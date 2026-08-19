@@ -13,6 +13,9 @@ RUN bunx prisma generate
 
 FROM oven/bun:1.3-debian AS runtime
 WORKDIR /app
+# Surfaced by GET /health so an operator can tell which build is running.
+ARG KB_VERSION=dev
+ENV KB_VERSION=${KB_VERSION}
 ENV NODE_ENV=production
 # Ingest shells out to nothing, but PDFs and OCR benefit from fonts being present.
 RUN apt-get update && apt-get install -y --no-install-recommends \
