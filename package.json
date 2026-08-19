@@ -44,9 +44,5 @@
   },
   "engines": {
     "bun": ">=1.1.0"
-  },
-  "optionalDependencies": {
-    "pdf-img-convert": "^2.0.0",
-    "sharp": "^0.34.5"
   }
 }

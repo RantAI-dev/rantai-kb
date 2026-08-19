@@ -84,6 +84,23 @@ The essentials:
 
 Optional: `KB_EXTRACT_MINERU_BASE_URL`, `KB_MINERU_API_KEY`, `KB_MISTRAL_OCR_KEY` for scanned-PDF layout extraction; `KB_RERANK_*` for reranking; `KB_HYBRID_BM25_ENABLED` for the full-text arm.
 
+### Optional extras
+
+The legacy OCR path rasterises PDF pages locally and needs two packages that
+are deliberately **not** installed by default — `canvas` (a transitive
+dependency) has no prebuilt binary for current Node ABIs and needs cairo and
+pixman to compile, which is a poor trade for a fallback most deployments never
+reach. Scanned PDFs normally go to MinerU or Mistral OCR instead.
+
+If you do want it:
+
+```bash
+bun add pdf-img-convert sharp
+```
+
+Without them, `processDocumentOCR` on a scanned PDF returns an error naming the
+missing package rather than failing obscurely.
+
 ## Scaling
 
 One process serves the API and runs the ingest worker. Jobs are claimed with `FOR UPDATE SKIP LOCKED`, so running more replicas is the whole scaling story — no queue broker, no separate worker deployment. Set `KB_WORKER_ENABLED=false` on a replica to make it API-only.
