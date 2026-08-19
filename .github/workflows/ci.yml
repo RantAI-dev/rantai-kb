@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, boundary, unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Generate Prisma client
+        run: bunx prisma generate
+
+      # The engine must never import service infrastructure. This is the
+      # invariant that keeps the KB embeddable as well as standalone — if it
+      # breaks, the next extraction becomes a rewrite.
+      - name: KB boundary
+        run: bun run check:kb-boundary
+
+      - name: Typecheck
+        run: bun run typecheck
+
+      - name: Unit tests
+        run: bun run test
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  smoke:
+    name: End-to-end smoke test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: kb
+          POSTGRES_PASSWORD: kb
+          POSTGRES_DB: rantai_kb
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U kb"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      surrealdb:
+        image: surrealdb/surrealdb:v2
+        ports: ["8000:8000"]
+        options: --entrypoint /surreal
+        env:
+          SURREAL_USER: root
+          SURREAL_PASS: root
+      minio:
+        image: quay.io/minio/minio
+        env:
+          MINIO_ROOT_USER: kbadmin
+          MINIO_ROOT_PASSWORD: kbsecret123
+        ports: ["9000:9000"]
+        options: >-
+          --health-cmd "mc ready local"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install
+      - run: bunx prisma generate
+
+      # The service image starts SurrealDB itself in compose; in CI the service
+      # container needs the start command, which `services:` cannot express —
+      # so run it directly.
+      - name: Start SurrealDB
+        run: |
+          docker run -d --name surreal --network host surrealdb/surrealdb:v2 \
+            start --user root --pass root
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:8000/health && break || sleep 2
+          done
+
+      - name: Create bucket
+        run: |
+          docker run --rm --network host quay.io/minio/minio \
+            sh -c "mc alias set local http://127.0.0.1:9000 kbadmin kbsecret123 && mc mb --ignore-existing local/rantai-kb"
+
+      - name: Migrate + vector schema
+        env:
+          DATABASE_URL: postgresql://kb:kb@127.0.0.1:5432/rantai_kb?schema=public
+          SURREAL_DB_URL: ws://127.0.0.1:8000/rpc
+          KB_EMBEDDING_DIM: "8"
+        run: |
+          bunx prisma migrate deploy
+          bun scripts/apply-vector-schema.ts
+
+      - name: Ingest + search round trip
+        env:
+          DATABASE_URL: postgresql://kb:kb@127.0.0.1:5432/rantai_kb?schema=public
+          SURREAL_DB_URL: ws://127.0.0.1:8000/rpc
+          S3_ENDPOINT: http://127.0.0.1:9000
+          S3_ACCESS_KEY_ID: kbadmin
+          S3_SECRET_ACCESS_KEY: kbsecret123
+          S3_BUCKET: rantai-kb
+          S3_ENABLE_PATH_STYLE: "1"
+          KB_EMBEDDING_DIM: "8"
+          KB_ENTITY_EXTRACTION_ENABLED: "false"
+        run: bun tests/smoke/round-trip.ts

@@ -1,0 +1,94 @@
+/**
+ * RAG (Retrieval Augmented Generation) Module
+ *
+ * This module provides semantic search capabilities for RantAI Agents.
+ * It uses OpenRouter-hosted embeddings and SurrealDB for efficient vector similarity search.
+ * Model choice is env-driven — see RagConfig.
+ */
+
+// Config
+export { getRagConfig } from "./config";
+export type { RagConfig } from "./config";
+
+// Embeddings
+export { generateEmbedding, generateEmbeddings } from "./embeddings";
+
+// Text chunking
+export { chunkDocument, chunkDocuments, prepareChunkForEmbedding } from "./chunker";
+export type { Chunk, ChunkOptions } from "./chunker";
+
+// Smart chunking (semantic-aware)
+export {
+  SmartChunker,
+  smartChunkDocument,
+  smartChunkDocuments,
+  chunkWithSmartChunker,
+} from "./smart-chunker";
+export type {
+  SmartChunk,
+  SmartChunkMetadata,
+  SmartChunkingOptions,
+  ChunkingStrategy,
+} from "./smart-chunker";
+
+// Vector store operations
+export {
+  storeChunks,
+  searchSimilar,
+  searchWithThreshold,
+  deleteChunksByDocumentId,
+  deleteDocument,
+  listDocuments,
+  clearAllDocuments,
+  getDocumentChunkCount,
+  getDocumentChunkCounts,
+} from "./vector-store";
+export type { SearchResult } from "./vector-store";
+
+// Retrieval
+export {
+  retrieveContext,
+  smartRetrieve,
+  formatContextForPrompt,
+  hybridRetrieve,
+  smartHybridRetrieve,
+  formatHybridContextForPrompt,
+} from "./retriever";
+export type { RetrievalResult, HybridRetrievalResult } from "./retriever";
+
+// Hybrid Search
+export {
+  HybridSearch,
+  createHybridSearch,
+  hybridSearch,
+} from "./hybrid-search";
+export type {
+  HybridSearchConfig,
+  HybridSearchResult,
+  HybridSearchStats,
+  ChunkResult,
+} from "./hybrid-search";
+
+// Artifact indexing
+
+// File processing
+export {
+  processFile,
+  processFiles,
+  scanDirectory,
+  detectFileType,
+  isSupportedFile,
+  getSupportedExtensions,
+} from "./file-processor";
+export type { ProcessedFile, SupportedFileType } from "./file-processor";
+
+// Phase 7
+export { bm25Search } from "./bm25-search";
+export type { Bm25Result } from "./bm25-search";
+export { reciprocalRankFusion } from "./hybrid-merge";
+export type { RrfOptions, RrfItem, RrfResult } from "./hybrid-merge";
+export { expandQuery } from "./query-expansion";
+export { generateContextualPrefixes } from "./contextual-retrieval";
+export { LruCache } from "./lru-cache";
+export type { LruCacheOptions } from "./lru-cache";
+export { searchByVector, searchSimilarBatch } from "./vector-store";

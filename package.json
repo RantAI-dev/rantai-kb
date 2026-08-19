@@ -1,0 +1,50 @@
+{
+  "name": "@rantai/kb",
+  "version": "0.1.0",
+  "description": "RantAI Knowledge Base \u2014 document ingest and retrieval as a standalone service",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RantAI-dev/rantai-kb.git"
+  },
+  "type": "module",
+  "private": false,
+  "scripts": {
+    "dev": "bun --watch src/server.ts",
+    "start": "bun src/server.ts",
+    "build": "bun build src/server.ts --target=bun --outdir=dist",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check:kb-boundary": "bun scripts/check-kb-boundary.ts",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate deploy",
+    "db:push": "prisma db push",
+    "kb:apply-schema": "bun scripts/apply-vector-schema.ts",
+    "key:create": "bun scripts/create-api-key.ts"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.700.0",
+    "@prisma/client": "^5.22.0",
+    "surrealdb": "^1.3.2",
+    "unpdf": "^1.4.0",
+    "mammoth": "^1.11.0",
+    "xlsx": "^0.18.5",
+    "officeparser": "^6.0.4",
+    "epub2": "^3.0.2",
+    "@iarna/rtf-to-html": "^1.1.0",
+    "fflate": "^0.8.2",
+    "pdf-lib": "^1.17.1",
+    "zod": "^3.23.8",
+    "pdf-img-convert": "^2.0.0",
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.14",
+    "prisma": "^5.22.0",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
+  }
+}

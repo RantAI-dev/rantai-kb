@@ -1,0 +1,338 @@
+/**
+ * File processor module for handling different file types
+ * Supports: Markdown, PDF, Images, Office (docx/xlsx/pptx), Structured data,
+ *           Code, RTF, EPUB, HTML/XML, CSV, JSON, YAML, TOML
+ */
+
+import * as fs from "fs";
+import * as path from "path";
+
+const OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions";
+const VISION_MODEL = "openai/gpt-4o-mini"; // Cost-effective vision model
+
+export type SupportedFileType = "markdown" | "pdf" | "image" | "document" | "text";
+
+export interface ProcessedFile {
+  content: string;
+  fileType: SupportedFileType;
+  originalPath: string;
+}
+
+/**
+ * Processing options
+ */
+export interface ProcessingOptions {
+  /**
+   * Use local OCR pipeline (via Ollama) instead of OpenRouter vision model.
+   * Requires Ollama to be running with OCR models pulled.
+   * Set OCR_MODEL_DEFAULT env var to configure the model.
+   */
+  useOCRPipeline?: boolean;
+
+  /**
+   * Document type hint for OCR (helps select the best model)
+   */
+  documentType?: "printed_text" | "handwritten" | "table" | "form" | "figure" | "mixed";
+
+  /**
+   * Output format for OCR
+   */
+  outputFormat?: "plain_text" | "markdown";
+}
+
+const IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"];
+const MARKDOWN_EXTENSIONS = [".md", ".markdown"];
+const PDF_EXTENSIONS = [".pdf"];
+// Office documents (modern + legacy + OpenDocument)
+const DOCUMENT_EXTENSIONS = [
+  ".docx", ".xlsx", ".pptx", ".rtf", ".epub",
+  ".doc", ".xls", ".ppt",
+  ".odt", ".ods",
+  ".gltf", ".glb",
+];
+// Structured text, code, config
+const TEXT_EXTENSIONS = [
+  ".csv", ".tsv", ".json", ".jsonl", ".html", ".htm", ".xml",
+  ".yaml", ".yml", ".toml",
+  ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java",
+  ".c", ".cpp", ".h", ".rb", ".php", ".sh", ".sql", ".r", ".swift", ".kt",
+  ".txt", ".log", ".ini", ".env",
+];
+
+/**
+ * Detect file type based on extension
+ */
+export function detectFileType(filePath: string): SupportedFileType | null {
+  const ext = path.extname(filePath).toLowerCase();
+
+  if (MARKDOWN_EXTENSIONS.includes(ext)) return "markdown";
+  if (PDF_EXTENSIONS.includes(ext)) return "pdf";
+  if (IMAGE_EXTENSIONS.includes(ext)) return "image";
+  if (DOCUMENT_EXTENSIONS.includes(ext)) return "document";
+  if (TEXT_EXTENSIONS.includes(ext)) return "text";
+
+  return null;
+}
+
+/**
+ * Check if a file is supported
+ */
+export function isSupportedFile(filePath: string): boolean {
+  return detectFileType(filePath) !== null;
+}
+
+/**
+ * Get all supported file extensions
+ */
+export function getSupportedExtensions(): string[] {
+  return [
+    ...MARKDOWN_EXTENSIONS,
+    ...PDF_EXTENSIONS,
+    ...IMAGE_EXTENSIONS,
+    ...DOCUMENT_EXTENSIONS,
+    ...TEXT_EXTENSIONS,
+  ];
+}
+
+/**
+ * Process a markdown file
+ */
+async function processMarkdown(filePath: string): Promise<string> {
+  return fs.readFileSync(filePath, "utf-8");
+}
+
+/**
+ * Process a PDF file and extract text
+ * Uses pdfjs-dist legacy build to avoid worker issues in Next.js
+ *
+ * If useOCRPipeline is enabled, will detect scanned PDFs and process them
+ * with OCR for better text extraction.
+ */
+async function processPdf(
+  filePath: string,
+  options?: ProcessingOptions
+): Promise<string> {
+  try {
+    const dataBuffer = fs.readFileSync(filePath);
+
+    // Legacy OCR pipeline opt-in remains first — callers that set useOCRPipeline
+    // want scanned-PDF detection via Ollama, not vision-LLM text extraction.
+    if (options?.useOCRPipeline) {
+      try {
+        const { processDocumentOCR } = await import("@/lib/ocr");
+        const result = await processDocumentOCR(dataBuffer, "application/pdf", {
+          documentType: options.documentType,
+          outputFormat: options.outputFormat || "markdown",
+        });
+        return "combinedText" in result ? result.combinedText : result.text;
+      } catch (error) {
+        console.warn("[processPdf] OCR pipeline failed, falling back to extractor dispatch:", error);
+      }
+    }
+
+    // Default: route through the extractor dispatch (vision-LLM primary, configured
+    // in src/lib/rag/config.ts, with unpdf available via KB_EXTRACT_PRIMARY=unpdf).
+    const { getDefaultExtractor, getFallbackExtractor, extractWithFallback } = await import("./extractors");
+    const primary = getDefaultExtractor();
+    const fallback = getFallbackExtractor();
+    const result = await extractWithFallback(dataBuffer, primary, fallback);
+    return result.text;
+  } catch (error) {
+    console.error("PDF processing error:", error);
+    throw new Error(`Failed to process PDF: ${error instanceof Error ? error.message : "Unknown error"}`);
+  }
+}
+
+/**
+ * Process an image using vision model to extract description and text
+ *
+ * @param filePath - Path to the image file
+ * @param options - Processing options (useOCRPipeline, documentType, outputFormat)
+ */
+async function processImage(
+  filePath: string,
+  options?: ProcessingOptions
+): Promise<string> {
+  const imageBuffer = fs.readFileSync(filePath);
+  const ext = path.extname(filePath).toLowerCase();
+
+  // Determine MIME type
+  const mimeTypes: Record<string, string> = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".heic": "image/heic",
+  };
+  const mimeType = mimeTypes[ext] || "image/png";
+
+  // Use OCR pipeline if requested
+  if (options?.useOCRPipeline) {
+    try {
+      const { processDocumentOCR } = await import("@/lib/ocr");
+      const result = await processDocumentOCR(imageBuffer, mimeType, {
+        documentType: options.documentType,
+        outputFormat: options.outputFormat || "markdown",
+      });
+
+      // Handle both single result and batch result
+      const text = "combinedText" in result ? result.combinedText : result.text;
+      const fileName = path.basename(filePath);
+      return `[Image: ${fileName}]\n\n${text}`;
+    } catch (error) {
+      console.warn("[processImage] OCR pipeline failed, falling back to OpenRouter:", error);
+      // Fall through to OpenRouter
+    }
+  }
+
+  // Default: Use OpenRouter vision model
+  const base64Image = imageBuffer.toString("base64");
+
+  const response = await fetch(OPENROUTER_API_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: VISION_MODEL,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: `Analyze this image and provide:
+1. A detailed description of what the image shows
+2. Any text visible in the image (OCR)
+3. Key information or data points visible
+
+Format your response as structured text that can be used for search and retrieval. Be thorough but concise.`,
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:${mimeType};base64,${base64Image}`,
+              },
+            },
+          ],
+        },
+      ],
+      max_tokens: 1500,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Vision API error: ${response.status} - ${errorText}`
+    );
+  }
+
+  const data = await response.json();
+  const description = data.choices[0]?.message?.content || "";
+
+  // Add metadata header for better context
+  const fileName = path.basename(filePath);
+  return `[Image: ${fileName}]\n\n${description}`;
+}
+
+/**
+ * Process a file based on its type
+ *
+ * @param filePath - Path to the file to process
+ * @param options - Processing options (useOCRPipeline, documentType, outputFormat)
+ */
+export async function processFile(
+  filePath: string,
+  options?: ProcessingOptions
+): Promise<ProcessedFile> {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`File not found: ${filePath}`);
+  }
+
+  const fileType = detectFileType(filePath);
+  if (!fileType) {
+    throw new Error(`Unsupported file type: ${filePath}`);
+  }
+
+  let content: string;
+
+  switch (fileType) {
+    case "markdown":
+      content = await processMarkdown(filePath);
+      break;
+    case "pdf":
+      content = await processPdf(filePath, options);
+      break;
+    case "image":
+      content = await processImage(filePath, options);
+      break;
+    case "document":
+    case "text": {
+      const fileBuffer = fs.readFileSync(filePath);
+      const { EXT_TO_MIME } = await import("@/lib/files/mime-types");
+      const { extractTextFromBuffer } = await import("@/lib/files/parsers");
+      const ext2 = path.extname(filePath).toLowerCase();
+      const mimeType = EXT_TO_MIME[ext2] || "text/plain";
+      content = await extractTextFromBuffer(fileBuffer, mimeType, path.basename(filePath));
+      break;
+    }
+  }
+
+  return {
+    content,
+    fileType,
+    originalPath: filePath,
+  };
+}
+
+/**
+ * Process multiple files
+ *
+ * @param filePaths - Array of file paths to process
+ * @param options - Processing options (useOCRPipeline, documentType, outputFormat)
+ */
+export async function processFiles(
+  filePaths: string[],
+  options?: ProcessingOptions
+): Promise<ProcessedFile[]> {
+  const results: ProcessedFile[] = [];
+
+  for (const filePath of filePaths) {
+    try {
+      const processed = await processFile(filePath, options);
+      results.push(processed);
+    } catch (error) {
+      console.error(`Error processing ${filePath}:`, error);
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Scan a directory for supported files
+ */
+export function scanDirectory(dirPath: string): string[] {
+  if (!fs.existsSync(dirPath)) {
+    return [];
+  }
+
+  const files: string[] = [];
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+
+    if (entry.isDirectory()) {
+      // Recursively scan subdirectories
+      files.push(...scanDirectory(fullPath));
+    } else if (entry.isFile() && isSupportedFile(fullPath)) {
+      files.push(fullPath);
+    }
+  }
+
+  return files;
+}

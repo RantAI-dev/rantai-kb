@@ -1,0 +1,103 @@
+-- =====================================================
+-- SurrealDB Schema for RantAI Knowledge Base
+-- =====================================================
+-- Owned by the KB engine (moved here from lib/surrealdb): the store schema
+-- travels with the code that depends on it, so extracting the engine into its
+-- own repo/service takes its vector schema along. Applied by
+-- `bun run kb:apply-fts-schema`.
+-- This schema defines tables and indexes for:
+-- - Document chunks with vector embeddings for RAG
+-- =====================================================
+
+-- =====================================
+-- Document Chunks (Vector Storage)
+-- =====================================
+
+DEFINE TABLE document_chunk SCHEMAFULL;
+
+-- Fields
+DEFINE FIELD id ON document_chunk TYPE string;
+DEFINE FIELD document_id ON document_chunk TYPE string;
+DEFINE FIELD content ON document_chunk TYPE string;
+DEFINE FIELD chunk_index ON document_chunk TYPE int;
+DEFINE FIELD embedding ON document_chunk TYPE array<float>;
+DEFINE FIELD metadata ON document_chunk TYPE option<object>;
+-- Phase 7c: contextual prefix generated at ingest. Prepended to `content` during embedding prep.
+DEFINE FIELD IF NOT EXISTS contextual_prefix ON document_chunk TYPE option<string>;
+-- Drift detection: identifier of the embedding model that produced this chunk's
+-- vector (e.g. "qwen/qwen3-embedding-8b"). null = pre-tracking row. When the
+-- current KB_EMBEDDING_MODEL differs, chunks with a stale model need re-embed.
+DEFINE FIELD IF NOT EXISTS embedding_model ON document_chunk TYPE option<string>;
+DEFINE FIELD created_at ON document_chunk TYPE datetime DEFAULT time::now();
+
+-- Vector index for similarity search.
+-- Dimension MUST match KB_EMBEDDING_DIM (default 4096 for qwen/qwen3-embedding-8b).
+-- To change KB_EMBEDDING_MODEL: drop this index, run `bun run kb:migrate` which
+-- re-embeds every chunk and re-creates the index at the new dimension.
+DEFINE INDEX embedding_idx ON document_chunk FIELDS embedding MTREE DIMENSION 4096 DIST COSINE;
+
+-- =====================================
+-- Phase 7: BM25 full-text search on chunks
+-- =====================================
+-- English analyzer: class tokenizer + lowercase + snowball stemmer.
+-- Adjust or clone (e.g. kb_id with indonesian stemmer) if you support more langs.
+DEFINE ANALYZER IF NOT EXISTS kb_en TOKENIZERS class FILTERS lowercase, snowball(english);
+
+-- SEARCH index enables @@ BM25 lookups on content field.
+-- BM25(1.2, 0.75) are standard Robertson–Sparck Jones parameters.
+DEFINE INDEX IF NOT EXISTS content_search_idx
+  ON document_chunk FIELDS content
+  SEARCH ANALYZER kb_en BM25(1.2, 0.75) HIGHLIGHTS;
+
+-- Indexes for filtering and lookups
+DEFINE INDEX document_id_idx ON document_chunk FIELDS document_id;
+DEFINE INDEX id_idx ON document_chunk FIELDS id UNIQUE;
+
+-- =====================================
+-- Entities (Knowledge Graph Nodes)
+-- =====================================
+
+DEFINE TABLE entity SCHEMAFULL;
+
+-- Fields
+DEFINE FIELD id ON entity TYPE string;
+DEFINE FIELD name ON entity TYPE string;
+DEFINE FIELD type ON entity TYPE string;
+DEFINE FIELD confidence ON entity TYPE float;
+DEFINE FIELD document_id ON entity TYPE option<string>;
+DEFINE FIELD chunk_id ON entity TYPE option<string>;
+DEFINE FIELD metadata ON entity TYPE option<object>;
+DEFINE FIELD created_at ON entity TYPE datetime DEFAULT time::now();
+
+-- Indexes for entity lookup and filtering
+DEFINE INDEX entity_id_idx ON entity FIELDS id UNIQUE;
+DEFINE INDEX entity_name_idx ON entity FIELDS name;
+DEFINE INDEX entity_type_idx ON entity FIELDS type;
+DEFINE INDEX entity_document_id_idx ON entity FIELDS document_id;
+DEFINE INDEX entity_name_type_idx ON entity FIELDS name, type;
+
+-- =====================================
+-- Conversation Memory (Semantic Memory)
+-- =====================================
+-- Stores conversation embeddings for semantic recall
+
+DEFINE TABLE conversation_memory SCHEMAFULL;
+
+-- Fields
+DEFINE FIELD id ON conversation_memory TYPE string;
+DEFINE FIELD userId ON conversation_memory TYPE string;
+DEFINE FIELD threadId ON conversation_memory TYPE string;
+DEFINE FIELD role ON conversation_memory TYPE string;
+DEFINE FIELD content ON conversation_memory TYPE string;
+DEFINE FIELD embedding ON conversation_memory TYPE array<float>;
+DEFINE FIELD metadata ON conversation_memory TYPE option<object>;
+DEFINE FIELD createdAt ON conversation_memory TYPE datetime DEFAULT time::now();
+
+-- Vector index for similarity search.
+-- Dimension MUST match KB_EMBEDDING_DIM (default 4096 for qwen/qwen3-embedding-8b).
+DEFINE INDEX conversation_embedding_idx ON conversation_memory FIELDS embedding MTREE DIMENSION 4096 DIST COSINE;
+
+-- Indexes for filtering
+DEFINE INDEX conversation_user_idx ON conversation_memory FIELDS userId;
+DEFINE INDEX conversation_thread_idx ON conversation_memory FIELDS threadId;
+DEFINE INDEX conversation_id_idx ON conversation_memory FIELDS id UNIQUE;

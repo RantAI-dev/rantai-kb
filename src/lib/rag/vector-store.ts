@@ -1,0 +1,647 @@
+import { kb } from "@/lib/kb-runtime/runtime";
+import { generateEmbedding, generateEmbeddings } from "./embeddings";
+import { Chunk } from "./chunker";
+
+/**
+ * Vector store operations using SurrealDB for vector storage
+ * and PostgreSQL (Prisma) for document metadata
+ */
+
+export interface SearchResult {
+  id: string;
+  content: string;
+  documentId: string;
+  documentTitle: string;
+  categories: string[];
+  subcategory: string | null;
+  section: string | null;
+  similarity: number;
+  /** Optional context prefix populated when KB_CONTEXTUAL_RETRIEVAL_ENABLED ran at ingest. */
+  contextualPrefix: string | null;
+  /** Figure asset (multimodal RAG): object key + page when chunkType is "figure". */
+  assetKey?: string | null;
+  page?: number | null;
+  chunkType?: string | null;
+}
+
+interface SurrealChunk {
+  id: string;
+  document_id: string;
+  content: string;
+  chunk_index: number;
+  metadata: Record<string, unknown> | null;
+  contextual_prefix: string | null;
+  similarity: number;
+}
+
+/**
+ * Search for similar chunks using cosine similarity in SurrealDB
+ */
+export async function searchSimilar(
+  query: string,
+  limit: number = 5,
+  categoryFilter?: string,
+  groupIds?: string[]
+): Promise<SearchResult[]> {
+  // Generate embedding for the query
+  const queryEmbedding = await generateEmbedding(query);
+
+  // Get SurrealDB client
+  const surrealClient = kb("vectors");
+
+  // First, get document IDs that match the filters (if any)
+  let documentIds: string[] | null = null;
+
+  if (categoryFilter || (groupIds && groupIds.length > 0)) {
+    // Build Prisma query to filter documents
+    const whereClause: {
+      categories?: { has: string };
+      groups?: { some: { groupId: { in: string[] } } };
+    } = {};
+
+    if (categoryFilter) {
+      whereClause.categories = { has: categoryFilter };
+    }
+
+    if (groupIds && groupIds.length > 0) {
+      whereClause.groups = {
+        some: {
+          groupId: { in: groupIds },
+        },
+      };
+    }
+
+    documentIds = await kb("documents").findAliveIdsByFilter({
+      category: categoryFilter ?? undefined,
+      groupIds: groupIds ?? undefined,
+    });
+
+    // If no documents match the filter, return empty results
+    if (documentIds.length === 0) {
+      return [];
+    }
+  }
+
+  // Build SurrealDB vector search query
+  let sql: string;
+  const vars: Record<string, unknown> = {
+    embedding: queryEmbedding,
+    limit: limit,
+  };
+
+  if (documentIds) {
+    sql = `
+      SELECT
+        id,
+        document_id,
+        content,
+        metadata,
+        contextual_prefix,
+        vector::similarity::cosine(embedding, $embedding) AS similarity
+      FROM document_chunk
+      WHERE document_id IN $document_ids
+      ORDER BY similarity DESC
+      LIMIT $limit
+    `;
+    vars.document_ids = documentIds;
+  } else {
+    sql = `
+      SELECT
+        id,
+        document_id,
+        content,
+        metadata,
+        contextual_prefix,
+        vector::similarity::cosine(embedding, $embedding) AS similarity
+      FROM document_chunk
+      ORDER BY similarity DESC
+      LIMIT $limit
+    `;
+  }
+
+  const surrealResults = await surrealClient.query<SurrealChunk>(sql, vars);
+  const chunks = surrealResults[0]?.result || [];
+
+  if (chunks.length === 0) {
+    return [];
+  }
+
+  // Get unique document IDs from results
+  const resultDocIds = [...new Set(chunks.map((c) => c.document_id))];
+
+  // Fetch document metadata from PostgreSQL — skip soft-deleted so their
+  // chunks effectively drop out of retrieval until the retention sweep cleans
+  // SurrealDB rows.
+  const documents = await kb("documents").findAliveMetaByIds(resultDocIds);
+
+  // Create a map for quick lookup
+  const docMap = new Map(documents.map((d) => [d.id, d]));
+
+  // Join chunk results with document metadata. Drop chunks whose parent doc
+  // is missing from docMap — that means the doc was soft-deleted (filtered
+  // upstream) and the chunk is effectively retired until the retention sweep.
+  const results: SearchResult[] = chunks
+    .filter((chunk) => docMap.has(chunk.document_id))
+    .map((chunk) => {
+      const doc = docMap.get(chunk.document_id)!;
+      return {
+        id: chunk.id,
+        content: chunk.content,
+        documentId: chunk.document_id,
+        documentTitle: doc.title,
+        categories: doc.categories,
+        subcategory: doc.subcategory,
+        section: (chunk.metadata as { section?: string } | null)?.section || null,
+        similarity: chunk.similarity,
+        contextualPrefix: chunk.contextual_prefix,
+        assetKey: (chunk.metadata as { assetKey?: string } | null)?.assetKey ?? null,
+        page: (chunk.metadata as { page?: number } | null)?.page ?? null,
+        chunkType: (chunk.metadata as { chunkType?: string } | null)?.chunkType ?? null,
+      };
+    });
+
+  return results;
+}
+
+/**
+ * Search with a minimum similarity threshold
+ */
+export async function searchWithThreshold(
+  query: string,
+  minSimilarity: number = 0.5,
+  limit: number = 10,
+  categoryFilter?: string,
+  groupIds?: string[]
+): Promise<SearchResult[]> {
+  const results = await searchSimilar(query, limit, categoryFilter, groupIds);
+
+  // Filter by minimum similarity
+  return results.filter((result) => result.similarity >= minSimilarity);
+}
+
+/**
+ * Delete only the SurrealDB chunks for a document (preserves the Prisma record).
+ * Useful for re-indexing artifact content without destroying the Document row.
+ */
+export async function deleteChunksByDocumentId(documentId: string): Promise<void> {
+  const surrealClient = kb("vectors");
+  await surrealClient.query(
+    `DELETE document_chunk WHERE document_id = $document_id`,
+    { document_id: documentId }
+  );
+}
+
+/**
+ * Delete a document and all its chunks
+ * - Deletes document from PostgreSQL (cascades to DocumentGroup)
+ * - Deletes chunks from SurrealDB
+ */
+export async function deleteDocument(documentId: string): Promise<void> {
+  // Delete chunks from SurrealDB
+  await deleteChunksByDocumentId(documentId);
+
+  // Delete document from PostgreSQL (cascades to groups)
+  await kb("documents").deleteById(documentId);
+
+  console.log(`[VectorStore] Deleted document ${documentId} and its chunks`);
+}
+
+/**
+ * Get all documents (without embeddings)
+ */
+export async function listDocuments() {
+  // Get documents from PostgreSQL
+  const documents = await kb("documents").listAll();
+
+  // Get chunk counts from SurrealDB
+  const surrealClient = kb("vectors");
+
+  const docsWithCounts = await Promise.all(
+    documents.map(async (doc) => {
+      const countResult = await surrealClient.query<{ count: number }>(
+        `SELECT count() as count FROM document_chunk WHERE document_id = $document_id GROUP ALL`,
+        { document_id: doc.id }
+      );
+      const count = countResult[0]?.result?.[0]?.count || 0;
+
+      return {
+        ...doc,
+        _count: {
+          chunks: count,
+        },
+      };
+    })
+  );
+
+  return docsWithCounts;
+}
+
+/**
+ * Clear all documents and chunks (useful for re-ingestion)
+ */
+export async function clearAllDocuments(): Promise<void> {
+  // Clear chunks from SurrealDB
+  const surrealClient = kb("vectors");
+  await surrealClient.query(`DELETE document_chunk`);
+
+  // Clear documents from PostgreSQL (cascades to groups)
+  await kb("documents").deleteAll();
+
+  console.log("[VectorStore] Cleared all documents and chunks");
+}
+
+/**
+ * Get chunk count for a specific document
+ */
+export async function getDocumentChunkCount(documentId: string): Promise<number> {
+  const surrealClient = kb("vectors");
+  const result = await surrealClient.query<{ count: number }>(
+    `SELECT count() as count FROM document_chunk WHERE document_id = $document_id GROUP ALL`,
+    { document_id: documentId }
+  );
+  return result[0]?.result?.[0]?.count || 0;
+}
+
+/**
+ * Get chunk counts for many documents in a single SurrealDB query.
+ * Returns a Map keyed by documentId. Missing ids resolve to 0.
+ */
+export async function getDocumentChunkCounts(
+  documentIds: string[]
+): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+  if (documentIds.length === 0) return counts;
+
+  // Chunk counts are a display nicety (the Files list shows "N chunks"). If
+  // SurrealDB is unavailable/uninitialized, degrade to 0 rather than throwing —
+  // a vector-store hiccup must not crash the whole documents page.
+  try {
+    const surrealClient = kb("vectors");
+    const result = await surrealClient.query<{ document_id: string; count: number }>(
+      `SELECT document_id, count() AS count FROM document_chunk WHERE document_id IN $ids GROUP BY document_id`,
+      { ids: documentIds }
+    );
+
+    const rawResult = result[0];
+    const rows = (Array.isArray(rawResult)
+      ? rawResult
+      : (rawResult as { result?: Array<{ document_id: string; count: number }> })?.result ||
+        []) as Array<{ document_id: string; count: number }>;
+
+    for (const row of rows) {
+      if (row && typeof row.document_id === "string") {
+        counts.set(row.document_id, row.count ?? 0);
+      }
+    }
+  } catch (error) {
+    console.error("[vector-store] getDocumentChunkCounts failed (SurrealDB); returning 0 counts:", error);
+  }
+
+  return counts;
+}
+
+/**
+ * Search for similar chunks scoped to specific document IDs
+ * Used for RAG retrieval on chat file attachments
+ */
+export async function searchByDocumentIds(
+  query: string,
+  documentIds: string[],
+  limit: number = 5,
+  minSimilarity: number = 0.3
+): Promise<SearchResult[]> {
+  if (documentIds.length === 0) return [];
+
+  const queryEmbedding = await generateEmbedding(query);
+  const surrealClient = kb("vectors");
+
+  const sql = `
+    SELECT
+      id,
+      document_id,
+      content,
+      metadata,
+      contextual_prefix,
+      vector::similarity::cosine(embedding, $embedding) AS similarity
+    FROM document_chunk
+    WHERE document_id IN $document_ids
+    ORDER BY similarity DESC
+    LIMIT $limit
+  `;
+
+  const surrealResults = await surrealClient.query<SurrealChunk>(sql, {
+    embedding: queryEmbedding,
+    document_ids: documentIds,
+    limit,
+  });
+  const chunks = surrealResults[0]?.result || [];
+
+  if (chunks.length === 0) return [];
+
+  // Fetch document metadata from PostgreSQL
+  const resultDocIds = [...new Set(chunks.map((c) => c.document_id))];
+  const documents = await kb("documents").findAliveMetaByIds(resultDocIds);
+  const docMap = new Map(documents.map((d) => [d.id, d]));
+
+  return chunks
+    .filter((chunk) => chunk.similarity >= minSimilarity && docMap.has(chunk.document_id))
+    .map((chunk) => {
+      const doc = docMap.get(chunk.document_id)!;
+      return {
+        id: chunk.id,
+        content: chunk.content,
+        documentId: chunk.document_id,
+        documentTitle: doc.title,
+        categories: doc.categories,
+        subcategory: doc.subcategory,
+        section: (chunk.metadata as { section?: string } | null)?.section || null,
+        similarity: chunk.similarity,
+        contextualPrefix: chunk.contextual_prefix,
+        assetKey: (chunk.metadata as { assetKey?: string } | null)?.assetKey ?? null,
+        page: (chunk.metadata as { page?: number } | null)?.page ?? null,
+        chunkType: (chunk.metadata as { chunkType?: string } | null)?.chunkType ?? null,
+      };
+    });
+}
+
+/**
+ * Same cosine search as `searchSimilar`, but takes a precomputed embedding.
+ * Used by searchSimilarBatch so we don't re-embed the same query.
+ */
+export async function searchByVector(
+  queryEmbedding: number[],
+  limit: number = 5,
+  categoryFilter?: string,
+  groupIds?: string[]
+): Promise<SearchResult[]> {
+  const surrealClient = kb("vectors");
+
+  let documentIds: string[] | null = null;
+  if (categoryFilter || (groupIds && groupIds.length > 0)) {
+    const whereClause: {
+      categories?: { has: string };
+      groups?: { some: { groupId: { in: string[] } } };
+    } = {};
+    if (categoryFilter) whereClause.categories = { has: categoryFilter };
+    if (groupIds && groupIds.length > 0) {
+      whereClause.groups = { some: { groupId: { in: groupIds } } };
+    }
+    documentIds = await kb("documents").findAliveIdsByFilter({
+      category: categoryFilter ?? undefined,
+      groupIds: groupIds ?? undefined,
+    });
+    if (documentIds.length === 0) return [];
+  }
+
+  let sql: string;
+  const vars: Record<string, unknown> = {
+    embedding: queryEmbedding,
+    limit,
+  };
+  if (documentIds) {
+    sql = `
+      SELECT id, document_id, content, metadata, contextual_prefix,
+        vector::similarity::cosine(embedding, $embedding) AS similarity
+      FROM document_chunk
+      WHERE document_id IN $document_ids
+      ORDER BY similarity DESC
+      LIMIT $limit
+    `;
+    vars.document_ids = documentIds;
+  } else {
+    sql = `
+      SELECT id, document_id, content, metadata, contextual_prefix,
+        vector::similarity::cosine(embedding, $embedding) AS similarity
+      FROM document_chunk
+      ORDER BY similarity DESC
+      LIMIT $limit
+    `;
+  }
+
+  const surrealResults = await surrealClient.query<SurrealChunk>(sql, vars);
+  const chunks = surrealResults[0]?.result || [];
+  if (chunks.length === 0) return [];
+
+  const resultDocIds = [...new Set(chunks.map((c) => c.document_id))];
+  const documents = await kb("documents").findAliveMetaByIds(resultDocIds);
+  const docMap = new Map(documents.map((d) => [d.id, d]));
+
+  return chunks
+    .filter((chunk) => docMap.has(chunk.document_id))
+    .map((chunk) => {
+    const doc = docMap.get(chunk.document_id)!;
+    const md = (chunk.metadata as Record<string, unknown> | null) ?? {};
+    return {
+      id: chunk.id,
+      content: chunk.content,
+      documentId: chunk.document_id,
+      documentTitle: doc.title,
+      categories: doc.categories,
+      subcategory: doc.subcategory,
+      section: (md.section as string | undefined) ?? null,
+      similarity: chunk.similarity,
+      contextualPrefix: chunk.contextual_prefix,
+      assetKey: (md.assetKey as string | undefined) ?? null,
+      page: (md.page as number | undefined) ?? null,
+      chunkType: (md.chunkType as string | undefined) ?? null,
+    };
+  });
+}
+
+/**
+ * Phase 7: batch-embed N queries in ONE OpenRouter call, then search each in
+ * parallel via Promise.all. Returns array-of-arrays aligned with the input.
+ */
+export async function searchSimilarBatch(
+  queries: string[],
+  limit: number = 5,
+  categoryFilter?: string,
+  groupIds?: string[]
+): Promise<SearchResult[][]> {
+  if (queries.length === 0) return [];
+  const vectors = await generateEmbeddings(queries);
+  const searches = vectors.map((vec) =>
+    searchByVector(vec, limit, categoryFilter, groupIds)
+  );
+  return await Promise.all(searches);
+}
+
+/**
+ * Store chunks for an existing document (used by knowledge API)
+ */
+/**
+ * Maximum simultaneous SurrealDB inserts when persisting chunks.
+ *
+ * The previous implementation issued one CREATE per chunk sequentially —
+ * a 128KB artifact produces ~140 chunks at the default 1000-char split,
+ * so indexing serialized into ~140 round-trips back-to-back. Parallelism
+ * is bounded so the surreal connection isn't flooded. Was 8, but the MTREE
+ * (embedding ANN) index takes a table-level write lock, so 8 concurrent
+ * CREATEs on a figure-heavy doc (600+ chunks) produced a storm of
+ * optimistic-lock "read or write conflict" retries that could exhaust the
+ * retry budget → 500 "Failed to create document". 3 keeps useful throughput
+ * while cutting index contention. Env-tunable so it can be adjusted without
+ * a rebuild (set KB_STORE_CHUNKS_CONCURRENCY in the stack).
+ */
+const STORE_CHUNKS_CONCURRENCY = Number(process.env.KB_STORE_CHUNKS_CONCURRENCY) || 3
+
+/**
+ * SurrealDB's MTREE index (used on document_chunk.embedding for cosine ANN)
+ * serializes structural updates at the tree-node level. When STORE_CHUNKS_CONCURRENCY
+ * parallel CREATEs land in the same time window, OCC aborts the losers with
+ * "Failed to commit transaction due to a read or write conflict. This
+ * transaction can be retried." The error is verbatim transient — SurrealDB
+ * itself names the recovery path. Each CREATE is wrapped so the conflicting
+ * losers re-attempt with jittered exponential backoff, spreading the
+ * collisions out in time without giving up the per-document throughput we
+ * gained from the parallel writes.
+ */
+const STORE_CHUNKS_RETRY_ATTEMPTS = 5
+const STORE_CHUNKS_RETRY_BASE_MS = 50
+
+const TRANSIENT_CONFLICT_PATTERNS: readonly RegExp[] = [
+  /failed to commit transaction/i,
+  /read or write conflict/i,
+  /can be retried/i,
+]
+
+function isTransientConflict(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return TRANSIENT_CONFLICT_PATTERNS.some((p) => p.test(err.message))
+}
+
+async function withConflictRetry<T>(
+  label: string,
+  op: () => Promise<T>,
+  attempts = STORE_CHUNKS_RETRY_ATTEMPTS,
+): Promise<T> {
+  let lastErr: unknown
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await op()
+    } catch (err) {
+      lastErr = err
+      if (!isTransientConflict(err)) throw err
+      if (i === attempts - 1) break
+      // Exponential backoff with ±50% jitter so two concurrent retriers
+      // that started together don't keep colliding on every attempt.
+      const base = STORE_CHUNKS_RETRY_BASE_MS * Math.pow(2, i)
+      const jitter = base * (Math.random() - 0.5)
+      const delay = Math.max(0, base + jitter)
+      console.warn(
+        `[VectorStore] ${label} transient conflict (attempt ${i + 1}/${attempts}); retrying in ${Math.round(delay)}ms`,
+      )
+      await new Promise((resolve) => setTimeout(resolve, delay))
+    }
+  }
+  throw lastErr
+}
+
+export async function storeChunks(
+  documentId: string,
+  chunks: Chunk[],
+  embeddings: number[][],
+  embeddingModel?: string,
+): Promise<void> {
+  // Hard contract: every chunk must have a matching embedding vector. If an
+  // embed batch failed (generateEmbeddings degrades to empty result rather
+  // than throwing), the arrays diverge and we used to silently write `undefined`
+  // into SurrealDB → vector::similarity::cosine() panics at query time. Fail
+  // fast here so the caller can roll the document back instead.
+  if (chunks.length !== embeddings.length) {
+    throw new Error(
+      `[VectorStore] chunks/embeddings length mismatch for document ${documentId}: ${chunks.length} chunks vs ${embeddings.length} embeddings`
+    );
+  }
+  if (embeddings.length === 0) return;
+
+  // Dimension contract: every embedding in this batch must have the same
+  // length AND match KB_EMBEDDING_DIM. Mid-batch drift (provider hiccup,
+  // partial model rollout) or config-vs-actual mismatch (operator forgot to
+  // update KB_EMBEDDING_DIM after swapping KB_EMBEDDING_MODEL) corrupts the
+  // MTREE index irreparably — the index is dimension-bound at DEFINE time.
+  const { getRagConfig } = await import("./config");
+  const expectedDim = getRagConfig().embeddingDim;
+  const firstDim = embeddings[0].length;
+  if (firstDim !== expectedDim) {
+    throw new Error(
+      `[VectorStore] embedding dim ${firstDim} differs from KB_EMBEDDING_DIM=${expectedDim} for document ${documentId}. ` +
+      `Either fix the env or swap the embedding model + re-define the MTREE index at dim=${firstDim}.`
+    );
+  }
+  for (let i = 0; i < embeddings.length; i++) {
+    if (!Array.isArray(embeddings[i]) || embeddings[i].length === 0) {
+      throw new Error(
+        `[VectorStore] empty embedding at index ${i} for document ${documentId}`
+      );
+    }
+    if (embeddings[i].length !== firstDim) {
+      throw new Error(
+        `[VectorStore] mid-batch dim drift at index ${i} for document ${documentId}: ${embeddings[i].length} vs first ${firstDim}`
+      );
+    }
+  }
+
+  const surrealClient = kb("vectors");
+
+  // Process chunks in bounded-concurrency batches. Order doesn't matter
+  // for storage (each chunk has its own deterministic id); we wait for
+  // each batch before starting the next so a cascade of failures can't
+  // exceed the cap.
+  for (let start = 0; start < chunks.length; start += STORE_CHUNKS_CONCURRENCY) {
+    const end = Math.min(start + STORE_CHUNKS_CONCURRENCY, chunks.length)
+    await Promise.all(
+      Array.from({ length: end - start }, (_, offset) => {
+        const i = start + offset
+        const chunk = chunks[i]
+        const embedding = embeddings[i]
+        const chunkId = `${documentId}_${i}`
+
+        // SurrealDB rejects a literal NULL for `option<string>` fields
+        // ("Found NULL for field X, but expected a option<string>"). The
+        // schema's option<T> permits only T or implicit NONE (field absent
+        // from the SET clause). Build the assignment list dynamically so
+        // contextual_prefix and embedding_model are only set when we have
+        // a real string — otherwise omit them and let SurrealDB treat them
+        // as NONE.
+        const contextualPrefix = chunk.metadata.contextualPrefix
+        const setClauses = [
+          "id = $id",
+          "document_id = $document_id",
+          "content = $content",
+          "chunk_index = $chunk_index",
+          "embedding = $embedding",
+          "metadata = $metadata",
+          "created_at = time::now()",
+        ]
+        const vars: Record<string, unknown> = {
+          id: chunkId,
+          document_id: documentId,
+          content: chunk.content,
+          chunk_index: chunk.metadata.chunkIndex,
+          embedding: embedding,
+          metadata: chunk.metadata,
+        }
+        if (typeof contextualPrefix === "string" && contextualPrefix.length > 0) {
+          setClauses.push("contextual_prefix = $contextual_prefix")
+          vars.contextual_prefix = contextualPrefix
+        }
+        if (typeof embeddingModel === "string" && embeddingModel.length > 0) {
+          setClauses.push("embedding_model = $embedding_model")
+          vars.embedding_model = embeddingModel
+        }
+
+        return withConflictRetry(`CREATE document_chunk:${chunkId}`, () =>
+          surrealClient.query(
+            `CREATE document_chunk SET ${setClauses.join(", ")}`,
+            vars,
+          ),
+        )
+      }),
+    )
+  }
+
+  console.log(
+    `[VectorStore] Stored ${chunks.length} chunks for document ${documentId}`
+  );
+}

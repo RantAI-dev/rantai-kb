@@ -1,0 +1,150 @@
+// RantAI KB — relational metadata.
+//
+// The vector/graph side lives in SurrealDB (see src/lib/rag/store/schema.surql);
+// this schema owns documents, their grouping, and ingest jobs.
+//
+// Every row is scoped by `tenantId`, a plain string the caller supplies — NOT a
+// foreign key. That is deliberate: the service knows nothing about the calling
+// product's user/organization model, which is exactly what lets one KB serve
+// several applications. In the monolith these models carried bidirectional
+// relations to Organization; dropping them is what made extraction possible.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Document {
+  id          String    @id @default(uuid())
+  /// Caller-supplied tenant scope. Required on every read and write.
+  tenantId    String
+  title       String
+  content     String
+  categories  String[]  @default([])
+  subcategory String?
+  metadata    Json?
+
+  // Stored original
+  s3Key    String?
+  fileType String?
+  fileSize Int?
+  mimeType String?
+
+  /// ready | processing | failed
+  status String @default("ready")
+
+  /// Opaque caller reference (their user id, session id, whatever).
+  externalRef String?
+
+  groups DocumentGroup[]
+
+  retrievalCount  Int       @default(0)
+  lastRetrievedAt DateTime?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  @@index([tenantId, deletedAt])
+  @@index([tenantId, status])
+  @@index([s3Key])
+}
+
+model KnowledgeBase {
+  id          String  @id @default(uuid())
+  tenantId    String
+  name        String
+  description String?
+  color       String?
+
+  documents DocumentGroup[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+}
+
+model DocumentGroup {
+  id              String        @id @default(uuid())
+  documentId      String
+  knowledgeBaseId String
+  document        Document      @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  knowledgeBase   KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  createdAt       DateTime      @default(now())
+
+  @@unique([documentId, knowledgeBaseId])
+  @@index([knowledgeBaseId])
+}
+
+model Category {
+  id       String  @id @default(uuid())
+  tenantId String
+  name     String
+  label    String
+  color    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([tenantId, name])
+}
+
+model IngestJob {
+  id       String  @id @default(uuid())
+  tenantId String
+  /// Opaque caller reference for attribution.
+  externalRef String?
+
+  filename String
+  fileSize Int?
+  mimeType String?
+  s3Key    String?
+
+  documentId String?
+
+  /// pending | processing | success | failed
+  status  String  @default("pending")
+  error   String?
+  attempt Int     @default(1)
+
+  step        String?
+  progress    Int     @default(0)
+  stepCurrent Int?
+  stepTotal   Int?
+  etaSeconds  Int?
+
+  startedAt DateTime?
+  params    Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId, status, createdAt])
+  @@index([status, createdAt])
+  @@index([documentId])
+}
+
+/// API keys, scoped to a tenant and optionally to specific knowledge bases.
+model ApiKey {
+  id       String @id @default(uuid())
+  tenantId String
+  name     String
+  /// SHA-256 of the key; the plaintext is shown once at creation.
+  hash     String @unique
+  /// Empty = all scopes. Otherwise e.g. ["kb:read", "kb:write"].
+  scopes   String[] @default([])
+  /// Empty = every knowledge base in the tenant.
+  knowledgeBaseIds String[] @default([])
+
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([tenantId])
+}

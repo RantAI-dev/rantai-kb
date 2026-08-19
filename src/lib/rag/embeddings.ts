@@ -1,0 +1,347 @@
+/**
+ * Embeddings module using OpenRouter API.
+ * Model is selected via KB_EMBEDDING_MODEL env (see src/lib/rag/config.ts).
+ * Default from the 2026-04-20 SOTA audit: qwen/qwen3-embedding-8b (4096d).
+ *
+ * Features:
+ * - Retry logic with exponential backoff for transient errors
+ * - Response validation before processing
+ * - Batch processing with rate limiting
+ */
+
+import { getRagConfig, resolveApiKey } from "./config";
+import { LruCache } from "./lru-cache";
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 1000;
+// D-82: BATCH_SIZE / EMBED_CONCURRENCY were compile-time constants —
+// operators couldn't tune embedding parallelism without a code edit.
+// Read from env on module load with the historical defaults preserved.
+const parsePositiveInt = (raw: string | undefined, fallback: number): number => {
+  if (!raw) return fallback;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+const BATCH_SIZE = parsePositiveInt(process.env.KB_EMBED_BATCH_SIZE, 128);
+const EMBED_CONCURRENCY = parsePositiveInt(process.env.KB_EMBED_CONCURRENCY, 4);
+
+// Some providers reject a batch outright once it exceeds their per-request cap,
+// and the error is a hard 400 (not retryable) — every oversized batch is lost,
+// so a book-sized document ends up with almost no embedded chunks. Gemini's
+// BatchEmbedContents allows at most 100 items; OpenRouter forwards that error
+// verbatim. Clamp per model so the 128 default can't silently break ingest.
+const PROVIDER_BATCH_LIMITS: ReadonlyArray<[RegExp, number]> = [
+  [/(^|\/)(google\/)?gemini-embedding/i, 100],
+  [/(^|\/)(google\/)?text-embedding-00\d/i, 100],
+];
+
+export function resolveEmbedBatchSize(model: string, requested: number = BATCH_SIZE): number {
+  const limit = PROVIDER_BATCH_LIMITS.find(([re]) => re.test(model))?.[1];
+  return limit ? Math.min(requested, limit) : requested;
+}
+
+// Single-query embedding cache (hits common: same user retries the same Q,
+// follow-up rewrites converging on the same standalone query, etc). ~8 MB
+// of vector data at 4096-dim Float64 with 256 entries. Bypassed by the batch
+// path (generateEmbeddings) since ingest chunks are write-once.
+const QUERY_EMBED_CACHE_SIZE = parsePositiveInt(process.env.KB_QUERY_EMBED_CACHE_SIZE, 256);
+const QUERY_EMBED_CACHE_TTL_MS = parsePositiveInt(process.env.KB_QUERY_EMBED_CACHE_TTL_MS, 5 * 60 * 1000);
+const QUERY_EMBED_CACHE = new LruCache<string, number[]>({
+  maxSize: QUERY_EMBED_CACHE_SIZE,
+  ttlMs: QUERY_EMBED_CACHE_TTL_MS,
+});
+
+/**
+ * Sleep for specified milliseconds
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Check if an error is transient (should be retried)
+ */
+function isTransientError(status: number): boolean {
+  return status >= 500 || status === 429;
+}
+
+// MiniMax embeddings (embo-01) use a NON-OpenAI shape: request
+// { model, texts, type:"db"|"query" } → response { vectors: number[][], base_resp }.
+// Detected by endpoint host so the same KB_EMBEDDING_BASE_URL override can point
+// at MiniMax (covered by the Token Plan) instead of OpenRouter. MiniMax returns
+// rate-limit/errors as HTTP-200 soft errors in base_resp.status_code (0 = ok).
+function isMiniMaxEmbed(baseUrl: string): boolean {
+  return /minimax/i.test(baseUrl);
+}
+const MINIMAX_RATE_LIMIT_CODES = new Set([1002, 1027]);
+
+/**
+ * Validate embedding API response structure
+ */
+function validateEmbeddingResponse(data: unknown): data is { data: Array<{ embedding: number[] }> } {
+  if (!data || typeof data !== "object") {
+    return false;
+  }
+
+  const obj = data as Record<string, unknown>;
+  if (!obj.data || !Array.isArray(obj.data)) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Generate embeddings for a single text using OpenRouter
+ * This model produces 1536-dimensional vectors
+ * Includes retry logic for transient errors
+ */
+export async function generateEmbedding(text: string): Promise<number[]> {
+  const cfg = getRagConfig();
+  const apiKey = resolveApiKey(cfg.embeddingApiKey);
+  if (!apiKey) throw new Error("No API key configured: set KB_EMBEDDING_API_KEY or OPENROUTER_API_KEY");
+  const minimax = isMiniMaxEmbed(cfg.embeddingBaseUrl);
+
+  // Cache key includes the model so swapping KB_EMBEDDING_MODEL doesn't return
+  // stale vectors of the wrong dimension/space.
+  const cacheKey = `${cfg.embeddingModel}|${text.trim()}`;
+  const cached = QUERY_EMBED_CACHE.get(cacheKey);
+  if (cached) return cached;
+
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const response = await fetch(cfg.embeddingBaseUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(
+          minimax
+            ? { model: cfg.embeddingModel, texts: [text], type: "query" }
+            : { model: cfg.embeddingModel, input: text, dimensions: cfg.embeddingDim }
+        ),
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+
+        // Retry on transient errors
+        if (isTransientError(response.status) && attempt < MAX_RETRIES) {
+          const delay = Math.min(RETRY_DELAY_MS * Math.pow(2, attempt - 1), 10000);
+          console.warn(
+            `[Embeddings] Attempt ${attempt}/${MAX_RETRIES} failed (${response.status}), retrying in ${delay}ms...`
+          );
+          await sleep(delay);
+          continue;
+        }
+
+        throw new Error(`OpenRouter embedding API error: ${response.status} - ${errorText}`);
+      }
+
+      const data = await response.json();
+
+      if (minimax) {
+        const code = data?.base_resp?.status_code;
+        if (code && code !== 0) {
+          if (MINIMAX_RATE_LIMIT_CODES.has(code) && attempt < MAX_RETRIES) {
+            const delay = Math.min(RETRY_DELAY_MS * Math.pow(2, attempt - 1), 10000);
+            console.warn(`[Embeddings] MiniMax rate-limited (${code}), retrying in ${delay}ms...`);
+            await sleep(delay);
+            continue;
+          }
+          throw new Error(`MiniMax embedding error ${code}: ${data?.base_resp?.status_msg ?? "unknown"}`);
+        }
+        const vec = data?.vectors?.[0];
+        if (!Array.isArray(vec)) {
+          throw new Error(`Invalid MiniMax embedding response: ${JSON.stringify(data).slice(0, 300)}`);
+        }
+        QUERY_EMBED_CACHE.set(cacheKey, vec);
+        return vec;
+      }
+
+      // Validate response structure (OpenAI shape)
+      if (!validateEmbeddingResponse(data)) {
+        throw new Error(`Invalid embedding response structure: ${JSON.stringify(data).slice(0, 500)}`);
+      }
+
+      if (data.data.length === 0) {
+        throw new Error("Empty embedding response from API");
+      }
+
+      const item = data.data[0];
+      if (!item?.embedding || !Array.isArray(item.embedding)) {
+        throw new Error(`Invalid embedding item structure: ${JSON.stringify(item).slice(0, 200)}`);
+      }
+
+      QUERY_EMBED_CACHE.set(cacheKey, item.embedding);
+      return item.embedding;
+    } catch (error) {
+      lastError = error as Error;
+      if (attempt === MAX_RETRIES) break;
+    }
+  }
+
+  throw lastError || new Error("Embedding generation failed");
+}
+
+/**
+ * Generate embeddings for multiple texts in batch
+ * More efficient than calling generateEmbedding multiple times
+ * Runs EMBED_CONCURRENCY worker tasks in parallel, each picking the next
+ * unfinished batch index from a shared counter. Results are indexed by batch
+ * position so output order always matches input order.
+ */
+export async function generateEmbeddings(
+  texts: string[],
+  options?: {
+    /** Called with cumulative embedded count after each completed batch —
+     *  drives the ingest progress bar instead of a single 0/N emit. */
+    onProgress?: (done: number, total: number) => void
+  }
+): Promise<number[][]> {
+  if (texts.length === 0) return [];
+
+  const cfg = getRagConfig();
+  const apiKey = resolveApiKey(cfg.embeddingApiKey);
+  if (!apiKey) throw new Error("No API key configured: set KB_EMBEDDING_API_KEY or OPENROUTER_API_KEY");
+  const minimax = isMiniMaxEmbed(cfg.embeddingBaseUrl);
+
+  // Split into batches, never exceeding the provider's per-request cap.
+  const batchSize = resolveEmbedBatchSize(cfg.embeddingModel);
+  const batches: string[][] = [];
+  for (let i = 0; i < texts.length; i += batchSize) {
+    batches.push(texts.slice(i, i + batchSize));
+  }
+
+  // Results indexed by batch position so output order matches input order.
+  const results: number[][][] = new Array(batches.length);
+
+  let embedded = 0;
+  const reportBatchDone = (count: number) => {
+    embedded += count;
+    try {
+      options?.onProgress?.(embedded, texts.length);
+    } catch {
+      /* progress must never fail the embed */
+    }
+  };
+
+  let nextIdx = 0;
+  async function worker(): Promise<void> {
+    while (true) {
+      const idx = nextIdx++;
+      if (idx >= batches.length) return;
+      const batch = batches[idx];
+
+      let lastError: Error | null = null;
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          const response = await fetch(cfg.embeddingBaseUrl, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${apiKey}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify(
+              minimax
+                ? { model: cfg.embeddingModel, texts: batch, type: "db" }
+                : { model: cfg.embeddingModel, input: batch, dimensions: cfg.embeddingDim }
+            ),
+          });
+
+          if (!response.ok) {
+            const errorText = await response.text();
+            if (isTransientError(response.status) && attempt < MAX_RETRIES) {
+              const delay = Math.min(RETRY_DELAY_MS * Math.pow(2, attempt - 1), 10000);
+              console.warn(
+                `[Embeddings] Batch ${idx + 1}/${batches.length} attempt ${attempt}/${MAX_RETRIES} failed (${response.status}), retrying in ${delay}ms...`
+              );
+              await sleep(delay);
+              continue;
+            }
+            throw new Error(`OpenRouter embedding API error: ${response.status} - ${errorText}`);
+          }
+
+          const data = await response.json();
+          if (minimax) {
+            const code = data?.base_resp?.status_code;
+            if (code && code !== 0) {
+              if (MINIMAX_RATE_LIMIT_CODES.has(code) && attempt < MAX_RETRIES) {
+                const delay = Math.min(RETRY_DELAY_MS * Math.pow(2, attempt - 1), 10000);
+                console.warn(`[Embeddings] MiniMax batch ${idx + 1}/${batches.length} rate-limited (${code}), retrying in ${delay}ms...`);
+                await sleep(delay);
+                continue;
+              }
+              throw new Error(`MiniMax embedding error ${code}: ${data?.base_resp?.status_msg ?? "unknown"}`);
+            }
+            if (!Array.isArray(data?.vectors)) {
+              throw new Error(`Invalid MiniMax embedding response: ${JSON.stringify(data).slice(0, 300)}`);
+            }
+            results[idx] = data.vectors;
+            reportBatchDone(batch.length);
+            lastError = null;
+            break;
+          }
+          if (!validateEmbeddingResponse(data)) {
+            throw new Error(`Invalid embedding response structure: ${JSON.stringify(data).slice(0, 500)}`);
+          }
+          if (data.data.length === 0) {
+            console.warn("[Embeddings] Received empty data array from API");
+            results[idx] = [];
+            break;
+          }
+          const embeddings = data.data.map((item: { embedding: number[] }, i: number) => {
+            if (!item?.embedding || !Array.isArray(item.embedding)) {
+              throw new Error(`Invalid embedding item at index ${i}: ${JSON.stringify(item).slice(0, 200)}`);
+            }
+            return item.embedding;
+          });
+          results[idx] = embeddings;
+          reportBatchDone(batch.length);
+          lastError = null;
+          break;
+        } catch (error) {
+          lastError = error as Error;
+          if (attempt === MAX_RETRIES) {
+            console.error(
+              `[Embeddings] Batch ${idx + 1}/${batches.length} failed after ${MAX_RETRIES} retries:`,
+              lastError.message
+            );
+          }
+        }
+      }
+      if (lastError) throw lastError;
+    }
+  }
+
+  // Run EMBED_CONCURRENCY workers in parallel.
+  await Promise.all(Array.from({ length: Math.min(EMBED_CONCURRENCY, batches.length) }, () => worker()));
+
+  // Flatten results in original order.
+  const allEmbeddings: number[][] = [];
+  for (const batchResult of results) allEmbeddings.push(...batchResult);
+  return allEmbeddings;
+}
+
+/**
+ * Calculate cosine similarity between two vectors
+ */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) {
+    throw new Error("Vectors must have the same length");
+  }
+
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+}
