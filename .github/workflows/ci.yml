@@ -67,22 +67,6 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U kb"
           --health-interval 5s --health-timeout 5s --health-retries 10
-      surrealdb:
-        image: surrealdb/surrealdb:v2
-        ports: ["8000:8000"]
-        options: --entrypoint /surreal
-        env:
-          SURREAL_USER: root
-          SURREAL_PASS: root
-      minio:
-        image: quay.io/minio/minio
-        env:
-          MINIO_ROOT_USER: kbadmin
-          MINIO_ROOT_PASSWORD: kbsecret123
-        ports: ["9000:9000"]
-        options: >-
-          --health-cmd "mc ready local"
-          --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -92,21 +76,28 @@ jobs:
       - run: bun install
       - run: bunx prisma generate
 
-      # The service image starts SurrealDB itself in compose; in CI the service
-      # container needs the start command, which `services:` cannot express —
-      # so run it directly.
-      - name: Start SurrealDB
+      # SurrealDB and MinIO both need a start command with arguments, which the
+      # `services:` block cannot express — so run them directly.
+      - name: Start SurrealDB and MinIO
         run: |
           docker run -d --name surreal --network host surrealdb/surrealdb:v2 \
             start --user root --pass root
-          for i in $(seq 1 30); do
-            curl -sf http://127.0.0.1:8000/health && break || sleep 2
+          docker run -d --name minio --network host \
+            -e MINIO_ROOT_USER=kbadmin -e MINIO_ROOT_PASSWORD=kbsecret123 \
+            quay.io/minio/minio server /data
+
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:8000/health >/dev/null && break || sleep 2
           done
+          for i in $(seq 1 40); do
+            curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null && break || sleep 2
+          done
+          docker logs surreal | tail -5
 
       - name: Create bucket
         run: |
-          docker run --rm --network host quay.io/minio/minio \
-            sh -c "mc alias set local http://127.0.0.1:9000 kbadmin kbsecret123 && mc mb --ignore-existing local/rantai-kb"
+          docker run --rm --network host --entrypoint sh quay.io/minio/minio -c \
+            "mc alias set local http://127.0.0.1:9000 kbadmin kbsecret123 && mc mb --ignore-existing local/rantai-kb"
 
       - name: Migrate + vector schema
         env:

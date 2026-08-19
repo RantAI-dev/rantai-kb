@@ -93,8 +93,13 @@ export async function convertPDFToImages(
   }
 
   try {
-    // Dynamic import to avoid issues if package not installed
-    const pdfImgConvert = await import("pdf-img-convert");
+    // Optional dependency: pulls in `canvas`, which needs cairo/pixman to
+    // build and has no prebuilt binary for current Node ABIs. Deployments that
+    // never OCR a scanned PDF should not have to compile it, so the specifier
+    // is indirect — TypeScript treats it as `any` and the package can be
+    // genuinely absent (the catch below explains how to add it).
+    const pdfImgConvertSpecifier = "pdf-img-convert";
+    const pdfImgConvert = await import(pdfImgConvertSpecifier);
 
     // Calculate scale from DPI (base PDF DPI is 72)
     const scale = dpi / 72;
@@ -126,7 +131,9 @@ export async function convertPDFToImages(
       let height = 0;
 
       try {
-        const sharp = await import("sharp");
+        // Optional too — dimensions fall back to an estimate without it.
+        const sharpSpecifier = "sharp";
+        const sharp = await import(sharpSpecifier);
         const metadata = await sharp.default(imageBuffer).metadata();
         width = metadata.width || 0;
         height = metadata.height || 0;

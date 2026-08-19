@@ -1,17 +1,17 @@
 # syntax=docker/dockerfile:1
-FROM oven/bun:1.1-debian AS deps
+FROM oven/bun:1.3-debian AS deps
 WORKDIR /app
 COPY package.json bun.lock* ./
 RUN bun install --frozen-lockfile || bun install
 
-FROM oven/bun:1.1-debian AS build
+FROM oven/bun:1.3-debian AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 # Generate the Prisma client for the runtime platform.
 RUN bunx prisma generate
 
-FROM oven/bun:1.1-debian AS runtime
+FROM oven/bun:1.3-debian AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 # Ingest shells out to nothing, but PDFs and OCR benefit from fonts being present.
