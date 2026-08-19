@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
+import { configureKb } from "@/lib/kb-runtime/runtime"
+import { makeFakeKbRuntime } from "../../helpers/kb-fakes"
 
 describe("retriever — parallel vector + BM25", () => {
   const originalFetch = global.fetch
@@ -28,6 +30,16 @@ describe("retriever — parallel vector + BM25", () => {
     })
     vi.doMock("@/lib/rag/vector-store", () => ({ searchWithThreshold: vectorMock, searchSimilar: vi.fn() }))
     vi.doMock("@/lib/rag/bm25-search", () => ({ bm25Search: bm25Mock }))
+    // BM25 hits carry no metadata and no ownership, so the retriever resolves
+    // each one's document before trusting it. Make document "d" visible.
+    configureKb({
+      documents: {
+        ...makeFakeKbRuntime().documents,
+        findAliveMetaByIds: vi.fn(async () => [
+          { id: "d", title: "t", categories: [], subcategory: null },
+        ]),
+      },
+    })
 
     const { retrieveContext } = await import("@/lib/rag/retriever")
     const t0 = Date.now()
@@ -114,5 +126,29 @@ describe("retriever — query expansion with parallel embed", () => {
 
     // 3 vector searches fanned out in parallel.
     expect(vectorMock).toHaveBeenCalledTimes(3)
+  })
+
+  it("drops a BM25 hit whose document the caller cannot see", async () => {
+    process.env.KB_HYBRID_BM25_ENABLED = "true"
+    vi.doMock("@/lib/rag/vector-store", () => ({
+      searchWithThreshold: vi.fn(async () => []),
+      searchSimilar: vi.fn(),
+    }))
+    vi.doMock("@/lib/rag/bm25-search", () => ({
+      bm25Search: vi.fn(async () => [
+        { id: "leak", documentId: "someone-elses-doc", content: "secret", score: 9 },
+      ]),
+    }))
+    // DocumentStore resolves nothing — the document belongs to another tenant
+    // (or was soft-deleted), so the full-text hit must not survive.
+    configureKb({
+      documents: { ...makeFakeKbRuntime().documents, findAliveMetaByIds: vi.fn(async () => []) },
+    })
+
+    const { retrieveContext } = await import("@/lib/rag/retriever")
+    const r = await retrieveContext("secret", { maxChunks: 5 })
+
+    expect(r.chunks.map((c: any) => c.id)).not.toContain("leak")
+    expect(r.context).not.toContain("secret")
   })
 })
