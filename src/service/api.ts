@@ -208,6 +208,143 @@ async function deleteDocument(id: string, auth: AuthContext): Promise<Response> 
   })
 }
 
+// ─── Document intelligence (entities/relations) ─────────────────────────────
+
+/** Shape actually written to SurrealDB's `entity` table — see
+ * src/lib/ingest/index-document.ts (the live write path) and
+ * src/lib/document-intelligence/pipeline.ts (the standalone pipeline). */
+type SurrealEntityRow = {
+  id: unknown
+  name: string
+  type: string
+  confidence: number
+  metadata?: Record<string, unknown> | null
+}
+
+/** Shape of a graph edge row. Relation *type* is the table name the edge
+ * lives in (RELATE x->WORKS_FOR->y), not a stored column — index-document.ts
+ * never writes a `relation_type` field, only pipeline.ts's unused
+ * storeResults() does, so it is read back opportunistically when present. */
+type SurrealRelationRow = {
+  id: unknown
+  in: unknown
+  out: unknown
+  confidence: number
+  relation_type?: string
+  context?: string
+  metadata?: Record<string, unknown> | null
+}
+
+/**
+ * Document.status is only ever ready | processing | failed (prisma/schema.prisma) —
+ * there is no independent status for entity/relation extraction. It runs (or
+ * is skipped by ingest policy) as one internal step of the same job that does
+ * chunking and embedding, and its own failures are caught and swallowed as
+ * non-fatal (see index-document.ts). So "ready" becomes "completed": the job
+ * reached its terminal state, which holds whether or not any entities were
+ * found — an empty graph is a legitimate result, not a failure.
+ *
+ * "pending" is never returned: a document's status is already "processing"
+ * from the instant it's created (see ingestDocument above), before any job
+ * has been claimed, so there is no observable state that means "not started
+ * yet" distinct from "processing".
+ */
+function deriveIntelligenceStatus(documentStatus: string): "pending" | "processing" | "completed" | "failed" {
+  if (documentStatus === "processing") return "processing"
+  if (documentStatus === "failed") return "failed"
+  return "completed"
+}
+
+/** GET /v1/documents/:id/intelligence — entities + relations extracted for a document. */
+async function getDocumentIntelligence(id: string, auth: AuthContext): Promise<Response> {
+  if (!hasScope(auth, "kb:read")) return error("API key lacks scope kb:read", 403)
+
+  return withTenant(auth.tenantId, async () => {
+    // SECURITY: SurrealDB has no tenant concept of its own — entity and
+    // relation rows carry only a `document_id` (see pipeline.ts / index-
+    // document.ts), so nothing stops a query keyed on a caller-supplied id
+    // from crossing tenants. Resolving the document through the tenant-
+    // scoped Postgres store FIRST, and returning the exact same 404 a
+    // nonexistent id gets, is the only thing standing between this endpoint
+    // and a caller enumerating another tenant's document ids to read their
+    // graph. Do not remove this as a "redundant" lookup before touching
+    // SurrealDB below — it is the tenant check.
+    const doc = await prisma.document.findFirst({
+      where: { id, tenantId: auth.tenantId, deletedAt: null },
+      select: { id: true, status: true },
+    })
+    if (!doc) return error("Not found", 404)
+
+    const store = kb("vectors")
+
+    const entityResult = await store.query<SurrealEntityRow>("SELECT * FROM entity WHERE document_id = $id", { id })
+    const entityRows = entityResult[0]?.result ?? []
+
+    // Relations live in dynamic tables named after their relation type
+    // (RELATE x->WORKS_FOR->y creates table `WORKS_FOR`), not one shared
+    // table — the same reason cleanupDocumentIntelligence() in
+    // src/lib/surrealdb/client.ts has to enumerate them via `INFO FOR DB`
+    // before it can delete them.
+    const relationRows: Array<SurrealRelationRow & { table: string }> = []
+    try {
+      const dbInfo = await store.query<{ tables?: Record<string, unknown> }>("INFO FOR DB")
+      // Every statement's row lands in result[0] (SurrealDBClient.normalizeQueryResult
+      // wraps a single non-recordset value as `{ result: [value] }`) — INFO FOR
+      // DB is one statement returning one info object.
+      const tables = dbInfo[0]?.result?.[0]?.tables
+      const relationTables = tables ? Object.keys(tables).filter((t) => t !== "entity" && t !== "document_chunk") : []
+
+      for (const table of relationTables) {
+        try {
+          const rel = await store.query<SurrealRelationRow>(`SELECT * FROM ${table} WHERE document_id = $id`, { id })
+          for (const row of rel[0]?.result ?? []) relationRows.push({ ...row, table })
+        } catch (err) {
+          // A relation table can still be listed in schema metadata after its
+          // rows are gone (SurrealDB doesn't drop empty dynamic tables), or
+          // fail transiently — skip it rather than fail the whole read.
+          console.warn(`[kb] intelligence: relation table "${table}" query failed:`, err)
+        }
+      }
+    } catch (err) {
+      console.warn("[kb] intelligence: relation table discovery failed:", err)
+    }
+
+    const entities = entityRows.map((row) => ({
+      id: String(row.id),
+      name: row.name,
+      type: row.type,
+      confidence: Number(row.confidence ?? 0),
+      metadata: row.metadata && typeof row.metadata === "object" ? row.metadata : {},
+    }))
+
+    const relations = relationRows.map((row) => ({
+      id: String(row.id),
+      in: String(row.in),
+      out: String(row.out),
+      relation_type: row.relation_type ?? row.table,
+      confidence: Number(row.confidence ?? 0),
+      metadata: {
+        ...(row.metadata && typeof row.metadata === "object" ? row.metadata : {}),
+        // index-document.ts (the live write path) stores context as a flat
+        // column, not nested under metadata — surface it either way.
+        context: row.context ?? (row.metadata as Record<string, unknown> | undefined)?.context,
+      },
+    }))
+
+    return json({
+      entities,
+      relations,
+      status: deriveIntelligenceStatus(doc.status),
+      stats: {
+        totalEntities: entities.length,
+        totalRelations: relations.length,
+        entityTypes: new Set(entities.map((e) => e.type)).size,
+        relationTypes: new Set(relations.map((r) => r.relation_type)).size,
+      },
+    })
+  })
+}
+
 /** GET /v1/jobs/:id */
 async function getJob(id: string, auth: AuthContext): Promise<Response> {
   const job = await prisma.ingestJob.findFirst({ where: { id, tenantId: auth.tenantId } })
@@ -340,6 +477,9 @@ export async function handleRequest(request: Request): Promise<Response> {
 
     const docMatch = path.match(/^\/v1\/documents\/([^/]+)$/)
     if (docMatch && request.method === "DELETE") return await deleteDocument(docMatch[1], auth)
+
+    const intelligenceMatch = path.match(/^\/v1\/documents\/([^/]+)\/intelligence$/)
+    if (intelligenceMatch && request.method === "GET") return await getDocumentIntelligence(intelligenceMatch[1], auth)
 
     const jobMatch = path.match(/^\/v1\/jobs\/([^/]+)$/)
     if (jobMatch && request.method === "GET") return await getJob(jobMatch[1], auth)
