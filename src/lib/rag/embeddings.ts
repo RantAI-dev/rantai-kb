@@ -107,6 +107,11 @@ export async function generateEmbedding(text: string): Promise<number[]> {
   const cached = QUERY_EMBED_CACHE.get(cacheKey);
   if (cached) return cached;
 
+  // Query-side text (this is the search path, mirroring the MiniMax
+  // type:"query" split above). Empty prefix (the default) is a no-op — see
+  // RagConfig.embeddingQueryPrefix.
+  const embedText = cfg.embeddingQueryPrefix + text;
+
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -119,8 +124,8 @@ export async function generateEmbedding(text: string): Promise<number[]> {
         },
         body: JSON.stringify(
           minimax
-            ? { model: cfg.embeddingModel, texts: [text], type: "query" }
-            : { model: cfg.embeddingModel, input: text, dimensions: cfg.embeddingDim }
+            ? { model: cfg.embeddingModel, texts: [embedText], type: "query" }
+            : { model: cfg.embeddingModel, input: embedText, dimensions: cfg.embeddingDim }
         ),
       });
 
@@ -208,11 +213,18 @@ export async function generateEmbeddings(
   if (!apiKey) throw new Error("No API key configured: set KB_EMBEDDING_API_KEY or OPENROUTER_API_KEY");
   const minimax = isMiniMaxEmbed(cfg.embeddingBaseUrl);
 
+  // Passage-side text (this is the storage/db path, mirroring the MiniMax
+  // type:"db" split below). Empty prefix (the default) is a no-op — see
+  // RagConfig.embeddingPassagePrefix.
+  const prefixedTexts = cfg.embeddingPassagePrefix
+    ? texts.map((t) => cfg.embeddingPassagePrefix + t)
+    : texts;
+
   // Split into batches, never exceeding the provider's per-request cap.
   const batchSize = resolveEmbedBatchSize(cfg.embeddingModel);
   const batches: string[][] = [];
-  for (let i = 0; i < texts.length; i += batchSize) {
-    batches.push(texts.slice(i, i + batchSize));
+  for (let i = 0; i < prefixedTexts.length; i += batchSize) {
+    batches.push(prefixedTexts.slice(i, i + batchSize));
   }
 
   // Results indexed by batch position so output order matches input order.
