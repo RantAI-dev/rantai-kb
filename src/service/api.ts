@@ -320,7 +320,13 @@ async function patchDocument(request: Request, id: string, auth: AuthContext): P
       await prisma.document.update({ where: { id }, data })
     }
 
-    const updated = await prisma.document.findFirst({ where: { id }, select: DOCUMENT_DETAIL_SELECT })
+    // Scoped again although `id` was authorised above: this is the line most
+    // likely to be copied into a new handler, and unscoped it would read any
+    // tenant's document. Every lookup in this file carries the tenant.
+    const updated = await prisma.document.findFirst({
+      where: { id, tenantId: auth.tenantId },
+      select: DOCUMENT_DETAIL_SELECT,
+    })
     if (!updated) return error("Not found", 404)
 
     return json({
