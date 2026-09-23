@@ -205,8 +205,34 @@ const DOCUMENT_DETAIL_SELECT = {
   createdAt: true,
   updatedAt: true,
   s3Key: true,
+  metadata: true,
   groups: { select: { knowledgeBaseId: true } },
 } as const
+
+/** Shape written to `Document.metadata.figures` by storeFiguresAsChunks() — see
+ *  src/lib/rag/figure-assets.ts's FigureAsset and index-document.ts's
+ *  `kb("documents").updateMetadata(input.documentId, { figures: assets })`.
+ *  Read back here as `unknown` (Prisma's `metadata` column is just `Json?`)
+ *  and narrowed defensively — nothing guarantees an old row's metadata was
+ *  ever written by this code path. */
+function readDocumentFigures(
+  metadata: unknown
+): Array<{ assetKey: string; page: number; caption: string | null; kind: string }> {
+  if (!metadata || typeof metadata !== "object") return []
+  const figures = (metadata as Record<string, unknown>).figures
+  if (!Array.isArray(figures)) return []
+  return figures
+    .filter((f): f is Record<string, unknown> => Boolean(f) && typeof f === "object")
+    .map((f) => ({
+      assetKey: typeof f.assetKey === "string" ? f.assetKey : "",
+      page: typeof f.page === "number" ? f.page : 0,
+      caption: typeof f.caption === "string" ? f.caption : null,
+      // FigureAsset's field is called `type` (see figure-assets.ts); the HTTP
+      // contract calls it `kind` to avoid colliding with chunkType/mimeType.
+      kind: typeof f.type === "string" ? f.type : "figure",
+    }))
+    .filter((f) => f.assetKey)
+}
 
 /** Row shape read back from SurrealDB's `document_chunk` — see storeChunks() in
  *  src/lib/rag/vector-store.ts for what's actually written (chunk_index is its
@@ -265,6 +291,7 @@ async function getDocument(id: string, auth: AuthContext): Promise<Response> {
         updatedAt: doc.updatedAt,
         knowledgeBaseIds: doc.groups.map((g) => g.knowledgeBaseId),
         chunkCount: chunks.length,
+        figures: readDocumentFigures(doc.metadata),
       },
       chunks,
     })
@@ -371,6 +398,72 @@ async function getDocumentRaw(id: string, auth: AuthContext): Promise<Response> 
       status: 200,
       headers: {
         "content-type": doc.mimeType || "application/octet-stream",
+        "content-length": String(buffer.length),
+        "access-control-allow-origin": "*",
+      },
+    })
+  })
+}
+
+/** Content type for a figure asset, derived from its stored filename — figure
+ *  crops are always uploaded as PNG today (see storeFiguresAsChunks in
+ *  figure-assets.ts) but this stays extension-driven rather than hardcoded so
+ *  it keeps working if that ever changes. */
+function assetContentType(key: string): string {
+  const ext = key.slice(key.lastIndexOf(".") + 1).toLowerCase()
+  if (ext === "png") return "image/png"
+  if (ext === "jpg" || ext === "jpeg") return "image/jpeg"
+  if (ext === "webp") return "image/webp"
+  if (ext === "gif") return "image/gif"
+  return "application/octet-stream"
+}
+
+/** GET /v1/documents/:id/assets?key=<assetKey> — stream a figure crop through the service. */
+async function getDocumentAsset(request: Request, id: string, auth: AuthContext): Promise<Response> {
+  if (!hasScope(auth, "kb:read")) return error("API key lacks scope kb:read", 403)
+
+  const key = new URL(request.url).searchParams.get("key")
+
+  return withTenant(auth.tenantId, async () => {
+    // Tenant ownership resolves through Postgres FIRST, exactly like
+    // getDocumentRaw/getDocumentIntelligence above — the blob store must never
+    // see a caller-supplied id/key before we know this tenant owns the document.
+    const doc = await prisma.document.findFirst({
+      where: { id, tenantId: auth.tenantId, deletedAt: null },
+      select: { id: true },
+    })
+    if (!doc) return error("Not found", 404)
+
+    // SECURITY: this prefix check — not the ownership lookup above — is what
+    // stops one tenant from fetching another tenant's (or another one of
+    // their OWN documents') figure images by guessing/reusing an assetKey.
+    // `key` must be exactly this document's asset namespace
+    // (documents/{tenantId}/{id}/assets/…, see assetPath() in
+    // service/adapters.ts), with no ".." or "\\" that could walk it outside
+    // that prefix even though ".." would still pass a naive startsWith check
+    // (startsWith is a literal string test, not a path resolution — a key
+    // like "documents/{tenantId}/{id}/assets/../../other-tenant/x.png" DOES
+    // start with the prefix as a string). Any failure here returns the exact
+    // same 404 as a missing document — never 403, never a different message —
+    // so a caller can't use the response to tell "wrong key" from "wrong
+    // document" apart and probe for valid keys.
+    const prefix = `documents/${auth.tenantId}/${id}/assets/`
+    if (!key || !key.startsWith(prefix) || key.includes("..") || key.includes("\\")) {
+      return error("Not found", 404)
+    }
+
+    let buffer: Buffer
+    try {
+      buffer = await kb("blob").download(key)
+    } catch (err) {
+      console.warn(`[kb] asset download failed for ${id}:`, err)
+      return error("Not found", 404)
+    }
+
+    return new Response(new Uint8Array(buffer), {
+      status: 200,
+      headers: {
+        "content-type": assetContentType(key),
         "content-length": String(buffer.length),
         "access-control-allow-origin": "*",
       },
@@ -792,6 +885,9 @@ export async function handleRequest(request: Request): Promise<Response> {
 
     const docRawMatch = path.match(/^\/v1\/documents\/([^/]+)\/raw$/)
     if (docRawMatch && request.method === "GET") return await getDocumentRaw(docRawMatch[1], auth)
+
+    const docAssetMatch = path.match(/^\/v1\/documents\/([^/]+)\/assets$/)
+    if (docAssetMatch && request.method === "GET") return await getDocumentAsset(request, docAssetMatch[1], auth)
 
     const intelligenceMatch = path.match(/^\/v1\/documents\/([^/]+)\/intelligence$/)
     if (intelligenceMatch && request.method === "GET") return await getDocumentIntelligence(intelligenceMatch[1], auth)
