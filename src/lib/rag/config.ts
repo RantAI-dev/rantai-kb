@@ -55,6 +55,25 @@ export interface RagConfig {
   embeddingBaseUrl: string;
   /** Explicit API key for the embedding endpoint. Falls back to OPENROUTER_API_KEY when empty. */
   embeddingApiKey: string;
+  /**
+   * Prepended to query text before it is embedded (the `generateEmbedding`
+   * path — searches, not ingest). Some retrieval-tuned embedding models
+   * (e.g. the e5 family) are trained with asymmetric `"query: "` /
+   * `"passage: "` prefixes and score poorly without them. Empty string
+   * (the default) is a no-op, so this is inert unless explicitly configured
+   * for a model that needs it — never inferred from the model name. Env:
+   * KB_EMBEDDING_QUERY_PREFIX.
+   */
+  embeddingQueryPrefix: string;
+  /**
+   * Prepended to passage/document text before it is embedded (the
+   * `generateEmbeddings` path — ingest chunks, and the same batch path
+   * `searchSimilarBatch` reuses for query-expansion paraphrases, mirroring
+   * how the MiniMax `type: "db"` vs `type: "query"` split already draws
+   * this same generateEmbedding/generateEmbeddings line). Empty string
+   * (the default) is a no-op. Env: KB_EMBEDDING_PASSAGE_PREFIX.
+   */
+  embeddingPassagePrefix: string;
 }
 
 const DEFAULTS: RagConfig = {
@@ -100,6 +119,8 @@ const DEFAULTS: RagConfig = {
   extractSmartFallback: "openai/gpt-4.1-nano",
   embeddingBaseUrl: "https://openrouter.ai/api/v1/embeddings",
   embeddingApiKey: "",
+  embeddingQueryPrefix: "",
+  embeddingPassagePrefix: "",
 };
 
 /** Resolve an API key: use the per-endpoint override if set, else fall back to OPENROUTER_API_KEY. */
@@ -155,5 +176,7 @@ export function envRagConfig(): RagConfig {
     extractSmartFallback: process.env.KB_EXTRACT_SMART_FALLBACK || DEFAULTS.extractSmartFallback,
     embeddingBaseUrl: process.env.KB_EMBEDDING_BASE_URL || DEFAULTS.embeddingBaseUrl,
     embeddingApiKey: process.env.KB_EMBEDDING_API_KEY || DEFAULTS.embeddingApiKey,
+    embeddingQueryPrefix: process.env.KB_EMBEDDING_QUERY_PREFIX || DEFAULTS.embeddingQueryPrefix,
+    embeddingPassagePrefix: process.env.KB_EMBEDDING_PASSAGE_PREFIX || DEFAULTS.embeddingPassagePrefix,
   };
 }

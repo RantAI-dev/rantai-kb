@@ -31,6 +31,8 @@ const OVERRIDABLE: (keyof RagConfig)[] = [
   "embeddingDim",
   "embeddingBaseUrl",
   "embeddingApiKey",
+  "embeddingQueryPrefix",
+  "embeddingPassagePrefix",
   "defaultMaxChunks",
   "rerankEnabled",
   "rerankModel",

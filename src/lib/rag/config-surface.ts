@@ -33,6 +33,8 @@ export const KB_ENV_SURFACE: KbEnvVar[] = [
   { name: "KB_EMBEDDING_API_KEY", purpose: "Key for the embeddings endpoint", default: "falls back to OPENROUTER_API_KEY", required: true },
   { name: "KB_EMBEDDING_MODEL", purpose: "Embedding model id", default: "qwen/qwen3-embedding-8b" },
   { name: "KB_EMBEDDING_DIM", purpose: "Embedding dimensions (must match the vector index)", default: "4096" },
+  { name: "KB_EMBEDDING_QUERY_PREFIX", purpose: "Text prepended to search queries before embedding, for models trained with one (e.g. e5: \"query: \")", default: "empty — no prefix" },
+  { name: "KB_EMBEDDING_PASSAGE_PREFIX", purpose: "Text prepended to stored chunks before embedding, for models trained with one (e.g. e5: \"passage: \")", default: "empty — no prefix" },
   { name: "KB_EMBED_BATCH_SIZE", purpose: "Texts per embedding request", default: "128, clamped per provider" },
   { name: "KB_EMBED_CONCURRENCY", purpose: "Parallel embedding requests", default: "4" },
   { name: "KB_QUERY_EMBED_CACHE_SIZE", purpose: "Query-embedding LRU size", default: "500" },

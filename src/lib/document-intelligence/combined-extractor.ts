@@ -335,20 +335,30 @@ Return ONLY valid JSON with "entities" and "relations" arrays.`;
   private parseResponse(content: string): ChunkExtraction {
     let cleaned = content.trim();
 
-    // Remove thinking tags
+    // Remove thinking tags. Reasoning models emit <think>...</think> before
+    // their actual answer; it must go first so the fence check below sees the
+    // real start of the response, not the inside of the reasoning block.
     cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
 
-    // Find JSON start
-    const jsonStart = cleaned.indexOf("{");
-    if (jsonStart > 0) {
-      cleaned = cleaned.slice(jsonStart);
-    }
-
-    // Remove code fences
+    // Remove code fences BEFORE searching for the JSON body. This order
+    // matters: a fenced response like "```json\n{...}\n```" has its opening
+    // fence sitting before the first "{". Finding "{" first (the old order)
+    // sliced the fence's leading "```json" off but left the trailing "```"
+    // in place, so JSON.parse (and the repair fallback below) always failed
+    // on fenced output and extraction silently resolved to an empty result —
+    // indistinguishable from a document with nothing to extract. Stripping
+    // fences first removes both markers together.
     if (cleaned.startsWith("```json")) {
       cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
     } else if (cleaned.startsWith("```")) {
       cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    }
+
+    // Find JSON start (defensive: strips any stray preamble text still left
+    // before the object, fenced or not).
+    const jsonStart = cleaned.indexOf("{");
+    if (jsonStart > 0) {
+      cleaned = cleaned.slice(jsonStart);
     }
 
     try {

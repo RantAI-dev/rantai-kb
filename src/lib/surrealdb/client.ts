@@ -734,8 +734,15 @@ export class SurrealDBClient {
     // Dynamically discover relation tables from database info
     try {
       const dbInfo = await this.query<{ tables: Record<string, string> }>(`INFO FOR DB`);
-      const rawInfo = dbInfo[0];
-      const info = Array.isArray(rawInfo) ? rawInfo[0] : rawInfo;
+      // `query()` runs every response through normalizeQueryResult, which
+      // always yields `{ result: T[] }` per statement — including for a
+      // single-value statement like INFO FOR DB, which it wraps as
+      // `{ result: [info] }`. Reading `dbInfo[0]` as the info object itself
+      // therefore always found `tables` undefined, so this loop enumerated
+      // nothing and every relation edge survived the delete it was supposed
+      // to clean up. With no tenant column on those rows (see the endpoint in
+      // service/api.ts), stale edges are not merely clutter.
+      const info = dbInfo[0]?.result?.[0];
 
       if (info?.tables) {
         // Filter out non-relation tables
