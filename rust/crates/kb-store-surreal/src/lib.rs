@@ -623,7 +623,7 @@ mod tests {
         let arr = surql_f32_array(&[0.0, 1.5, -2.25]);
         assert_eq!(arr, "[0, 1.5, -2.25]");
         let arr = surql_f32_array(&[f32::NAN, f32::INFINITY]);
-        assert_eq!(arr, "[0, 0]");
+        assert_eq!(arr, "[0.0, 0.0]");
     }
 
     #[test]

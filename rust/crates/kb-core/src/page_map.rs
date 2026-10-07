@@ -20,7 +20,7 @@ pub struct PageBlock {
 // Strip markdown noise and collapse whitespace so snippets compare cleanly.
 // The pattern is a fixed literal — if it ever fails to compile the unit test
 // `static_noise_regex_compiles` catches it before the LazyLock fires.
-static NOISE: LazyLock<Regex> = LazyLock::new(|| match Regex::new(r"[*#>|_~[\]()!`-]") {
+static NOISE: LazyLock<Regex> = LazyLock::new(|| match Regex::new(r"[*#>|_~\[\]()!\-`]") {
     Ok(r) => r,
     Err(_) => std::process::abort(),
 });
