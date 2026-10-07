@@ -1,0 +1,70 @@
+# Rust workspace for the KB read path (phase R1).
+
+# This file is intentionally minimal — version pinning happens in [workspace.dependencies]
+# below and nowhere else. Adding a crate-specific version is a smell; tell NOTES.md why.
+
+[workspace]
+resolver = "3"
+members = [
+    "crates/kb-core",
+    "crates/kb-ports",
+    "crates/kb-inference",
+    "crates/kb-store-pg",
+    "crates/kb-store-surreal",
+    "crates/kb-engine",
+    "crates/kb-server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+thiserror = "2.0.16"
+async-trait = "0.1.89"
+tokio = { version = "1.43.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+futures = "0.3.31"
+reqwest = { version = "0.12.20", default-features = false, features = ["rustls-tls", "json"] }
+sqlx = { version = "0.8.5", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
+axum = { version = "0.7.9", features = ["macros"] }
+tower = "0.5.2"
+tower-http = { version = "0.6.6", features = ["trace"] }
+sha2 = "0.10.9"
+hex = "0.4.3"
+fancy-regex = "0.14.0"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+anyhow = "1.0.97"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+# Clippy: `all` + `pedantic` as warnings. `pedantic` is noisy; the plan budget
+# acknowledges that some pedantic warnings will remain. Denied lints must reach
+# zero — they are the ones that signal a real bug.
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+
+# The compile-friendliest profile: no debug info for dependencies, minimal opt.
+# This is the difference between "all crates fit in the budget" and "OOM killed
+# at link time" on this 2 GB free-memory machine.
+[profile.dev]
+debug = 0
+incremental = true
+
+[profile.test]
+debug = 0
