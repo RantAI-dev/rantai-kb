@@ -36,12 +36,16 @@ impl Default for RouterOpts {
 
 // `\S\s{3,}\S` — runs of 3+ whitespace chars between visible tokens. Tables
 // flatten to these when extracted as text layer.
-static COLUMNAR_RUN: LazyLock<Regex> =
-    LazyLock::lock(|| Regex::new(r"\S\s{3,}\S").expect("columnar regex is valid"));
+static COLUMNAR_RUN: LazyLock<Regex> = LazyLock::new(|| match Regex::new(r"\S\s{3,}\S") {
+    Ok(r) => r,
+    Err(_) => std::process::abort(),
+});
 
 // `$X,XXX(.XX)?` — optional space after `$`, optional fractional part.
-static CURRENCY: LazyLock<Regex> =
-    LazyLock::lock(|| Regex::new(r"\$\s?[\d,]+(?:\.\d+)?").expect("currency regex is valid"));
+static CURRENCY: LazyLock<Regex> = LazyLock::new(|| match Regex::new(r"\$\s?[\d,]+(?:\.\d+)?") {
+    Ok(r) => r,
+    Err(_) => std::process::abort(),
+});
 
 /// `true` when the text contains more than `threshold` lines that look columnar
 /// (2+ runs of 3+ whitespace chars between visible tokens). Short lines are
@@ -146,7 +150,10 @@ mod tests {
 
     #[test]
     fn columnar_ignores_short_lines() {
-        let text = std::iter::repeat("A   B   C").take(10).collect::<Vec<_>>().join("\n");
+        let text = std::iter::repeat("A   B   C")
+            .take(10)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(!has_columnar_lines(&text, 5));
     }
 
@@ -166,7 +173,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let padding = "prose text ".repeat(40);
-        assert!(!is_unpdf_sufficient(&format!("{tabular}\n{padding}"), 1, DEFAULTS));
+        assert!(!is_unpdf_sufficient(
+            &format!("{tabular}\n{padding}"),
+            1,
+            DEFAULTS
+        ));
     }
 
     #[test]
@@ -176,26 +187,38 @@ mod tests {
 
     #[test]
     fn currency_false_below_threshold() {
-        let text = std::iter::repeat("$1,234").take(5).collect::<Vec<_>>().join(" ");
+        let text = std::iter::repeat("$1,234")
+            .take(5)
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(!has_dense_currency(&text, 10));
     }
 
     #[test]
     fn currency_true_above_threshold() {
-        let text = std::iter::repeat("$1,234").take(11).collect::<Vec<_>>().join(" ");
+        let text = std::iter::repeat("$1,234")
+            .take(11)
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(has_dense_currency(&text, 10));
     }
 
     #[test]
     fn currency_matches_space_and_decimals() {
-        let text = std::iter::repeat("$ 29,943.50").take(11).collect::<Vec<_>>().join("\n");
+        let text = std::iter::repeat("$ 29,943.50")
+            .take(11)
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(has_dense_currency(&text, 10));
     }
 
     #[test]
     fn currency_gate_rejects_even_with_volume() {
         let padded = "description text ".repeat(40);
-        let currency = std::iter::repeat("$29,943").take(11).collect::<Vec<_>>().join(" ");
+        let currency = std::iter::repeat("$29,943")
+            .take(11)
+            .collect::<Vec<_>>()
+            .join(" ");
         assert!(!is_unpdf_sufficient(
             &format!("{padded} {currency}"),
             1,
@@ -207,5 +230,13 @@ mod tests {
     fn clean_prose_passes_all_gates() {
         let prose = "The quick brown fox jumps over the lazy dog. ".repeat(20);
         assert!(is_unpdf_sufficient(&prose, 1, DEFAULTS));
+    }
+
+    #[test]
+    fn static_regexes_compile() {
+        // If either fixed literal in this crate drifts, this test catches it
+        // before `LazyLock::new` ever fires.
+        let _ = &*COLUMNAR_RUN;
+        let _ = &*CURRENCY;
     }
 }

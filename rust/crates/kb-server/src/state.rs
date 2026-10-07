@@ -35,8 +35,8 @@ impl AppState {
         let reranker: Arc<dyn kb_ports::Reranker> =
             build_reranker(&config.reranker).map_err(|e| anyhow::anyhow!("reranker: {e}"))?;
         let expander: Arc<dyn QueryExpander> = if config.expansion.enabled {
-            let bridge =
-                QueryExpanderBridge::new(config.expansion.clone()).map_err(|e| anyhow::anyhow!("expander: {e}"))?;
+            let bridge = QueryExpanderBridge::new(config.expansion.clone())
+                .map_err(|e| anyhow::anyhow!("expander: {e}"))?;
             Arc::new(bridge)
         } else {
             Arc::new(NoopExpander)
@@ -50,7 +50,12 @@ impl AppState {
             query_expander: expander,
         };
         let engine = Engine::new(config.engine, inputs);
-        Ok(Self { documents, chunks, embedder, engine })
+        Ok(Self {
+            documents,
+            chunks,
+            embedder,
+            engine,
+        })
     }
 
     /// Construct a state directly from arcs. Used in tests so we don't have to
@@ -72,7 +77,12 @@ impl AppState {
             query_expander: expander,
         };
         let engine = Engine::new(engine_settings, inputs);
-        Self { documents, chunks, embedder, engine }
+        Self {
+            documents,
+            chunks,
+            embedder,
+            engine,
+        }
     }
 }
 
@@ -103,7 +113,11 @@ fn build_reranker(cfg: &RerankerConfig) -> anyhow::Result<std::sync::Arc<dyn kb_
             let r = VllmReranker::new(base_url, model).map_err(|e| anyhow::anyhow!("vllm: {e}"))?;
             Ok(Arc::new(r))
         }
-        RerankerConfig::Cohere { model, api_key, endpoint } => {
+        RerankerConfig::Cohere {
+            model,
+            api_key,
+            endpoint,
+        } => {
             let r = CohereReranker::new(model, api_key, endpoint.as_deref())
                 .map_err(|e| anyhow::anyhow!("cohere: {e}"))?;
             Ok(Arc::new(r))
@@ -126,8 +140,8 @@ mod expander_bridge {
 
     impl QueryExpanderBridge {
         pub fn new(settings: ExpansionSettings) -> anyhow::Result<Self> {
-            let inner = kb_inference::QueryExpander::new(settings)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let inner =
+                kb_inference::QueryExpander::new(settings).map_err(|e| anyhow::anyhow!("{e}"))?;
             Ok(Self { inner })
         }
     }

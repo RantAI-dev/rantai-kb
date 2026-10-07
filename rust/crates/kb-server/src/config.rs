@@ -35,7 +35,6 @@ pub struct EmbedderConfig {
 }
 
 #[derive(Clone, Debug)]
-#[serde(rename_all = "snake_case")]
 pub enum RerankerConfig {
     Disabled,
     Tei {
@@ -103,8 +102,7 @@ impl Config {
         c.surreal.username = std::env::var("KB_SURREAL_USER").ok();
         c.surreal.password = std::env::var("KB_SURREAL_PASS").ok();
 
-        c.embedder.base_url =
-            std::env::var("KB_EMBEDDING_BASE_URL").unwrap_or(c.embedder.base_url);
+        c.embedder.base_url = std::env::var("KB_EMBEDDING_BASE_URL").unwrap_or(c.embedder.base_url);
         c.embedder.model = std::env::var("KB_EMBEDDING_MODEL").unwrap_or(c.embedder.model);
         c.embedder.api_key = std::env::var("KB_EMBEDDING_API_KEY")
             .ok()

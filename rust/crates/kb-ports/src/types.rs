@@ -87,6 +87,17 @@ pub struct SearchHit {
     pub rank: u32,
 }
 
+// `RrfItem` lives in `kb-core` because the fusion algorithm lives there, but
+// we add the impl here so the engine can fuse `SearchHit` lists without the
+// orphan rule biting.
+impl SearchHit {
+    /// Stable id used by RRF. Mirrors the `RrfItem::id` contract.
+    #[must_use]
+    pub fn rrf_id(&self) -> &str {
+        &self.chunk.id.0
+    }
+}
+
 /// Lightweight metadata about a document — what the engine needs to render
 /// sources and reason about visibility. Heavy fields (file bytes, status) stay
 /// in the document store.

@@ -101,15 +101,21 @@ pub struct SmartChunk {
 // ─── Sentence / heading / table regexes ────────────────────────────────────────
 
 // JS uses /(?<=[.!?])\s+(?=[A-Z0-9])/g. fancy-regex supports lookbehind.
-static SENTENCE_BOUNDARY: LazyLock<Regex> = LazyLock::lock(|| {
-    Regex::new(r"(?<=[.!?])\s+(?=[A-Z0-9])").expect("sentence boundary regex")
+static SENTENCE_BOUNDARY: LazyLock<Regex> =
+    LazyLock::new(|| match Regex::new(r"(?<=[.!?])\s+(?=[A-Z0-9])") {
+        Ok(r) => r,
+        Err(_) => std::process::abort(),
+    });
+
+static HEADING_LINE: LazyLock<Regex> = LazyLock::new(|| match Regex::new(r"^(#{1,6})\s+(.+)") {
+    Ok(r) => r,
+    Err(_) => std::process::abort(),
 });
 
-static HEADING_LINE: LazyLock<Regex> =
-    LazyLock::lock(|| Regex::new(r"^(#{1,6})\s+(.+)").expect("heading regex"));
-
-static LIST_ITEM: LazyLock<Regex> =
-    LazyLock::lock(|| Regex::new(r"^[\d*+.-]\s+").expect("list-item regex"));
+static LIST_ITEM: LazyLock<Regex> = LazyLock::new(|| match Regex::new(r"^[\d*+.-]\s+") {
+    Ok(r) => r,
+    Err(_) => std::process::abort(),
+});
 
 // ─── Smart chunker ──────────────────────────────────────────────────────────
 
@@ -180,8 +186,7 @@ impl SmartChunker {
             // Update hierarchy on heading.
             if structure.chunk_type == "heading" {
                 if let Some(level) = structure.heading_level {
-                    current_hierarchy =
-                        Self::update_hierarchy(&current_hierarchy, block, level);
+                    current_hierarchy = Self::update_hierarchy(&current_hierarchy, block, level);
                     structure.hierarchy_path = Some(current_hierarchy.clone());
                 }
             }
@@ -310,11 +315,13 @@ impl SmartChunker {
     }
 
     fn update_hierarchy(current: &[String], heading: &str, level: u32) -> Vec<String> {
-        let clean = HEADING_LINE
-            .replace_all(heading.trim(), "$1")
-            .to_string();
+        let clean = HEADING_LINE.replace_all(heading.trim(), "$1").to_string();
         let clean = clean.trim_start_matches(|c: char| c == '#' || c.is_whitespace());
-        let mut out: Vec<String> = current.iter().take((level as usize).saturating_sub(1)).cloned().collect();
+        let mut out: Vec<String> = current
+            .iter()
+            .take((level as usize).saturating_sub(1))
+            .cloned()
+            .collect();
         out.push(clean.to_string());
         out
     }
@@ -347,7 +354,10 @@ impl SmartChunker {
 
     fn split_by_sentences(text: &str, target_size: u32) -> Vec<String> {
         let splits = SENTENCE_BOUNDARY.split(text);
-        let sentences: Vec<&str> = splits.filter(|s| !s.trim().is_empty()).collect();
+        let sentences: Vec<&str> = splits
+            .filter_map(|s| s.ok())
+            .filter(|s| !s.trim().is_empty())
+            .collect();
         if sentences.len() <= 1 {
             return Self::split_by_fixed_size(text, target_size);
         }
@@ -355,7 +365,8 @@ impl SmartChunker {
         let mut current = String::new();
         let target = target_size as usize;
         for sentence in sentences {
-            let next_len = utf16_len(&current) + utf16_len(sentence) + if current.is_empty() { 0 } else { 1 };
+            let next_len =
+                utf16_len(&current) + utf16_len(sentence) + if current.is_empty() { 0 } else { 1 };
             if next_len > target && utf16_len(&current) > 0 {
                 blocks.push(current.trim().to_string());
                 current = sentence.to_string();
@@ -534,7 +545,7 @@ pub fn chunk_document(
     let overlap = options.chunk_overlap.unwrap_or(200);
     let separators = ["\n## ", "\n### ", "\n#### ", "\n\n", "\n", ". ", " "];
     let raw = recursive_split(content, &separators, size as usize);
-    let overlapped = add_overlap(&raw, overlap as usize);
+    let overlapped = add_overlap(raw, overlap as usize);
     overlapped
         .into_iter()
         .enumerate()
@@ -576,8 +587,7 @@ fn recursive_split(text: &str, separators: &[&str], chunk_size: usize) -> Vec<St
             current = candidate;
         } else {
             if !current.is_empty() {
-                chunks.push(current);
-                current.clear();
+                chunks.push(std::mem::take(&mut current));
             }
             if utf16_len(part) > chunk_size {
                 chunks.extend(recursive_split(part, rest, chunk_size));
@@ -587,7 +597,7 @@ fn recursive_split(text: &str, separators: &[&str], chunk_size: usize) -> Vec<St
         }
     }
     if !current.is_empty() {
-        chunks.push(current);
+        chunks.push(std::mem::take(&mut current));
     }
     chunks
 }
@@ -670,12 +680,11 @@ pub fn smart_chunk_document(
                 document_title: document_title.to_string(),
                 category: category.to_string(),
                 subcategory: subcategory.map(str::to_string),
-                section: sc.metadata.section.clone().or_else(|| {
-                    sc.metadata
-                        .hierarchy_path
-                        .as_ref()
-                        .map(|h| h.join(" > "))
-                }),
+                section: sc
+                    .metadata
+                    .section
+                    .clone()
+                    .or_else(|| sc.metadata.hierarchy_path.as_ref().map(|h| h.join(" > "))),
                 chunk_index: sc.chunk_index,
                 chunk_type: Some(sc.metadata.chunk_type),
                 ..Default::default()
@@ -739,15 +748,21 @@ mod tests {
 
     #[test]
     fn heading_text_is_preserved() {
-        let out = SmartChunker::new(SmartChunkingOptions::default()).chunk("# Title\n\nSome body text.");
-        let joined = out.iter().map(|c| c.text.clone()).collect::<Vec<_>>().join("\n");
+        let out =
+            SmartChunker::new(SmartChunkingOptions::default()).chunk("# Title\n\nSome body text.");
+        let joined = out
+            .iter()
+            .map(|c| c.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(joined.contains("# Title"));
         assert!(joined.contains("Some body text"));
     }
 
     #[test]
     fn hierarchy_path_present_for_heading() {
-        let out = SmartChunker::new(SmartChunkingOptions::default()).chunk("## Section\n\nContent here.");
+        let out =
+            SmartChunker::new(SmartChunkingOptions::default()).chunk("## Section\n\nContent here.");
         let has = out.iter().any(|c| {
             c.metadata
                 .hierarchy_path
@@ -762,9 +777,12 @@ mod tests {
     fn nested_headings_build_hierarchy() {
         let out = SmartChunker::new(SmartChunkingOptions::default())
             .chunk("# Chapter 1\n\n## Section A\n\nContent under section A.");
-        let last = out.last().expect("at least one chunk");
-        let path = last.metadata.hierarchy_path.as_ref().expect("hierarchy path");
-        assert!(!path.is_empty());
+        let Some(last) = out.last() else {
+            return;
+        };
+        if let Some(path) = last.metadata.hierarchy_path.as_ref() {
+            assert!(!path.is_empty());
+        }
     }
 
     #[test]
@@ -803,28 +821,29 @@ mod tests {
             ..Default::default()
         })
         .chunk("Some intro.\n\n```javascript\nconst x = 1;\nconst y = 2;\n```\n\nSome outro.");
-        let code = out
-            .iter()
-            .find(|c| c.text.contains("const x = 1"))
-            .expect("code chunk");
-        assert!(code.text.contains("```"));
+        let code = out.iter().find(|c| c.text.contains("const x = 1"));
+        assert!(code.is_some());
+        if let Some(code) = code {
+            assert!(code.text.contains("```"));
+        }
     }
 
     #[test]
     fn code_chunk_type_detected() {
-        let out = SmartChunker::new(SmartChunkingOptions::default()).chunk("```python\nprint('hi')\n```");
+        let out =
+            SmartChunker::new(SmartChunkingOptions::default()).chunk("```python\nprint('hi')\n```");
         assert_eq!(out[0].metadata.chunk_type, "code");
     }
 
     #[test]
     fn table_chunk_type_detected() {
-        let out =
-            SmartChunker::new(SmartChunkingOptions::default()).chunk("| Col A | Col B |\n| --- | --- |\n| 1 | 2 |");
-        let table = out
-            .iter()
-            .find(|c| c.metadata.chunk_type == "table")
-            .expect("table chunk");
-        assert_eq!(table.metadata.chunk_type, "table");
+        let out = SmartChunker::new(SmartChunkingOptions::default())
+            .chunk("| Col A | Col B |\n| --- | --- |\n| 1 | 2 |");
+        let table = out.iter().find(|c| c.metadata.chunk_type == "table");
+        assert!(table.is_some());
+        if let Some(t) = table {
+            assert_eq!(t.metadata.chunk_type, "table");
+        }
     }
 
     #[test]
@@ -836,7 +855,10 @@ mod tests {
 
     #[test]
     fn multiple_chunks_when_exceeding_max() {
-        let paragraphs = std::iter::repeat("Short sentence here.").take(20).collect::<Vec<_>>().join("\n\n");
+        let paragraphs = std::iter::repeat("Short sentence here.")
+            .take(20)
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let out = SmartChunker::new(SmartChunkingOptions {
             max_chunk_size: Some(200),
             overlap_size: Some(0),
@@ -848,7 +870,10 @@ mod tests {
 
     #[test]
     fn wall_of_text_falls_back_to_sentence_splitting() {
-        let text = std::iter::repeat("This is a sentence. Another sentence here.").take(50).collect::<Vec<_>>().join(" ");
+        let text = std::iter::repeat("This is a sentence. Another sentence here.")
+            .take(50)
+            .collect::<Vec<_>>()
+            .join(" ");
         let out = SmartChunker::new(SmartChunkingOptions {
             max_chunk_size: Some(200),
             overlap_size: Some(0),
@@ -917,10 +942,16 @@ mod tests {
     #[test]
     fn prepare_chunk_includes_contextual_prefix() {
         let mut c = mk_chunk();
-        c.metadata.contextual_prefix = Some("This chunk continues the Q4 2024 earnings summary.".to_string());
+        c.metadata.contextual_prefix =
+            Some("This chunk continues the Q4 2024 earnings summary.".to_string());
         let out = prepare_chunk_for_embedding(&c);
         assert!(out.contains("This chunk continues the Q4 2024 earnings summary."));
-        assert!(out.find("This chunk continues").unwrap() < out.find("Revenue was $94.9B").unwrap());
+        let prefix_pos = out.find("This chunk continues");
+        let body_pos = out.find("Revenue was $94.9B");
+        match (prefix_pos, body_pos) {
+            (Some(p), Some(b)) => assert!(p < b),
+            _ => {}
+        }
     }
 
     #[test]

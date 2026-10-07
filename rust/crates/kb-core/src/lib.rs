@@ -12,13 +12,15 @@ mod policy;
 mod signals;
 
 pub use chunk::{
-    chunk_document, prepare_chunk_for_embedding, smart_chunk, smart_chunk_document, ChunkOptions,
-    ChunkingStrategy, SmartChunk, SmartChunkMetadata, SmartChunkingOptions,
+    ChunkOptions, ChunkingStrategy, SmartChunk, SmartChunkMetadata, SmartChunkingOptions,
+    chunk_document, prepare_chunk_for_embedding, smart_chunk, smart_chunk_document,
 };
-pub use context::{numbered_source_list, source_dedupe_key, SourceDedupKey};
-pub use fusion::{reciprocal_rank_fusion, RrfItem, RrfOptions, RrfResult};
-pub use page_map::{assign_chunk_pages, PageBlock};
+pub use context::{NumberedSource, SourceDedupKey, numbered_source_list, source_dedupe_key};
+pub use fusion::{
+    IdRef, RrfItem, RrfOptions, RrfResult, reciprocal_rank_fusion, reciprocal_rank_fusion_with,
+};
+pub use page_map::{PageBlock, assign_chunk_pages};
 pub use policy::{
-    parse_figure_mode, resolve_ingest_policy, FigureMode, IngestPolicy, MimeRegistry,
+    FigureMode, IngestPolicy, MimeRegistry, parse_figure_mode, resolve_ingest_policy,
 };
-pub use signals::{has_columnar_lines, has_dense_currency, is_unpdf_sufficient, RouterOpts};
+pub use signals::{RouterOpts, has_columnar_lines, has_dense_currency, is_unpdf_sufficient};

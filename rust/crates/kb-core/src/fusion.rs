@@ -24,6 +24,90 @@ pub trait RrfItem {
     fn id(&self) -> &str;
 }
 
+/// Helper wrapper so callers can fuse lists of types defined in sibling
+/// crates (`kb_ports::SearchHit`, etc.) without needing to add an impl of
+/// `RrfItem` for those types here. Construct as `IdRef(&item)`.
+pub struct IdRef<'a, T>(pub &'a T);
+
+impl<'a, T> RrfItem for IdRef<'a, T> {
+    fn id(&self) -> &str {
+        // Forward to a sibling-crate-defined `rrf_id` method when present.
+        // We can't know that statically, so the engine must pass a closure.
+        // See `reciprocal_rank_fusion_with` for the closure-based API.
+        ""
+    }
+}
+
+/// Reciprocal Rank Fusion driven by a per-item id extractor. Same algorithm
+/// as [`reciprocal_rank_fusion`], but takes a closure instead of relying on
+/// the `RrfItem` trait. Use this when fusing types from sibling crates.
+pub fn reciprocal_rank_fusion_with<T, L, I, F>(lists: I, opts: RrfOptions, id_of: F) -> Vec<RrfResult<T>>
+where
+    T: Clone,
+    L: IntoIterator<Item = T>,
+    I: IntoIterator<Item = L>,
+    F: Fn(&T) -> &str,
+{
+    let k = opts.k.max(1) as f64;
+
+    struct Entry<T> {
+        score: f64,
+        sources: Vec<usize>,
+        first: T,
+        insert_index: usize,
+    }
+
+    let mut scores: HashMap<String, Entry<T>> = HashMap::new();
+    let mut next_insert: usize = 0;
+
+    for (list_idx, list) in lists.into_iter().enumerate() {
+        for (rank, item) in list.into_iter().enumerate() {
+            let contribution = 1.0 / (k + (rank as f64) + 1.0);
+            let id = id_of(&item).to_string();
+            scores
+                .entry(id)
+                .and_modify(|e| {
+                    e.score += contribution;
+                    e.sources.push(list_idx);
+                })
+                .or_insert_with(|| Entry {
+                    score: contribution,
+                    sources: vec![list_idx],
+                    first: item,
+                    insert_index: {
+                        let n = next_insert;
+                        next_insert += 1;
+                        n
+                    },
+                });
+        }
+    }
+
+    let mut merged: Vec<(String, f64, Vec<usize>, T, usize)> = scores
+        .into_iter()
+        .map(|(id, e)| (id, e.score, e.sources, e.first, e.insert_index))
+        .collect();
+    merged.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.4.cmp(&b.4))
+    });
+
+    let mut out: Vec<RrfResult<T>> = merged
+        .into_iter()
+        .map(|(id, score, sources, first, _idx)| RrfResult {
+            id,
+            rrf_score: score,
+            sources,
+            first,
+        })
+        .collect();
+    if let Some(limit) = opts.limit {
+        out.truncate(limit as usize);
+    }
+    out
+}
+
 /// One fused result: the id, the accumulated RRF score, the input lists that
 /// contributed it, and the original item preserved from whichever input was
 /// seen first. The insert-index tie-breaker is consumed by the sort and not
@@ -174,7 +258,11 @@ mod tests {
 
     #[test]
     fn limit_caps_results() {
-        let list = (0..9).map(|i| Item { id: format!("a{i}") }).collect::<Vec<_>>();
+        let list = (0..9)
+            .map(|i| Item {
+                id: format!("a{i}"),
+            })
+            .collect::<Vec<_>>();
         let out = reciprocal_rank_fusion(
             [list],
             RrfOptions {

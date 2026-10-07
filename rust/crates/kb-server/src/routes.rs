@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use kb_core::context::source_dedupe_key;
+use kb_core::source_dedupe_key;
 use kb_ports::{
     AuthContext, ChunkId, DocumentFilter, DocumentId, DocumentStore, KnowledgeBaseId, ScopeRequest,
     SearchHit, TenantId,
@@ -55,7 +55,10 @@ pub struct HealthChecks {
 
 #[axum::debug_handler]
 async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut checks = HealthChecks { postgres: false, vectors: false };
+    let mut checks = HealthChecks {
+        postgres: false,
+        vectors: false,
+    };
     // We don't have direct access to the pg pool here, but we can probe the
     // chunk store via a tiny query; the document store requires a tenant.
     // For simplicity, report `postgres: true` if documents resolves and
@@ -64,8 +67,19 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     checks.postgres = true;
     checks.vectors = true;
     let ok = checks.postgres && checks.vectors;
-    let status = if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
-    (status, Json(HealthResponse { ok, checks, version: env!("CARGO_PKG_VERSION").into() }))
+    let status = if ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(HealthResponse {
+            ok,
+            checks,
+            version: env!("CARGO_PKG_VERSION").into(),
+        }),
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -76,12 +90,13 @@ struct FormatsResponse {
 
 async fn formats() -> impl IntoResponse {
     let extensions: &[&str] = &[
-        ".pdf", ".docx", ".txt", ".md", ".html", ".htm",
-        ".png", ".jpg", ".jpeg", ".webp", ".gif",
-        ".csv", ".tsv", ".xlsx", ".xls",
-        ".json", ".xml", ".rtf",
+        ".pdf", ".docx", ".txt", ".md", ".html", ".htm", ".png", ".jpg", ".jpeg", ".webp", ".gif",
+        ".csv", ".tsv", ".xlsx", ".xls", ".json", ".xml", ".rtf",
     ];
-    Json(FormatsResponse { extensions: extensions.to_vec(), max_file_bytes: 50 * 1024 * 1024 })
+    Json(FormatsResponse {
+        extensions: extensions.to_vec(),
+        max_file_bytes: 50 * 1024 * 1024,
+    })
 }
 
 // ─── Search ─────────────────────────────────────────────────────────────
@@ -154,7 +169,9 @@ async fn search(
     Authed(auth): Authed,
     Json(body): Json<SearchBody>,
 ) -> Result<Json<SearchResponse>, ApiError> {
-    let query = body.query.ok_or_else(|| ApiError::BadRequest("query required".into()))?;
+    let query = body
+        .query
+        .ok_or_else(|| ApiError::BadRequest("query required".into()))?;
     if query.trim().is_empty() {
         return Ok(Json(SearchResponse {
             chunks: Vec::new(),
@@ -185,7 +202,10 @@ async fn search(
             .collect(),
         category: body.category.clone(),
     };
-    let scope_request = ScopeRequest { tenant: auth.tenant_id.clone(), filter };
+    let scope_request = ScopeRequest {
+        tenant: auth.tenant_id.clone(),
+        filter,
+    };
     let scope = state
         .documents
         .build_scope(&scope_request)
@@ -200,17 +220,17 @@ async fn search(
         }));
     }
 
-    let outcome = state.engine.retrieve(&query, &scope).await.map_err(ApiError::from)?;
+    let outcome = state
+        .engine
+        .retrieve(&query, &scope)
+        .await
+        .map_err(ApiError::from)?;
     let max_chunks = body.max_chunks.unwrap_or(8).clamp(1, 50) as usize;
     let mut hits: Vec<SearchHit> = outcome.hits.into_iter().take(max_chunks).collect();
 
     // Optionally narrow by document_ids (must be inside the scope).
     if let Some(doc_ids) = body.document_ids.as_ref() {
-        let allowed: HashSet<&str> = scope
-            .document_ids()
-            .iter()
-            .map(|d| d.0.as_str())
-            .collect();
+        let allowed: HashSet<&str> = scope.document_ids().iter().map(|d| d.0.as_str()).collect();
         let requested: HashSet<&str> = doc_ids.iter().map(String::as_str).collect();
         let keep: HashSet<&str> = allowed.intersection(&requested).copied().collect();
         hits.retain(|h| keep.contains(h.chunk.document_id.0.as_str()));
@@ -221,18 +241,36 @@ async fn search(
         Some("context") => Some(build_context_string(&chunks)),
         _ => None,
     };
-    let degrades: Vec<String> = outcome.degrades.iter().map(|d| d.label().to_string()).collect();
-    Ok(Json(SearchResponse { chunks, context, degrades, note: None }))
+    let degrades: Vec<String> = outcome
+        .degrades
+        .iter()
+        .map(|d| d.label().to_string())
+        .collect();
+    Ok(Json(SearchResponse {
+        chunks,
+        context,
+        degrades,
+        note: None,
+    }))
 }
 
 fn restrict_kbs(auth: &AuthContext, requested: Option<&[String]>) -> Option<Vec<String>> {
     if auth.knowledge_base_ids.is_empty() {
         return requested.map(|v| v.to_vec());
     }
-    let allowed: HashSet<&str> = auth.knowledge_base_ids.iter().map(|k| k.0.as_str()).collect();
+    let allowed: HashSet<&str> = auth
+        .knowledge_base_ids
+        .iter()
+        .map(|k| k.0.as_str())
+        .collect();
     let filtered: Vec<String> = requested
         .map(|v| v.to_vec())
-        .unwrap_or_else(|| auth.knowledge_base_ids.iter().map(|k| k.0.clone()).collect())
+        .unwrap_or_else(|| {
+            auth.knowledge_base_ids
+                .iter()
+                .map(|k| k.0.clone())
+                .collect()
+        })
         .into_iter()
         .filter(|id| allowed.contains(id.as_str()))
         .collect();
@@ -246,7 +284,7 @@ fn build_context_string(chunks: &[SearchChunk]) -> String {
     let mut labels: Vec<u32> = Vec::with_capacity(chunks.len());
     let mut next_n: u32 = 1;
     for c in chunks {
-        let key = source_dedupe_key(&kb_core::context::SourceDedupKey {
+        let key = source_dedupe_key(&kb_core::SourceDedupKey {
             document_title: Some(&c.document_title),
             section: c.section.as_deref(),
             asset_key: c.asset_key.as_deref(),
@@ -292,15 +330,16 @@ async fn list_documents(
     Query(q): Query<ListDocumentsQuery>,
 ) -> Result<Json<Vec<DocumentSummary>>, ApiError> {
     let limit = q.limit.unwrap_or(100).clamp(1, 500);
-    let kb_ids: Vec<KnowledgeBaseId> = q
+    let raw_kbs: Vec<String> = q
         .knowledge_base_ids
         .as_deref()
         .map(parse_csv)
-        .unwrap_or_default()
-        .into_iter()
-        .map(KnowledgeBaseId::new_unchecked)
+        .unwrap_or_default();
+    let kb_ids: Vec<KnowledgeBaseId> = raw_kbs
+        .iter()
+        .map(|k| KnowledgeBaseId::new_unchecked(k.clone()))
         .collect();
-    let allowed = restrict_kbs(&auth, q.knowledge_base_ids.as_deref());
+    let allowed = restrict_kbs(&auth, Some(raw_kbs.as_slice()));
     let kb_filter: Vec<KnowledgeBaseId> = match allowed {
         Some(v) if v.is_empty() => {
             return Ok(Json(Vec::new()));
@@ -433,7 +472,10 @@ async fn list_knowledge_bases(
 }
 
 fn parse_csv(s: &str) -> Vec<String> {
-    s.split(',').map(|p| p.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    s.split(',')
+        .map(|p| p.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 // Quiet pedantic lints about types we want to keep reachable.

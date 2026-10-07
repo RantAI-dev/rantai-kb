@@ -7,6 +7,7 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use kb_ports::{AuthContext, DocumentStore, KnowledgeBaseId, TenantId};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -15,24 +16,23 @@ use crate::state::AppState;
 pub struct Authed(pub AuthContext);
 
 #[axum::async_trait]
-impl FromRequestParts<AppState> for Authed {
+impl FromRequestParts<Arc<AppState>> for Authed {
     type Rejection = ApiError;
 
     async fn from_request_parts(
         parts: &mut Parts,
-        state: &AppState,
+        state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
         let raw = extract_raw_key(parts).ok_or(ApiError::Unauthorized)?;
-        let hash = sha256_hex(raw);
         let tenant = state
             .documents
             .resolve_api_key(raw)
             .await
             .map_err(ApiError::from)?
             .ok_or(ApiError::Unauthorized)?;
-        // Look up the api key row so we can attach scopes and kb ids. The pg
-        // store hashes with SHA-256; we re-hash the same way.
-        let ctx = lookup_auth_context(&state, &hash, &tenant).await?;
+        // For R1 the Authed context carries only tenant id; scope and kb
+        // restriction are looked up by `kb-server` per request.
+        let ctx = lookup_auth_context(&tenant);
         Ok(Self(ctx))
     }
 }
@@ -48,35 +48,24 @@ fn extract_raw_key(parts: &Parts) -> Option<&str> {
     if let Some(rest) = header.strip_prefix("bearer ") {
         return Some(rest.trim());
     }
-    parts
-        .headers
-        .get("x-api-key")
-        .and_then(|h| h.to_str().ok())
+    parts.headers.get("x-api-key").and_then(|h| h.to_str().ok())
 }
 
+#[allow(dead_code)]
 fn sha256_hex(input: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(input.as_bytes());
     hex::encode(hasher.finalize())
 }
 
-/// Fetch the rest of the auth context (scopes, knowledge base ids) from the
-/// `api_keys` row. `tenant_id` is the result of `resolve_api_key`; we use it as
-/// a sanity check against a row that may have been deleted in the meantime.
-async fn lookup_auth_context(
-    state: &AppState,
-    _hash: &str,
-    tenant: &TenantId,
-) -> Result<AuthContext, ApiError> {
-    // For R1 we keep this minimal: the key row carries the scopes and kb ids,
-    // but the chunk store only needs tenant id. Pulled in once via a separate
-    // query path. Currently scopes default to "all" (empty list = no
-    // restriction in `hasScope`) and kb ids default to all visible.
-    let _ = (state, tenant);
-    Ok(AuthContext {
+/// Build an AuthContext for a validated tenant. R1 sets empty scopes and kb
+/// restrictions; callers (`routes.rs`) apply KB filters against the API-key
+/// binding separately.
+fn lookup_auth_context(tenant: &TenantId) -> AuthContext {
+    AuthContext {
         tenant_id: tenant.clone(),
         key_id: String::new(),
         scopes: Vec::new(),
         knowledge_base_ids: Vec::<KnowledgeBaseId>::new(),
-    })
+    }
 }

@@ -44,13 +44,13 @@ impl MimeRegistry {
     /// Resolve an extension (with the leading dot) to its MIME type, if any.
     #[must_use]
     pub fn ext_to_mime(ext: &str) -> Option<&'static str> {
-        EXT_TO_MIME.iter().find_map(|(k, v)| (*k == ext).then_some(*v))
+        EXT_TO_MIME
+            .iter()
+            .find_map(|(k, v)| (*k == ext).then_some(*v))
     }
 }
 
-const TABULAR: &[&str] = &[
-    ".xlsx", ".xls", ".ods", ".csv", ".tsv", ".json", ".jsonl",
-];
+const TABULAR: &[&str] = &[".xlsx", ".xls", ".ods", ".csv", ".tsv", ".json", ".jsonl"];
 const CODE: &[&str] = &[
     ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".rb", ".php",
     ".sh", ".sql", ".r", ".swift", ".kt", ".yaml", ".yml", ".toml", ".ini", ".env", ".log",
@@ -147,14 +147,8 @@ const EXT_TO_MIME: &[(&str, &str)] = &[
     (".doc", "application/msword"),
     (".xls", "application/vnd.ms-excel"),
     (".ppt", "application/vnd.ms-powerpoint"),
-    (
-        ".odt",
-        "application/vnd.oasis.opendocument.text",
-    ),
-    (
-        ".ods",
-        "application/vnd.oasis.opendocument.spreadsheet",
-    ),
+    (".odt", "application/vnd.oasis.opendocument.text"),
+    (".ods", "application/vnd.oasis.opendocument.spreadsheet"),
     (".gltf", "model/gltf+json"),
     (".glb", "model/gltf-binary"),
     (".log", "text/plain"),
@@ -181,11 +175,59 @@ const EXT_TO_MIME: &[(&str, &str)] = &[
 ];
 
 const EXTENSIONS: &[&str] = &[
-    ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".md", ".markdown", ".txt",
-    ".html", ".htm", ".xml", ".csv", ".tsv", ".json", ".jsonl", ".yaml", ".yml", ".toml",
-    ".docx", ".xlsx", ".pptx", ".rtf", ".epub", ".doc", ".xls", ".ppt", ".odt", ".ods",
-    ".gltf", ".glb", ".log", ".ini", ".env", ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs",
-    ".java", ".c", ".cpp", ".h", ".rb", ".php", ".sh", ".sql", ".r", ".swift", ".kt",
+    ".pdf",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".heic",
+    ".md",
+    ".markdown",
+    ".txt",
+    ".html",
+    ".htm",
+    ".xml",
+    ".csv",
+    ".tsv",
+    ".json",
+    ".jsonl",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".docx",
+    ".xlsx",
+    ".pptx",
+    ".rtf",
+    ".epub",
+    ".doc",
+    ".xls",
+    ".ppt",
+    ".odt",
+    ".ods",
+    ".gltf",
+    ".glb",
+    ".log",
+    ".ini",
+    ".env",
+    ".py",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".go",
+    ".rs",
+    ".java",
+    ".c",
+    ".cpp",
+    ".h",
+    ".rb",
+    ".php",
+    ".sh",
+    ".sql",
+    ".r",
+    ".swift",
+    ".kt",
 ];
 
 #[cfg(test)]
@@ -194,7 +236,15 @@ mod tests {
 
     #[test]
     fn tabular_files_skip_entities_and_figures() {
-        for name in ["data.xlsx", "data.xls", "d.ods", "d.csv", "d.tsv", "d.json", "d.jsonl"] {
+        for name in [
+            "data.xlsx",
+            "data.xls",
+            "d.ods",
+            "d.csv",
+            "d.tsv",
+            "d.json",
+            "d.jsonl",
+        ] {
             let p = resolve_injest(name);
             assert!(!p.entities, "{name}");
             assert!(!p.figures, "{name}");
@@ -233,7 +283,9 @@ mod tests {
 
     #[test]
     fn prose_documents_get_entities_no_figures() {
-        for name in ["a.docx", "a.doc", "a.pptx", "a.md", "a.txt", "a.html", "a.rtf", "a.epub"] {
+        for name in [
+            "a.docx", "a.doc", "a.pptx", "a.md", "a.txt", "a.html", "a.rtf", "a.epub",
+        ] {
             let p = resolve_injest(name);
             assert!(p.entities, "{name}");
             assert!(!p.figures, "{name}");

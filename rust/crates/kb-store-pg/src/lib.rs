@@ -11,12 +11,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use kb_ports::{
-    ChunkMetadata, DocumentFilter, DocumentId, DocumentMeta, DocumentStore, KnowledgeBaseId,
-    KnowledgeBaseSummary, PortError, ScopeRequest, TenantId,
+    ChunkMetadata, DocumentFilter, DocumentId, DocumentMeta, DocumentScope, DocumentStore,
+    KnowledgeBaseId, KnowledgeBaseSummary, PortError, ScopeRequest, TenantId,
 };
-use kb_ports::scope::DocumentScope;
 use sha2::{Digest, Sha256};
-use sqlx::{postgres::PgPoolOptions, PgPool, Row};
+use sqlx::{PgPool, Row, postgres::PgPoolOptions};
 
 const MAX_LIMIT: u32 = 200;
 
@@ -34,7 +33,6 @@ impl PgSettings {
         PgPoolOptions::new()
             .max_connections(self.max_connections)
             .acquire_timeout(self.acquire_timeout)
-            .connect_timeout(self.connect_timeout)
             .connect(&self.database_url)
             .await
     }
@@ -87,7 +85,10 @@ impl PgDocumentStore {
                 idx += 1;
             }
             if has_category {
-                sql.push_str(&format!(" AND d.categories @> ARRAY[${idx}]::text[]", idx = idx));
+                sql.push_str(&format!(
+                    " AND d.categories @> ARRAY[${idx}]::text[]",
+                    idx = idx
+                ));
                 idx += 1;
             }
             let mut q = sqlx::query(&sql).bind(tenant.0.as_str());
@@ -224,8 +225,7 @@ impl DocumentStore for PgDocumentStore {
         let mut out = Vec::with_capacity(rows.len());
         for row in &rows {
             out.push(
-                row_to_doc_meta(row)
-                    .map_err(|e| PortError::Unavailable(format!("pg row: {e}")))?,
+                row_to_doc_meta(row).map_err(|e| PortError::Unavailable(format!("pg row: {e}")))?,
             );
         }
         Ok(out)
@@ -319,10 +319,7 @@ impl DocumentStore for PgDocumentStore {
         Ok(out)
     }
 
-    async fn resolve_api_key(
-        &self,
-        plaintext_key: &str,
-    ) -> Result<Option<TenantId>, PortError> {
+    async fn resolve_api_key(&self, plaintext_key: &str) -> Result<Option<TenantId>, PortError> {
         let mut hasher = Sha256::new();
         hasher.update(plaintext_key.as_bytes());
         let hash = hex::encode(hasher.finalize());

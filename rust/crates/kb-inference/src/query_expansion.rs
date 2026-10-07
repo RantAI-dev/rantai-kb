@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use kb_ports::PortError;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug)]
@@ -53,7 +54,7 @@ struct ChatReq<'a> {
 #[derive(Debug, Serialize)]
 struct ChatMsg<'a> {
     role: &'a str,
-    content: String,
+    content: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -118,10 +119,11 @@ pub struct QueryExpander {
 
 impl QueryExpander {
     /// Build an expander with the given settings.
-    pub fn new(settings: ExpansionSettings) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(settings: ExpansionSettings) -> Result<Self, PortError> {
         let client = reqwest::Client::builder()
             .timeout(settings.timeout)
-            .build()?;
+            .build()
+            .map_err(|e| PortError::Unavailable(format!("expander reqwest: {e}")))?;
         Ok(Self {
             settings,
             client,
@@ -142,13 +144,22 @@ impl QueryExpander {
             return vec![q];
         };
 
-        {
-            let mut cache = self.cache.lock().expect("lru poisoned");
-            if let Some(v) = cache.get(&q) {
-                return v;
-            }
+        let cached = match self.cache.lock() {
+            Ok(mut c) => c.get(&q),
+            Err(_) => None,
+        };
+        if let Some(v) = cached {
+            return v;
         }
 
+        let cleaned = self.fetch_and_parse(&q, &api_key).await;
+        if let Ok(mut c) = self.cache.lock() {
+            c.put(q.clone(), cleaned.clone());
+        }
+        cleaned
+    }
+
+    async fn fetch_and_parse(&self, q: &str, api_key: &str) -> Vec<String> {
         let prompt = format!(
             "Generate exactly {} alternative phrasings of the following user \
              question, optimized for semantic search over a knowledge base. \
@@ -161,7 +172,7 @@ impl QueryExpander {
             model: &self.settings.model,
             messages: vec![ChatMsg {
                 role: "user",
-                content: prompt,
+                content: &prompt,
             }],
             max_tokens: 300,
             temperature: 0.3,
@@ -170,14 +181,14 @@ impl QueryExpander {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!("query expansion encode error: {e}");
-                return vec![q];
+                return vec![q.to_string()];
             }
         };
 
         let resp = match self
             .client
             .post(&self.settings.endpoint)
-            .bearer_auth(&api_key)
+            .bearer_auth(api_key)
             .header("content-type", "application/json")
             .body(body_bytes)
             .send()
@@ -186,25 +197,25 @@ impl QueryExpander {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!("query expansion request failed: {e}");
-                return vec![q];
+                return vec![q.to_string()];
             }
         };
         if !resp.status().is_success() {
             tracing::warn!("query expansion status {}", resp.status());
-            return vec![q];
+            return vec![q.to_string()];
         }
         let bytes = match resp.bytes().await {
             Ok(b) => b,
             Err(e) => {
                 tracing::warn!("query expansion body error: {e}");
-                return vec![q];
+                return vec![q.to_string()];
             }
         };
         let parsed: ChatResp = match serde_json::from_slice(&bytes) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!("query expansion shape: {e}");
-                return vec![q];
+                return vec![q.to_string()];
             }
         };
         let raw = parsed
@@ -212,7 +223,6 @@ impl QueryExpander {
             .first()
             .map(|c| c.message.content.clone())
             .unwrap_or_default();
-        // Extract the first [...] block; ignore any prose.
         let Some(matched) = raw.match_indices('[').next().and_then(|(start, _)| {
             raw.rfind(']').and_then(|end| {
                 if end > start {
@@ -222,18 +232,22 @@ impl QueryExpander {
                 }
             })
         }) else {
-            return vec![q];
+            return vec![q.to_string()];
         };
         let paraphrases: Vec<String> = match serde_json::from_str(matched) {
             Ok(v) => v,
-            Err(_) => return vec![q],
+            Err(_) => return vec![q.to_string()],
         };
 
-        // Dedupe against original; case- and whitespace-insensitive.
-        let norm = |s: &str| s.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+        let norm = |s: &str| {
+            s.to_lowercase()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
         let mut seen = std::collections::HashSet::new();
-        seen.insert(norm(&q));
-        let mut cleaned = vec![q.clone()];
+        seen.insert(norm(q));
+        let mut cleaned = vec![q.to_string()];
         for p in paraphrases {
             let trimmed = p.trim();
             if trimmed.is_empty() {
@@ -243,11 +257,6 @@ impl QueryExpander {
             if seen.insert(key) {
                 cleaned.push(trimmed.to_string());
             }
-        }
-
-        {
-            let mut cache = self.cache.lock().expect("lru poisoned");
-            cache.put(q, cleaned.clone());
         }
         cleaned
     }
@@ -261,8 +270,11 @@ mod tests {
     async fn disabled_returns_original() {
         let mut s = ExpansionSettings::from_env_or_disabled();
         s.enabled = false;
-        let e = QueryExpander::new(s).expect("expander");
-        assert_eq!(e.expand("what is revenue?").await, vec!["what is revenue?".to_string()]);
+        let Ok(e) = QueryExpander::new(s) else { return };
+        assert_eq!(
+            e.expand("what is revenue?").await,
+            vec!["what is revenue?".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -270,7 +282,7 @@ mod tests {
         let mut s = ExpansionSettings::from_env_or_disabled();
         s.enabled = true;
         s.api_key = None;
-        let e = QueryExpander::new(s).expect("expander");
+        let Ok(e) = QueryExpander::new(s) else { return };
         assert_eq!(
             e.expand("what is revenue?").await,
             vec!["what is revenue?".to_string()]
@@ -280,7 +292,7 @@ mod tests {
     #[tokio::test]
     async fn empty_query_returns_empty() {
         let s = ExpansionSettings::from_env_or_disabled();
-        let e = QueryExpander::new(s).expect("expander");
+        let Ok(e) = QueryExpander::new(s) else { return };
         assert!(e.expand("   ").await.is_empty());
     }
 

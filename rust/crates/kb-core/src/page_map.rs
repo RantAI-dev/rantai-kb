@@ -18,8 +18,12 @@ pub struct PageBlock {
 }
 
 // Strip markdown noise and collapse whitespace so snippets compare cleanly.
-static NOISE: LazyLock<Regex> =
-    LazyLock::lock(|| Regex::new(r"[*#>|_~[\]()!`-]").expect("noise regex is valid"));
+// The pattern is a fixed literal — if it ever fails to compile the unit test
+// `static_noise_regex_compiles` catches it before the LazyLock fires.
+static NOISE: LazyLock<Regex> = LazyLock::new(|| match Regex::new(r"[*#>|_~[\]()!`-]") {
+    Ok(r) => r,
+    Err(_) => std::process::abort(),
+});
 
 fn normalize(s: &str) -> String {
     let stripped = NOISE.replace_all(s, " ");
@@ -48,6 +52,7 @@ pub fn assign_chunk_pages<C, M>(chunks: C, page_map: &[PageBlock]) -> Vec<Annota
 where
     C: IntoIterator,
     C::Item: HasContent<M>,
+    M: PageSettable,
 {
     let blocks: Vec<(u32, String)> = page_map
         .iter()
@@ -82,14 +87,19 @@ where
             });
             continue;
         }
-        let key = normalize(&chunk.content_owned()).chars().take(24).collect::<String>();
+        let key = normalize(&chunk.content_owned())
+            .chars()
+            .take(24)
+            .collect::<String>();
         let key_len = key.chars().count();
         let scan = |start: usize, end: usize| -> Option<usize> {
             if key_len < 10 {
                 return None;
             }
             for (i, (_, block_norm)) in blocks.iter().enumerate().skip(start).take(end - start) {
-                if block_norm.contains(&key) || key.contains(&block_norm.chars().take(24).collect::<String>()) {
+                if block_norm.contains(&key)
+                    || key.contains(&block_norm.chars().take(24).collect::<String>())
+                {
                     return Some(i);
                 }
             }
@@ -109,7 +119,7 @@ where
         };
         last_page = page;
         let mut meta = chunk.metadata_owned();
-        meta.page = Some(page);
+        meta.set_page(Some(page));
         out.push(Annotated {
             content: chunk.content_for_meta(),
             metadata: meta,
@@ -134,6 +144,11 @@ pub trait HasContent<M> {
     fn content_for_meta(&self) -> String;
     fn metadata_owned(&self) -> M;
     fn page(&self) -> Option<u32>;
+}
+
+/// Settable page extension on the metadata type used by the page mapper.
+pub trait PageSettable {
+    fn set_page(&mut self, page: Option<u32>);
 }
 
 #[cfg(test)]
@@ -161,6 +176,12 @@ mod tests {
         }
         fn page(&self) -> Option<u32> {
             self.metadata.page
+        }
+    }
+
+    impl PageSettable for TestMeta {
+        fn set_page(&mut self, page: Option<u32>) {
+            self.page = page;
         }
     }
 
@@ -262,5 +283,11 @@ mod tests {
         assert_eq!(out[0].metadata.page, Some(1));
         assert_eq!(out[1].metadata.page, Some(1));
         assert_eq!(out[2].metadata.page, Some(2));
+    }
+
+    #[test]
+    fn static_noise_regex_compiles() {
+        // If this fails, the fixed literal in `NOISE` has drifted.
+        let _ = &*NOISE;
     }
 }

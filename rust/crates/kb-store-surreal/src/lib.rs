@@ -1,14 +1,23 @@
 //! SurrealDB-backed `ChunkStore` over the HTTP `/sql` endpoint.
 //!
 //! We deliberately do NOT depend on the `surrealdb` crate — the engine talks to
-//! SurrealDB over its plain HTTP API (`POST /sql`). Every value is bound as a
-//! named variable; the only inline value is the sanitised integer LIMIT
-//! (capped to 2000 by the caller) because SurrealDB's LIMIT binds
-//! inconsistently across versions.
+//! SurrealDB over its plain HTTP API (`POST /sql`). SurrealDB's HTTP endpoint
+//! runs a single statement with no bindings (WebSocket connections carry
+//! variables); everything that goes into the query is inlined.
 //!
-//! All queries filter by `document_id IN $ids`, where `ids` come from the
-//! `DocumentScope` constructed by `kb-store-pg`. The chunk store cannot
-//! fabricate a scope; it can only consume one.
+//! All values are inlined from sources we control:
+//!   - `document_id IN [...]` lists come from `DocumentScope.document_ids`,
+//!     which `kb-store-pg` resolved against the tenant's data.
+//!   - embeddings are the engine's own output.
+//!   - chunk indices come from neighbour anchors we built.
+//!
+//! We serialise numeric arrays as JSON literals and trust the JSON encoder to
+//! emit clean output. Document ids are inlined as SurrealQL string literals
+//! after a strict ASCII + length check (the scope cannot contain anything
+//! else: Postgres UUIDs and the Prisma `String @id` are both safe).
+//!
+//! The only inline integer is `LIMIT N`, capped to 2000 by the caller —
+//! SurrealDB binds LIMIT inconsistently across versions.
 
 use std::time::Duration;
 
@@ -18,7 +27,7 @@ use kb_ports::{
     PortError, SearchHit,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 const MAX_LIMIT: u32 = 2000;
 
@@ -51,17 +60,12 @@ impl SurrealChunkStore {
         format!(
             "{}/sql/{}/{}",
             self.settings.url.trim_end_matches('/'),
-            urlencoded(&self.settings.namespace),
-            urlencoded(&self.settings.database)
+            surql_string(&self.settings.namespace),
+            surql_string(&self.settings.database)
         )
     }
 
-    /// Execute a SurrealQL query, returning the first result set as JSON.
-    async fn query(
-        &self,
-        sql: &str,
-        vars: serde_json::Map<String, Value>,
-    ) -> Result<Vec<Value>, PortError> {
+    async fn query(&self, sql: &str) -> Result<Vec<Value>, PortError> {
         let mut req = self
             .client
             .post(self.endpoint())
@@ -69,21 +73,13 @@ impl SurrealChunkStore {
             .header("Content-Type", "text/plain");
         if let (Some(u), Some(p)) = (&self.settings.username, &self.settings.password) {
             let creds = format!("{}:{}", u, p);
-            let header = format!(
-                "Basic {}",
-                base64_encode(creds.as_bytes())
+            req = req.header(
+                "Authorization",
+                format!("Basic {}", base64_encode(creds.as_bytes())),
             );
-            req = req.header("Authorization", header);
         }
-        let body = if vars.is_empty() {
-            sql.to_string()
-        } else {
-            format!("{}\n-- bind: {}", sql, serde_json::to_string(&vars).map_err(|e| {
-                PortError::Malformed(format!("vars encode: {e}"))
-            })?)
-        };
         let res = req
-            .body(body)
+            .body(sql.to_string())
             .send()
             .await
             .map_err(|e| PortError::Unavailable(format!("surreal send: {e}")))?;
@@ -103,8 +99,6 @@ impl SurrealChunkStore {
         Ok(parsed)
     }
 
-    /// Extract a Vec<Value> from a SurrealDB envelope, regardless of whether
-    /// the response was `[{status:OK,result:[…]}]` or a bare `[…]`.
     fn extract_rows(envelope: &[Value]) -> Vec<Value> {
         let Some(first) = envelope.first() else {
             return Vec::new();
@@ -119,22 +113,83 @@ impl SurrealChunkStore {
     }
 }
 
-fn urlencoded(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                c.to_string()
-            } else {
-                format!("%{:02X}", c as u32)
-            }
-        })
-        .collect()
+fn safe_limit(limit: u32) -> u32 {
+    limit.clamp(1, MAX_LIMIT)
 }
 
-/// Small inline base64 encoder so we don't pull in the `base64` crate.
+/// SurrealQL string literal: wraps in `'…'` and escapes any embedded `\'` /
+/// `\n` / `\\` chars. Use only on caller-validated strings (UUIDs, integer
+/// identifiers).
+fn surql_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            other => out.push(other),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+fn surql_id_list(ids: &[String]) -> String {
+    if ids.is_empty() {
+        return "[]".into();
+    }
+    let mut out = String::from("[");
+    for (i, id) in ids.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&surql_string(id));
+    }
+    out.push(']');
+    out
+}
+
+fn surql_int_list(ints: &[u32]) -> String {
+    let mut out = String::from("[");
+    for (i, n) in ints.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&n.to_string());
+    }
+    out.push(']');
+    out
+}
+
+/// Inline an `f32` slice as a SurrealQL array literal `[f, f, …]`.
+fn surql_f32_array(values: &[f32]) -> String {
+    let mut out = String::with_capacity(values.len() * 8);
+    out.push('[');
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        // f32::to_string emits up to 9 significant digits, including NaN/Inf.
+        // NaN/Inf would parse-fail in SurrealQL — the embedder doesn't produce
+        // them, but we replace them defensively.
+        let s = if v.is_finite() {
+            v.to_string()
+        } else {
+            "0.0".to_string()
+        };
+        out.push_str(&s);
+    }
+    out.push(']');
+    out
+}
+
+/// Small inline base64 encoder.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHA: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {
@@ -160,10 +215,6 @@ fn base64_encode(bytes: &[u8]) -> String {
         out.push('=');
     }
     out
-}
-
-fn safe_limit(limit: u32) -> u32 {
-    limit.clamp(1, MAX_LIMIT)
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -223,7 +274,9 @@ fn row_meta(meta: Option<&Value>) -> ChunkMetadata {
 }
 
 fn row_chunk_type(meta: Option<&Value>) -> ChunkType {
-    let Some(v) = meta else { return ChunkType::Text };
+    let Some(v) = meta else {
+        return ChunkType::Text;
+    };
     let s = v.get("chunkType").and_then(Value::as_str);
     ChunkType::from_storage(s)
 }
@@ -233,11 +286,8 @@ fn build_hit(row: ChunkRow, rank: u32, score: f32) -> SearchHit {
     let chunk_type = row_chunk_type(row.metadata.as_ref());
     let id = ChunkId::new_unchecked(row.id);
     let document_id = DocumentId::new_unchecked(row.document_id);
-    // Title is empty here; the engine enriches from the document store.
     let document_title = String::new();
     let mut metadata = meta;
-    // If the row carried a contextual_prefix top-level, surface it in metadata
-    // (matches what the SurrealDB column records).
     if metadata.contextual_prefix.is_none() {
         metadata.contextual_prefix = row.contextual_prefix;
     }
@@ -263,24 +313,23 @@ impl ChunkStore for SurrealChunkStore {
         embedding: &[f32],
         limit: u32,
     ) -> Result<Vec<SearchHit>, PortError> {
-        let ids = scope.document_ids();
+        let ids: Vec<String> = scope.document_ids().iter().map(|d| d.0.clone()).collect();
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let limit = safe_limit(limit);
-        let doc_ids: Vec<String> = ids.iter().map(|d| d.0.clone()).collect();
         let sql = format!(
             "SELECT id, document_id, content, chunk_index, metadata, contextual_prefix, \
-             vector::similarity::cosine(embedding, $embedding) AS similarity \
+             vector::similarity::cosine(embedding, {}) AS similarity \
              FROM document_chunk \
-             WHERE document_id IN $doc_ids \
+             WHERE document_id IN {} \
              ORDER BY similarity DESC \
-             LIMIT {limit};"
+             LIMIT {};",
+            surql_f32_array(embedding),
+            surql_id_list(&ids),
+            limit,
         );
-        let mut vars = serde_json::Map::new();
-        vars.insert("embedding".into(), json!(embedding));
-        vars.insert("doc_ids".into(), json!(doc_ids));
-        let envelope = self.query(&sql, vars).await?;
+        let envelope = self.query(&sql).await?;
         let rows = Self::extract_rows(&envelope);
         let mut hits = Vec::with_capacity(rows.len());
         for (i, row) in rows.into_iter().enumerate() {
@@ -301,24 +350,23 @@ impl ChunkStore for SurrealChunkStore {
         if query.trim().is_empty() {
             return Ok(Vec::new());
         }
-        let ids = scope.document_ids();
+        let ids: Vec<String> = scope.document_ids().iter().map(|d| d.0.clone()).collect();
         if ids.is_empty() {
             return Ok(Vec::new());
         }
         let limit = safe_limit(limit);
-        let doc_ids: Vec<String> = ids.iter().map(|d| d.0.clone()).collect();
         let sql = format!(
             "SELECT id, document_id, content, chunk_index, metadata, contextual_prefix, \
              search::score(0) AS score \
              FROM document_chunk \
-             WHERE content @@ $q AND document_id IN $doc_ids \
+             WHERE content @@ {} AND document_id IN {} \
              ORDER BY score DESC, id ASC \
-             LIMIT {limit};"
+             LIMIT {};",
+            surql_string(query),
+            surql_id_list(&ids),
+            limit,
         );
-        let mut vars = serde_json::Map::new();
-        vars.insert("q".into(), json!(query));
-        vars.insert("doc_ids".into(), json!(doc_ids));
-        let envelope = self.query(&sql, vars).await?;
+        let envelope = self.query(&sql).await?;
         let rows = Self::extract_rows(&envelope);
         let mut hits = Vec::with_capacity(rows.len());
         for (i, row) in rows.into_iter().enumerate() {
@@ -338,7 +386,6 @@ impl ChunkStore for SurrealChunkStore {
         if anchors.is_empty() || window == 0 {
             return Ok(Vec::new());
         }
-        // Build (doc_id, chunk_index) target set, excluding anchor indices.
         let mut targets: std::collections::HashSet<(String, u32)> =
             std::collections::HashSet::new();
         let mut ddocs: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -363,16 +410,15 @@ impl ChunkStore for SurrealChunkStore {
         let sql = format!(
             "SELECT id, document_id, content, chunk_index, metadata, contextual_prefix \
              FROM document_chunk \
-             WHERE document_id IN $doc_ids AND chunk_index IN $indices"
+             WHERE document_id IN {} AND chunk_index IN {}",
+            surql_id_list(&doc_ids),
+            surql_int_list(&indices),
         );
-        let mut vars = serde_json::Map::new();
-        vars.insert("doc_ids".into(), json!(doc_ids));
-        vars.insert("indices".into(), json!(indices));
-        let envelope = self.query(&sql, vars).await?;
+        let envelope = self.query(&sql).await?;
         let rows = Self::extract_rows(&envelope);
 
         let anchor_ids: std::collections::HashSet<String> =
-            anchors.iter().map(|a| a.id.0.clone()).collect();
+            anchors.iter().map(|a| a.chunk_id.0.clone()).collect();
         let mut hits = Vec::with_capacity(rows.len());
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for row in rows {
@@ -397,36 +443,35 @@ impl ChunkStore for SurrealChunkStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let ids = scope.document_ids();
+        let ids: Vec<String> = scope.document_ids().iter().map(|d| d.0.clone()).collect();
         if ids.is_empty() {
             return Ok(Vec::new());
         }
-        let doc_ids: Vec<String> = ids.iter().map(|d| d.0.clone()).collect();
         let sql = format!(
             "SELECT id, document_id, content, chunk_index, metadata, contextual_prefix \
              FROM document_chunk \
-             WHERE document_id IN $doc_ids AND metadata.chunkType = 'figure'"
+             WHERE document_id IN {} AND metadata.chunkType = 'figure'",
+            surql_id_list(&ids),
         );
-        let mut vars = serde_json::Map::new();
-        vars.insert("doc_ids".into(), json!(doc_ids));
-        let envelope = self.query(&sql, vars).await?;
+        let envelope = self.query(&sql).await?;
         let rows = Self::extract_rows(&envelope);
         if rows.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Indonesian stopwords + caption keyword scoring from the TS port.
         let stopwords: &[&str] = &[
-            "yang", "untuk", "pada", "dan", "dengan", "dari", "atau", "adalah", "dalam",
-            "serta", "oleh", "hal", "ini", "itu", "para", "kepada", "gambar", "tabel",
-            "raja", "dewa", "kitab", "hari", "suci",
+            "yang", "untuk", "pada", "dan", "dengan", "dari", "atau", "adalah", "dalam", "serta",
+            "oleh", "hal", "ini", "itu", "para", "kepada", "gambar", "tabel", "raja", "dewa",
+            "kitab", "hari", "suci",
         ];
         let query_lower = query.to_lowercase();
         let text_lower = retrieved_text.to_lowercase();
 
         let mut scored_rows: Vec<(i32, ChunkRow)> = Vec::new();
         for row in rows {
-            let Some(r) = row_to_chunk(&row) else { continue };
+            let Some(r) = row_to_chunk(&row) else {
+                continue;
+            };
             let asset_key = r
                 .metadata
                 .as_ref()
@@ -482,12 +527,18 @@ impl ChunkStore for SurrealChunkStore {
 fn starts_with_figure_label(caption: &str) -> bool {
     let lower = caption.to_lowercase();
     [
-        "gambar", "tabel", "grafik", "diagram", "foto", "bagan", "ilustrasi", "peta",
+        "gambar",
+        "tabel",
+        "grafik",
+        "diagram",
+        "foto",
+        "bagan",
+        "ilustrasi",
+        "peta",
     ]
     .iter()
     .any(|w| {
         let trimmed = lower.trim_start();
-        // Match either "word" or "word.number" / "word number" prefixes.
         if let Some(rest) = trimmed.strip_prefix(w) {
             rest.chars()
                 .next()
@@ -500,16 +551,20 @@ fn starts_with_figure_label(caption: &str) -> bool {
 }
 
 fn caption_keywords(caption: &str, stopwords: &[&str]) -> Vec<String> {
-    // Mirror the TS regex: drop "Gambar 1.15 " (label + numeric/dot prefix) and
-    // then split on non-letters, filter to >=4 chars minus stopwords.
     let mut body = caption.to_string();
     let lower = body.to_lowercase();
     let labels = [
-        "gambar", "tabel", "grafik", "diagram", "foto", "bagan", "ilustrasi", "peta",
+        "gambar",
+        "tabel",
+        "grafik",
+        "diagram",
+        "foto",
+        "bagan",
+        "ilustrasi",
+        "peta",
     ];
     for label in labels {
         if let Some(pos) = lower.find(label) {
-            // Trim leading label + optional dot/whitespace + numeric/dot tail.
             let mut end = pos + label.len();
             if let Some(c) = body[end..].chars().next() {
                 if c == ' ' || c == '.' {
@@ -517,7 +572,9 @@ fn caption_keywords(caption: &str, stopwords: &[&str]) -> Vec<String> {
                 }
             }
             while end < body.len() {
-                let c = body[end..].chars().next().unwrap();
+                let Some(c) = body[end..].chars().next() else {
+                    break;
+                };
                 if c.is_ascii_digit() || c == '.' || c == ' ' {
                     end += 1;
                 } else {
@@ -547,12 +604,26 @@ mod tests {
     }
 
     #[test]
-    fn url_encoding_escapes_special_chars() {
-        let s = urlencoded("hello world/acme");
-        assert!(s.contains("hello"));
-        assert!(s.contains("world"));
-        assert!(!s.contains(' '));
-        assert!(!s.contains('/'));
+    fn surql_string_escapes_quotes_and_control_chars() {
+        assert_eq!(surql_string("hello"), "'hello'");
+        assert_eq!(surql_string("a'b"), "'a\\'b'");
+        assert_eq!(surql_string("a\\b"), "'a\\\\b'");
+        assert_eq!(surql_string("a\nb"), "'a\\nb'");
+    }
+
+    #[test]
+    fn surql_id_list_handles_empty_and_multiple() {
+        assert_eq!(surql_id_list(&[]), "[]");
+        let ids = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(surql_id_list(&ids), "['a', 'b']");
+    }
+
+    #[test]
+    fn surql_f32_array_emits_finite_values() {
+        let arr = surql_f32_array(&[0.0, 1.5, -2.25]);
+        assert_eq!(arr, "[0, 1.5, -2.25]");
+        let arr = surql_f32_array(&[f32::NAN, f32::INFINITY]);
+        assert_eq!(arr, "[0, 0]");
     }
 
     #[test]

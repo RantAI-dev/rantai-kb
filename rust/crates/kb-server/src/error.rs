@@ -1,10 +1,10 @@
 //! Typed error for the HTTP layer. Maps cleanly into `IntoResponse`.
 
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use kb_ports::{EngineError, PortError};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
@@ -69,11 +69,9 @@ impl IntoResponse for ApiError {
                 None,
             ),
             ApiError::NotFound => render_error(StatusCode::NOT_FOUND, "Not found", None),
-            ApiError::BadRequest(msg) => render_error(
-                StatusCode::BAD_REQUEST,
-                "Bad request",
-                Some(msg.as_str()),
-            ),
+            ApiError::BadRequest(msg) => {
+                render_error(StatusCode::BAD_REQUEST, "Bad request", Some(msg.as_str()))
+            }
             ApiError::Unavailable(msg) => render_error(
                 StatusCode::BAD_GATEWAY,
                 "Upstream unavailable",

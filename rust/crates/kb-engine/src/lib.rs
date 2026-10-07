@@ -22,13 +22,13 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use kb_core::fusion::{reciprocal_rank_fusion, RrfItem, RrfOptions, RrfResult};
+use kb_core::{RrfResult, reciprocal_rank_fusion_with};
+use kb_ports::DocumentScope;
+use kb_ports::PortError;
 use kb_ports::{
     ChunkId, ChunkStore, DocumentId, DocumentMeta, DocumentStore, Embedder, EngineError,
     NeighbourAnchor, RerankCandidate, RerankResult, Reranker, RetrievalDegrade, SearchHit,
 };
-use kb_ports::DocumentScope;
-use kb_ports::PortError;
 use tracing::warn;
 
 /// Tunable engine knobs.
@@ -132,9 +132,12 @@ impl Engine {
         // 2. Embed each query.
         let mut embeddings: Vec<Vec<f32>> = Vec::with_capacity(queries.len());
         for q in &queries {
-            let v = self.inputs.embedder.embed_query(q).await.map_err(|e| {
-                EngineError::RetrievalFailed(format!("embedder: {e}"))
-            })?;
+            let v = self
+                .inputs
+                .embedder
+                .embed_query(q)
+                .await
+                .map_err(|e| EngineError::RetrievalFailed(format!("embedder: {e}")))?;
             embeddings.push(v);
         }
 
@@ -148,10 +151,7 @@ impl Engine {
                 .inputs
                 .chunk_store
                 .vector_search(scope, embedding, per_arm_top_k);
-            let bm25_fut = self
-                .inputs
-                .chunk_store
-                .bm25_search(scope, q, per_arm_top_k);
+            let bm25_fut = self.inputs.chunk_store.bm25_search(scope, q, per_arm_top_k);
             let (vector_hits, bm25_hits) = tokio::join!(vector_fut, bm25_fut);
             let vector_hits = vector_hits.unwrap_or_else(|e| {
                 warn!("vector arm failed: {e}");
@@ -170,12 +170,13 @@ impl Engine {
         let mut fused_per_query: Vec<RrfResult<SearchHit>> = Vec::new();
         for (vec_list, bm_list) in vector_lists.iter().zip(bm25_lists.iter()) {
             let lists: Vec<Vec<SearchHit>> = vec![vec_list.clone(), bm_list.clone()];
-            let merged = reciprocal_rank_fusion(
+            let merged = reciprocal_rank_fusion_with(
                 lists,
-                RrfOptions {
+                kb_core::RrfOptions {
                     k: self.settings.rrf_k,
                     limit: None,
                 },
+                |h| h.chunk.id.0.as_str(),
             );
             for m in merged {
                 fused_per_query.push(m);
@@ -219,8 +220,10 @@ impl Engine {
             .await
         {
             Ok(ordered) => {
-                let order: HashMap<ChunkId, u32> =
-                    ordered.iter().map(|r| (r.id.clone(), r.final_rank)).collect();
+                let order: HashMap<ChunkId, u32> = ordered
+                    .iter()
+                    .map(|r| (r.id.clone(), r.final_rank))
+                    .collect();
                 hits.sort_by(|a, b| {
                     let ar = order.get(&a.chunk.id).copied().unwrap_or(u32::MAX);
                     let br = order.get(&b.chunk.id).copied().unwrap_or(u32::MAX);
@@ -272,10 +275,8 @@ impl Engine {
 
         // 7. Figures (degrade on failure, no vision gate in R1).
         if self.settings.figure_limit > 0 && !hits.is_empty() {
-            let mut doc_ids: Vec<String> = hits
-                .iter()
-                .map(|h| h.chunk.document_id.0.clone())
-                .collect();
+            let mut doc_ids: Vec<String> =
+                hits.iter().map(|h| h.chunk.document_id.0.clone()).collect();
             doc_ids.sort();
             doc_ids.dedup();
             let retrieved_text: String = hits
@@ -366,20 +367,16 @@ async fn enrich_titles(
     let Ok(metas) = store.list(&tenant, limit, &[]).await else {
         return;
     };
-    let title_by_id: HashMap<DocumentId, String> =
-        metas.into_iter().map(|m: DocumentMeta| (m.id, m.title)).collect();
+    let title_by_id: HashMap<DocumentId, String> = metas
+        .into_iter()
+        .map(|m: DocumentMeta| (m.id, m.title))
+        .collect();
     for h in hits.iter_mut() {
         if h.chunk.document_title.is_empty() {
             if let Some(title) = title_by_id.get(&h.chunk.document_id) {
                 h.chunk.document_title = title.clone();
             }
         }
-    }
-}
-
-impl RrfItem for SearchHit {
-    fn id(&self) -> &str {
-        &self.chunk.id.0
     }
 }
 

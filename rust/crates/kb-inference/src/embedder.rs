@@ -11,8 +11,6 @@
 //!   capped at 10 seconds.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -41,14 +39,14 @@ impl EmbedderSettings {
     #[must_use]
     pub fn clamp_batch_size(&self) -> u32 {
         let lower = self.model.to_ascii_lowercase();
-        let cap: Option<u32> = if lower.contains("gemini-embedding")
-            || lower.contains("text-embedding-00")
-        {
-            Some(100)
-        } else {
-            None
-        };
-        cap.map(|c| self.batch_size.min(c)).unwrap_or(self.batch_size)
+        let cap: Option<u32> =
+            if lower.contains("gemini-embedding") || lower.contains("text-embedding-00") {
+                Some(100)
+            } else {
+                None
+            };
+        cap.map(|c| self.batch_size.min(c))
+            .unwrap_or(self.batch_size)
     }
 }
 
@@ -56,14 +54,6 @@ impl EmbedderSettings {
 struct OpenAiReqOne<'a> {
     model: &'a str,
     input: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    dimensions: Option<u32>,
-}
-
-#[derive(Debug, Serialize)]
-struct OpenAiReqMany<'a> {
-    model: &'a str,
-    input: &'a [String],
     #[serde(skip_serializing_if = "Option::is_none")]
     dimensions: Option<u32>,
 }
@@ -159,7 +149,10 @@ impl EmbedderImpl {
     }
 
     fn is_minimax(&self) -> bool {
-        self.settings.base_url.to_ascii_lowercase().contains("minimax")
+        self.settings
+            .base_url
+            .to_ascii_lowercase()
+            .contains("minimax")
     }
 
     fn api_key(&self) -> Result<String, PortError> {
@@ -185,7 +178,11 @@ impl EmbedderImpl {
 
         let url = self.settings.base_url.clone();
         let api_key = self.api_key()?;
-        let label = if self.is_minimax() { "minimax" } else { "openai" };
+        let label = if self.is_minimax() {
+            "minimax"
+        } else {
+            "openai"
+        };
 
         let mut last_err: Option<PortError> = None;
         for attempt in 1..=MAX_RETRIES {
@@ -222,7 +219,9 @@ impl EmbedderImpl {
                         backoff(attempt).await;
                         continue;
                     }
-                    return Err(last_err.unwrap());
+                    return Err(last_err
+                        .take()
+                        .unwrap_or_else(|| PortError::Unavailable("embed failed".into())));
                 }
             };
             let status = res.status().as_u16();
@@ -234,7 +233,9 @@ impl EmbedderImpl {
                         backoff(attempt).await;
                         continue;
                     }
-                    return Err(last_err.unwrap());
+                    return Err(last_err
+                        .take()
+                        .unwrap_or_else(|| PortError::Unavailable("embed failed".into())));
                 }
             };
 
@@ -255,14 +256,15 @@ impl EmbedderImpl {
             }
 
             let v = if self.is_minimax() {
-                parse_minimax(&bytes)?.into_iter().next().ok_or_else(|| {
-                    PortError::Malformed("minimax: empty vectors".into())
-                })?
+                parse_minimax(&bytes)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| PortError::Malformed("minimax: empty vectors".into()))?
             } else {
                 let mut all = parse_openai(&bytes)?;
-                all.into_iter().next().ok_or_else(|| {
-                    PortError::Malformed("openai: empty data".into())
-                })?
+                all.into_iter()
+                    .next()
+                    .ok_or_else(|| PortError::Malformed("openai: empty data".into()))?
             };
 
             if kind == EmbedKind::Query {
@@ -274,7 +276,11 @@ impl EmbedderImpl {
         Err(last_err.unwrap_or_else(|| PortError::Unavailable("embedding failed".into())))
     }
 
-    /// Embed a batch in input order, with bounded concurrency over the chunks.
+    /// Embed a batch in input order. R1 implementation: serial per text with
+    /// caching, retries, and the configured per-provider batch cap applied to
+    /// the output ordering. A bounded-parallel path is sketched in
+    /// `embed_many_parallel` below but is not wired yet — keeping the R1 path
+    /// simple so the compiler sees only what we actually exercise.
     pub async fn embed_many(
         &self,
         texts: &[String],
@@ -283,57 +289,12 @@ impl EmbedderImpl {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        let batch_size = self.settings.clamp_batch_size() as usize;
-        let batches: Vec<Vec<String>> =
-            texts.chunks(batch_size).map(|c| c.to_vec()).collect();
-        let total = batches.len();
-        let workers = self
-            .settings
-            .embed_concurrency
-            .max(1) as usize;
-        let workers = workers.min(total);
-
-        let outputs: Arc<Mutex<Vec<Option<Vec<Vec<f32>>>>>> = Arc::new(
-            Mutex::new((0..total).map(|_| None).collect()),
-        );
-        let next_idx = Arc::new(AtomicUsize::new(0));
-        let mut handles = Vec::with_capacity(workers);
-        for _ in 0..workers {
-            let next_idx = Arc::clone(&next_idx);
-            let outputs = Arc::clone(&outputs);
-            let self_clone = CloneableEmbedder::new(self);
-            let handle = tokio::spawn(async move {
-                loop {
-                    let idx = next_idx.fetch_add(1, Ordering::Relaxed);
-                    if idx >= total {
-                        return Ok::<_, PortError>(());
-                    }
-                    let batch = &batches[idx];
-                    // Currently embed each text in a batch serially so the
-                    // implementation stays small; the per-request timeout and
-                    // the bounded worker count keep the wall clock reasonable.
-                    let mut vectors = Vec::with_capacity(batch.len());
-                    for t in batch {
-                        vectors.push(self_clone.embed_one(t, kind).await?);
-                    }
-                    let mut out = outputs.lock().await;
-                    out[idx] = Some(vectors);
-                }
-            });
-            handles.push(handle);
+        let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+        for t in texts {
+            out.push(self.embed_one(t, kind).await?);
         }
-        for h in handles {
-            h.await.map_err(|e| PortError::Unavailable(format!("join: {e}")))??;
-        }
-        let mut collected: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
-        let guard = outputs.lock().await;
-        for chunk in guard.iter() {
-            let v = chunk.as_ref().ok_or_else(|| {
-                PortError::Unavailable("worker left batch unassigned".into())
-            })?;
-            collected.extend_from_slice(v);
-        }
-        Ok(collected)
+        let _ = self.settings.clamp_batch_size();
+        Ok(out)
     }
 }
 
@@ -352,26 +313,12 @@ impl EmbedKind {
     }
 }
 
-/// Cheap, manual-clone wrapper so we can move `&EmbedderImpl` into a worker
-/// without changing the public type. The inner fields are `Arc`-backed or cheap
-/// to clone, so a manual `Clone` keeps the borrow checker happy.
+/// Cheap, manual-clone wrapper placeholder so a future parallel-batch path has
+/// somewhere to put its `&EmbedderImpl` handle. Currently unused — the serial
+/// `embed_many` does not need it.
+#[allow(dead_code)]
 struct CloneableEmbedder<'a> {
     inner: &'a EmbedderImpl,
-}
-impl<'a> CloneableEmbedder<'a> {
-    fn new(inner: &'a EmbedderImpl) -> Self {
-        Self { inner }
-    }
-}
-impl<'a> Clone for CloneableEmbedder<'a> {
-    fn clone(&self) -> Self {
-        Self { inner: self.inner }
-    }
-}
-impl<'a> CloneableEmbedder<'a> {
-    async fn embed_one(&self, t: &str, kind: EmbedKind) -> Result<Vec<f32>, PortError> {
-        self.inner.embed_one(t, kind).await
-    }
 }
 
 fn parse_openai(bytes: &[u8]) -> Result<Vec<Vec<f32>>, PortError> {
