@@ -35,6 +35,7 @@ impl Reranker for NoopReranker {
             .enumerate()
             .map(|(i, c)| RerankResult {
                 id: c.id,
+                final_rank: i as u32,
                 score: (final_k as f32) - (i as f32),
             })
             .collect())

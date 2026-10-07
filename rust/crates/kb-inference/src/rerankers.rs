@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 use kb_ports::{PortError, RerankCandidate, RerankResult, Reranker};
 use std::time::Duration;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct TeiReranker {
@@ -119,6 +120,7 @@ impl Reranker for TeiReranker {
             }
             out.push(RerankResult {
                 id: cand.id.clone(),
+                final_rank: out.len() as u32,
                 score: r.score,
             });
             if out.len() as u32 >= final_k {
@@ -134,6 +136,7 @@ impl Reranker for TeiReranker {
             }
             out.push(RerankResult {
                 id: cand.id.clone(),
+                final_rank: out.len() as u32,
                 score: 0.0,
             });
         }
@@ -243,10 +246,11 @@ async fn rerank_cohere_shape(
         if !picked.insert(cand.id.clone()) {
             continue;
         }
-        out.push(RerankResult {
-            id: cand.id.clone(),
-            score: r.relevance_score,
-        });
+out.push(RerankResult {
+                id: cand.id.clone(),
+                final_rank: out.len() as u32,
+                score: r.relevance_score,
+            });
         if out.len() as u32 >= final_k {
             break;
         }
@@ -258,10 +262,11 @@ async fn rerank_cohere_shape(
         if !picked.insert(cand.id.clone()) {
             continue;
         }
-        out.push(RerankResult {
-            id: cand.id.clone(),
-            score: 0.0,
-        });
+out.push(RerankResult {
+                id: cand.id.clone(),
+                final_rank: out.len() as u32,
+                score: 0.0,
+            });
     }
     Ok(out)
 }
@@ -333,13 +338,13 @@ impl Reranker for CohereReranker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kb_ports::ChunkType;
 
     fn cand(id: &str, text: &str) -> RerankCandidate {
         RerankCandidate {
             id: id.into(),
             text: text.into(),
-            chunk_type: ChunkType::Text,
+            original_rank: 0,
+            original_score: 0.0,
         }
     }
 
