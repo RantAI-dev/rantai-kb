@@ -43,6 +43,28 @@ Live SurrealDB checks (SurrealDB 2.7.0, probe rows removed afterwards):
 - `SELECT document_id, count() ... GROUP BY document_id` returns counts; a document with no chunks is absent (maps to 0).
 - `ORDER BY chunk_index ASC` returns chunks in index order.
 
+## R2 live results (Rust, kb-server, live Postgres + SurrealDB 2.7)
+
+Bugs found and fixed during the live run:
+- chunks_meta.rs: `ordered_chunks` and `chunk_counts` read the raw SurrealDB envelope instead of rows (now `extract_rows`). Detail endpoint returned 400 "bad row".
+- routes.rs list_documents: an absent `knowledge_base_ids` param was treated as an empty filter, so an unrestricted key got `[]`. Now absent = unfiltered, matching TS `restrictKnowledgeBases`.
+- Added `src/main.rs` binary (kb-server had no entrypoint).
+
+Results against seeded tenant_r2 (2 docs, 3 chunks):
+- GET /v1/documents: both docs, chunk_count 2 and 1 (from SurrealDB). PASS
+- GET /v1/documents?knowledge_base_ids=kb_r2: only doc_r2a. PASS
+- GET /v1/documents?knowledge_base_ids=kb_nope: []. PASS
+- GET /v1/documents/doc_r2a: 2 chunks in chunk_index order. PASS
+- GET /v1/documents/doc_missing: 404. PASS
+- GET /v1/knowledge-bases: kb_r2 with document_count 1. PASS
+- GET /health, /v1/formats: 200. PASS
+- Tenant isolation: second tenant (tenant_other) gets [] for list and KB list, and 404 for tenant_r2's doc. PASS
+- Auth without key: 401. PASS
+
+Not verified: POST /v1/search (no embedding key; embedder is unavailable offline). Bun parity not yet run.
+
+Known difference to check: TS restrictKnowledgeBases treats an explicit empty requested list as "all of the key's KBs"; Rust treats an explicit empty value as no KBs. Recorded for R2 parity.
+
 ## Dependencies
 
 No external dependencies added beyond workspace baseline. All fakes implemented in-tree.

@@ -24,7 +24,8 @@ pub async fn execute_chunk_counts(
         "SELECT document_id, count() AS n FROM document_chunk \
          WHERE document_id IN {ids_sql} GROUP BY document_id;"
     );
-    let rows = store.query(&sql).await?;
+    let envelope = store.query(&sql).await?;
+    let rows = SurrealChunkStore::extract_rows(&envelope);
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let doc = row.get("document_id").and_then(Value::as_str);
@@ -47,7 +48,8 @@ pub async fn execute_ordered_chunks(
          FROM document_chunk WHERE document_id = \"{}\" ORDER BY chunk_index ASC;",
         document_id.0
     );
-    let rows = store.query(&sql).await?;
+    let envelope = store.query(&sql).await?;
+    let rows = SurrealChunkStore::extract_rows(&envelope);
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let Some(chunk) = row_to_chunk(&row) else {

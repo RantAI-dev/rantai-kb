@@ -216,7 +216,8 @@ async fn list_documents(
         .iter()
         .map(|k| KnowledgeBaseId::new_unchecked(k.clone()))
         .collect();
-    let allowed = restrict_kbs(&auth, Some(raw_kbs.as_slice()));
+    let requested = q.knowledge_base_ids.as_ref().map(|_| raw_kbs.as_slice());
+    let allowed = restrict_kbs(&auth, requested);
     let kb_filter: Vec<KnowledgeBaseId> = match allowed {
         Some(v) if v.is_empty() => {
             return Ok(Json(Vec::new()));
