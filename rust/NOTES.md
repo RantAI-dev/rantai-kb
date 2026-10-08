@@ -28,8 +28,9 @@
 |---|---|
 | postgres:16 | started via `docker compose up -d postgres surrealdb`; healthy |
 | surrealdb:v2 (2.7.0) | running; port 8000 not published to host, used `docker compose exec surrealdb /surreal sql` |
-| minio (quay.io/minio/minio) | NOT STARTED. `docker compose pull` fails: `quay.io ... 401 UNAUTHORIZED` on manifest HEAD. Registry access, not a code issue. Blob-store parity cannot be run live. |
-| createbucket | not started (depends on minio) |
+| minio (quay.io/minio/minio) | NOT USED. `docker compose pull` fails: `quay.io ... 401 UNAUTHORIZED`. |
+| rustfs/rustfs:latest | substitute for minio, run as standalone container `rantai-kb-rustfs` on network `rantai-kb_default` with the compose credentials (kbadmin / kbsecret123), bucket `rantai-kb`. Verified with amazon/aws-cli, path-style: create-bucket, put, get, delete all exit 0 and get returned the uploaded bytes. The TS adapter uses only Put/Get/Delete (src/service/adapters.ts). |
+| createbucket | replaced by aws-cli create-bucket against RustFS (same result: bucket exists) |
 | kb (Bun/Rust app containers) | not started, per plan |
 
 Postgres schema: `prisma/migrations/20260819110721_init/migration.sql` applied with psql (no Prisma CLI in repo). Tables: ApiKey, Category, Document, DocumentGroup, IngestJob, KnowledgeBase.
