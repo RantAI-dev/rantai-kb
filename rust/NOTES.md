@@ -88,3 +88,31 @@ Status after the follow-up pass (user: shape may differ if functionality is the 
 ## Dependencies
 
 No external dependencies added beyond workspace baseline. All fakes implemented in-tree.
+
+
+## R4 slice: document DELETE (soft and hard)
+
+Compile/test ledger for this slice (one cargo process at a time):
+- clippy29 (empty knowledgeBaseIds fix): exit 0
+- clippy31 (figures): exit 101, test fixtures missing `metadata`; fixed
+- clippy32: exit 0; test33: all suites pass
+- clippy35 (DELETE route + port methods): exit 101, fakes missing new methods; fixed
+- clippy36, clippy38 (DELETE tests): exit 0; test37, test39: all suites pass, kb-server 8 tests
+
+Behaviour (TS deleteDocument, src/service/api.ts:475):
+- needs kb:write (403 otherwise); tenant-scoped lookup (404 otherwise)
+- soft (default): sets deletedAt; chunks and blob kept
+- hard (?hard=true): chunks removed first (failure logged, not fatal), then the row (DocumentGroup cascades)
+
+Known gap: the blob (S3) is not removed. There is no blob-store port yet (R3). The
+hard-delete response reports the stored key in blob_key_pending so it can be cleaned up.
+
+Live verification (Rust and Bun, same stores, scratch documents):
+- read-only key -> 403 on DELETE (Rust)
+- write key soft delete -> 200 on both; reads 404 on both; list excludes both; rows keep deletedAt
+- hard delete scratch docs -> 200 on both; rows removed
+- hard delete doc_r2b on Rust: chunks_removed=1; SurrealDB count 1 -> 0; doc_r2a chunks untouched (2)
+- doc_r2b restored afterwards (Postgres row from saved SQL; chunk from seed_surreal.surql line 4); both servers again show 1 chunk
+
+Response shape difference: Rust returns extra fields chunks_removed and blob_key_pending; Bun returns {ok:true}. Additive.
+Error text differences (cosmetic, already noted): Rust "not found"/"insufficient permissions" vs TS "Not found"/"API key lacks scope kb:write".

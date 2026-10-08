@@ -222,3 +222,119 @@ async fn test_tenant_b_key_searching_fakes_with_tenant_a_docs_gets_zero_results(
     assert_eq!(body2.sources.len(), 0);
     assert_eq!(body2.context, "");
 }
+
+fn delete_test_doc(id: &str) -> DocumentMeta {
+    DocumentMeta {
+        id: DocumentId(id.into()),
+        title: "Delete Me".into(),
+        categories: vec![],
+        subcategory: None,
+        status: "READY".into(),
+        chunk_count: 0,
+        file_type: None,
+        file_size: None,
+        mime_type: None,
+        created_at: "2026-01-01T00:00:00Z".into(),
+        updated_at: "2026-01-01T00:00:00Z".into(),
+        knowledge_base_ids: vec![],
+        metadata: None,
+    }
+}
+
+async fn send_delete(app: axum::Router, uri: &str, key: &str) -> StatusCode {
+    let request = Request::builder()
+        .uri(uri)
+        .method("DELETE")
+        .header("authorization", format!("Bearer {key}"))
+        .body(Body::empty())
+        .unwrap();
+    app.oneshot(request).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn test_delete_without_kb_write_returns_403() {
+    let (app, doc_store, _) = setup_test_app();
+    doc_store.insert_api_key_with_scopes(
+        "read-only-key",
+        TenantId("tenant-1".into()),
+        vec!["kb:read".into()],
+        vec![],
+    );
+    doc_store.insert_doc(TenantId("tenant-1".into()), delete_test_doc("doc-del-1"));
+
+    assert_eq!(
+        send_delete(app, "/v1/documents/doc-del-1", "read-only-key").await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        doc_store.docs.read().unwrap()[&TenantId("tenant-1".into())].len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_soft_delete_hides_document_from_reads() {
+    let (app, doc_store, _) = setup_test_app();
+    doc_store.insert_api_key_with_scopes(
+        "writer-key",
+        TenantId("tenant-1".into()),
+        vec!["kb:read".into(), "kb:write".into()],
+        vec![],
+    );
+    doc_store.insert_doc(TenantId("tenant-1".into()), delete_test_doc("doc-del-2"));
+
+    assert_eq!(
+        send_delete(app.clone(), "/v1/documents/doc-del-2", "writer-key").await,
+        StatusCode::OK
+    );
+    let request = Request::builder()
+        .uri("/v1/documents/doc-del-2")
+        .method("GET")
+        .header("authorization", "Bearer writer-key")
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        app.oneshot(request).await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(doc_store.deleted.read().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_delete_other_tenant_document_is_not_found() {
+    let (app, doc_store, _) = setup_test_app();
+    doc_store.insert_api_key_with_scopes(
+        "tenant-2-key",
+        TenantId("tenant-2".into()),
+        vec!["kb:read".into(), "kb:write".into()],
+        vec![],
+    );
+    doc_store.insert_doc(TenantId("tenant-1".into()), delete_test_doc("doc-del-3"));
+
+    assert_eq!(
+        send_delete(app, "/v1/documents/doc-del-3", "tenant-2-key").await,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        doc_store.docs.read().unwrap()[&TenantId("tenant-1".into())].len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_hard_delete_removes_document() {
+    let (app, doc_store, _) = setup_test_app();
+    doc_store.insert_api_key_with_scopes(
+        "hard-key",
+        TenantId("tenant-1".into()),
+        vec!["kb:read".into(), "kb:write".into()],
+        vec![],
+    );
+    doc_store.insert_doc(TenantId("tenant-1".into()), delete_test_doc("doc-del-4"));
+
+    assert_eq!(
+        send_delete(app, "/v1/documents/doc-del-4?hard=true", "hard-key").await,
+        StatusCode::OK
+    );
+    assert!(doc_store.docs.read().unwrap()[&TenantId("tenant-1".into())].is_empty());
+}

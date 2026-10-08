@@ -59,6 +59,8 @@ pub struct FakeDocumentStore {
     pub api_keys: Arc<RwLock<HashMap<String, AuthContext>>>,
     pub kbs: Arc<RwLock<HashMap<TenantId, Vec<KnowledgeBaseSummary>>>>,
     pub fail_scope: Arc<AtomicBool>,
+    /// Soft-deleted documents, kept so tests can assert on them.
+    pub deleted: Arc<RwLock<Vec<DocumentMeta>>>,
 }
 
 impl FakeDocumentStore {
@@ -121,6 +123,38 @@ impl DocumentStore for FakeDocumentStore {
         Ok(None)
     }
 
+    async fn soft_delete(&self, tenant: &TenantId, id: &DocumentId) -> Result<bool, PortError> {
+        // Tenant-scoped: another tenant's document is simply not found. The fake
+        // has no deleted_at column, so a soft-deleted doc is moved to `deleted`.
+        let mut map = self.docs.write().unwrap();
+        let Some(list) = map.get_mut(tenant) else {
+            return Ok(false);
+        };
+        let Some(pos) = list.iter().position(|d| &d.id == id) else {
+            return Ok(false);
+        };
+        let doc = list.remove(pos);
+        self.deleted.write().unwrap().push(doc);
+        Ok(true)
+    }
+
+    async fn hard_delete(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+    ) -> Result<Option<Option<String>>, PortError> {
+        let mut map = self.docs.write().unwrap();
+        let Some(list) = map.get_mut(tenant) else {
+            return Ok(None);
+        };
+        let Some(pos) = list.iter().position(|d| &d.id == id) else {
+            return Ok(None);
+        };
+        list.remove(pos);
+        // The fake keeps no blob keys, so none is reported.
+        Ok(Some(None))
+    }
+
     async fn find_alive_meta_by_ids(
         &self,
         tenant: &TenantId,
@@ -175,6 +209,10 @@ pub struct FakeChunkStore {
 
 #[async_trait]
 impl ChunkStore for FakeChunkStore {
+    async fn delete_by_document(&self, _document_id: &DocumentId) -> Result<u64, PortError> {
+        Ok(0)
+    }
+
     async fn chunk_counts(
         &self,
         _document_ids: &[DocumentId],

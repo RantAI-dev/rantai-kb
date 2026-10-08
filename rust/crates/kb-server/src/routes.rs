@@ -23,7 +23,10 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/search", post(search))
         .route("/v1/documents", get(list_documents))
-        .route("/v1/documents/:id", get(get_document))
+        .route(
+            "/v1/documents/:id",
+            get(get_document).delete(delete_document),
+        )
         .route("/v1/knowledge-bases", get(list_knowledge_bases))
 }
 
@@ -33,6 +36,76 @@ pub fn health_router() -> Router<Arc<AppState>> {
         .route("/health", get(health))
         .route("/v1/health", get(health))
         .route("/v1/formats", get(formats))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteQuery {
+    #[serde(default)]
+    pub hard: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteResponse {
+    pub ok: bool,
+    /// Chunks removed from SurrealDB (hard delete only).
+    pub chunks_removed: u64,
+    /// Blob key of a hard-deleted document. The blob store adapter is not
+    /// ported yet, so the object is not removed here; the key is reported so
+    /// it can be cleaned up.
+    pub blob_key_pending: Option<String>,
+}
+
+/// `DELETE /v1/documents/:id`. Mirrors TS deleteDocument: needs `kb:write`;
+/// soft delete sets `deletedAt` and leaves chunks and the blob alone; hard
+/// delete (`?hard=true`) removes the chunks, then the row.
+async fn delete_document(
+    State(state): State<Arc<AppState>>,
+    Authed(auth): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<DeleteQuery>,
+) -> Result<Json<DeleteResponse>, ApiError> {
+    if !crate::auth::has_scope(&auth, "kb:write") {
+        return Err(ApiError::Forbidden("kb:write".to_string()));
+    }
+    let doc_id = DocumentId::new_unchecked(id);
+    let hard = q.hard.as_deref() == Some("true");
+
+    if !hard {
+        let deleted = state
+            .documents
+            .soft_delete(&auth.tenant_id, &doc_id)
+            .await
+            .map_err(ApiError::from)?;
+        if !deleted {
+            return Err(ApiError::NotFound);
+        }
+        return Ok(Json(DeleteResponse {
+            ok: true,
+            chunks_removed: 0,
+            blob_key_pending: None,
+        }));
+    }
+
+    // Same order as TS: chunks first, then the row. A chunk-delete failure is
+    // logged and does not stop the row delete, as in TS.
+    let chunks_removed = match state.chunks.delete_by_document(&doc_id).await {
+        Ok(n) => n,
+        Err(err) => {
+            tracing::warn!(error = %err, "chunk delete failed during hard delete");
+            0
+        }
+    };
+    let blob_key = state
+        .documents
+        .hard_delete(&auth.tenant_id, &doc_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+    Ok(Json(DeleteResponse {
+        ok: true,
+        chunks_removed,
+        blob_key_pending: blob_key,
+    }))
 }
 
 // ─── Health ──────────────────────────────────────────────────────────

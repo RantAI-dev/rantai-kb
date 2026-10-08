@@ -54,6 +54,18 @@ pub trait DocumentStore: Send + Sync {
         id: &DocumentId,
     ) -> Result<Option<DocumentMeta>, PortError>;
 
+    /// Soft delete: sets `deletedAt`. Returns `false` when no live document matched.
+    async fn soft_delete(&self, tenant: &TenantId, id: &DocumentId) -> Result<bool, PortError>;
+
+    /// Hard delete: removes the Postgres row (and its group links). Returns the
+    /// stored blob key when there was one, so the caller can remove the object.
+    /// Returns `Ok(None)` when no row matched.
+    async fn hard_delete(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+    ) -> Result<Option<Option<String>>, PortError>;
+
     /// Look up metadata for multiple document ids (tenant-filtered, not soft-deleted).
     async fn find_alive_meta_by_ids(
         &self,
@@ -111,6 +123,10 @@ pub trait ChunkStore: Send + Sync {
         anchors: &[NeighbourAnchor],
         window: u32,
     ) -> Result<Vec<SearchHit>, PortError>;
+
+    /// Delete every chunk belonging to a document (hard delete). Returns the
+    /// number removed. Visibility is the caller's job.
+    async fn delete_by_document(&self, document_id: &DocumentId) -> Result<u64, PortError>;
 
     /// Chunk counts per document, from SurrealDB `document_chunk`. Missing ids
     /// are absent from the result and count as 0 at the call site.

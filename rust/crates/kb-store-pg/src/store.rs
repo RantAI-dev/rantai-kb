@@ -161,6 +161,44 @@ impl DocumentStore for PgDocumentStore {
         }
     }
 
+    async fn soft_delete(&self, tenant: &TenantId, id: &DocumentId) -> Result<bool, PortError> {
+        let res = sqlx::query(
+            r#"UPDATE "Document" SET "deletedAt" = NOW()
+               WHERE id = $1 AND "tenantId" = $2 AND "deletedAt" IS NULL"#,
+        )
+        .bind(id.0.as_str())
+        .bind(tenant.0.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| PortError::Unavailable(format!("pg delete: {e}")))?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    async fn hard_delete(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+    ) -> Result<Option<Option<String>>, PortError> {
+        // DocumentGroup rows cascade on delete (see the init migration).
+        let row = sqlx::query(
+            r#"DELETE FROM "Document" WHERE id = $1 AND "tenantId" = $2 RETURNING "s3Key""#,
+        )
+        .bind(id.0.as_str())
+        .bind(tenant.0.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| PortError::Unavailable(format!("pg delete: {e}")))?;
+        match row {
+            None => Ok(None),
+            Some(r) => {
+                let s3_key: Option<String> = r
+                    .try_get("s3Key")
+                    .map_err(|e| PortError::Unavailable(format!("pg delete: {e}")))?;
+                Ok(Some(s3_key))
+            }
+        }
+    }
+
     async fn find_alive_meta_by_ids(
         &self,
         tenant: &TenantId,

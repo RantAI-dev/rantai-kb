@@ -62,6 +62,10 @@ impl ChunkStore for SurrealChunkStore {
         .await
     }
 
+    async fn delete_by_document(&self, document_id: &DocumentId) -> Result<u64, PortError> {
+        crate::chunks_meta::execute_delete_by_document(self, document_id).await
+    }
+
     async fn chunk_counts(
         &self,
         document_ids: &[DocumentId],
