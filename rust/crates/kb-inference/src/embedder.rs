@@ -10,7 +10,6 @@
 //! - Up to 3 retries on transient errors (5xx or 429), exponential backoff
 //!   capped at 10 seconds.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,6 +17,8 @@ use kb_ports::{Embedder, PortError};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::warn;
+
+use crate::query_cache::QueryCache;
 
 /// Per-call settings. All fields are required; defaults live in `kb-server`.
 #[derive(Debug, Clone)]
@@ -89,43 +90,6 @@ struct MiniMaxBase {
 }
 
 const MAX_RETRIES: u32 = 3;
-
-/// Cached query embeddings. ~8 MB at 4096-d Float32 with 256 entries.
-#[derive(Default)]
-struct QueryCache {
-    map: HashMap<String, Vec<f32>>,
-    order: Vec<String>,
-    capacity: usize,
-}
-
-impl QueryCache {
-    fn with_capacity(cap: usize) -> Self {
-        Self {
-            map: HashMap::new(),
-            order: Vec::new(),
-            capacity: cap,
-        }
-    }
-
-    fn get(&mut self, k: &str) -> Option<Vec<f32>> {
-        self.map.get(k).cloned()
-    }
-
-    fn put(&mut self, k: String, v: Vec<f32>) {
-        if self.map.contains_key(&k) {
-            self.map.insert(k, v);
-            return;
-        }
-        if self.order.len() >= self.capacity {
-            if let Some(evicted) = self.order.first().cloned() {
-                self.order.remove(0);
-                self.map.remove(&evicted);
-            }
-        }
-        self.order.push(k.clone());
-        self.map.insert(k, v);
-    }
-}
 
 /// Embedding client. Holds one shared `reqwest::Client` and a small query cache.
 pub struct EmbedderImpl {
@@ -261,7 +225,7 @@ impl EmbedderImpl {
                     .next()
                     .ok_or_else(|| PortError::Malformed("minimax: empty vectors".into()))?
             } else {
-                let mut all = parse_openai(&bytes)?;
+                let all = parse_openai(&bytes)?;
                 all.into_iter()
                     .next()
                     .ok_or_else(|| PortError::Malformed("openai: empty data".into()))?
@@ -394,16 +358,5 @@ mod tests {
         s.model = "baai/bge-m3".into();
         s.batch_size = 256;
         assert_eq!(s.clamp_batch_size(), 256);
-    }
-
-    #[test]
-    fn query_cache_eviction() {
-        let mut c = QueryCache::with_capacity(2);
-        c.put("a".into(), vec![1.0]);
-        c.put("b".into(), vec![2.0]);
-        c.put("c".into(), vec![3.0]);
-        assert!(c.get("a").is_none());
-        assert!(c.get("b").is_some());
-        assert!(c.get("c").is_some());
     }
 }

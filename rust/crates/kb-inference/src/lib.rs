@@ -6,10 +6,13 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod embedder;
+pub mod llm_reranker;
+pub mod query_cache;
 pub mod query_expansion;
 pub mod rerankers;
 
 pub use embedder::{EmbedderImpl, EmbedderSettings};
+pub use llm_reranker::LlmReranker;
 pub use query_expansion::{ExpansionSettings, QueryExpander};
 pub use rerankers::{CohereReranker, TeiReranker, VllmReranker};
 

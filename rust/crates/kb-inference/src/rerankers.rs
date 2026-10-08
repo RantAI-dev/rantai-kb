@@ -6,7 +6,7 @@
 //! engine can still map every candidate id.
 
 use async_trait::async_trait;
-use kb_ports::{ChunkId, PortError, RerankCandidate, RerankResult, Reranker};
+use kb_ports::{PortError, RerankCandidate, RerankResult, Reranker};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -18,6 +18,12 @@ pub struct TeiReranker {
 }
 
 impl TeiReranker {
+    /// Display name, e.g. `TEI bge-reranker-v2-m3`.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     pub fn new(base_url: &str, model: &str) -> Result<Self, PortError> {
         if base_url.is_empty() {
             return Err(PortError::Invalid(
@@ -156,6 +162,12 @@ pub struct VllmReranker {
 }
 
 impl VllmReranker {
+    /// Display name, e.g. `TEI bge-reranker-v2-m3`.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     pub fn new(base_url: &str, model: &str) -> Result<Self, PortError> {
         if base_url.is_empty() {
             return Err(PortError::Invalid(
@@ -304,6 +316,12 @@ pub struct CohereReranker {
 }
 
 impl CohereReranker {
+    /// Display name, e.g. `TEI bge-reranker-v2-m3`.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     /// Build a Cohere client. `api_key` is required.
     pub fn new(model: &str, api_key: &str, endpoint: Option<&str>) -> Result<Self, PortError> {
         if api_key.is_empty() {

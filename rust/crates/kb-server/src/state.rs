@@ -101,9 +101,13 @@ fn embedder_settings_from(c: EmbedderConfig) -> EmbedderSettings {
 }
 
 fn build_reranker(cfg: &RerankerConfig) -> anyhow::Result<std::sync::Arc<dyn kb_ports::Reranker>> {
-    use kb_inference::{CohereReranker, TeiReranker, VllmReranker};
+    use kb_inference::{CohereReranker, LlmReranker, TeiReranker, VllmReranker};
     match cfg {
         RerankerConfig::Disabled => Ok(Arc::new(kb_inference::NoopReranker)),
+        RerankerConfig::Llm { model, api_key } => {
+            let r = LlmReranker::new(model, api_key).map_err(|e| anyhow::anyhow!("llm: {e}"))?;
+            Ok(Arc::new(r))
+        }
         RerankerConfig::Tei { base_url, model } => {
             let r = TeiReranker::new(base_url, model).map_err(|e| anyhow::anyhow!("tei: {e}"))?;
             Ok(Arc::new(r))

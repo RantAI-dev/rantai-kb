@@ -37,6 +37,12 @@ pub struct EmbedderConfig {
 #[derive(Clone, Debug)]
 pub enum RerankerConfig {
     Disabled,
+    /// LLM-as-reranker over OpenRouter. Also the TS default for unset or
+    /// unknown `KB_RERANK_PROVIDER`.
+    Llm {
+        model: String,
+        api_key: String,
+    },
     Tei {
         base_url: String,
         model: String,
@@ -75,8 +81,8 @@ impl Config {
 
         let surreal_user = lookup("SURREAL_DB_USER").filter(|s| !s.trim().is_empty());
         let surreal_pass = lookup("SURREAL_DB_PASS").filter(|s| !s.trim().is_empty());
-        let surreal_ns = lookup("SURREAL_DB_NAMESPACE").unwrap_or_else(|| "kb".into());
-        let surreal_db = lookup("SURREAL_DB_DATABASE").unwrap_or_else(|| "main".into());
+        let surreal_ns = lookup("SURREAL_DB_NAMESPACE").unwrap_or_else(|| "rantai".into());
+        let surreal_db = lookup("SURREAL_DB_DATABASE").unwrap_or_else(|| "knowledge".into());
 
         let embedding_api_key = lookup("KB_EMBEDDING_API_KEY")
             .filter(|s| !s.trim().is_empty())
@@ -96,12 +102,13 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(4096);
 
-        let port: u16 = lookup("PORT").and_then(|v| v.parse().ok()).unwrap_or(3001);
+        let port: u16 = lookup("PORT").and_then(|v| v.parse().ok()).unwrap_or(8080);
         let bind_addr = format!("0.0.0.0:{port}");
 
         // Retrieval knobs. Names and defaults come from
         // src/lib/rag/config.ts and src/lib/rag/config-surface.ts.
-        let hybrid_bm25_enabled = bool_flag(&lookup, "KB_HYBRID_BM25_ENABLED", true);
+        let hybrid_bm25_enabled =
+            lookup("KB_HYBRID_BM25_ENABLED").is_none_or(|v| v.trim() != "false");
         let default_max_chunks = int_var(&lookup, "KB_DEFAULT_MAX_CHUNKS", 8)?;
         let neighbour_window = int_var(&lookup, "KB_NEIGHBOR_WINDOW", 1)?;
         let rerank_initial_k = int_var(&lookup, "KB_RERANK_INITIAL_K", 20)?;
@@ -207,10 +214,9 @@ where
     }
 }
 
-/// Reads `KB_RERANK_*` as `src/lib/rag/rerankers/index.ts` does. The provider
-/// names are `tei`, `vllm`, `cohere` and `openrouter` (the LLM reranker).
-/// The Rust port has no LLM reranker, so `openrouter` and any unset or
-/// unknown provider are reported as a configuration error.
+/// Reads `KB_RERANK_*` as `src/lib/rag/rerankers/index.ts` does.
+/// `tei`, `vllm` and `cohere` select their adapters. `openrouter`, unset and
+/// unknown providers all use the LLM reranker, as in TypeScript.
 fn read_reranker<F>(lookup: &F) -> Result<RerankerConfig>
 where
     F: Fn(&str) -> Option<String>,
@@ -243,9 +249,10 @@ where
             api_key: api_key.unwrap_or_default(),
             endpoint: base_url,
         }),
-        other => bail!(
-            "KB_RERANK_PROVIDER={other:?} is not supported by the Rust service (use tei, vllm or cohere)"
-        ),
+        _ => Ok(RerankerConfig::Llm {
+            model: model.unwrap_or_else(|| "openai/gpt-4.1-nano".into()),
+            api_key: lookup("OPENROUTER_API_KEY").unwrap_or_default(),
+        }),
     }
 }
 

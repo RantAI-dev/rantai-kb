@@ -16,6 +16,8 @@
 | 16 | cargo test --workspace | 38s | config test asserted removed KB_MIN_SIMILARITY (fixed, now 0.30 constant) |
 | 17 | cargo test --workspace | ~40s | all pass: kb-core 71, kb-engine 10, kb-inference 10 (+ others), kb-server 4+6+3+5 |
 | 15 | cargo clippy --workspace --all-targets --keep-going (full output saved) | ~40s | exit 0, zero `error:` lines. Fixed: Vec<Vec<f32>> ownership in vector arm; test-module lint allow in kb-server config; server_tests EngineSettings fields. Warnings remain (missing_docs, pedantic) and are reported. |
+| 16b | cargo clippy --workspace --all-targets --keep-going --message-format=short | 3.8s | exit 0, zero errors; incremental. Remaining warnings: pedantic casts, too_many_lines in embedder.rs:130 |
+| 18 | cargo test --workspace | ~25s | all pass after R1 finish: kb-inference 16 (+6: LLM reranker parse/select/prompt/key/short-circuit, LRU recency), kb-engine 10, kb-core 71. Clippy run 16 (3.8s, incremental, exit 0, zero errors). |
 
 ## Dependencies
 
