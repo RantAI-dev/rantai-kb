@@ -1,1 +1,339 @@
-//! Empty — modules are filled in by the kb-engine checkpoint.
+//! Retrieval pipeline implementing hybrid search, fusion, reranking,
+//! neighbour weave, figure co-retrieval, and context building.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use kb_core::{
+    ContextItem, RrfOptions, SourceEntry, build_context_and_sources, reciprocal_rank_fusion_with,
+    weave_neighbours_with,
+};
+use kb_ports::{
+    ChunkStore, DocumentId, DocumentScope, DocumentStore, Embedder, EngineError, NeighbourAnchor,
+    RerankCandidate, Reranker, RetrievalDegrade, SearchHit, TenantId,
+};
+
+/// Parameters for one retrieval execution.
+#[derive(Debug, Clone)]
+pub struct RetrievalOptions {
+    pub max_chunks: u32,
+    pub min_similarity: f32,
+    pub candidate_pool_size: u32,
+    pub rerank_final_k: u32,
+    pub neighbour_window: u32,
+    pub figure_limit: u32,
+}
+
+impl Default for RetrievalOptions {
+    fn default() -> Self {
+        Self {
+            max_chunks: 10,
+            min_similarity: 0.30,
+            candidate_pool_size: 40,
+            rerank_final_k: 20,
+            neighbour_window: 2,
+            figure_limit: 4,
+        }
+    }
+}
+
+/// The outcome of the retrieval pipeline.
+#[derive(Debug, Clone)]
+pub struct RetrievalOutcome {
+    pub chunks: Vec<SearchHit>,
+    pub sources: Vec<SourceEntry>,
+    pub context: String,
+    pub degrades: Vec<RetrievalDegrade>,
+}
+
+/// Enrich missing document titles on hits via `DocumentStore::find_alive_meta_by_ids`.
+pub async fn enrich_titles(
+    doc_store: &Arc<dyn DocumentStore>,
+    tenant: &TenantId,
+    hits: &mut [SearchHit],
+) {
+    let mut missing_ids: Vec<DocumentId> = Vec::new();
+    let mut seen: HashSet<DocumentId> = HashSet::new();
+    for h in hits.iter() {
+        if h.chunk.document_title.trim().is_empty() && seen.insert(h.chunk.document_id.clone()) {
+            missing_ids.push(h.chunk.document_id.clone());
+        }
+    }
+    if missing_ids.is_empty() {
+        return;
+    }
+
+    if let Ok(metas) = doc_store.find_alive_meta_by_ids(tenant, &missing_ids).await {
+        let title_map: HashMap<DocumentId, String> =
+            metas.into_iter().map(|m| (m.id, m.title)).collect();
+        for h in hits.iter_mut() {
+            if h.chunk.document_title.trim().is_empty() {
+                if let Some(title) = title_map.get(&h.chunk.document_id) {
+                    h.chunk.document_title = title.clone();
+                }
+            }
+        }
+    }
+}
+
+/// Execute the full retrieval pipeline.
+pub async fn execute_pipeline(
+    doc_store: &Arc<dyn DocumentStore>,
+    chunk_store: &Arc<dyn ChunkStore>,
+    embedder: &Arc<dyn Embedder>,
+    reranker: &Arc<dyn Reranker>,
+    scope: &DocumentScope,
+    query: &str,
+    opts: &RetrievalOptions,
+) -> Result<RetrievalOutcome, EngineError> {
+    if scope.document_ids().is_empty() {
+        return Ok(RetrievalOutcome {
+            chunks: Vec::new(),
+            sources: Vec::new(),
+            context: String::new(),
+            degrades: Vec::new(),
+        });
+    }
+
+    let mut degrades: Vec<RetrievalDegrade> = Vec::new();
+    let pool_size = opts.candidate_pool_size.clamp(1, 100);
+
+    // 1. Parallel vector & BM25 arms
+    let embed_store = Arc::clone(chunk_store);
+    let embed_scope = scope.clone();
+    let embedder_ref = Arc::clone(embedder);
+    let q_vec = query.to_string();
+
+    let vector_future = async move {
+        let vec = embedder_ref
+            .embed_query(&q_vec)
+            .await
+            .map_err(|e| format!("embed query: {e}"))?;
+        embed_store
+            .vector_search(&embed_scope, &vec, pool_size)
+            .await
+            .map_err(|e| format!("vector search: {e}"))
+    };
+
+    let bm25_store = Arc::clone(chunk_store);
+    let bm25_scope = scope.clone();
+    let q_bm25 = query.to_string();
+
+    let bm25_future = async move {
+        bm25_store
+            .bm25_search(&bm25_scope, &q_bm25, pool_size)
+            .await
+            .map_err(|e| format!("bm25 search: {e}"))
+    };
+
+    let (vector_res, bm25_res) = tokio::join!(vector_future, bm25_future);
+
+    // 2. Failure and fusion handling
+    let fused_hits: Vec<SearchHit> = match (vector_res, bm25_res) {
+        (Err(v_err), Err(b_err)) => {
+            return Err(EngineError::RetrievalFailed(format!(
+                "both search arms failed. vector: {v_err}; bm25: {b_err}"
+            )));
+        }
+        (Err(_), Ok(b_hits)) => {
+            degrades.push(RetrievalDegrade::VectorArmFailed);
+            // No vector hits: BM25 hits only, none are vector-only
+            b_hits
+        }
+        (Ok(v_hits), Err(_)) => {
+            degrades.push(RetrievalDegrade::Bm25ArmFailed);
+            // Vector hits only: all are vector-only, apply min_similarity
+            v_hits
+                .into_iter()
+                .filter(|h| h.similarity >= opts.min_similarity)
+                .collect()
+        }
+        (Ok(v_hits), Ok(b_hits)) => {
+            // Both arms succeeded: fuse with RRF
+            let rrf_opts = RrfOptions {
+                k: 60,
+                limit: Some(pool_size),
+            };
+
+            let lists = vec![v_hits, b_hits];
+            let rrf_results = reciprocal_rank_fusion_with(lists, rrf_opts, |hit: &SearchHit| {
+                hit.chunk.id.0.as_str()
+            });
+
+            // Step 3: Drop vector-only hits below min_similarity
+            // List 0 is vector, List 1 is BM25
+            rrf_results
+                .into_iter()
+                .filter(|res| {
+                    let is_vector_only = res.sources == vec![0];
+                    if is_vector_only {
+                        res.first.similarity >= opts.min_similarity
+                    } else {
+                        true
+                    }
+                })
+                .map(|res| res.first)
+                .collect()
+        }
+    };
+
+    if fused_hits.is_empty() {
+        return Ok(RetrievalOutcome {
+            chunks: Vec::new(),
+            sources: Vec::new(),
+            context: String::new(),
+            degrades,
+        });
+    }
+
+    // 4. Rerank
+    let final_k = opts.rerank_final_k.clamp(1, 100);
+    let candidates: Vec<RerankCandidate> = fused_hits
+        .iter()
+        .map(|h| RerankCandidate {
+            id: h.chunk.id.clone(),
+            text: h.chunk.content.clone(),
+            original_rank: h.rank,
+            original_score: h.similarity,
+        })
+        .collect();
+
+    let rerank_res = reranker.rerank(query, candidates, final_k).await;
+    let mut reranked_hits: Vec<SearchHit> = match rerank_res {
+        Ok(ordered) => {
+            let mut hit_map: HashMap<String, SearchHit> = fused_hits
+                .into_iter()
+                .map(|h| (h.chunk.id.0.clone(), h))
+                .collect();
+            let mut reordered: Vec<SearchHit> = Vec::new();
+            for item in ordered {
+                if let Some(mut hit) = hit_map.remove(&item.id.0) {
+                    hit.similarity = item.score;
+                    hit.rank = item.final_rank;
+                    reordered.push(hit);
+                }
+            }
+            reordered
+        }
+        Err(_) => {
+            degrades.push(RetrievalDegrade::RerankUnavailable);
+            fused_hits
+        }
+    };
+
+    // 5. Cut to max_chunks (1..=50)
+    let max_chunks = opts.max_chunks.clamp(1, 50) as usize;
+    reranked_hits.truncate(max_chunks);
+
+    // 6. Enrich titles for cut chunks
+    enrich_titles(doc_store, scope.tenant(), &mut reranked_hits).await;
+
+    // 7. THEN add neighbours (never cut by max_chunks)
+    if opts.neighbour_window > 0 && !reranked_hits.is_empty() {
+        let anchors: Vec<NeighbourAnchor> = reranked_hits
+            .iter()
+            .filter_map(|c| {
+                c.chunk.metadata.chunk_index.map(|idx| NeighbourAnchor {
+                    chunk_id: c.chunk.id.clone(),
+                    document_id: c.chunk.document_id.clone(),
+                    chunk_index: idx,
+                })
+            })
+            .collect();
+
+        if !anchors.is_empty() {
+            match chunk_store
+                .neighbours(scope, &anchors, opts.neighbour_window)
+                .await
+            {
+                Ok(mut neighbours) => {
+                    enrich_titles(doc_store, scope.tenant(), &mut neighbours).await;
+                    reranked_hits = weave_neighbours_with(
+                        &reranked_hits,
+                        &neighbours,
+                        opts.neighbour_window,
+                        |h| h.chunk.id.0.clone(),
+                        |h| h.chunk.document_id.0.clone(),
+                        |h| h.chunk.metadata.chunk_index.unwrap_or(0),
+                    );
+                }
+                Err(_) => {
+                    degrades.push(RetrievalDegrade::NeighboursPartial);
+                }
+            }
+        }
+    }
+
+    // 8. THEN append figures (never cut by max_chunks)
+    if opts.figure_limit > 0 && !reranked_hits.is_empty() {
+        let mut retrieved_doc_ids: Vec<DocumentId> = Vec::new();
+        let mut seen_docs: HashSet<DocumentId> = HashSet::new();
+        for c in &reranked_hits {
+            if seen_docs.insert(c.chunk.document_id.clone()) {
+                retrieved_doc_ids.push(c.chunk.document_id.clone());
+            }
+        }
+
+        let anchored_chunks: Vec<(DocumentId, u32)> = reranked_hits
+            .iter()
+            .filter_map(|c| {
+                c.chunk
+                    .metadata
+                    .chunk_index
+                    .map(|idx| (c.chunk.document_id.clone(), idx))
+            })
+            .collect();
+
+        let retrieved_text: String = reranked_hits
+            .iter()
+            .map(|c| c.chunk.content.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        match chunk_store
+            .figures(
+                scope,
+                query,
+                &retrieved_text,
+                &retrieved_doc_ids,
+                &anchored_chunks,
+                opts.figure_limit,
+            )
+            .await
+        {
+            Ok(mut figures) => {
+                enrich_titles(doc_store, scope.tenant(), &mut figures).await;
+                reranked_hits.extend(figures);
+            }
+            Err(_) => {
+                degrades.push(RetrievalDegrade::FiguresPartial);
+            }
+        }
+    }
+
+    // 9. Build context string and sources with kb-core
+    let cat_holder: Vec<String> = Vec::new();
+    let context_items: Vec<ContextItem<'_>> = reranked_hits
+        .iter()
+        .map(|hit| ContextItem {
+            document_id: Some(hit.chunk.document_id.0.as_str()),
+            document_title: &hit.chunk.document_title,
+            section: hit.chunk.metadata.section.as_deref(),
+            categories: &cat_holder,
+            asset_key: hit.chunk.metadata.asset_key.as_deref(),
+            page: hit.chunk.metadata.page,
+            chunk_type: Some(hit.chunk.chunk_type.as_storage()),
+            content: &hit.chunk.content,
+            contextual_prefix: hit.chunk.metadata.contextual_prefix.as_deref(),
+        })
+        .collect();
+
+    let (context, sources) = build_context_and_sources(&context_items);
+
+    Ok(RetrievalOutcome {
+        chunks: reranked_hits,
+        sources,
+        context,
+        degrades,
+    })
+}
