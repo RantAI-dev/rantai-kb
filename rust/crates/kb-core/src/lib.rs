@@ -4,18 +4,22 @@
 
 #![allow(clippy::module_name_repetitions)]
 
-mod chunk;
+pub mod chunk;
 mod context;
 mod fusion;
 mod page_map;
 mod policy;
 mod signals;
+mod weave;
 
 pub use chunk::{
     ChunkOptions, ChunkingStrategy, SmartChunk, SmartChunkMetadata, SmartChunkingOptions,
     chunk_document, prepare_chunk_for_embedding, smart_chunk, smart_chunk_document,
 };
-pub use context::{NumberedSource, SourceDedupKey, numbered_source_list, source_dedupe_key};
+pub use context::{
+    ContextItem, NumberedSource, SourceDedupKey, SourceEntry, build_context_and_sources,
+    numbered_source_list, source_dedupe_key,
+};
 pub use fusion::{
     IdRef, RrfItem, RrfOptions, RrfResult, reciprocal_rank_fusion, reciprocal_rank_fusion_with,
 };
@@ -24,3 +28,4 @@ pub use policy::{
     FigureMode, IngestPolicy, MimeRegistry, parse_figure_mode, resolve_ingest_policy,
 };
 pub use signals::{RouterOpts, has_columnar_lines, has_dense_currency, is_unpdf_sufficient};
+pub use weave::{WeaveItem, weave_neighbours, weave_neighbours_with};

@@ -45,6 +45,12 @@ impl ChunkType {
             Self::Figure => "figure",
         }
     }
+
+    /// Alias for `as_str`.
+    #[must_use]
+    pub fn as_storage(&self) -> &'static str {
+        self.as_str()
+    }
 }
 
 /// Metadata carried alongside a chunk at search time. Mirrors what the

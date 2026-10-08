@@ -41,7 +41,11 @@ impl<'a, T> RrfItem for IdRef<'a, T> {
 /// Reciprocal Rank Fusion driven by a per-item id extractor. Same algorithm
 /// as [`reciprocal_rank_fusion`], but takes a closure instead of relying on
 /// the `RrfItem` trait. Use this when fusing types from sibling crates.
-pub fn reciprocal_rank_fusion_with<T, L, I, F>(lists: I, opts: RrfOptions, id_of: F) -> Vec<RrfResult<T>>
+pub fn reciprocal_rank_fusion_with<T, L, I, F>(
+    lists: I,
+    opts: RrfOptions,
+    id_of: F,
+) -> Vec<RrfResult<T>>
 where
     T: Clone,
     L: IntoIterator<Item = T>,

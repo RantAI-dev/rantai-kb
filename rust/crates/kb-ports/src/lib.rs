@@ -14,8 +14,10 @@ mod types;
 
 pub use error::{EngineError, PortError, RetrievalDegrade};
 pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
-pub use scope::DocumentScope;
-pub use traits::{ChunkStore, DocumentFilter, DocumentStore, Embedder, NeighbourAnchor, Reranker, ScopeRequest};
+pub use scope::{DocumentScope, adapter};
+pub use traits::{
+    ChunkStore, DocumentFilter, DocumentStore, Embedder, NeighbourAnchor, Reranker, ScopeRequest,
+};
 pub use types::{
     AuthContext, Chunk, ChunkMetadata, ChunkType, DocumentMeta, KnowledgeBaseSummary,
     RerankCandidate, RerankResult, RerankScore, SearchHit,

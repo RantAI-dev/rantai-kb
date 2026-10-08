@@ -1,18 +1,15 @@
-//! Ports: store and inference traits.
-//!
-//! Every trait method takes structured arguments; no raw query strings cross a
-//! trait boundary. Implementations are responsible for translating them into
-//! SQL or SurrealQL and for binding every value (no string interpolation of
-//! caller-supplied data).
+//! Port definitions (driven traits). The engine and CLI interact with external
+//! systems solely through these interfaces.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::error::PortError;
-use crate::ids::{DocumentId, KnowledgeBaseId, TenantId};
+use crate::ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 use crate::scope::DocumentScope;
 use crate::types::{
-    ChunkMetadata, DocumentMeta, KnowledgeBaseSummary, RerankCandidate, RerankResult, SearchHit,
+    AuthContext, ChunkMetadata, DocumentMeta, KnowledgeBaseSummary, RerankCandidate, RerankResult,
+    SearchHit,
 };
 
 /// What the chunk store is allowed to look at. Currently the empty case is
@@ -34,8 +31,16 @@ pub struct ScopeRequest {
     pub filter: DocumentFilter,
 }
 
-/// Document metadata lookup. Lives behind the Postgres adapter. The engine
-/// depends on this; it never touches `DocumentStore` for raw query strings.
+/// Anchor for a neighbour lookup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeighbourAnchor {
+    pub chunk_id: ChunkId,
+    pub document_id: DocumentId,
+    pub chunk_index: u32,
+}
+
+/// Document-metadata and tenancy store (Postgres). Every read is tenant-
+/// filtered; every write preserves soft-delete (`deletedAt IS NULL`).
 #[async_trait]
 pub trait DocumentStore: Send + Sync {
     /// Build a [`DocumentScope`] for the given tenant + filter. This is the
@@ -48,6 +53,13 @@ pub trait DocumentStore: Send + Sync {
         scope: &DocumentScope,
         id: &DocumentId,
     ) -> Result<Option<DocumentMeta>, PortError>;
+
+    /// Look up metadata for multiple document ids (tenant-filtered, not soft-deleted).
+    async fn find_alive_meta_by_ids(
+        &self,
+        tenant: &TenantId,
+        document_ids: &[DocumentId],
+    ) -> Result<Vec<DocumentMeta>, PortError>;
 
     /// List documents visible to the tenant (optionally filtered). Used by
     /// `GET /v1/documents`.
@@ -72,9 +84,9 @@ pub trait DocumentStore: Send + Sync {
         tenant: &TenantId,
     ) -> Result<Vec<KnowledgeBaseSummary>, PortError>;
 
-    /// Look up the tenant for a presented API key. Returns `None` if the key
-    /// is unknown, revoked, or hashed differently in the response.
-    async fn resolve_api_key(&self, plaintext_key: &str) -> Result<Option<TenantId>, PortError>;
+    /// Look up the tenant and auth context for a presented API key. Returns `None`
+    /// if the key is unknown, revoked, or hashed differently.
+    async fn resolve_api_key(&self, plaintext_key: &str) -> Result<Option<AuthContext>, PortError>;
 }
 
 /// Chunk store: vector + BM25 + neighbours + figure co-retrieval over the
@@ -91,7 +103,7 @@ pub trait ChunkStore: Send + Sync {
         limit: u32,
     ) -> Result<Vec<SearchHit>, PortError>;
 
-    /// BM25 search by raw query string. Hits are returned in BM25 score order.
+    /// BM25 full-text search over `content`.
     async fn bm25_search(
         &self,
         scope: &DocumentScope,
@@ -99,60 +111,44 @@ pub trait ChunkStore: Send + Sync {
         limit: u32,
     ) -> Result<Vec<SearchHit>, PortError>;
 
-    /// Fetch up to `window` adjacent chunks per anchor (same document, by
-    /// `chunk_index`). Returns zero-score hits so the engine can keep the
-    /// anchor's rank priority while adding context.
+    /// Look up adjacent chunks within `window` offsets of each anchor chunk.
+    /// Results must be within the provided `scope`.
     async fn neighbours(
         &self,
+        scope: &DocumentScope,
         anchors: &[NeighbourAnchor],
         window: u32,
     ) -> Result<Vec<SearchHit>, PortError>;
 
-    /// Figure co-retrieval: pull in figures from `scope`'s documents whose
-    /// caption matches the query or already-retrieved text. The vision gate
-    /// is NOT applied at this layer (R1 scope).
+    /// Co-retrieve figures belonging to retrieved documents whose anchor or caption matches.
     async fn figures(
         &self,
         scope: &DocumentScope,
         query: &str,
         retrieved_text: &str,
+        retrieved_doc_ids: &[DocumentId],
+        anchored_chunks: &[(DocumentId, u32)],
         limit: u32,
     ) -> Result<Vec<SearchHit>, PortError>;
 }
 
-/// Anchor for a neighbour lookup.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NeighbourAnchor {
-    pub chunk_id: crate::ids::ChunkId,
-    pub document_id: DocumentId,
-    pub chunk_index: u32,
-}
-
-/// Embedder: turns text into vectors. The engine never embeds inline — it
-/// calls the port, hits a cache upstream, and hands the vector to the chunk
-/// store. R1 has no LRU; the embedding read path is best-effort cached inside
-/// `kb-inference` for repeated queries.
+/// Text embedder (dense vectors).
 #[async_trait]
 pub trait Embedder: Send + Sync {
-    /// Embed a single query. Concatenates any configured query prefix.
+    /// Embed a single query string for retrieval.
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>, PortError>;
 
-    /// Embed a batch of passages (storage). Concatenates any configured passage
-    /// prefix. Implementations may chunk internally and respect provider caps.
+    /// Embed a batch of document chunks during ingest.
     async fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, PortError>;
 
-    /// Vector dimensionality of the configured model. The engine asserts on
-    /// this when storing chunks (R3) but reads it here to confirm the chunk
-    /// store's expectation.
+    /// Expected dimensionality of vectors produced by this embedder.
     fn dimension(&self) -> u32;
 }
 
-/// Reranker: takes ranked candidates and returns a reordered list.
+/// Cross-encoder reranker. Scores (query, candidate) pairs.
 #[async_trait]
 pub trait Reranker: Send + Sync {
-    /// Rank the candidates against `query` and return the top `final_k`.
-    /// Returns them in final order. Missing entries from the backend are
-    /// back-filled with zero-score leftovers so the caller can still map by id.
+    /// Rerank candidates against query, returning top `final_k` results.
     async fn rerank(
         &self,
         query: &str,
