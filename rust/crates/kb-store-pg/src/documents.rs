@@ -16,6 +16,7 @@ pub fn row_to_doc_meta(row: &sqlx::postgres::PgRow) -> Result<DocumentMeta, sqlx
     let created_at: String = row.try_get("created_at")?;
     let updated_at: String = row.try_get("updated_at")?;
     let knowledge_base_ids: Vec<String> = row.try_get("knowledge_base_ids")?;
+    let metadata: Option<serde_json::Value> = row.try_get("metadata")?;
     Ok(DocumentMeta {
         id: DocumentId(id),
         title,
@@ -29,5 +30,6 @@ pub fn row_to_doc_meta(row: &sqlx::postgres::PgRow) -> Result<DocumentMeta, sqlx
         created_at,
         updated_at,
         knowledge_base_ids,
+        metadata,
     })
 }

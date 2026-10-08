@@ -281,6 +281,55 @@ async fn chunk_counts_for(
 }
 
 #[derive(Debug, Serialize)]
+pub struct FigureView {
+    pub asset_key: String,
+    pub page: u32,
+    pub caption: Option<String>,
+    pub kind: String,
+}
+
+/// Figures from `Document.metadata.figures`, same rules as TS readDocumentFigures:
+/// non-object entries are skipped, `assetKey` must be a non-empty string,
+/// `page` defaults to 0, `kind` comes from `type` and defaults to "figure".
+pub fn read_document_figures(metadata: Option<&serde_json::Value>) -> Vec<FigureView> {
+    let Some(figures) = metadata
+        .and_then(|m| m.get("figures"))
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Vec::new();
+    };
+    figures
+        .iter()
+        .filter_map(serde_json::Value::as_object)
+        .filter_map(|f| {
+            let asset_key = f
+                .get("assetKey")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if asset_key.is_empty() {
+                return None;
+            }
+            Some(FigureView {
+                asset_key: asset_key.to_string(),
+                page: f
+                    .get("page")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0) as u32,
+                caption: f
+                    .get("caption")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                kind: f
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("figure")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Serialize)]
 pub struct DocumentDetail {
     pub id: String,
     pub title: String,
@@ -294,6 +343,7 @@ pub struct DocumentDetail {
     pub updated_at: String,
     pub knowledge_base_ids: Vec<String>,
     pub chunk_count: u32,
+    pub figures: Vec<FigureView>,
     pub chunks: Vec<DocumentChunkView>,
 }
 
@@ -357,6 +407,7 @@ async fn get_document(
         updated_at: meta.updated_at,
         knowledge_base_ids: meta.knowledge_base_ids,
         chunk_count,
+        figures: read_document_figures(meta.metadata.as_ref()),
         chunks: chunk_views,
     }))
 }
@@ -405,4 +456,38 @@ fn parse_csv(s: &str) -> Vec<String> {
         .map(|p| p.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod figure_tests {
+    use super::read_document_figures;
+    use serde_json::json;
+
+    #[test]
+    fn missing_or_non_array_figures_is_empty() {
+        assert!(read_document_figures(None).is_empty());
+        assert!(read_document_figures(Some(&json!({}))).is_empty());
+        assert!(read_document_figures(Some(&json!({"figures": "x"}))).is_empty());
+    }
+
+    #[test]
+    fn drops_entries_without_asset_key_and_applies_defaults() {
+        let meta = json!({"figures": [
+            {"assetKey": "a.png", "page": 3, "caption": "Chart", "type": "chart"},
+            {"assetKey": "", "page": 1},
+            {"page": 2},
+            "not-an-object",
+            {"assetKey": "b.png"}
+        ]});
+        let figs = read_document_figures(Some(&meta));
+        assert_eq!(figs.len(), 2);
+        assert_eq!(figs[0].asset_key, "a.png");
+        assert_eq!(figs[0].page, 3);
+        assert_eq!(figs[0].caption.as_deref(), Some("Chart"));
+        assert_eq!(figs[0].kind, "chart");
+        assert_eq!(figs[1].asset_key, "b.png");
+        assert_eq!(figs[1].page, 0);
+        assert_eq!(figs[1].caption, None);
+        assert_eq!(figs[1].kind, "figure");
+    }
 }

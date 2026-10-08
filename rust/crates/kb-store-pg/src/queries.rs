@@ -5,6 +5,7 @@ pub const MAX_LIMIT: u32 = 200;
 pub const SELECT_BY_ID: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
+           d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
            COALESCE((SELECT array_agg(g2."knowledgeBaseId" ORDER BY g2."knowledgeBaseId")
@@ -17,6 +18,7 @@ pub const SELECT_BY_ID: &str = r#"
 pub const SELECT_ALIVE_BY_IDS: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
+           d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
            COALESCE((SELECT array_agg(g2."knowledgeBaseId" ORDER BY g2."knowledgeBaseId")
@@ -31,6 +33,7 @@ pub const SELECT_ALIVE_BY_IDS: &str = r#"
 pub const SELECT_DOCS_TENANT_ONLY: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
+           d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
            COALESCE((SELECT array_agg(g2."knowledgeBaseId" ORDER BY g2."knowledgeBaseId")
@@ -45,6 +48,7 @@ pub const SELECT_DOCS_TENANT_ONLY: &str = r#"
 pub const SELECT_DOCS_WITH_KB: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
+           d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
            COALESCE((SELECT array_agg(g2."knowledgeBaseId" ORDER BY g2."knowledgeBaseId")

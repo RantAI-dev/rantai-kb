@@ -123,6 +123,8 @@ pub struct DocumentMeta {
     pub updated_at: String,
     /// Knowledge bases this document belongs to (from DocumentGroup).
     pub knowledge_base_ids: Vec<String>,
+    /// Raw `Document.metadata` JSON; figures are read from it by the server.
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Summary of a knowledge base, as returned by the document store list path.
