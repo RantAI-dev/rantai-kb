@@ -1,4 +1,4 @@
-//! Typed error for the HTTP layer. Maps cleanly into `IntoResponse`.
+//! API error types and their HTTP mappings.
 
 use axum::Json;
 use axum::http::StatusCode;
@@ -6,21 +6,14 @@ use axum::response::{IntoResponse, Response};
 use kb_ports::{EngineError, PortError};
 use serde_json::{Value, json};
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum ApiError {
-    #[error("unauthorized")]
     Unauthorized,
-    #[error("forbidden: {0}")]
-    Forbidden(&'static str),
-    #[error("not found")]
+    Forbidden(String),
     NotFound,
-    #[error("bad request: {0}")]
     BadRequest(String),
-    #[error("upstream unavailable: {0}")]
     Unavailable(String),
-    #[error("upstream returned malformed data: {0}")]
     Malformed(String),
-    #[error("internal error: {0}")]
     Internal(String),
 }
 
@@ -28,9 +21,10 @@ impl From<EngineError> for ApiError {
     fn from(e: EngineError) -> Self {
         match e {
             EngineError::Unauthorized => Self::Unauthorized,
-            EngineError::Forbidden(scope) => Self::Forbidden(scope),
-            EngineError::NotFound => Self::NotFound,
+            EngineError::Forbidden(scope) => Self::Forbidden(scope.to_string()),
+            EngineError::NotFound(_) => Self::NotFound,
             EngineError::RetrievalFailed(msg) => Self::Unavailable(msg),
+            EngineError::ScopeViolation(_) => Self::Forbidden("kb:scope".to_string()),
         }
     }
 }
@@ -41,6 +35,9 @@ impl From<PortError> for ApiError {
             PortError::Invalid(msg) => Self::BadRequest(msg),
             PortError::Unavailable(msg) => Self::Unavailable(msg),
             PortError::Malformed(msg) => Self::Malformed(msg),
+            PortError::Storage(msg) => Self::Unavailable(msg),
+            PortError::InvalidArgument(msg) => Self::BadRequest(msg),
+            PortError::Timeout => Self::Unavailable("operation timed out".to_string()),
         }
     }
 }
@@ -57,35 +54,31 @@ fn render_error(status: StatusCode, error: &str, detail: Option<&str>) -> Respon
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        match &self {
-            ApiError::Unauthorized => render_error(
-                StatusCode::UNAUTHORIZED,
-                "Unauthorized — supply a key via Authorization: Bearer or X-Api-Key",
-                None,
-            ),
-            ApiError::Forbidden(scope) => render_error(
-                StatusCode::FORBIDDEN,
-                &format!("API key lacks scope {scope}"),
-                None,
-            ),
-            ApiError::NotFound => render_error(StatusCode::NOT_FOUND, "Not found", None),
-            ApiError::BadRequest(msg) => {
-                render_error(StatusCode::BAD_REQUEST, "Bad request", Some(msg.as_str()))
+        match self {
+            Self::Unauthorized => {
+                render_error(StatusCode::UNAUTHORIZED, "invalid or missing api key", None)
             }
-            ApiError::Unavailable(msg) => render_error(
-                StatusCode::BAD_GATEWAY,
-                "Upstream unavailable",
-                Some(msg.as_str()),
+            Self::Forbidden(scope) => render_error(
+                StatusCode::FORBIDDEN,
+                "insufficient permissions",
+                Some(&format!("missing scope: {scope}")),
             ),
-            ApiError::Malformed(msg) => render_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Upstream returned malformed data",
-                Some(msg.as_str()),
+            Self::NotFound => render_error(StatusCode::NOT_FOUND, "not found", None),
+            Self::BadRequest(msg) => {
+                render_error(StatusCode::BAD_REQUEST, "bad request", Some(&msg))
+            }
+            Self::Unavailable(msg) => render_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service unavailable",
+                Some(&msg),
             ),
-            ApiError::Internal(msg) => render_error(
+            Self::Malformed(msg) => {
+                render_error(StatusCode::BAD_REQUEST, "malformed request", Some(&msg))
+            }
+            Self::Internal(msg) => render_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal error",
-                Some(msg.as_str()),
+                "internal server error",
+                Some(&msg),
             ),
         }
     }

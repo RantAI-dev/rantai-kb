@@ -5,7 +5,7 @@ use std::sync::Arc;
 use kb_engine::{Engine, EngineInputs, EngineSettings, NoopExpander, QueryExpander};
 use kb_inference::EmbedderSettings;
 use kb_inference::ExpansionSettings;
-use kb_ports::{DocumentStore, Embedder};
+use kb_ports::{DocumentStore, Embedder, PortError};
 
 use crate::config::{EmbedderConfig, RerankerConfig};
 
@@ -102,7 +102,6 @@ fn embedder_settings_from(c: EmbedderConfig) -> EmbedderSettings {
 
 fn build_reranker(cfg: &RerankerConfig) -> anyhow::Result<std::sync::Arc<dyn kb_ports::Reranker>> {
     use kb_inference::{CohereReranker, TeiReranker, VllmReranker};
-    use kb_ports::Reranker;
     match cfg {
         RerankerConfig::Disabled => Ok(Arc::new(kb_inference::NoopReranker)),
         RerankerConfig::Tei { base_url, model } => {
@@ -125,8 +124,6 @@ fn build_reranker(cfg: &RerankerConfig) -> anyhow::Result<std::sync::Arc<dyn kb_
     }
 }
 
-// ── QueryExpander adapter ────────────────────────────────────────────────
-//
 // `kb-inference` has its own `QueryExpander`. We bridge it to the engine's
 // trait object so the engine stays dep-free of `kb-inference`.
 
@@ -148,8 +145,8 @@ mod expander_bridge {
 
     #[async_trait]
     impl QueryExpander for QueryExpanderBridge {
-        async fn expand(&self, query: &str) -> Vec<String> {
-            self.inner.expand(query).await
+        async fn expand(&self, query: &str) -> Result<Vec<String>, PortError> {
+            Ok(self.inner.expand(query).await)
         }
     }
 }

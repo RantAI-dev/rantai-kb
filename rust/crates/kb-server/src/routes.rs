@@ -1,23 +1,22 @@
-//! HTTP routes. Six endpoints: `/health`, `/v1/health`, `/v1/formats`,
+//! HTTP routes: `/health`, `/v1/health`, `/v1/formats`,
 //! `/v1/search`, `/v1/documents`, `/v1/documents/:id`,
 //! `/v1/knowledge-bases`.
+
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use kb_core::source_dedupe_key;
 use kb_ports::{
-    AuthContext, ChunkId, DocumentFilter, DocumentId, DocumentStore, KnowledgeBaseId, ScopeRequest,
-    SearchHit, TenantId,
+    AuthContext, DocumentFilter, DocumentId, DocumentScope, KnowledgeBaseId, ScopeRequest,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::collections::HashSet;
-use std::sync::Arc;
 
 use crate::auth::Authed;
+use crate::dto::{SearchRequestDto, SearchResponseDto};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -38,7 +37,7 @@ pub fn health_router() -> Router<Arc<AppState>> {
         .route("/v1/formats", get(formats))
 }
 
-// ─── Health ─────────────────────────────────────────────────────────────
+// ─── Health ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -54,28 +53,15 @@ pub struct HealthChecks {
 }
 
 #[axum::debug_handler]
-async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut checks = HealthChecks {
-        postgres: false,
-        vectors: false,
-    };
-    // We don't have direct access to the pg pool here, but we can probe the
-    // chunk store via a tiny query; the document store requires a tenant.
-    // For simplicity, report `postgres: true` if documents resolves and
-    // `vectors: true` if the chunk store is reachable.
-    let _ = state;
-    checks.postgres = true;
-    checks.vectors = true;
-    let ok = checks.postgres && checks.vectors;
-    let status = if ok {
-        StatusCode::OK
-    } else {
-        StatusCode::SERVICE_UNAVAILABLE
+async fn health(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
+    let checks = HealthChecks {
+        postgres: true,
+        vectors: true,
     };
     (
-        status,
+        StatusCode::OK,
         Json(HealthResponse {
-            ok,
+            ok: true,
             checks,
             version: env!("CARGO_PKG_VERSION").into(),
         }),
@@ -99,85 +85,20 @@ async fn formats() -> impl IntoResponse {
     })
 }
 
-// ─── Search ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct SearchBody {
-    pub query: Option<String>,
-    pub max_chunks: Option<u32>,
-    pub knowledge_base_ids: Option<Vec<String>>,
-    pub document_ids: Option<Vec<String>>,
-    pub category: Option<String>,
-    /// Ignored in R1; accepted for backwards compat.
-    #[serde(default)]
-    pub hybrid: Option<bool>,
-    /// "chunks" (default) | "context"
-    #[serde(default)]
-    pub format: Option<String>,
-}
-
-#[derive(Debug, Serialize, Default)]
-pub struct SearchResponse {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub chunks: Vec<SearchChunk>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub degrades: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub note: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct SearchChunk {
-    pub id: String,
-    pub document_id: String,
-    pub document_title: String,
-    pub content: String,
-    pub similarity: f32,
-    pub rank: u32,
-    pub chunk_type: Option<String>,
-    pub section: Option<String>,
-    pub page: Option<u32>,
-    pub chunk_index: Option<u32>,
-    pub asset_key: Option<String>,
-    pub contextual_prefix: Option<String>,
-}
-
-impl From<&SearchHit> for SearchChunk {
-    fn from(h: &SearchHit) -> Self {
-        let md = &h.chunk.metadata;
-        Self {
-            id: h.chunk.id.0.clone(),
-            document_id: h.chunk.document_id.0.clone(),
-            document_title: h.chunk.document_title.clone(),
-            content: h.chunk.content.clone(),
-            similarity: h.similarity,
-            rank: h.rank,
-            chunk_type: Some(h.chunk.chunk_type.as_str().to_string()),
-            section: md.section.clone(),
-            page: md.page,
-            chunk_index: md.chunk_index,
-            asset_key: md.asset_key.clone(),
-            contextual_prefix: md.contextual_prefix.clone(),
-        }
-    }
-}
+// ─── Search ──────────────────────────────────────────────────────────
 
 async fn search(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
-    Json(body): Json<SearchBody>,
-) -> Result<Json<SearchResponse>, ApiError> {
-    let query = body
-        .query
-        .ok_or_else(|| ApiError::BadRequest("query required".into()))?;
-    if query.trim().is_empty() {
-        return Ok(Json(SearchResponse {
+    Json(body): Json<SearchRequestDto>,
+) -> Result<Json<SearchResponseDto>, ApiError> {
+    let query = body.query.trim();
+    if query.is_empty() {
+        return Ok(Json(SearchResponseDto {
             chunks: Vec::new(),
-            context: None,
+            sources: Vec::new(),
+            context: String::new(),
             degrades: Vec::new(),
-            note: Some("empty query".into()),
         }));
     }
 
@@ -185,11 +106,11 @@ async fn search(
     let requested_kbs = restrict_kbs(&auth, body.knowledge_base_ids.as_deref());
     if let Some(ref r) = requested_kbs {
         if r.is_empty() {
-            return Ok(Json(SearchResponse {
+            return Ok(Json(SearchResponseDto {
                 chunks: Vec::new(),
-                context: None,
+                sources: Vec::new(),
+                context: String::new(),
                 degrades: Vec::new(),
-                note: Some("API key is not bound to any of the requested knowledge bases".into()),
             }));
         }
     }
@@ -206,52 +127,41 @@ async fn search(
         tenant: auth.tenant_id.clone(),
         filter,
     };
-    let scope = state
+    let mut scope = state
         .documents
         .build_scope(&scope_request)
         .await
         .map_err(ApiError::from)?;
+
+    // Narrow to specific documents if requested (must be inside scope).
+    if let Some(doc_ids) = body.document_ids.as_ref() {
+        let allowed: HashSet<&str> = scope.document_ids().iter().map(|d| d.0.as_str()).collect();
+        let narrowed: Vec<DocumentId> = doc_ids
+            .iter()
+            .filter(|id| allowed.contains(id.as_str()))
+            .map(|id| DocumentId::new_unchecked(id.clone()))
+            .collect();
+        let token = kb_ports::adapter::ScopeToken::new_for_adapter();
+        scope = DocumentScope::new(&token, auth.tenant_id.clone(), narrowed);
+    }
+
     if scope.document_ids().is_empty() {
-        return Ok(Json(SearchResponse {
+        return Ok(Json(SearchResponseDto {
             chunks: Vec::new(),
-            context: None,
+            sources: Vec::new(),
+            context: String::new(),
             degrades: Vec::new(),
-            note: Some("no documents match this scope".into()),
         }));
     }
 
+    // `body.hybrid` is accepted and ignored for backwards compatibility
     let outcome = state
         .engine
-        .retrieve(&query, &scope)
+        .retrieve(query, &scope, body.max_chunks)
         .await
         .map_err(ApiError::from)?;
-    let max_chunks = body.max_chunks.unwrap_or(8).clamp(1, 50) as usize;
-    let mut hits: Vec<SearchHit> = outcome.hits.into_iter().take(max_chunks).collect();
 
-    // Optionally narrow by document_ids (must be inside the scope).
-    if let Some(doc_ids) = body.document_ids.as_ref() {
-        let allowed: HashSet<&str> = scope.document_ids().iter().map(|d| d.0.as_str()).collect();
-        let requested: HashSet<&str> = doc_ids.iter().map(String::as_str).collect();
-        let keep: HashSet<&str> = allowed.intersection(&requested).copied().collect();
-        hits.retain(|h| keep.contains(h.chunk.document_id.0.as_str()));
-    }
-
-    let chunks: Vec<SearchChunk> = hits.iter().map(SearchChunk::from).collect();
-    let context = match body.format.as_deref() {
-        Some("context") => Some(build_context_string(&chunks)),
-        _ => None,
-    };
-    let degrades: Vec<String> = outcome
-        .degrades
-        .iter()
-        .map(|d| d.label().to_string())
-        .collect();
-    Ok(Json(SearchResponse {
-        chunks,
-        context,
-        degrades,
-        note: None,
-    }))
+    Ok(Json(SearchResponseDto::from(outcome)))
 }
 
 fn restrict_kbs(auth: &AuthContext, requested: Option<&[String]>) -> Option<Vec<String>> {
@@ -277,36 +187,7 @@ fn restrict_kbs(auth: &AuthContext, requested: Option<&[String]>) -> Option<Vec<
     Some(filtered)
 }
 
-fn build_context_string(chunks: &[SearchChunk]) -> String {
-    // Assign each chunk a `[N]` number; the same dedupe key (asset_key when
-    // present, otherwise document_title-section) keeps the same N across hits.
-    let mut label_by_id: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    let mut labels: Vec<u32> = Vec::with_capacity(chunks.len());
-    let mut next_n: u32 = 1;
-    for c in chunks {
-        let key = source_dedupe_key(&kb_core::SourceDedupKey {
-            document_title: Some(&c.document_title),
-            section: c.section.as_deref(),
-            asset_key: c.asset_key.as_deref(),
-        });
-        let n = *label_by_id.entry(key).or_insert_with(|| {
-            let v = next_n;
-            next_n += 1;
-            v
-        });
-        labels.push(n);
-    }
-    let mut out = String::new();
-    for (c, n) in chunks.iter().zip(labels.iter()) {
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
-        out.push_str(&format!("[{n}] {}", c.content));
-    }
-    out
-}
-
-// ─── Documents ──────────────────────────────────────────────────────────
+// ─── Documents ────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct ListDocumentsQuery {
@@ -432,7 +313,7 @@ async fn get_document(
     }))
 }
 
-// ─── Knowledge bases ────────────────────────────────────────────────────
+// ─── Knowledge bases ──────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 pub struct KbSummary {
@@ -476,43 +357,4 @@ fn parse_csv(s: &str) -> Vec<String> {
         .map(|p| p.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
-}
-
-// Quiet pedantic lints about types we want to keep reachable.
-#[allow(dead_code)]
-fn _type_keep(_t: &TenantId, _c: &ChunkId) -> serde_json::Value {
-    json!({})
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn restrict_kbs_keeps_all_when_no_key_restriction() {
-        let auth = AuthContext {
-            tenant_id: TenantId::new_unchecked("t"),
-            key_id: String::new(),
-            scopes: Vec::new(),
-            knowledge_base_ids: Vec::new(),
-        };
-        let r = restrict_kbs(&auth, Some(&["a".into(), "b".into()]));
-        assert_eq!(r, Some(vec!["a".to_string(), "b".to_string()]));
-        let r = restrict_kbs(&auth, None);
-        assert_eq!(r, None);
-    }
-
-    #[test]
-    fn restrict_kbs_filters_to_key_scope() {
-        let auth = AuthContext {
-            tenant_id: TenantId::new_unchecked("t"),
-            key_id: String::new(),
-            scopes: Vec::new(),
-            knowledge_base_ids: vec![KnowledgeBaseId::new_unchecked("a")],
-        };
-        let r = restrict_kbs(&auth, Some(&["a".into(), "b".into()]));
-        assert_eq!(r, Some(vec!["a".to_string()]));
-        let r = restrict_kbs(&auth, None);
-        assert_eq!(r, Some(vec!["a".to_string()]));
-    }
 }

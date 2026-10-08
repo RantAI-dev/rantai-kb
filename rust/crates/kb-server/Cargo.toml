@@ -32,4 +32,5 @@ anyhow = { workspace = true }
 
 [dev-dependencies]
 kb-ports = { path = "../kb-ports" }
+kb-engine = { path = "../kb-engine", features = ["test-utils"] }
 tokio = { workspace = true }
