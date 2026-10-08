@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 default = []
-test-utils = []
+test-utils = ["kb-ports/scope-adapter"]
 
 [dependencies]
 kb-ports = { path = "../kb-ports" }
@@ -21,4 +21,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
+futures = { workspace = true }
 tracing = { workspace = true }
+
+
+[dev-dependencies]
+# Test builds of kb-engine need the scope adapter token for its fakes.
+kb-ports = { path = "../kb-ports", features = ["scope-adapter"] }

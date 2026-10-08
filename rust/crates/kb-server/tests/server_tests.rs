@@ -25,8 +25,10 @@ fn setup_test_app() -> (axum::Router, FakeDocumentStore, FakeChunkStore) {
         max_chunks: 10,
         min_similarity: 0.30,
         neighbour_window: 1,
-        figure_limit: 4,
+        figure_limit: 3,
         expansion_enabled: false,
+        expansion_paraphrases: 3,
+        hybrid_bm25_enabled: true,
     };
 
     let state = AppState::from_arcs(

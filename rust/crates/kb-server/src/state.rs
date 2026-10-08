@@ -146,6 +146,9 @@ mod expander_bridge {
     #[async_trait]
     impl QueryExpander for QueryExpanderBridge {
         async fn expand(&self, query: &str) -> Result<Vec<String>, PortError> {
+            // `kb-inference` returns `[original]` on every failure and never
+            // errors. Its contract is the same as `expandQuery` in
+            // src/lib/rag/query-expansion.ts.
             Ok(self.inner.expand(query).await)
         }
     }

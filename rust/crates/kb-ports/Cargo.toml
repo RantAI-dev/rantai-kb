@@ -14,3 +14,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
+
+[features]
+# Enabled only by DocumentStore adapters and engine test fakes. See src/scope.rs.
+scope-adapter = []

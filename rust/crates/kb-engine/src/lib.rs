@@ -30,31 +30,29 @@ pub use retrieval::{RetrievalOptions, RetrievalOutcome, enrich_titles, execute_p
 /// Tunable engine knobs.
 #[derive(Debug, Clone)]
 pub struct EngineSettings {
+    /// Candidates fetched per arm before fusion (`KB_RERANK_INITIAL_K`).
     pub candidate_pool_size: u32,
+    /// Chunks kept by the reranker (`KB_RERANK_FINAL_K`).
     pub rerank_final_k: u32,
+    /// Default chunk cap when the request has none (`KB_DEFAULT_MAX_CHUNKS`).
     pub max_chunks: u32,
+    /// Vector-only hits below this similarity are dropped.
     pub min_similarity: f32,
+    /// Adjacent chunks pulled around each hit (`KB_NEIGHBOR_WINDOW`).
     pub neighbour_window: u32,
+    /// Figures kept per answer (`KB_FIGURE_MAX_PER_ANSWER`).
     pub figure_limit: u32,
+    /// Query expansion on/off (`KB_QUERY_EXPANSION_ENABLED`).
     pub expansion_enabled: bool,
+    /// Paraphrases requested (`KB_QUERY_EXPANSION_PARAPHRASES`).
+    pub expansion_paraphrases: u32,
+    /// BM25 arm on/off (`KB_HYBRID_BM25_ENABLED`). When off the engine runs
+    /// the vector arm alone and does not record a degrade.
+    pub hybrid_bm25_enabled: bool,
 }
 
-impl Default for EngineSettings {
-    fn default() -> Self {
-        Self {
-            candidate_pool_size: 40,
-            rerank_final_k: 20,
-            max_chunks: 10,
-            min_similarity: 0.30,
-            neighbour_window: 2,
-            figure_limit: 4,
-            expansion_enabled: false,
-        }
-    }
-}
-
-/// A query expander the server can plug in without forcing `kb-engine` to
-/// depend on `kb-inference`.
+/// Query expander port. The engine calls it only when expansion is enabled.
+/// Its implementation lives in `kb-inference`.
 #[async_trait]
 pub trait QueryExpander: Send + Sync {
     async fn expand(&self, query: &str) -> Result<Vec<String>, PortError>;
@@ -140,6 +138,9 @@ impl Engine {
             rerank_final_k: self.settings.rerank_final_k,
             neighbour_window: self.settings.neighbour_window,
             figure_limit: self.settings.figure_limit,
+            expansion_enabled: self.settings.expansion_enabled,
+            expansion_paraphrases: self.settings.expansion_paraphrases,
+            hybrid_bm25_enabled: self.settings.hybrid_bm25_enabled,
         };
 
         execute_pipeline(
@@ -147,6 +148,7 @@ impl Engine {
             &self.inputs.chunk_store,
             &self.inputs.embedder,
             &self.inputs.reranker,
+            &self.inputs.query_expander,
             scope,
             trimmed,
             &opts,

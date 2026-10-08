@@ -196,6 +196,11 @@ pub fn build_hit(row: ChunkRow, rank: u32, score: f32) -> SearchHit {
     let document_id = DocumentId::new_unchecked(row.document_id);
     let document_title = String::new();
     let mut metadata = meta;
+    // The row column is authoritative: neighbour lookup keys on it, so it
+    // overrides the metadata `chunkIndex`.
+    if let Ok(idx) = u32::try_from(row.chunk_index) {
+        metadata.chunk_index = Some(idx);
+    }
     if metadata.contextual_prefix.is_none() {
         metadata.contextual_prefix = row.contextual_prefix;
     }

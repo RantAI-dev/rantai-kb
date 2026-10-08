@@ -10,9 +10,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use kb_ports::{
-    AuthContext, DocumentFilter, DocumentId, DocumentScope, KnowledgeBaseId, ScopeRequest,
-};
+use kb_ports::{AuthContext, DocumentFilter, DocumentId, KnowledgeBaseId, ScopeRequest};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::Authed;
@@ -133,16 +131,14 @@ async fn search(
         .await
         .map_err(ApiError::from)?;
 
-    // Narrow to specific documents if requested (must be inside scope).
+    // Narrow to specific documents if requested. `narrowed_to` can only keep
+    // ids already visible in the scope, so the request cannot widen it.
     if let Some(doc_ids) = body.document_ids.as_ref() {
-        let allowed: HashSet<&str> = scope.document_ids().iter().map(|d| d.0.as_str()).collect();
-        let narrowed: Vec<DocumentId> = doc_ids
+        let requested: Vec<DocumentId> = doc_ids
             .iter()
-            .filter(|id| allowed.contains(id.as_str()))
             .map(|id| DocumentId::new_unchecked(id.clone()))
             .collect();
-        let token = kb_ports::adapter::ScopeToken::new_for_adapter();
-        scope = DocumentScope::new(&token, auth.tenant_id.clone(), narrowed);
+        scope = scope.narrowed_to(&requested);
     }
 
     if scope.document_ids().is_empty() {

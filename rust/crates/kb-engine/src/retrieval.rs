@@ -13,6 +13,8 @@ use kb_ports::{
     RerankCandidate, Reranker, RetrievalDegrade, SearchHit, TenantId,
 };
 
+use crate::QueryExpander;
+
 /// Parameters for one retrieval execution.
 #[derive(Debug, Clone)]
 pub struct RetrievalOptions {
@@ -22,17 +24,26 @@ pub struct RetrievalOptions {
     pub rerank_final_k: u32,
     pub neighbour_window: u32,
     pub figure_limit: u32,
+    /// Whether to ask the expander for paraphrases.
+    pub expansion_enabled: bool,
+    /// Paraphrases kept besides the original query.
+    pub expansion_paraphrases: u32,
+    /// Run the BM25 arm.
+    pub hybrid_bm25_enabled: bool,
 }
 
 impl Default for RetrievalOptions {
     fn default() -> Self {
         Self {
-            max_chunks: 10,
+            max_chunks: 8,
             min_similarity: 0.30,
-            candidate_pool_size: 40,
-            rerank_final_k: 20,
-            neighbour_window: 2,
-            figure_limit: 4,
+            candidate_pool_size: 20,
+            rerank_final_k: 5,
+            neighbour_window: 1,
+            figure_limit: 3,
+            expansion_enabled: false,
+            expansion_paraphrases: 3,
+            hybrid_bm25_enabled: true,
         }
     }
 }
@@ -82,6 +93,7 @@ pub async fn execute_pipeline(
     chunk_store: &Arc<dyn ChunkStore>,
     embedder: &Arc<dyn Embedder>,
     reranker: &Arc<dyn Reranker>,
+    expander: &Arc<dyn QueryExpander>,
     scope: &DocumentScope,
     query: &str,
     opts: &RetrievalOptions,
@@ -98,30 +110,74 @@ pub async fn execute_pipeline(
     let mut degrades: Vec<RetrievalDegrade> = Vec::new();
     let pool_size = opts.candidate_pool_size.clamp(1, 100);
 
-    // 1. Parallel vector & BM25 arms
-    let embed_store = Arc::clone(chunk_store);
-    let embed_scope = scope.clone();
-    let embedder_ref = Arc::clone(embedder);
-    let q_vec = query.to_string();
-
-    let vector_future = async move {
-        let vec = embedder_ref
-            .embed_query(&q_vec)
-            .await
-            .map_err(|e| format!("embed query: {e}"))?;
-        embed_store
-            .vector_search(&embed_scope, &vec, pool_size)
-            .await
-            .map_err(|e| format!("vector search: {e}"))
+    // 1. Query expansion. The original query is always first. A failed
+    //    expander records a degrade and the original query is used alone.
+    let variants: Vec<String> = if opts.expansion_enabled {
+        match expander.expand(query).await {
+            Ok(mut v) => {
+                if !v.iter().any(|q| q == query) {
+                    v.insert(0, query.to_string());
+                }
+                v.truncate(1 + opts.expansion_paraphrases as usize);
+                v
+            }
+            Err(_) => {
+                degrades.push(RetrievalDegrade::ExpansionUnavailable);
+                vec![query.to_string()]
+            }
+        }
+    } else {
+        vec![query.to_string()]
     };
 
-    let bm25_store = Arc::clone(chunk_store);
-    let bm25_scope = scope.clone();
-    let q_bm25 = query.to_string();
+    // 2. Vector arm (one search per variant, in parallel, unioned by best score)
+    //    and BM25 arm (original query only), run concurrently.
+    let vector_future = async {
+        let embeds = variants.iter().map(|q| embedder.embed_query(q));
+        let vectors = futures::future::join_all(embeds).await;
+        // Own the vectors first: the search futures borrow them, so they must
+        // outlive the futures.
+        let mut query_vectors: Vec<Vec<f32>> = Vec::with_capacity(vectors.len());
+        for v in vectors {
+            query_vectors.push(v.map_err(|e| format!("embed query: {e}"))?);
+        }
+        let searches: Vec<_> = query_vectors
+            .iter()
+            .map(|v| chunk_store.vector_search(scope, v, pool_size))
+            .collect();
+        let lists = futures::future::join_all(searches).await;
+        let mut union: HashMap<String, SearchHit> = HashMap::new();
+        for list in lists {
+            let list = list.map_err(|e| format!("vector search: {e}"))?;
+            for hit in list {
+                let keep_new = union
+                    .get(&hit.chunk.id.0)
+                    .is_none_or(|prev| prev.similarity < hit.similarity);
+                if keep_new {
+                    union.insert(hit.chunk.id.0.clone(), hit);
+                }
+            }
+        }
+        let mut merged: Vec<SearchHit> = union.into_values().collect();
+        merged.sort_by(|a, b| {
+            b.similarity
+                .partial_cmp(&a.similarity)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.chunk.id.0.cmp(&b.chunk.id.0))
+        });
+        merged.truncate(pool_size as usize);
+        for (rank, hit) in merged.iter_mut().enumerate() {
+            hit.rank = rank as u32;
+        }
+        Ok::<Vec<SearchHit>, String>(merged)
+    };
 
-    let bm25_future = async move {
-        bm25_store
-            .bm25_search(&bm25_scope, &q_bm25, pool_size)
+    let bm25_future = async {
+        if !opts.hybrid_bm25_enabled {
+            return Ok(Vec::new());
+        }
+        chunk_store
+            .bm25_search(scope, query, pool_size)
             .await
             .map_err(|e| format!("bm25 search: {e}"))
     };

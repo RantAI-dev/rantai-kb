@@ -10,10 +10,7 @@ mod pipeline_tests {
         make_fake_scope,
     };
     use crate::retrieval::{RetrievalOptions, execute_pipeline};
-    use kb_ports::{
-        ChunkId, ChunkMetadata, ChunkType, DocumentId, DocumentMeta, EngineError, RetrievalDegrade,
-        SearchHit, TenantId,
-    };
+    use kb_ports::{ChunkType, DocumentId, EngineError, RetrievalDegrade, TenantId};
 
     fn setup() -> (
         Arc<FakeDocumentStore>,
@@ -27,6 +24,10 @@ mod pipeline_tests {
             Arc::new(FakeEmbedder::default()),
             Arc::new(FakeReranker::default()),
         )
+    }
+
+    fn noop_expander() -> Arc<dyn crate::QueryExpander> {
+        Arc::new(crate::NoopExpander)
     }
 
     #[tokio::test]
@@ -58,6 +59,7 @@ mod pipeline_tests {
             &(chunk_store as Arc<_>),
             &(embedder as Arc<_>),
             &(reranker as Arc<_>),
+            &noop_expander(),
             &scope,
             "query",
             &opts,
@@ -91,6 +93,7 @@ mod pipeline_tests {
             &(chunk_store as Arc<_>),
             &(embedder as Arc<_>),
             &(reranker as Arc<_>),
+            &noop_expander(),
             &scope,
             "query",
             &opts,
@@ -124,6 +127,7 @@ mod pipeline_tests {
             &(chunk_store as Arc<_>),
             &(embedder as Arc<_>),
             &(reranker as Arc<_>),
+            &noop_expander(),
             &scope,
             "query",
             &opts,
@@ -150,6 +154,7 @@ mod pipeline_tests {
             &(chunk_store as Arc<_>),
             &(embedder as Arc<_>),
             &(reranker as Arc<_>),
+            &noop_expander(),
             &scope,
             "query",
             &opts,
@@ -189,6 +194,7 @@ mod pipeline_tests {
             &(chunk_store as Arc<_>),
             &(embedder as Arc<_>),
             &(reranker as Arc<_>),
+            &noop_expander(),
             &scope,
             "query",
             &opts,
@@ -220,6 +226,7 @@ mod pipeline_tests {
             &(chunk_store as Arc<_>),
             &(embedder as Arc<_>),
             &(reranker as Arc<_>),
+            &noop_expander(),
             &scope,
             "query",
             &opts,
@@ -278,6 +285,7 @@ mod pipeline_tests {
             &(chunk_store as Arc<_>),
             &(embedder as Arc<_>),
             &(reranker as Arc<_>),
+            &noop_expander(),
             &scope,
             "query",
             &opts,
@@ -287,5 +295,179 @@ mod pipeline_tests {
 
         // 2 base hits + 1 neighbour + 1 figure = 4 total chunks!
         assert_eq!(outcome.chunks.len(), 4);
+    }
+
+    /// Expander that returns fixed paraphrases, or fails.
+    struct FixedExpander {
+        paraphrases: Vec<String>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::QueryExpander for FixedExpander {
+        async fn expand(&self, query: &str) -> Result<Vec<String>, kb_ports::PortError> {
+            if self.fail {
+                return Err(kb_ports::PortError::Unavailable(
+                    "forced expander failure".into(),
+                ));
+            }
+            let mut out = vec![query.to_string()];
+            out.extend(self.paraphrases.iter().cloned());
+            Ok(out)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_8_expansion_unions_variant_hits_and_bm25_uses_original_only() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let tenant = TenantId("t1".into());
+        let scope = make_fake_scope(tenant.clone(), vec![DocumentId("d1".into())]);
+
+        // The fake vector store returns the same list for every variant, so the
+        // union must keep one entry per chunk id with its best similarity.
+        chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+            "c_v",
+            "d1",
+            "Title 1",
+            "Vector hit",
+            1,
+            0.9,
+        ));
+        chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+            "c_v",
+            "d1",
+            "Title 1",
+            "Vector hit",
+            1,
+            0.5,
+        ));
+
+        let expander: Arc<dyn crate::QueryExpander> = Arc::new(FixedExpander {
+            paraphrases: vec!["para one".into(), "para two".into()],
+            fail: false,
+        });
+        let mut opts = RetrievalOptions::default();
+        opts.expansion_enabled = true;
+        opts.expansion_paraphrases = 2;
+        opts.neighbour_window = 0;
+        opts.figure_limit = 0;
+
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &expander,
+            &scope,
+            "query",
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        // One chunk id after union, no degrade.
+        assert_eq!(outcome.chunks.len(), 1);
+        assert_eq!(outcome.chunks[0].chunk.id.0, "c_v");
+        assert!(outcome.degrades.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_9_expander_failure_records_degrade_and_continues() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let tenant = TenantId("t1".into());
+        let scope = make_fake_scope(tenant.clone(), vec![DocumentId("d1".into())]);
+
+        chunk_store
+            .bm25_hits
+            .write()
+            .unwrap()
+            .push(make_fake_hit("c_b", "d1", "Title 1", "BM25 hit", 1, 0.8));
+
+        let expander: Arc<dyn crate::QueryExpander> = Arc::new(FixedExpander {
+            paraphrases: Vec::new(),
+            fail: true,
+        });
+        let mut opts = RetrievalOptions::default();
+        opts.expansion_enabled = true;
+        opts.neighbour_window = 0;
+        opts.figure_limit = 0;
+
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &expander,
+            &scope,
+            "query",
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.chunks.len(), 1);
+        assert_eq!(
+            outcome.degrades,
+            vec![RetrievalDegrade::ExpansionUnavailable]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_10_scope_excludes_other_tenants_documents() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let tenant_a = TenantId("tenant-a".into());
+        // Tenant A may see only d_a. The store also holds a hit for tenant B's
+        // document d_b, which must never leave the scope filter.
+        let scope = make_fake_scope(tenant_a.clone(), vec![DocumentId("d_a".into())]);
+
+        chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+            "c_b",
+            "d_b",
+            "Other",
+            "Tenant B content",
+            1,
+            0.99,
+        ));
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "c_b",
+            "d_b",
+            "Other",
+            "Tenant B content",
+            1,
+            0.99,
+        ));
+        chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+            "c_a",
+            "d_a",
+            "Mine",
+            "Tenant A content",
+            1,
+            0.7,
+        ));
+
+        let mut opts = RetrievalOptions::default();
+        opts.neighbour_window = 0;
+        opts.figure_limit = 0;
+
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            outcome
+                .chunks
+                .iter()
+                .all(|h| h.chunk.document_id.0 == "d_a")
+        );
+        assert!(outcome.chunks.iter().all(|h| h.chunk.id.0 != "c_b"));
     }
 }

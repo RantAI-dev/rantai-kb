@@ -11,6 +11,11 @@
 | 10 | cargo clippy --workspace --all-targets --keep-going --message-format=short | 0.7s | kb-engine fakes trait alignment (fixed) |
 | 11 | cargo test --workspace | 2.5s | kb-server compilation fixes (fixed) |
 | 12 | cargo test --workspace | 8.25s | 95 passed across all crates, 1 assertion mismatch in server_tests (fixed) |
+| 13 | cargo clippy --workspace --all-targets --keep-going --message-format=short | 16.8s | kb-engine (lib) 1 error, error text not captured (first run output tail-truncated). Many kb-inference/kb-store-surreal missing_docs and pedantic warnings. kb-engine tests.rs unused imports (ChunkId, ChunkMetadata, DocumentMeta, SearchHit). |
+| 14 | cargo clippy --workspace --all-targets --keep-going --message-format=short (second run to capture error text) | 16.8s | same single kb-engine (lib) error; output was grep-filtered for `^error` and the error body still not shown |
+| 16 | cargo test --workspace | 38s | config test asserted removed KB_MIN_SIMILARITY (fixed, now 0.30 constant) |
+| 17 | cargo test --workspace | ~40s | all pass: kb-core 71, kb-engine 10, kb-inference 10 (+ others), kb-server 4+6+3+5 |
+| 15 | cargo clippy --workspace --all-targets --keep-going (full output saved) | ~40s | exit 0, zero `error:` lines. Fixed: Vec<Vec<f32>> ownership in vector arm; test-module lint allow in kb-server config; server_tests EngineSettings fields. Warnings remain (missing_docs, pedantic) and are reported. |
 
 ## Dependencies
 

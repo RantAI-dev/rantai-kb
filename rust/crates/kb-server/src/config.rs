@@ -99,37 +99,34 @@ impl Config {
         let port: u16 = lookup("PORT").and_then(|v| v.parse().ok()).unwrap_or(3001);
         let bind_addr = format!("0.0.0.0:{port}");
 
-        // RAG Knobs
-        let default_max_chunks: u32 = lookup("KB_DEFAULT_MAX_CHUNKS")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(8);
-        let neighbor_window: u32 = lookup("KB_NEIGHBOR_WINDOW")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(1);
-        let rerank_initial_k: u32 = lookup("KB_RERANK_INITIAL_K")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(20);
-        let rerank_final_k: u32 = lookup("KB_RERANK_FINAL_K")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(5);
-        let min_similarity: f32 = lookup("KB_MIN_SIMILARITY")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0.30);
-        let figure_limit: u32 = lookup("KB_FIGURE_LIMIT")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(4);
-        let query_expansion_enabled = lookup("KB_QUERY_EXPANSION_ENABLED")
-            .map(|v| v == "true")
-            .unwrap_or(false);
+        // Retrieval knobs. Names and defaults come from
+        // src/lib/rag/config.ts and src/lib/rag/config-surface.ts.
+        let hybrid_bm25_enabled = bool_flag(&lookup, "KB_HYBRID_BM25_ENABLED", true);
+        let default_max_chunks = int_var(&lookup, "KB_DEFAULT_MAX_CHUNKS", 8)?;
+        let neighbour_window = int_var(&lookup, "KB_NEIGHBOR_WINDOW", 1)?;
+        let rerank_initial_k = int_var(&lookup, "KB_RERANK_INITIAL_K", 20)?;
+        let rerank_final_k = int_var(&lookup, "KB_RERANK_FINAL_K", 5)?;
+        let figure_limit = int_var(&lookup, "KB_FIGURE_MAX_PER_ANSWER", 3)?;
+        let query_expansion_enabled = bool_flag(&lookup, "KB_QUERY_EXPANSION_ENABLED", false);
+        let query_expansion_model = lookup("KB_QUERY_EXPANSION_MODEL")
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "openai/gpt-4.1-nano".into());
+        let query_expansion_paraphrases = int_var(&lookup, "KB_QUERY_EXPANSION_PARAPHRASES", 3)?;
+
+        // `KB_MIN_SIMILARITY` is not a documented variable. The minimum is the
+        // constant used by the TypeScript retriever (`minSimilarity = 0.30`).
+        let min_similarity: f32 = 0.30;
 
         let engine = EngineSettings {
             candidate_pool_size: rerank_initial_k,
             rerank_final_k,
             max_chunks: default_max_chunks,
             min_similarity,
-            neighbour_window: neighbor_window,
+            neighbour_window,
             figure_limit,
             expansion_enabled: query_expansion_enabled,
+            expansion_paraphrases: query_expansion_paraphrases,
+            hybrid_bm25_enabled,
         };
 
         let pg = PgSettings {
@@ -160,11 +157,16 @@ impl Config {
             request_timeout: Duration::from_secs(15),
         };
 
-        let reranker = read_reranker(&lookup);
+        let reranker = read_reranker(&lookup)?;
 
-        let mut expansion = ExpansionSettings::from_env_or_disabled();
-        expansion.enabled = query_expansion_enabled;
-        expansion.api_key = embedding_api_key;
+        let expansion = ExpansionSettings {
+            enabled: query_expansion_enabled,
+            api_key: embedding_api_key,
+            endpoint: "https://openrouter.ai/api/v1/chat/completions".into(),
+            model: query_expansion_model,
+            paraphrase_count: query_expansion_paraphrases,
+            timeout: Duration::from_secs(8),
+        };
 
         Ok(Config {
             bind_addr,
@@ -179,33 +181,71 @@ impl Config {
     }
 }
 
-fn read_reranker<F>(lookup: &F) -> RerankerConfig
+fn bool_flag<F>(lookup: &F, name: &str, default: bool) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
-    let enabled = lookup("KB_RERANK_ENABLED")
-        .map(|v| v == "true")
-        .unwrap_or(false);
-    if !enabled {
-        return RerankerConfig::Disabled;
+    match lookup(name) {
+        None => default,
+        Some(v) if v.trim().is_empty() => default,
+        Some(v) => v.trim() == "true",
+    }
+}
+
+fn int_var<F, T>(lookup: &F, name: &str, default: T) -> Result<T>
+where
+    F: Fn(&str) -> Option<String>,
+    T: std::str::FromStr + Copy,
+{
+    match lookup(name) {
+        None => Ok(default),
+        Some(v) if v.trim().is_empty() => Ok(default),
+        Some(v) => v
+            .trim()
+            .parse::<T>()
+            .map_err(|_| anyhow::anyhow!("{name} must be an integer, got {v:?}")),
+    }
+}
+
+/// Reads `KB_RERANK_*` as `src/lib/rag/rerankers/index.ts` does. The provider
+/// names are `tei`, `vllm`, `cohere` and `openrouter` (the LLM reranker).
+/// The Rust port has no LLM reranker, so `openrouter` and any unset or
+/// unknown provider are reported as a configuration error.
+fn read_reranker<F>(lookup: &F) -> Result<RerankerConfig>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    if !bool_flag(lookup, "KB_RERANK_ENABLED", false) {
+        return Ok(RerankerConfig::Disabled);
     }
 
-    let kind = lookup("KB_RERANK_PROVIDER").unwrap_or_else(|| "cohere".into());
+    let kind = lookup("KB_RERANK_PROVIDER")
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let model = lookup("KB_RERANK_MODEL").filter(|s| !s.trim().is_empty());
+    let base_url = lookup("KB_RERANK_BASE_URL").filter(|s| !s.trim().is_empty());
+    let api_key = lookup("KB_RERANK_API_KEY")
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| lookup("COHERE_API_KEY").filter(|s| !s.trim().is_empty()));
+
     match kind.as_str() {
-        "tei" => RerankerConfig::Tei {
-            base_url: lookup("KB_TEI_RERANK_URL").unwrap_or_default(),
-            model: lookup("KB_TEI_RERANK_MODEL").unwrap_or_default(),
-        },
-        "vllm" => RerankerConfig::Vllm {
-            base_url: lookup("KB_VLLM_RERANK_URL").unwrap_or_default(),
-            model: lookup("KB_VLLM_RERANK_MODEL").unwrap_or_default(),
-        },
-        "cohere" => RerankerConfig::Cohere {
-            api_key: lookup("COHERE_API_KEY").unwrap_or_default(),
-            model: lookup("KB_COHERE_RERANK_MODEL").unwrap_or_else(|| "rerank-v3.5".into()),
-            endpoint: lookup("KB_COHERE_RERANK_ENDPOINT"),
-        },
-        _ => RerankerConfig::Disabled,
+        "tei" => Ok(RerankerConfig::Tei {
+            base_url: base_url.unwrap_or_else(|| "http://tei-rerank:80".into()),
+            model: model.unwrap_or_else(|| "BAAI/bge-reranker-v2-m3".into()),
+        }),
+        "vllm" => Ok(RerankerConfig::Vllm {
+            base_url: base_url.unwrap_or_else(|| "http://localhost:8200".into()),
+            model: model.unwrap_or_else(|| "nvidia/llama-nemotron-rerank-1b-v2".into()),
+        }),
+        "cohere" => Ok(RerankerConfig::Cohere {
+            model: model.unwrap_or_else(|| "rerank-v4.0-pro".into()),
+            api_key: api_key.unwrap_or_default(),
+            endpoint: base_url,
+        }),
+        other => bail!(
+            "KB_RERANK_PROVIDER={other:?} is not supported by the Rust service (use tei, vllm or cohere)"
+        ),
     }
 }
 
@@ -216,6 +256,7 @@ pub struct HealthChecks {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
@@ -271,9 +312,19 @@ mod tests {
         map.insert("KB_NEIGHBOR_WINDOW", "3");
         map.insert("KB_RERANK_INITIAL_K", "30");
         map.insert("KB_RERANK_FINAL_K", "7");
-        map.insert("KB_MIN_SIMILARITY", "0.45");
-        map.insert("KB_FIGURE_LIMIT", "6");
+        map.insert("KB_FIGURE_MAX_PER_ANSWER", "6");
+        map.insert("KB_HYBRID_BM25_ENABLED", "false");
         map.insert("KB_QUERY_EXPANSION_ENABLED", "true");
+        map.insert("KB_QUERY_EXPANSION_MODEL", "custom/expander");
+        map.insert("KB_QUERY_EXPANSION_PARAPHRASES", "2");
+        map.insert("KB_VECTOR_KNN", "true");
+        map.insert("KB_RERANK_ENABLED", "true");
+        map.insert("KB_RERANK_PROVIDER", "tei");
+        map.insert("KB_RERANK_BASE_URL", "http://tei.local:80");
+        map.insert("KB_RERANK_MODEL", "BAAI/custom");
+        map.insert("KB_RERANK_API_KEY", "unused-for-tei");
+        map.insert("KB_EMBEDDING_QUERY_PREFIX", "query: ");
+        map.insert("KB_EMBEDDING_PASSAGE_PREFIX", "passage: ");
 
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
@@ -295,8 +346,50 @@ mod tests {
         assert_eq!(cfg.engine.neighbour_window, 3);
         assert_eq!(cfg.engine.candidate_pool_size, 30);
         assert_eq!(cfg.engine.rerank_final_k, 7);
-        assert!((cfg.engine.min_similarity - 0.45).abs() < 1e-4);
+        assert!((cfg.engine.min_similarity - 0.30).abs() < 1e-4);
         assert_eq!(cfg.engine.figure_limit, 6);
+        assert!(!cfg.engine.hybrid_bm25_enabled);
         assert!(cfg.engine.expansion_enabled);
+        assert_eq!(cfg.engine.expansion_paraphrases, 2);
+        assert_eq!(cfg.expansion.model, "custom/expander");
+        assert_eq!(cfg.embedder.query_prefix, "query: ");
+        assert_eq!(cfg.embedder.passage_prefix, "passage: ");
+        match &cfg.reranker {
+            RerankerConfig::Tei { base_url, model } => {
+                assert_eq!(base_url, "http://tei.local:80");
+                assert_eq!(model, "BAAI/custom");
+            }
+            other => panic!("expected TEI reranker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_defaults_match_typescript_config() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("SURREAL_DB_URL", "http://localhost:8000");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.engine.max_chunks, 8);
+        assert_eq!(cfg.engine.neighbour_window, 1);
+        assert_eq!(cfg.engine.candidate_pool_size, 20);
+        assert_eq!(cfg.engine.rerank_final_k, 5);
+        assert_eq!(cfg.engine.figure_limit, 3);
+        assert!(cfg.engine.hybrid_bm25_enabled);
+        assert!(!cfg.engine.expansion_enabled);
+        assert_eq!(cfg.engine.expansion_paraphrases, 3);
+        assert!(matches!(cfg.reranker, RerankerConfig::Disabled));
+    }
+
+    #[test]
+    fn test_non_integer_setting_fails_with_name() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("SURREAL_DB_URL", "http://localhost:8000");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_DEFAULT_MAX_CHUNKS", "many");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        assert!(err.to_string().contains("KB_DEFAULT_MAX_CHUNKS"));
     }
 }
