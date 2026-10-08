@@ -76,7 +76,14 @@ Shape and contract differences found (TS is the reference):
 - Query param: TS reads `knowledgeBaseIds`; Rust reads `knowledge_base_ids`. Live Bun with `knowledgeBaseIds=kb_nope` returns []; Rust ignores the TS name.
 - Not-found message: TS "Not found", Rust "not found".
 
-Status: NOT FIXED. These change the public API shape and the port types across crates, so they need a decision before the rewrite.
+Status after the follow-up pass (user: shape may differ if functionality is the same or better):
+- FIXED: `knowledgeBaseIds` (Bun name) is read by the Rust list route; `knowledge_base_ids` kept as alias.
+- FIXED: empty filter value is "absent" (TS parseList); restricted key with empty filter gets all its KBs (TS restrictKnowledgeBases). Verified live: rust ids == bun ids for all 4 filter cases.
+- FIXED: Rust docs carry fileType, fileSize, mimeType, createdAt, updatedAt, knowledgeBaseIds, chunk_count (list and detail). Verified live.
+- Intentional shape difference: Rust returns bare arrays and snake_case; Bun uses envelopes and camelCase. Same data, different field names.
+- NOT PORTED: detail `figures` (read from document metadata JSON). Bun detail includes it; Rust does not yet.
+- Minor: Bun chunk objects carry `id`; Rust chunk views do not. Chunk text, order, and counts match.
+- Not-found message: Rust "not found", Bun "Not found" (same status 404).
 
 ## Dependencies
 

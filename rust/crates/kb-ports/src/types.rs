@@ -115,6 +115,14 @@ pub struct DocumentMeta {
     pub subcategory: Option<String>,
     pub status: String,
     pub chunk_count: u32,
+    pub file_type: Option<String>,
+    pub file_size: Option<i32>,
+    pub mime_type: Option<String>,
+    /// RFC 3339 timestamps, UTC.
+    pub created_at: String,
+    pub updated_at: String,
+    /// Knowledge bases this document belongs to (from DocumentGroup).
+    pub knowledge_base_ids: Vec<String>,
 }
 
 /// Summary of a knowledge base, as returned by the document store list path.

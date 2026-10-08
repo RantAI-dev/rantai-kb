@@ -169,7 +169,10 @@ fn restrict_kbs(auth: &AuthContext, requested: Option<&[String]>) -> Option<Vec<
         .iter()
         .map(|k| k.0.as_str())
         .collect();
+    // Matches TS restrictKnowledgeBases: no or empty request means "all of the
+    // key's knowledge bases"; otherwise the request is intersected with the key.
     let filtered: Vec<String> = requested
+        .filter(|v| !v.is_empty())
         .map(|v| v.to_vec())
         .unwrap_or_else(|| {
             auth.knowledge_base_ids
@@ -188,6 +191,8 @@ fn restrict_kbs(auth: &AuthContext, requested: Option<&[String]>) -> Option<Vec<
 #[derive(Debug, Deserialize)]
 pub struct ListDocumentsQuery {
     pub limit: Option<u32>,
+    /// Bun/TS name (camelCase), used by existing clients.
+    #[serde(alias = "knowledge_base_ids", rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Option<String>,
 }
 
@@ -199,6 +204,12 @@ pub struct DocumentSummary {
     pub subcategory: Option<String>,
     pub status: String,
     pub chunk_count: u32,
+    pub file_type: Option<String>,
+    pub file_size: Option<i32>,
+    pub mime_type: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub knowledge_base_ids: Vec<String>,
 }
 
 async fn list_documents(
@@ -216,7 +227,8 @@ async fn list_documents(
         .iter()
         .map(|k| KnowledgeBaseId::new_unchecked(k.clone()))
         .collect();
-    let requested = q.knowledge_base_ids.as_ref().map(|_| raw_kbs.as_slice());
+    // An empty parameter parses to no ids, which is "absent" (TS parseList -> undefined).
+    let requested = (!raw_kbs.is_empty()).then_some(raw_kbs.as_slice());
     let allowed = restrict_kbs(&auth, requested);
     let kb_filter: Vec<KnowledgeBaseId> = match allowed {
         Some(v) if v.is_empty() => {
@@ -241,6 +253,12 @@ async fn list_documents(
             categories: d.categories,
             subcategory: d.subcategory,
             status: d.status,
+            file_type: d.file_type,
+            file_size: d.file_size,
+            mime_type: d.mime_type,
+            created_at: d.created_at,
+            updated_at: d.updated_at,
+            knowledge_base_ids: d.knowledge_base_ids,
         })
         .collect();
     Ok(Json(out))
@@ -269,6 +287,13 @@ pub struct DocumentDetail {
     pub categories: Vec<String>,
     pub subcategory: Option<String>,
     pub status: String,
+    pub file_type: Option<String>,
+    pub file_size: Option<i32>,
+    pub mime_type: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub knowledge_base_ids: Vec<String>,
+    pub chunk_count: u32,
     pub chunks: Vec<DocumentChunkView>,
 }
 
@@ -318,12 +343,20 @@ async fn get_document(
             asset_key: meta.asset_key,
         })
         .collect();
+    let chunk_count = chunk_views.len() as u32;
     Ok(Json(DocumentDetail {
         id: meta.id.0,
         title: meta.title,
         categories: meta.categories,
         subcategory: meta.subcategory,
         status: meta.status,
+        file_type: meta.file_type,
+        file_size: meta.file_size,
+        mime_type: meta.mime_type,
+        created_at: meta.created_at,
+        updated_at: meta.updated_at,
+        knowledge_base_ids: meta.knowledge_base_ids,
+        chunk_count,
         chunks: chunk_views,
     }))
 }

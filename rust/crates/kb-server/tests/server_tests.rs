@@ -96,6 +96,12 @@ async fn test_search_happy_path_fields() {
             subcategory: None,
             status: "ready".into(),
             chunk_count: 1,
+            file_type: None,
+            file_size: None,
+            mime_type: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+            knowledge_base_ids: vec![],
         },
     );
 
@@ -150,6 +156,12 @@ async fn test_tenant_b_key_searching_fakes_with_tenant_a_docs_gets_zero_results(
             subcategory: None,
             status: "ready".into(),
             chunk_count: 1,
+            file_type: None,
+            file_size: None,
+            mime_type: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+            knowledge_base_ids: vec![],
         },
     );
 
