@@ -70,14 +70,6 @@ pub trait DocumentStore: Send + Sync {
         knowledge_base_ids: &[KnowledgeBaseId],
     ) -> Result<Vec<DocumentMeta>, PortError>;
 
-    /// Fetch ordered chunks for a document. Used by `GET /v1/documents/:id`.
-    /// Document visibility is the caller's responsibility — pass the id only
-    /// after `find_by_id` succeeded.
-    async fn ordered_chunks(
-        &self,
-        document_id: &DocumentId,
-    ) -> Result<Vec<(u32, String, ChunkMetadata)>, PortError>;
-
     /// List knowledge bases visible to the tenant.
     async fn list_knowledge_bases(
         &self,
@@ -119,6 +111,20 @@ pub trait ChunkStore: Send + Sync {
         anchors: &[NeighbourAnchor],
         window: u32,
     ) -> Result<Vec<SearchHit>, PortError>;
+
+    /// Chunk counts per document, from SurrealDB `document_chunk`. Missing ids
+    /// are absent from the result and count as 0 at the call site.
+    async fn chunk_counts(
+        &self,
+        document_ids: &[DocumentId],
+    ) -> Result<Vec<(DocumentId, u32)>, PortError>;
+
+    /// Ordered chunks for one document, for `GET /v1/documents/:id`. Document
+    /// visibility is the caller's job: pass the id only after `find_by_id`.
+    async fn ordered_chunks(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Vec<(u32, String, ChunkMetadata)>, PortError>;
 
     /// Co-retrieve figures belonging to retrieved documents whose anchor or caption matches.
     async fn figures(

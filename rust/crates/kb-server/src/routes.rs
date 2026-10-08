@@ -229,18 +229,36 @@ async fn list_documents(
         .list(&auth.tenant_id, limit, &kb_filter)
         .await
         .map_err(ApiError::from)?;
+    let ids: Vec<DocumentId> = docs.iter().map(|d| d.id.clone()).collect();
+    let counts = chunk_counts_for(&state, &ids).await?;
     let out: Vec<DocumentSummary> = docs
         .into_iter()
         .map(|d| DocumentSummary {
+            chunk_count: counts.get(&d.id.0).copied().unwrap_or(0),
             id: d.id.0,
             title: d.title,
             categories: d.categories,
             subcategory: d.subcategory,
             status: d.status,
-            chunk_count: d.chunk_count,
         })
         .collect();
     Ok(Json(out))
+}
+
+/// Chunk counts keyed by document id, read from SurrealDB. Missing ids are absent.
+async fn chunk_counts_for(
+    state: &AppState,
+    ids: &[DocumentId],
+) -> Result<std::collections::HashMap<String, u32>, ApiError> {
+    if ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+    let rows = state
+        .chunks
+        .chunk_counts(ids)
+        .await
+        .map_err(ApiError::from)?;
+    Ok(rows.into_iter().map(|(id, n)| (id.0, n)).collect())
 }
 
 #[derive(Debug, Serialize)]
@@ -285,7 +303,7 @@ async fn get_document(
         return Err(ApiError::NotFound);
     };
     let chunks = state
-        .documents
+        .chunks
         .ordered_chunks(&doc_id)
         .await
         .map_err(ApiError::from)?;

@@ -1,9 +1,12 @@
 //! `ChunkStore` port implementation for `SurrealChunkStore`.
 
 use async_trait::async_trait;
-use kb_ports::{ChunkStore, DocumentId, DocumentScope, NeighbourAnchor, PortError, SearchHit};
+use kb_ports::{
+    ChunkMetadata, ChunkStore, DocumentId, DocumentScope, NeighbourAnchor, PortError, SearchHit,
+};
 
 use crate::bm25::execute_bm25_search;
+use crate::chunks_meta::{execute_chunk_counts, execute_ordered_chunks};
 use crate::client::SurrealChunkStore;
 use crate::figures::execute_figures;
 use crate::neighbours::execute_neighbours;
@@ -57,5 +60,19 @@ impl ChunkStore for SurrealChunkStore {
             limit,
         )
         .await
+    }
+
+    async fn chunk_counts(
+        &self,
+        document_ids: &[DocumentId],
+    ) -> Result<Vec<(DocumentId, u32)>, PortError> {
+        execute_chunk_counts(self, document_ids).await
+    }
+
+    async fn ordered_chunks(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Vec<(u32, String, ChunkMetadata)>, PortError> {
+        execute_ordered_chunks(self, document_id).await
     }
 }

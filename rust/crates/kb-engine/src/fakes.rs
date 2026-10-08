@@ -146,13 +146,6 @@ impl DocumentStore for FakeDocumentStore {
         Ok(list.into_iter().take(limit as usize).collect())
     }
 
-    async fn ordered_chunks(
-        &self,
-        _document_id: &DocumentId,
-    ) -> Result<Vec<(u32, String, ChunkMetadata)>, PortError> {
-        Ok(Vec::new())
-    }
-
     async fn list_knowledge_bases(
         &self,
         tenant: &TenantId,
@@ -182,6 +175,20 @@ pub struct FakeChunkStore {
 
 #[async_trait]
 impl ChunkStore for FakeChunkStore {
+    async fn chunk_counts(
+        &self,
+        _document_ids: &[DocumentId],
+    ) -> Result<Vec<(DocumentId, u32)>, PortError> {
+        Ok(Vec::new())
+    }
+
+    async fn ordered_chunks(
+        &self,
+        _document_id: &DocumentId,
+    ) -> Result<Vec<(u32, String, ChunkMetadata)>, PortError> {
+        Ok(Vec::new())
+    }
+
     async fn vector_search(
         &self,
         scope: &DocumentScope,

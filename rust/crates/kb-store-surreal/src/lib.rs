@@ -9,6 +9,7 @@
 //! Numeric literals and vector arrays are sanitized and inlined.
 
 mod bm25;
+mod chunks_meta;
 mod client;
 mod figures;
 mod neighbours;
