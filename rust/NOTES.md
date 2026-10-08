@@ -65,6 +65,19 @@ Not verified: POST /v1/search (no embedding key; embedder is unavailable offline
 
 Known difference to check: TS restrictKnowledgeBases treats an explicit empty requested list as "all of the key's KBs"; Rust treats an explicit empty value as no KBs. Recorded for R2 parity.
 
+## R2 parity against Bun (same live stores)
+
+Bun ran from the repo (`bun src/server.ts`, PORT 18081, Surreal ws RPC, prisma generated after `bun install`).
+
+Shape and contract differences found (TS is the reference):
+- Envelopes: TS wraps lists and objects (`{documents}`, `{knowledgeBases}`, `{document, chunks}`). Rust returns bare arrays and objects.
+- Field casing: TS camelCase (`knowledgeBaseIds`, `documentCount`, `chunkCount`, `createdAt`). Rust snake_case (`chunk_count`, `document_count`).
+- Missing fields in Rust list/detail: `fileType`, `fileSize`, `mimeType`, `createdAt`, `updatedAt`, `knowledgeBaseIds`, `figures`. Rust DocumentMeta (kb-ports types.rs) lacks them.
+- Query param: TS reads `knowledgeBaseIds`; Rust reads `knowledge_base_ids`. Live Bun with `knowledgeBaseIds=kb_nope` returns []; Rust ignores the TS name.
+- Not-found message: TS "Not found", Rust "not found".
+
+Status: NOT FIXED. These change the public API shape and the port types across crates, so they need a decision before the rewrite.
+
 ## Dependencies
 
 No external dependencies added beyond workspace baseline. All fakes implemented in-tree.
