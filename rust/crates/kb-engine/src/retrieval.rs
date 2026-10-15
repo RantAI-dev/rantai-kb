@@ -48,7 +48,10 @@ impl fmt::Debug for RetrievalOptions {
             .field("expansion_enabled", &self.expansion_enabled)
             .field("expansion_paraphrases", &self.expansion_paraphrases)
             .field("hybrid_bm25_enabled", &self.hybrid_bm25_enabled)
-            .field("figure_gate", &self.figure_gate.as_ref().map(|_| "<FigureGate>"))
+            .field(
+                "figure_gate",
+                &self.figure_gate.as_ref().map(|_| "<FigureGate>"),
+            )
             .finish()
     }
 }

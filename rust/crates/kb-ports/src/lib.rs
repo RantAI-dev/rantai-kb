@@ -27,8 +27,8 @@ pub use types::{
     AuthContext, CategoryRecord, Chunk, ChunkMetadata, ChunkToStore, ChunkType, CreateCategory,
     CreateJobInput, CreateKnowledgeBase, DocumentDownloadMeta, DocumentIntelligenceData,
     DocumentMeta, Entity, EntityView, ExtractedFigure, ExtractionOptions, ExtractionResult,
-    FigureGateCandidate, JobRecord, JobView, KnowledgeBaseRecord,
-    KnowledgeBaseSummary, NewDocument, PageBlock, PageBlockKind, PageText, PatchCategory,
-    PatchDocument, PatchKnowledgeBase, ReapableJob, Relation, RelationView, RerankCandidate,
-    RerankResult, RerankScore, RetryJobOutcome, SearchHit, StoredChunk,
+    FigureGateCandidate, JobRecord, JobView, KnowledgeBaseRecord, KnowledgeBaseSummary,
+    NewDocument, PageBlock, PageBlockKind, PageText, PatchCategory, PatchDocument,
+    PatchKnowledgeBase, ReapableJob, Relation, RelationView, RerankCandidate, RerankResult,
+    RerankScore, RetryJobOutcome, SearchHit, StoredChunk,
 };

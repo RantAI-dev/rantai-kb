@@ -553,7 +553,6 @@ impl Embedder for ShortEmbedder {
     }
 }
 
-
 #[tokio::test]
 async fn test_ingest_worker_end_to_end_full_pipeline() {
     let (jobs, documents, chunks, blobs) = parts();
@@ -570,7 +569,8 @@ async fn test_ingest_worker_end_to_end_full_pipeline() {
         },
         PageText {
             page: 1,
-            text: "Section two follows with the breakdown by region and by product line.".to_string(),
+            text: "Section two follows with the breakdown by region and by product line."
+                .to_string(),
         },
     ];
 
@@ -578,7 +578,10 @@ async fn test_ingest_worker_end_to_end_full_pipeline() {
         PageBlock {
             kind: PageBlockKind::Text,
             id: None,
-            text: Some("Section one explains the quarter in detail with all financial figures.".to_string()),
+            text: Some(
+                "Section one explains the quarter in detail with all financial figures."
+                    .to_string(),
+            ),
         },
         PageBlock {
             kind: PageBlockKind::Figure,
@@ -601,7 +604,8 @@ async fn test_ingest_worker_end_to_end_full_pipeline() {
 
 Section two follows with the breakdown by region and by product line.
 
-Alice works at Acme Corp.".to_string(),
+Alice works at Acme Corp."
+            .to_string(),
         file_type: "markdown".to_string(),
         used_ocr: false,
         figures,
@@ -680,36 +684,59 @@ Alice works at Acme Corp.".to_string(),
     let doc_chunks = stored.get(&DocumentId::new_unchecked(DOC)).unwrap();
     assert!(doc_chunks.len() >= 2);
 
-    let fig_chunk = doc_chunks.iter().find(|c| {
-        c.metadata.get("chunkType").and_then(|v| v.as_str()) == Some("figure")
-    }).expect("figure chunk should be stored");
+    let fig_chunk = doc_chunks
+        .iter()
+        .find(|c| c.metadata.get("chunkType").and_then(|v| v.as_str()) == Some("figure"))
+        .expect("figure chunk should be stored");
     assert_eq!(
         fig_chunk.metadata.get("assetKey").and_then(|v| v.as_str()),
         Some("documents/tenant-1/doc_1/assets/fig-p0-1.png")
     );
     assert_eq!(
-        fig_chunk.metadata.get("anchorChunkIndex").and_then(|v| v.as_u64()),
+        fig_chunk
+            .metadata
+            .get("anchorChunkIndex")
+            .and_then(|v| v.as_u64()),
         Some(0)
     );
 
     // Verify chunkIndex monotonically reindexed across set
     for (i, c) in doc_chunks.iter().enumerate() {
         assert_eq!(c.chunk_index, i as u32);
-        assert_eq!(c.metadata.get("chunkIndex").and_then(|v| v.as_u64()), Some(i as u64));
+        assert_eq!(
+            c.metadata.get("chunkIndex").and_then(|v| v.as_u64()),
+            Some(i as u64)
+        );
     }
 
     // 3. Check document metadata figures updated
-    let doc_meta = documents.docs.read().unwrap()[&tenant()][0].metadata.clone().unwrap();
+    let doc_meta = documents.docs.read().unwrap()[&tenant()][0]
+        .metadata
+        .clone()
+        .unwrap();
     let figs = doc_meta.get("figures").and_then(|v| v.as_array()).unwrap();
     assert_eq!(figs.len(), 1);
-    assert_eq!(figs[0]["assetKey"], "documents/tenant-1/doc_1/assets/fig-p0-1.png");
+    assert_eq!(
+        figs[0]["assetKey"],
+        "documents/tenant-1/doc_1/assets/fig-p0-1.png"
+    );
     assert_eq!(figs[0]["type"], "chart");
 
     // 4. Check entity upserts and relations
     let upserts = entity_store.upserted_entities.read().unwrap();
     assert_eq!(upserts.len(), 2);
-    assert!(upserts.iter().any(|(_, san, name, typ, ..)| san == "alice" && name == "Alice" && typ == "PERSON"));
-    assert!(upserts.iter().any(|(_, san, name, typ, ..)| san == "acme_corp" && name == "Acme Corp" && typ == "ORGANIZATION"));
+    assert!(
+        upserts
+            .iter()
+            .any(|(_, san, name, typ, ..)| san == "alice" && name == "Alice" && typ == "PERSON")
+    );
+    assert!(
+        upserts
+            .iter()
+            .any(|(_, san, name, typ, ..)| san == "acme_corp"
+                && name == "Acme Corp"
+                && typ == "ORGANIZATION")
+    );
 
     let rels = entity_store.relations.read().unwrap();
     assert_eq!(rels.len(), 1);
@@ -745,7 +772,9 @@ async fn test_ingest_worker_entity_extractor_failure_is_non_fatal() {
 
     let fake_extractor = Arc::new(FakeExtractor::returning("Some text here", "text"));
     let entity_extractor = Arc::new(FakeEntityExtractor::default());
-    entity_extractor.fail.store(true, std::sync::atomic::Ordering::Relaxed);
+    entity_extractor
+        .fail
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 
     let worker = IngestWorker::new(
         jobs.clone(),
@@ -775,7 +804,9 @@ async fn test_ingest_worker_embed_failure_marks_job_and_document_failed() {
 
     let fake_extractor = Arc::new(FakeExtractor::returning("Some text here", "text"));
     let embedder = Arc::new(FakeEmbedder::default());
-    embedder.fail.store(true, std::sync::atomic::Ordering::Relaxed);
+    embedder
+        .fail
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 
     let worker = IngestWorker::new(
         jobs.clone(),

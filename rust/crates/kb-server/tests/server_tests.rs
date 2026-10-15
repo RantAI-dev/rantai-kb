@@ -137,7 +137,9 @@ async fn test_key_without_kb_read_returns_403() {
 async fn test_search_happy_path_fields() {
     let harness = Harness::new();
     let tenant = TenantId("tenant-1".into());
-    harness.documents.insert_api_key("valid-key", tenant.clone());
+    harness
+        .documents
+        .insert_api_key("valid-key", tenant.clone());
 
     let doc_id = "doc-1";
     harness.documents.insert_doc(
@@ -298,7 +300,10 @@ fn delete_test_doc(id: &str) -> DocumentMeta {
 }
 
 async fn send_delete(app: axum::Router, uri: &str, key: &str) -> StatusCode {
-    app.oneshot(authed("DELETE", uri, key)).await.unwrap().status()
+    app.oneshot(authed("DELETE", uri, key))
+        .await
+        .unwrap()
+        .status()
 }
 
 #[tokio::test]
@@ -343,12 +348,7 @@ async fn test_soft_delete_hides_document_from_reads() {
         .insert_doc(TenantId("tenant-1".into()), delete_test_doc("doc-del-2"));
 
     assert_eq!(
-        send_delete(
-            harness.app.clone(),
-            "/v1/documents/doc-del-2",
-            "writer-key"
-        )
-        .await,
+        send_delete(harness.app.clone(), "/v1/documents/doc-del-2", "writer-key").await,
         StatusCode::OK
     );
     assert_eq!(
@@ -414,10 +414,7 @@ async fn test_hard_delete_removes_document() {
         .await,
         StatusCode::OK
     );
-    assert!(
-        harness.documents.docs.read().unwrap()[&TenantId("tenant-1".into())]
-            .is_empty()
-    );
+    assert!(harness.documents.docs.read().unwrap()[&TenantId("tenant-1".into())].is_empty());
 }
 
 #[tokio::test]
@@ -562,5 +559,9 @@ async fn test_ingest_worker_with_real_local_extractor() {
     let stored = chunk_store.stored_chunks.read().unwrap();
     let chunks = stored.get(&doc_id).expect("stored chunks for doc");
     assert!(!chunks.is_empty());
-    assert!(chunks[0].content.contains("Hello world from real extractor test"));
+    assert!(
+        chunks[0]
+            .content
+            .contains("Hello world from real extractor test")
+    );
 }

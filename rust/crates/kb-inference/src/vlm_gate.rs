@@ -147,10 +147,8 @@ impl FigureGate for VlmFigureGate {
             return Ok(Vec::new());
         }
 
-        let seen: Vec<&FigureGateCandidate> = candidates
-            .iter()
-            .take(self.config.top_n as usize)
-            .collect();
+        let seen: Vec<&FigureGateCandidate> =
+            candidates.iter().take(self.config.top_n as usize).collect();
 
         let mut kept: Vec<String> = Vec::new();
         for c in seen {
@@ -185,7 +183,12 @@ mod tests {
 
     #[async_trait]
     impl BlobStore for TestBlobStore {
-        async fn upload(&self, _key: &str, _body: Vec<u8>, _content_type: &str) -> Result<u64, PortError> {
+        async fn upload(
+            &self,
+            _key: &str,
+            _body: Vec<u8>,
+            _content_type: &str,
+        ) -> Result<u64, PortError> {
             Ok(0)
         }
         async fn download(&self, _key: &str) -> Result<Vec<u8>, PortError> {
@@ -241,7 +244,10 @@ mod tests {
             },
         ];
 
-        let kept = gate.gate_figures("What is the water cycle?", &candidates).await.unwrap();
+        let kept = gate
+            .gate_figures("What is the water cycle?", &candidates)
+            .await
+            .unwrap();
         assert_eq!(kept, vec!["fig-1"]);
     }
 }

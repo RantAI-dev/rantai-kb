@@ -38,9 +38,7 @@ pub fn escape_record_id(record_id: &str) -> Result<String, PortError> {
     }
 
     if let Some((table, id)) = trimmed.split_once(':') {
-        if table.is_empty()
-            || !table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
+        if table.is_empty() || !table.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(PortError::Malformed(format!(
                 "invalid record table name: {table}"
             )));
@@ -237,8 +235,7 @@ impl EntityStore for SurrealChunkStore {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_string();
-            let confidence =
-                row.get("confidence").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+            let confidence = row.get("confidence").and_then(Value::as_f64).unwrap_or(0.0) as f32;
             let metadata = row
                 .get("metadata")
                 .cloned()
@@ -312,10 +309,9 @@ impl EntityStore for SurrealChunkStore {
                                     .and_then(Value::as_str)
                                     .unwrap_or(&table)
                                     .to_string();
-                                let confidence = row
-                                    .get("confidence")
-                                    .and_then(Value::as_f64)
-                                    .unwrap_or(0.0) as f32;
+                                let confidence =
+                                    row.get("confidence").and_then(Value::as_f64).unwrap_or(0.0)
+                                        as f32;
                                 let mut metadata = match row.get("metadata") {
                                     Some(Value::Object(m)) => Value::Object(m.clone()),
                                     _ => serde_json::json!({}),
