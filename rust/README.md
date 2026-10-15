@@ -174,3 +174,27 @@ docker run -p 8080:8080 --env-file .env rantai-kb:rust
 ```
 
 The runtime image is built on `debian:bookworm-slim`, runs as non-root user `appuser` (uid 10001), includes liberation fonts and CA certificates, and bundles `libpdfium.so` dynamically loaded per `TARGETARCH`.
+
+---
+
+## Testing & Parity Verification
+
+### 1. Workspace Unit & Integration Tests
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+### 2. Live Smoke Test
+Runs Postgres 16, SurrealDB v2, S3 (RustFS), and stub embeddings to execute an end-to-end ingest, chunking, SSE events, search, detail, list, and soft/hard delete cycle:
+```bash
+./rust/scripts/smoke.sh
+```
+
+### 3. Bidirectional Search Parity Matrix
+Validates 100% search response parity between TypeScript (Bun) and Rust running against the same database and storage:
+```bash
+./rust/scripts/search-parity.sh
+```
+Runs a matrix of search bodies (queries, hybrid true/false/omitted, maxChunks 1/3/8/50, format "context", documentIds, knowledgeBaseIds, and categories), diffing normalized JSON responses (`jq -S`, rounded to 4 decimal places) and requiring 0 diffs.
+

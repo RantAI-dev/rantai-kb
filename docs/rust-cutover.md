@@ -63,6 +63,7 @@ Route HTTP traffic (`GET /v1/*`, `POST /v1/search`) through your load balancer t
 
 - Validated: SurrealDB chunks created by either Bun or Rust are retrievable by both runtimes.
 - Validated: API keys created by either Bun (`bun scripts/create-api-key.ts`) or Rust (`kb-server create-api-key`) authenticate seamlessly on both runtimes.
+- **Search Parity Verification**: Run `./rust/scripts/search-parity.sh` to execute the full search parity test matrix (29 test cases covering queries, `hybrid: true/false/omitted`, `maxChunks` 1/3/8/50, `format: "context"`, `documentIds`, `knowledgeBaseIds`, and `category` filters) verifying zero JSON diffs between Bun and Rust on the same storage state.
 
 ### Phase 3: Route Write Traffic to Rust
 

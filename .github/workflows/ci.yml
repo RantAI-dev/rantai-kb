@@ -186,3 +186,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run smoke test script
         run: ./rust/scripts/smoke.sh
+
+  rust-search-parity:
+    name: Rust vs Bun search parity test matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run search parity harness
+        run: ./rust/scripts/search-parity.sh
