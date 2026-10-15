@@ -290,6 +290,39 @@ async fn delete_returns_only_ok() {
 }
 
 #[tokio::test]
+async fn hard_delete_can_follow_a_soft_delete() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    h.documents
+        .insert_doc(TenantId(TENANT.to_string()), doc_meta("doc-1", "Doc"));
+
+    assert_eq!(
+        h.send("DELETE", "/v1/documents/doc-1", &tenant_key(TENANT))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    // A soft-deleted document is invisible to every read path...
+    assert_error(
+        h.send("GET", "/v1/documents/doc-1", &tenant_key(TENANT))
+            .await,
+        StatusCode::NOT_FOUND,
+        "Not found",
+    )
+    .await;
+    // ...but the delete route can still find it, exactly as TypeScript does.
+    let response = h
+        .send(
+            "DELETE",
+            "/v1/documents/doc-1?hard=true",
+            &tenant_key(TENANT),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(h.documents.deleted.read().unwrap().len(), 0);
+}
+
+#[tokio::test]
 async fn knowledge_base_list_uses_the_bun_envelope() {
     let h = Harness::new();
     h.with_tenant(TENANT);

@@ -250,6 +250,24 @@ async fn health_reports_both_checks_and_the_version() {
 }
 
 #[tokio::test]
+async fn formats_needs_no_key() {
+    let h = Harness::new();
+    let response = h
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/formats")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["maxFileBytes"], 50 * 1024 * 1024);
+}
+
+#[tokio::test]
 async fn health_needs_no_key() {
     let h = Harness::new();
     let response = h

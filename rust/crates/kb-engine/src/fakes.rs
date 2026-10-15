@@ -178,12 +178,27 @@ impl DocumentStore for FakeDocumentStore {
         &self,
         tenant: &TenantId,
         id: &DocumentId,
+        include_deleted: bool,
     ) -> Result<Option<DocumentMeta>, PortError> {
         let map = self.docs.read().unwrap();
-        Ok(map
+        if let Some(doc) = map
             .get(tenant)
             .and_then(|list| list.iter().find(|d| &d.id == id))
-            .cloned())
+        {
+            return Ok(Some(doc.clone()));
+        }
+        if include_deleted {
+            // The fake keeps soft-deleted rows in their own list, so the hard
+            // delete that follows a soft delete still finds the document.
+            return Ok(self
+                .deleted
+                .read()
+                .unwrap()
+                .iter()
+                .find(|d| &d.id == id)
+                .cloned());
+        }
+        Ok(None)
     }
 
     async fn soft_delete(&self, tenant: &TenantId, id: &DocumentId) -> Result<bool, PortError> {
@@ -205,13 +220,20 @@ impl DocumentStore for FakeDocumentStore {
         id: &DocumentId,
     ) -> Result<Option<Option<String>>, PortError> {
         let mut map = self.docs.write().unwrap();
-        let Some(list) = map.get_mut(tenant) else {
+        if let Some(list) = map.get_mut(tenant) {
+            if let Some(pos) = list.iter().position(|d| &d.id == id) {
+                list.remove(pos);
+                // The fake keeps no blob keys, so none is reported.
+                return Ok(Some(None));
+            }
+        }
+        // A soft delete moved the row aside; a hard delete still removes it,
+        // which is what the delete route is allowed to do.
+        let mut deleted = self.deleted.write().unwrap();
+        let Some(pos) = deleted.iter().position(|d| &d.id == id) else {
             return Ok(None);
         };
-        let Some(pos) = list.iter().position(|d| &d.id == id) else {
-            return Ok(None);
-        };
-        list.remove(pos);
+        deleted.remove(pos);
         Ok(Some(None))
     }
 

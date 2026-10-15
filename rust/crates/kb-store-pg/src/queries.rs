@@ -17,6 +17,22 @@ pub const SELECT_BY_ID: &str = r#"
      WHERE d.id = $1 AND d."tenantId" = $2 AND d."deletedAt" IS NULL
 "#;
 
+/// Same row as `SELECT_BY_ID`, but soft-deleted documents included. Only the
+/// hard-delete path looks a document up this way.
+pub const SELECT_BY_ID_WITH_DELETED: &str = r#"
+    SELECT d.id, d.title, d.categories, d."subcategory", d.status,
+           d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
+           d."s3Key" AS s3_key,
+           d.metadata,
+           to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+           to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+           COALESCE((SELECT array_agg(g2."knowledgeBaseId" ORDER BY g2."knowledgeBaseId")
+                       FROM "DocumentGroup" g2 WHERE g2."documentId" = d.id), '{}') AS knowledge_base_ids,
+           0::bigint AS chunk_count
+      FROM "Document" d
+     WHERE d.id = $1 AND d."tenantId" = $2
+"#;
+
 pub const SELECT_ALIVE_BY_IDS: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,

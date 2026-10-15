@@ -664,8 +664,10 @@ async fn delete_document(
     // Resolve the document inside the caller's tenant before touching anything.
     // The Bun route 404s on the tenant-filtered lookup, so a hard delete must
     // not reach the chunk store first and wipe another tenant's chunks on its
-    // way to the same 404.
-    let doc = find_visible_document(&state, &auth, &id).await?;
+    // way to the same 404. Soft-deleted documents are in scope here: Bun's
+    // delete route does not filter on `deletedAt`, so a hard delete can follow
+    // a soft delete.
+    let doc = find_document(&state, &auth, &id, true).await?;
 
     if !hard {
         let deleted = state
@@ -719,9 +721,24 @@ pub(crate) async fn find_visible_document(
     auth: &AuthContext,
     id: &str,
 ) -> Result<kb_ports::DocumentMeta, ApiError> {
+    find_document(state, auth, id, false).await
+}
+
+/// The delete path is the one lookup that also sees soft-deleted documents, so
+/// `?hard=true` can follow a soft delete.
+pub(crate) async fn find_document(
+    state: &AppState,
+    auth: &AuthContext,
+    id: &str,
+    include_deleted: bool,
+) -> Result<kb_ports::DocumentMeta, ApiError> {
     state
         .documents
-        .find_meta_by_id(&auth.tenant_id, &DocumentId::new_unchecked(id))
+        .find_meta_by_id(
+            &auth.tenant_id,
+            &DocumentId::new_unchecked(id),
+            include_deleted,
+        )
         .await
         .map_err(ApiError::from)?
         .ok_or(ApiError::NotFound)

@@ -17,11 +17,11 @@ use crate::documents::row_to_doc_meta;
 use crate::queries::{
     DELETE_CATEGORY, DELETE_DOCUMENT_GROUPS, DELETE_KB_GROUPS, DELETE_KNOWLEDGE_BASE,
     INSERT_CATEGORY, INSERT_DOCUMENT, INSERT_DOCUMENT_GROUP, INSERT_KNOWLEDGE_BASE, MAX_LIMIT,
-    SELECT_ALIVE_BY_IDS, SELECT_BY_ID, SELECT_CATEGORIES, SELECT_CATEGORY_BY_ID_TENANT,
-    SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB, SELECT_EXISTS_FOR_PATCH, SELECT_FOR_DOWNLOAD,
-    SELECT_KB_BY_ID_TENANT, SELECT_KNOWLEDGE_BASES, SELECT_OWNED_KB_IDS, SET_DOCUMENT_STATUS,
-    UPDATE_CATEGORY, UPDATE_DOCUMENT_PATCH, UPDATE_EXTRACTED_CONTENT, UPDATE_KNOWLEDGE_BASE,
-    UPDATE_METADATA,
+    SELECT_ALIVE_BY_IDS, SELECT_BY_ID, SELECT_BY_ID_WITH_DELETED, SELECT_CATEGORIES,
+    SELECT_CATEGORY_BY_ID_TENANT, SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB,
+    SELECT_EXISTS_FOR_PATCH, SELECT_FOR_DOWNLOAD, SELECT_KB_BY_ID_TENANT, SELECT_KNOWLEDGE_BASES,
+    SELECT_OWNED_KB_IDS, SET_DOCUMENT_STATUS, UPDATE_CATEGORY, UPDATE_DOCUMENT_PATCH,
+    UPDATE_EXTRACTED_CONTENT, UPDATE_KNOWLEDGE_BASE, UPDATE_METADATA,
 };
 
 /// Open a connection pool from settings. A free function rather than a
@@ -216,8 +216,14 @@ impl DocumentStore for PgDocumentStore {
         &self,
         tenant: &TenantId,
         id: &DocumentId,
+        include_deleted: bool,
     ) -> Result<Option<DocumentMeta>, PortError> {
-        let row = sqlx::query(SELECT_BY_ID)
+        let statement = if include_deleted {
+            SELECT_BY_ID_WITH_DELETED
+        } else {
+            SELECT_BY_ID
+        };
+        let row = sqlx::query(statement)
             .bind(id.as_str())
             .bind(tenant.as_str())
             .fetch_optional(&self.pool)

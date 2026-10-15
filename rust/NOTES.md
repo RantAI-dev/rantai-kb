@@ -346,3 +346,22 @@ Cargo ledger (continuing numbering from 79):
   actually failed. Everything else about the search response is unchanged.
 - **`limit` is parsed leniently** (`?limit=abc` falls back to 100) instead of producing the
   500 that `take: NaN` produces in TypeScript.
+
+## R4 slice 4: delete-after-soft-delete, config coverage, formats/health auth
+
+| # | command | result |
+|---|---|---|
+| 96 | `cargo test -p kb-server --test document_tests` | exit 101, 1 failure: a hard delete could not follow a soft delete, because `DocumentStore::find_meta_by_id` excluded `deletedAt` and the fake's `hard_delete` only looked at live rows. The port method now takes `include_deleted` (TS's delete route does not filter on `deletedAt`) and the fake removes soft-deleted rows too. |
+| 97 | `cargo test -p kb-server` | exit 0, all suites pass. |
+| 98 | `cargo fmt -p kb-server -p kb-ports -p kb-store-pg -p kb-engine` | free (no compile). |
+| 99 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0, zero errors. |
+| 100 | `cargo test --workspace` | exit 0, every suite passes. |
+
+Configuration covered by `config::tests`: `KB_WORKER_ENABLED`, `KB_INGEST_CONCURRENCY`,
+`KB_INGEST_POLL_MS`, `KB_INGEST_STALE_MS`, `KB_INGEST_MAX_ATTEMPTS`, `KB_INGEST_RECLAIM_MS`,
+`KB_INGEST_REAP_DAYS`, `KB_INGEST_REAP_MS`, `KB_VERSION`, `ENTITY_EXTRACTION_*`, including the
+`Math.max` floors and the fact that only the exact string `"false"` disables the worker.
+
+Worker concurrency: `KB_INGEST_CONCURRENCY` is applied as jobs claimed per tick, which the worker
+runs one after another. With the default of 1 this is identical to the TypeScript worker; above 1
+the Rust process claims a wider batch per poll but still indexes one document at a time.

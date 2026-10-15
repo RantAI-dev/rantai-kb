@@ -466,6 +466,18 @@ mod tests {
         map.insert("KB_MISTRAL_OCR_KEY", "mistral-key");
         map.insert("KB_LAYOUT_EXTRACTOR_ORDER", "mistral,sidecar");
         map.insert("OCR_FALLBACK_MODEL", "custom-ocr-model");
+        map.insert("KB_WORKER_ENABLED", "false");
+        map.insert("KB_INGEST_CONCURRENCY", "4");
+        map.insert("KB_INGEST_POLL_MS", "1500");
+        map.insert("KB_INGEST_STALE_MS", "900000");
+        map.insert("KB_INGEST_MAX_ATTEMPTS", "5");
+        map.insert("KB_INGEST_RECLAIM_MS", "30000");
+        map.insert("KB_INGEST_REAP_DAYS", "3");
+        map.insert("KB_INGEST_REAP_MS", "600000");
+        map.insert("KB_VERSION", "9.9.9");
+        map.insert("ENTITY_EXTRACTION_LLM_MODEL", "custom/entity-model");
+        map.insert("ENTITY_EXTRACTION_LLM_BASE_URL", "http://llm.local/v1");
+        map.insert("ENTITY_EXTRACTION_CONCURRENCY", "3");
 
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
@@ -511,6 +523,26 @@ mod tests {
             vec!["mistral", "sidecar"]
         );
         assert_eq!(cfg.extract.ocr_fallback_model, "custom-ocr-model");
+        assert_eq!(cfg.version, "9.9.9");
+        assert!(!cfg.worker.enabled);
+        assert_eq!(cfg.worker.concurrency, 4);
+        assert_eq!(cfg.worker.poll_ms, 1500);
+        assert_eq!(cfg.worker.stale_ms, 900_000);
+        assert_eq!(cfg.worker.max_attempts, 5);
+        assert_eq!(cfg.worker.reclaim_ms, 30_000);
+        assert_eq!(cfg.worker.reap_days, 3);
+        assert_eq!(cfg.worker.reap_ms, 600_000);
+        assert_eq!(cfg.entity.model, "custom/entity-model");
+        assert_eq!(cfg.entity.base_url, "http://llm.local/v1");
+        assert_eq!(cfg.entity.concurrency, 3);
+        let worker_settings = cfg.worker.ingest_settings();
+        assert_eq!(worker_settings.poll_interval, Duration::from_millis(1500));
+        assert_eq!(worker_settings.stale_after, Duration::from_millis(900_000));
+        assert_eq!(worker_settings.max_attempts, 5);
+        assert_eq!(
+            worker_settings.reclaim_interval,
+            Duration::from_millis(30_000)
+        );
 
         match &cfg.reranker {
             RerankerConfig::Tei { base_url, model } => {
@@ -538,12 +570,52 @@ mod tests {
         assert!(!cfg.engine.expansion_enabled);
         assert_eq!(cfg.engine.expansion_paraphrases, 3);
         assert!(matches!(cfg.reranker, RerankerConfig::Disabled));
+        // Worker defaults match `src/lib/ingest/worker.ts`.
+        assert!(cfg.worker.enabled);
+        assert_eq!(cfg.worker.concurrency, 1);
+        assert_eq!(cfg.worker.poll_ms, 3000);
+        assert_eq!(cfg.worker.stale_ms, 300_000);
+        assert_eq!(cfg.worker.max_attempts, 3);
+        assert_eq!(cfg.worker.reclaim_ms, 60_000);
+        assert_eq!(cfg.worker.reap_days, 7);
+        assert_eq!(cfg.worker.reap_ms, 3_600_000);
+        assert_eq!(cfg.version, "dev");
         // Object storage defaults match the Bun adapter.
         assert_eq!(cfg.s3.endpoint, "http://localhost:9000");
         assert_eq!(cfg.s3.region, "us-east-1");
         assert_eq!(cfg.s3.bucket, "rantai-kb");
         assert_eq!(cfg.s3.access_key_id, "");
         assert!(cfg.s3.force_path_style);
+    }
+
+    #[test]
+    fn test_worker_knobs_keep_the_typescript_floors() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("SURREAL_DB_URL", "http://localhost:8000");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        // Values below the floor are raised, exactly like `Math.max`.
+        map.insert("KB_INGEST_CONCURRENCY", "0");
+        map.insert("KB_INGEST_POLL_MS", "10");
+        map.insert("KB_INGEST_STALE_MS", "1000");
+        map.insert("KB_INGEST_MAX_ATTEMPTS", "0");
+        map.insert("KB_INGEST_RECLAIM_MS", "1");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.worker.concurrency, 1);
+        assert_eq!(cfg.worker.poll_ms, 500);
+        assert_eq!(cfg.worker.stale_ms, 60_000);
+        assert_eq!(cfg.worker.max_attempts, 1);
+        assert_eq!(cfg.worker.reclaim_ms, 15_000);
+        // Only the exact string "false" disables the worker.
+        map.insert("KB_WORKER_ENABLED", "false");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert!(!cfg.worker.enabled);
+        map.insert("KB_WORKER_ENABLED", "0");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert!(cfg.worker.enabled);
     }
 
     #[test]

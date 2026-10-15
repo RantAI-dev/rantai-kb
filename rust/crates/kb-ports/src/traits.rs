@@ -62,16 +62,20 @@ pub trait DocumentStore: Send + Sync {
         id: &DocumentId,
     ) -> Result<Option<DocumentMeta>, PortError>;
 
-    /// Look up one document by id for a known tenant (and not soft-deleted).
+    /// Look up one document by id for a known tenant.
     ///
-    /// This is the `findFirst({ id, tenantId, deletedAt: null })` the HTTP
-    /// routes run before every read, write or blob access. It is not the
-    /// scoped [`DocumentStore::find_by_id`], because building a scope resolves
-    /// every document id the tenant owns and the route needs exactly one row.
+    /// This is the `findFirst({ id, tenantId })` the HTTP routes run before
+    /// every read, write or blob access, with `deletedAt: null` added unless
+    /// `include_deleted` is set: reads exclude soft-deleted rows, while
+    /// `DELETE /v1/documents/:id` must still find one so a soft delete can be
+    /// followed by a hard delete. It is not the scoped
+    /// [`DocumentStore::find_by_id`], because building a scope resolves every
+    /// document id the tenant owns and the route needs exactly one row.
     async fn find_meta_by_id(
         &self,
         tenant: &TenantId,
         id: &DocumentId,
+        include_deleted: bool,
     ) -> Result<Option<DocumentMeta>, PortError>;
 
     /// Soft delete: sets `deletedAt`. Returns `false` when no live document matched.
