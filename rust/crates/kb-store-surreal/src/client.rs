@@ -13,6 +13,21 @@ pub fn safe_limit(limit: u32) -> u32 {
     limit.clamp(1, MAX_LIMIT)
 }
 
+/// Normalize SurrealDB record IDs (e.g. `document_chunk:`foo`` -> `document_chunk:⟨foo⟩`).
+/// Bun's SurrealDB SDK serializes RecordId with Unicode angle brackets `⟨...⟩`.
+#[must_use]
+pub fn normalize_surreal_id(id: &str) -> String {
+    if let Some((table, ident)) = id.split_once(':') {
+        let clean = ident
+            .trim_matches('`')
+            .trim_start_matches('⟨')
+            .trim_end_matches('⟩');
+        format!("{table}:⟨{clean}⟩")
+    } else {
+        id.to_string()
+    }
+}
+
 /// Settings for connecting to SurrealDB.
 #[derive(Clone, Debug)]
 pub struct SurrealSettings {
@@ -153,7 +168,11 @@ pub fn row_meta(meta: Option<&Value>) -> ChunkMetadata {
         Value::Object(_) => v,
         _ => return ChunkMetadata::default(),
     };
-    let section = obj.get("section").and_then(Value::as_str).map(String::from);
+    let section = obj
+        .get("section")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
     let page = obj.get("page").and_then(Value::as_u64).map(|n| n as u32);
     let chunk_index = obj
         .get("chunkIndex")
@@ -192,7 +211,7 @@ pub fn row_chunk_type(meta: Option<&Value>) -> ChunkType {
 pub fn build_hit(row: ChunkRow, rank: u32, score: f32) -> SearchHit {
     let meta = row_meta(row.metadata.as_ref());
     let chunk_type = row_chunk_type(row.metadata.as_ref());
-    let id = ChunkId::new_unchecked(row.id);
+    let id = ChunkId::new_unchecked(normalize_surreal_id(&row.id));
     let document_id = DocumentId::new_unchecked(row.document_id);
     let document_title = String::new();
     let mut metadata = meta;
@@ -212,9 +231,12 @@ pub fn build_hit(row: ChunkRow, rank: u32, score: f32) -> SearchHit {
             content: row.content,
             chunk_type,
             metadata,
+            categories: Vec::new(),
+            subcategory: None,
         },
         similarity: score,
         rank,
+        is_bm25: false,
     }
 }
 
@@ -248,5 +270,17 @@ mod tests {
     fn extract_rows_accepts_a_bare_row_array() {
         let rows = SurrealChunkStore::extract_rows(&[json!([{"n": 1}])]);
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn normalize_surreal_id_transforms_backticks_to_angle_brackets() {
+        assert_eq!(
+            normalize_surreal_id("document_chunk:`doc1_0`"),
+            "document_chunk:⟨doc1_0⟩"
+        );
+        assert_eq!(
+            normalize_surreal_id("document_chunk:⟨doc1_0⟩"),
+            "document_chunk:⟨doc1_0⟩"
+        );
     }
 }

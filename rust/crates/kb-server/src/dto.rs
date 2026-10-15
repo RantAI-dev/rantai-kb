@@ -35,9 +35,18 @@ pub struct SearchRequestDto {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchResponseDto {
-    pub chunks: Vec<ChunkDto>,
-    pub sources: Vec<SourceDto>,
-    pub context: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub chunks: Option<Vec<ChunkDto>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sources: Option<Vec<SourceDto>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub context: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub results: Option<Vec<serde_json::Value>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub stats: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub note: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub degrades: Vec<String>,
 }
@@ -49,7 +58,6 @@ pub struct SourceDto {
     #[serde(rename = "documentTitle")]
     pub document_title: String,
     pub section: Option<String>,
-    #[serde(default)]
     pub categories: Vec<String>,
     #[serde(rename = "assetKey")]
     pub asset_key: Option<String>,
@@ -61,23 +69,23 @@ pub struct SourceDto {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChunkDto {
     pub id: String,
+    pub content: String,
     #[serde(rename = "documentId")]
     pub document_id: String,
     #[serde(rename = "documentTitle")]
     pub document_title: String,
-    pub content: String,
-    #[serde(rename = "chunkIndex")]
-    pub chunk_index: Option<u32>,
-    #[serde(rename = "chunkType")]
-    pub chunk_type: Option<String>,
+    pub categories: Vec<String>,
+    pub subcategory: Option<String>,
     pub section: Option<String>,
-    pub page: Option<u32>,
-    #[serde(rename = "assetKey")]
-    pub asset_key: Option<String>,
-    #[serde(rename = "contextualPrefix")]
-    pub contextual_prefix: Option<String>,
-    pub score: f32,
-    pub rank: u32,
+    pub similarity: f32,
+    #[serde(rename = "contextualPrefix", skip_serializing_if = "Option::is_none")]
+    pub contextual_prefix: Option<Option<String>>,
+    #[serde(rename = "assetKey", skip_serializing_if = "Option::is_none")]
+    pub asset_key: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<Option<u32>>,
+    #[serde(rename = "chunkType", skip_serializing_if = "Option::is_none")]
+    pub chunk_type: Option<Option<String>>,
 }
 
 impl SearchResponseDto {
@@ -86,9 +94,12 @@ impl SearchResponseDto {
     #[must_use]
     pub fn empty() -> Self {
         Self {
-            chunks: Vec::new(),
-            sources: Vec::new(),
-            context: String::new(),
+            chunks: Some(Vec::new()),
+            sources: Some(Vec::new()),
+            context: Some(String::new()),
+            results: None,
+            stats: None,
+            note: None,
             degrades: Vec::new(),
         }
     }
@@ -104,9 +115,12 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             .map(|d| d.label().to_string())
             .collect();
         SearchResponseDto {
-            chunks,
-            sources,
-            context: outcome.context,
+            chunks: Some(chunks),
+            sources: Some(sources),
+            context: Some(outcome.context),
+            results: None,
+            stats: None,
+            note: None,
             degrades,
         }
     }
@@ -114,19 +128,34 @@ impl From<RetrievalOutcome> for SearchResponseDto {
 
 impl From<SearchHit> for ChunkDto {
     fn from(hit: SearchHit) -> Self {
+        let (contextual_prefix, asset_key, page, chunk_type) = if hit.is_bm25 {
+            (
+                Some(None), // BM25 hit serializes contextualPrefix: null
+                None,       // BM25 hit omits assetKey
+                None,       // BM25 hit omits page
+                None,       // BM25 hit omits chunkType
+            )
+        } else {
+            (
+                hit.chunk.metadata.contextual_prefix.map(Some), // vector hit omits contextualPrefix if None
+                Some(hit.chunk.metadata.asset_key), // vector hit serializes assetKey (null if None)
+                Some(hit.chunk.metadata.page),      // vector hit serializes page (null if None)
+                Some(Some(hit.chunk.chunk_type.as_storage().to_string())), // vector hit serializes chunkType: "text"
+            )
+        };
         ChunkDto {
             id: hit.chunk.id.0,
+            content: hit.chunk.content,
             document_id: hit.chunk.document_id.0,
             document_title: hit.chunk.document_title,
-            content: hit.chunk.content,
-            chunk_index: hit.chunk.metadata.chunk_index,
-            chunk_type: Some(hit.chunk.chunk_type.as_storage().to_string()),
+            categories: hit.chunk.categories,
+            subcategory: hit.chunk.subcategory,
             section: hit.chunk.metadata.section,
-            page: hit.chunk.metadata.page,
-            asset_key: hit.chunk.metadata.asset_key,
-            contextual_prefix: hit.chunk.metadata.contextual_prefix,
-            score: hit.similarity,
-            rank: hit.rank,
+            similarity: hit.similarity,
+            contextual_prefix,
+            asset_key,
+            page,
+            chunk_type,
         }
     }
 }

@@ -2,7 +2,6 @@
 
 // Shared helpers only: this file keeps its own harness because it also builds an
 // ingest worker over fakes.
-#[allow(dead_code)]
 mod harness;
 
 use std::sync::Arc;
@@ -54,6 +53,7 @@ impl Harness {
             expansion_enabled: false,
             expansion_paraphrases: 3,
             hybrid_bm25_enabled: true,
+            rerank_enabled: false,
         };
 
         let state = AppState::from_parts(
@@ -195,13 +195,16 @@ async fn test_search_happy_path_fields() {
         .unwrap();
     let body: SearchResponseDto = serde_json::from_slice(&bytes).unwrap();
 
-    assert_eq!(body.chunks.len(), 1);
-    assert_eq!(body.chunks[0].id, "c_1");
-    assert_eq!(body.chunks[0].document_title, "Happy Path Document");
-    assert_eq!(body.sources.len(), 1);
-    assert_eq!(body.sources[0].document_title, "Happy Path Document");
-    assert!(body.context.contains("[1] Happy Path Document"));
-    assert!(body.context.contains("Happy path content line"));
+    let chunks = body.chunks.expect("chunks present");
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].id, "c_1");
+    assert_eq!(chunks[0].document_title, "Happy Path Document");
+    let sources = body.sources.expect("sources present");
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].document_title, "Happy Path Document");
+    let context = body.context.expect("context present");
+    assert!(context.contains("[1] Happy Path Document"));
+    assert!(context.contains("Happy path content line"));
 }
 
 #[tokio::test]
@@ -342,9 +345,9 @@ async fn test_tenant_b_key_searching_fakes_with_tenant_a_docs_gets_zero_results(
         .unwrap();
     let body1: SearchResponseDto = serde_json::from_slice(&bytes1).unwrap();
 
-    assert_eq!(body1.chunks.len(), 0);
-    assert_eq!(body1.sources.len(), 0);
-    assert_eq!(body1.context, "");
+    assert_eq!(body1.chunks.as_deref().unwrap_or(&[]).len(), 0);
+    assert_eq!(body1.sources.as_deref().unwrap_or(&[]).len(), 0);
+    assert_eq!(body1.context.as_deref().unwrap_or(""), "");
 
     // Test with hybrid: true
     let request2 = Request::builder()
@@ -362,9 +365,9 @@ async fn test_tenant_b_key_searching_fakes_with_tenant_a_docs_gets_zero_results(
         .unwrap();
     let body2: SearchResponseDto = serde_json::from_slice(&bytes2).unwrap();
 
-    assert_eq!(body2.chunks.len(), 0);
-    assert_eq!(body2.sources.len(), 0);
-    assert_eq!(body2.context, "");
+    assert_eq!(body2.chunks.as_deref().unwrap_or(&[]).len(), 0);
+    assert_eq!(body2.sources.as_deref().unwrap_or(&[]).len(), 0);
+    assert_eq!(body2.context.as_deref().unwrap_or(""), "");
 }
 
 fn delete_test_doc(id: &str) -> DocumentMeta {

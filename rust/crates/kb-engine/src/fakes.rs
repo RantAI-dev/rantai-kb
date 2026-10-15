@@ -103,9 +103,12 @@ pub fn make_fake_hit(
                 chunk_index: Some(chunk_index),
                 ..Default::default()
             },
+            categories: Vec::new(),
+            subcategory: None,
         },
         similarity,
         rank: 0,
+        is_bm25: false,
     }
 }
 
@@ -750,6 +753,19 @@ impl ChunkStore for FakeChunkStore {
             .take(limit as usize)
             .cloned()
             .collect();
+        Ok(filtered)
+    }
+
+    async fn bm25_search_global(
+        &self,
+        _query: &str,
+        limit: u32,
+    ) -> Result<Vec<SearchHit>, PortError> {
+        if self.fail_bm25.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable("forced bm25 failure".to_string()));
+        }
+        let list = self.bm25_hits.read().unwrap();
+        let filtered: Vec<SearchHit> = list.iter().take(limit as usize).cloned().collect();
         Ok(filtered)
     }
 

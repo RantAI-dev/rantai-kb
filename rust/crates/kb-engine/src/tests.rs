@@ -10,7 +10,7 @@ mod pipeline_tests {
         make_fake_scope,
     };
     use crate::retrieval::{RetrievalOptions, execute_pipeline};
-    use kb_ports::{ChunkType, DocumentId, EngineError, RetrievalDegrade, TenantId};
+    use kb_ports::{ChunkType, DocumentId, DocumentMeta, EngineError, RetrievalDegrade, TenantId};
 
     fn setup() -> (
         Arc<FakeDocumentStore>,
@@ -18,8 +18,28 @@ mod pipeline_tests {
         Arc<FakeEmbedder>,
         Arc<FakeReranker>,
     ) {
+        let doc_store = Arc::new(FakeDocumentStore::default());
+        doc_store.insert_doc(
+            TenantId("t1".into()),
+            DocumentMeta {
+                id: DocumentId("d1".into()),
+                title: "Title 1".into(),
+                categories: vec![],
+                subcategory: None,
+                status: "READY".into(),
+                chunk_count: 1,
+                file_type: None,
+                file_size: None,
+                mime_type: None,
+                s3_key: None,
+                created_at: "".into(),
+                updated_at: "".into(),
+                knowledge_base_ids: vec![],
+                metadata: None,
+            },
+        );
         (
-            Arc::new(FakeDocumentStore::default()),
+            doc_store,
             Arc::new(FakeChunkStore::default()),
             Arc::new(FakeEmbedder::default()),
             Arc::new(FakeReranker::default()),
@@ -87,7 +107,11 @@ mod pipeline_tests {
             0.8,
         ));
 
-        let opts = RetrievalOptions::default();
+        let opts = RetrievalOptions {
+            rerank_enabled: true,
+            max_chunks: 0,
+            ..Default::default()
+        };
         let outcome = execute_pipeline(
             &(doc_store as Arc<_>),
             &(chunk_store as Arc<_>),
@@ -121,7 +145,11 @@ mod pipeline_tests {
             0.8,
         ));
 
-        let opts = RetrievalOptions::default();
+        let opts = RetrievalOptions {
+            rerank_enabled: true,
+            max_chunks: 0,
+            ..Default::default()
+        };
         let outcome = execute_pipeline(
             &(doc_store as Arc<_>),
             &(chunk_store as Arc<_>),
@@ -221,8 +249,17 @@ mod pipeline_tests {
             .write()
             .unwrap()
             .push(make_fake_hit("c1", "d1", "Title 1", "First", 1, 0.9));
+        chunk_store
+            .bm25_hits
+            .write()
+            .unwrap()
+            .push(make_fake_hit("c2", "d1", "Title 1", "Second", 2, 0.8));
 
-        let opts = RetrievalOptions::default();
+        let opts = RetrievalOptions {
+            rerank_enabled: true,
+            max_chunks: 1,
+            ..Default::default()
+        };
         let outcome = execute_pipeline(
             &(doc_store as Arc<_>),
             &(chunk_store as Arc<_>),

@@ -178,6 +178,7 @@ fn engine_settings() -> EngineSettings {
         expansion_enabled: false,
         expansion_paraphrases: 3,
         hybrid_bm25_enabled: true,
+        rerank_enabled: false,
     }
 }
 

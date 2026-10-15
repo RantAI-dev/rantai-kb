@@ -265,6 +265,8 @@ impl Config {
             .unwrap_or_else(|| "openai/gpt-4.1-nano".into());
         let query_expansion_paraphrases = int_var(&lookup, "KB_QUERY_EXPANSION_PARAPHRASES", 3)?;
 
+        let rerank_enabled = bool_flag(&lookup, "KB_RERANK_ENABLED", false);
+
         // `KB_MIN_SIMILARITY` is not a documented variable. The minimum is the
         // constant used by the TypeScript retriever (`minSimilarity = 0.30`).
         let min_similarity: f32 = 0.30;
@@ -279,6 +281,7 @@ impl Config {
             expansion_enabled: query_expansion_enabled,
             expansion_paraphrases: query_expansion_paraphrases,
             hybrid_bm25_enabled,
+            rerank_enabled,
         };
 
         let pg = PgSettings {

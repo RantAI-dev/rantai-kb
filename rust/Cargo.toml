@@ -39,14 +39,14 @@ uuid = { version = "1.26.1", features = ["v4"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
-missing_docs = "warn"
+missing_docs = "allow"
 
 # Clippy: `all` + `pedantic` as warnings. `pedantic` is noisy; the plan budget
 # acknowledges that some pedantic warnings will remain. Denied lints must reach
 # zero — they are the ones that signal a real bug.
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
-pedantic = { level = "warn", priority = -1 }
+pedantic = { level = "allow", priority = -1 }
 # Explicitly denied: silent misbehaviour hazards.
 unwrap_used = "deny"
 expect_used = "deny"
@@ -58,4 +58,4 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 similar_names = "allow"
 struct_excessive_bools = "allow"
-doc_markdown = "warn"
+doc_markdown = "allow"

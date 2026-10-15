@@ -18,6 +18,14 @@ pub const BM25_SEARCH_QUERY: &str = "SELECT id, document_id, content, chunk_inde
      ORDER BY score DESC, id ASC \
      LIMIT {limit};";
 
+/// Unscoped BM25 full-text search template matching TypeScript `bm25Search`.
+pub const BM25_SEARCH_QUERY_UNSCOPED: &str = "SELECT id, document_id, content, chunk_index, metadata, contextual_prefix, \
+     search::score(0) AS score \
+     FROM document_chunk \
+     WHERE content @@ $q \
+     ORDER BY score DESC, id ASC \
+     LIMIT {limit};";
+
 /// Neighbour chunk lookup template.
 pub const NEIGHBOURS_QUERY: &str = "SELECT id, document_id, content, chunk_index, metadata, contextual_prefix \
      FROM document_chunk \

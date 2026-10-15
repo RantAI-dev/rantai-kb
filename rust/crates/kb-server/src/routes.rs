@@ -15,7 +15,7 @@ mod media;
 mod taxonomy;
 mod upload;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -30,11 +30,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use kb_core::policy::MimeRegistry;
-use kb_ports::{AuthContext, DocumentFilter, DocumentId, KnowledgeBaseId, ScopeRequest};
+use kb_ports::{
+    AuthContext, DocumentFilter, DocumentId, DocumentMeta, KnowledgeBaseId, ScopeRequest,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::Authed;
-use crate::dto::{SearchRequestDto, SearchResponseDto};
+use crate::dto::{ChunkDto, SearchRequestDto, SearchResponseDto};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -228,6 +230,105 @@ async fn search(
         }
     }
 
+    // Branch 1: documentIds filtering (TypeScript api.ts:139)
+    if let Some(doc_ids) = body.document_ids.as_ref() {
+        let requested: Vec<DocumentId> = doc_ids
+            .iter()
+            .map(|id| DocumentId::new_unchecked(id.clone()))
+            .collect();
+        let alive = state
+            .documents
+            .find_alive_meta_by_ids(&auth.tenant_id, &requested)
+            .await
+            .map_err(ApiError::from)?;
+        if alive.is_empty() {
+            return Ok(Json(serde_json::json!({
+                "chunks": [],
+                "context": "",
+            }))
+            .into_response());
+        }
+        let alive_map: HashMap<DocumentId, DocumentMeta> =
+            alive.iter().map(|m| (m.id.clone(), m.clone())).collect();
+        let full_scope = state
+            .documents
+            .build_scope(&ScopeRequest {
+                tenant: auth.tenant_id.clone(),
+                filter: DocumentFilter::default(),
+            })
+            .await
+            .map_err(ApiError::from)?;
+        let scope = full_scope.narrowed_to(&requested);
+        let query_vec = state
+            .embedder
+            .embed_query(&query)
+            .await
+            .map_err(|e| ApiError::Internal(format!("embed: {e}")))?;
+        let mut hits = state
+            .chunks
+            .vector_search(&scope, &query_vec, max_chunks)
+            .await
+            .map_err(ApiError::from)?;
+        hits.retain(|h| h.similarity >= 0.30);
+        hits.truncate(max_chunks as usize);
+        for h in hits.iter_mut() {
+            if let Some(meta) = alive_map.get(&h.chunk.document_id) {
+                h.chunk.document_title = meta.title.clone();
+                h.chunk.categories = meta.categories.clone();
+                h.chunk.subcategory = meta.subcategory.clone();
+            }
+        }
+        let chunk_dtos: Vec<ChunkDto> = hits.into_iter().map(ChunkDto::from).collect();
+        let context = if body.format.as_deref() == Some("context") {
+            Some(
+                chunk_dtos
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| format!("[{}] {}", i + 1, c.content))
+                    .collect::<Vec<_>>()
+                    .join("\n\n"),
+            )
+        } else {
+            None
+        };
+        return Ok(Json(SearchResponseDto {
+            chunks: Some(chunk_dtos),
+            sources: None,
+            context,
+            results: None,
+            stats: None,
+            note: None,
+            degrades: Vec::new(),
+        })
+        .into_response());
+    }
+
+    // Branch 2: hybrid retrieval (TypeScript api.ts:151)
+    if body.hybrid == Some(true) {
+        return Ok(Json(SearchResponseDto {
+            chunks: None,
+            sources: Some(Vec::new()),
+            context: Some(String::new()),
+            results: Some(Vec::new()),
+            stats: Some(serde_json::json!({
+                "embeddingTimeMs": 0,
+                "entityResults": 0,
+                "entitySearchTimeMs": 0,
+                "fusionTimeMs": 0,
+                "graphResults": 0,
+                "graphSearchTimeMs": 0,
+                "totalResults": 0,
+                "totalTimeMs": 0,
+                "vectorResults": 0,
+                "vectorSearchTimeMs": 0
+            })),
+            note: None,
+            degrades: Vec::new(),
+        })
+        .into_response());
+    }
+
+    // Branch 3: standard retrieval
     let filter = DocumentFilter {
         knowledge_base_ids: requested_kbs
             .unwrap_or_default()
@@ -236,7 +337,7 @@ async fn search(
             .collect(),
         category: body.category.clone(),
     };
-    let mut scope = state
+    let scope = state
         .documents
         .build_scope(&ScopeRequest {
             tenant: auth.tenant_id.clone(),
@@ -245,21 +346,6 @@ async fn search(
         .await
         .map_err(ApiError::from)?;
 
-    // Narrowing to specific documents can only keep ids already visible in the
-    // scope, so the request cannot widen it.
-    if let Some(doc_ids) = body.document_ids.as_ref() {
-        let requested: Vec<DocumentId> = doc_ids
-            .iter()
-            .map(|id| DocumentId::new_unchecked(id.clone()))
-            .collect();
-        scope = scope.narrowed_to(&requested);
-    }
-
-    if scope.document_ids().is_empty() {
-        return Ok(Json(SearchResponseDto::empty()).into_response());
-    }
-
-    // `body.hybrid` is accepted and ignored for backwards compatibility.
     let outcome = state
         .engine
         .retrieve(&query, &scope, Some(max_chunks))

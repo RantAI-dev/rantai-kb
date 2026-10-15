@@ -103,11 +103,12 @@ async fn serve_stops_the_listener_and_then_the_worker_on_cancel() {
     let finished = wait_for(|| !jobs.finished.read().unwrap().is_empty()).await;
     assert!(finished, "the worker never finished the queued job");
 
-    let _ = cancel.cancel();
-    tokio::time::timeout(Duration::from_secs(5), server)
+    cancel.cancel();
+    let res = tokio::time::timeout(Duration::from_secs(5), server)
         .await
         .expect("serve returned after the cancel")
         .expect("no join error");
+    assert!(res.is_ok());
 
     // Cancelling again is harmless, and the documents the worker wrote stayed.
     cancel.cancel();
@@ -132,11 +133,12 @@ async fn serve_works_without_a_worker() {
 
     let body = reqwest_get(addr).await;
     assert!(body.contains("\"ok\""));
-    let _ = cancel.cancel();
-    tokio::time::timeout(Duration::from_secs(5), server)
+    cancel.cancel();
+    let res = tokio::time::timeout(Duration::from_secs(5), server)
         .await
         .expect("serve returned")
         .expect("no join error");
+    assert!(res.is_ok());
 }
 
 #[tokio::test]

@@ -79,6 +79,10 @@ pub struct Chunk {
     pub content: String,
     pub chunk_type: ChunkType,
     pub metadata: ChunkMetadata,
+    #[serde(default)]
+    pub categories: Vec<String>,
+    #[serde(default)]
+    pub subcategory: Option<String>,
 }
 
 /// A chunk on its way into the vector store.
@@ -253,6 +257,9 @@ pub struct SearchHit {
     /// Zero-based rank within the source arm. Set by the chunk store before
     /// the engine sees it.
     pub rank: u32,
+    /// Whether this hit originated from the BM25 arm.
+    #[serde(default)]
+    pub is_bm25: bool,
 }
 
 impl SearchHit {

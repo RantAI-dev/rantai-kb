@@ -5,14 +5,11 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use kb_core::{
-    ContextItem, RrfOptions, SourceEntry, build_context_and_sources, reciprocal_rank_fusion_with,
-    weave_neighbours_with,
-};
+use kb_core::{ContextItem, SourceEntry, build_context_and_sources, weave_neighbours_with};
 use kb_ports::{
-    ChunkStore, DocumentId, DocumentScope, DocumentStore, Embedder, EngineError, FigureGate,
-    FigureGateCandidate, NeighbourAnchor, RerankCandidate, Reranker, RetrievalDegrade, SearchHit,
-    TenantId,
+    ChunkStore, DocumentId, DocumentMeta, DocumentScope, DocumentStore, Embedder, EngineError,
+    FigureGate, FigureGateCandidate, NeighbourAnchor, RerankCandidate, Reranker, RetrievalDegrade,
+    SearchHit, TenantId,
 };
 
 use crate::QueryExpander;
@@ -34,6 +31,8 @@ pub struct RetrievalOptions {
     pub hybrid_bm25_enabled: bool,
     /// Optional figure gate veto.
     pub figure_gate: Option<Arc<dyn FigureGate>>,
+    /// Whether reranker is enabled.
+    pub rerank_enabled: bool,
 }
 
 impl fmt::Debug for RetrievalOptions {
@@ -63,12 +62,13 @@ impl Default for RetrievalOptions {
             min_similarity: 0.30,
             candidate_pool_size: 20,
             rerank_final_k: 5,
-            neighbour_window: 1,
-            figure_limit: 3,
+            neighbour_window: 0,
+            figure_limit: 0,
             expansion_enabled: false,
             expansion_paraphrases: 3,
             hybrid_bm25_enabled: true,
             figure_gate: None,
+            rerank_enabled: false,
         }
     }
 }
@@ -82,7 +82,7 @@ pub struct RetrievalOutcome {
     pub degrades: Vec<RetrievalDegrade>,
 }
 
-/// Enrich missing document titles on hits via `DocumentStore::find_alive_meta_by_ids`.
+/// Enrich document titles, categories, and subcategory on hits via `DocumentStore::find_alive_meta_by_ids`.
 pub async fn enrich_titles(
     doc_store: &Arc<dyn DocumentStore>,
     tenant: &TenantId,
@@ -91,7 +91,7 @@ pub async fn enrich_titles(
     let mut missing_ids: Vec<DocumentId> = Vec::new();
     let mut seen: HashSet<DocumentId> = HashSet::new();
     for h in hits.iter() {
-        if h.chunk.document_title.trim().is_empty() && seen.insert(h.chunk.document_id.clone()) {
+        if seen.insert(h.chunk.document_id.clone()) {
             missing_ids.push(h.chunk.document_id.clone());
         }
     }
@@ -100,13 +100,13 @@ pub async fn enrich_titles(
     }
 
     if let Ok(metas) = doc_store.find_alive_meta_by_ids(tenant, &missing_ids).await {
-        let title_map: HashMap<DocumentId, String> =
-            metas.into_iter().map(|m| (m.id, m.title)).collect();
+        let meta_map: HashMap<DocumentId, DocumentMeta> =
+            metas.into_iter().map(|m| (m.id.clone(), m)).collect();
         for h in hits.iter_mut() {
-            if h.chunk.document_title.trim().is_empty() {
-                if let Some(title) = title_map.get(&h.chunk.document_id) {
-                    h.chunk.document_title = title.clone();
-                }
+            if let Some(meta) = meta_map.get(&h.chunk.document_id) {
+                h.chunk.document_title = meta.title.clone();
+                h.chunk.categories = meta.categories.clone();
+                h.chunk.subcategory = meta.subcategory.clone();
             }
         }
     }
@@ -130,15 +130,6 @@ pub async fn execute_pipeline(
     query: &str,
     opts: &RetrievalOptions,
 ) -> Result<RetrievalOutcome, EngineError> {
-    if scope.document_ids().is_empty() {
-        return Ok(RetrievalOutcome {
-            chunks: Vec::new(),
-            sources: Vec::new(),
-            context: String::new(),
-            degrades: Vec::new(),
-        });
-    }
-
     let mut degrades: Vec<RetrievalDegrade> = Vec::new();
     let pool_size = opts.candidate_pool_size.clamp(1, 100);
 
@@ -162,9 +153,11 @@ pub async fn execute_pipeline(
         vec![query.to_string()]
     };
 
-    // 2. Vector arm (one search per variant, in parallel, unioned by best score)
-    //    and BM25 arm (original query only), run concurrently.
+    // 2. Vector arm (scoped to document IDs from KB/category if non-empty).
     let vector_future = async {
+        if scope.document_ids().is_empty() {
+            return Ok(Vec::new());
+        }
         let embeds = variants.iter().map(|q| embedder.embed_query(q));
         let vectors = futures::future::join_all(embeds).await;
         // Own the vectors first: the search futures borrow them, so they must
@@ -198,27 +191,62 @@ pub async fn execute_pipeline(
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| a.chunk.id.0.cmp(&b.chunk.id.0))
         });
+        merged.retain(|h| h.similarity >= opts.min_similarity);
         merged.truncate(pool_size as usize);
         for (rank, hit) in merged.iter_mut().enumerate() {
             hit.rank = rank as u32;
+            hit.is_bm25 = false;
         }
         Ok::<Vec<SearchHit>, String>(merged)
     };
 
+    // 3. BM25 arm: global in SurrealDB, filtered against alive tenant documents in Postgres.
     let bm25_future = async {
         if !opts.hybrid_bm25_enabled {
             return Ok(Vec::new());
         }
-        chunk_store
-            .bm25_search(scope, query, pool_size)
+        let raw_hits = chunk_store
+            .bm25_search_global(query, pool_size)
             .await
-            .map_err(|e| format!("bm25 search: {e}"))
+            .map_err(|e| format!("bm25 search: {e}"))?;
+        if raw_hits.is_empty() {
+            return Ok(Vec::new());
+        }
+        let doc_ids: Vec<DocumentId> = raw_hits
+            .iter()
+            .map(|h| h.chunk.document_id.clone())
+            .collect();
+        let alive_metas = doc_store
+            .find_alive_meta_by_ids(scope.tenant(), &doc_ids)
+            .await
+            .map_err(|e| format!("resolve doc metas: {e}"))?;
+        let meta_map: HashMap<DocumentId, DocumentMeta> =
+            alive_metas.into_iter().map(|m| (m.id.clone(), m)).collect();
+
+        let mut filtered = Vec::new();
+        for mut hit in raw_hits {
+            if let Some(doc) = meta_map.get(&hit.chunk.document_id) {
+                hit.similarity = 0.0;
+                hit.chunk.document_title = doc.title.clone();
+                hit.chunk.categories = doc.categories.clone();
+                hit.chunk.subcategory = doc.subcategory.clone();
+                hit.chunk.metadata.section = None;
+                hit.chunk.metadata.contextual_prefix = None;
+                hit.chunk.metadata.asset_key = None;
+                hit.chunk.metadata.page = None;
+                hit.is_bm25 = true;
+                filtered.push(hit);
+            }
+        }
+        for (rank, hit) in filtered.iter_mut().enumerate() {
+            hit.rank = rank as u32;
+        }
+        Ok::<Vec<SearchHit>, String>(filtered)
     };
 
     let (vector_res, bm25_res) = tokio::join!(vector_future, bm25_future);
 
-    // 2. Failure and fusion handling
-    let fused_hits: Vec<SearchHit> = match (vector_res, bm25_res) {
+    let (mut v_hits, b_hits) = match (vector_res, bm25_res) {
         (Err(v_err), Err(b_err)) => {
             return Err(EngineError::RetrievalFailed(format!(
                 "both search arms failed. vector: {v_err}; bm25: {b_err}"
@@ -226,44 +254,54 @@ pub async fn execute_pipeline(
         }
         (Err(_), Ok(b_hits)) => {
             degrades.push(RetrievalDegrade::VectorArmFailed);
-            // No vector hits: BM25 hits only, none are vector-only
-            b_hits
+            (Vec::new(), b_hits)
         }
         (Ok(v_hits), Err(_)) => {
             degrades.push(RetrievalDegrade::Bm25ArmFailed);
-            // Vector hits only: all are vector-only, apply min_similarity
-            v_hits
-                .into_iter()
-                .filter(|h| h.similarity >= opts.min_similarity)
-                .collect()
+            (v_hits, Vec::new())
         }
-        (Ok(v_hits), Ok(b_hits)) => {
-            // Both arms succeeded: fuse with RRF
-            let rrf_opts = RrfOptions {
-                k: 60,
-                limit: Some(pool_size),
-            };
+        (Ok(v_hits), Ok(b_hits)) => (v_hits, b_hits),
+    };
 
-            let lists = vec![v_hits, b_hits];
-            let rrf_results = reciprocal_rank_fusion_with(lists, rrf_opts, |hit: &SearchHit| {
-                hit.chunk.id.0.as_str()
+    // Enrich titles & categories on vector hits
+    enrich_titles(doc_store, scope.tenant(), &mut v_hits).await;
+
+    // 4. Fuse without cross-arm deduplication (matching Bun's RecordId behavior).
+    // Vector hits and BM25 hits are treated as distinct candidates in RRF.
+    let fused_hits: Vec<SearchHit> = if b_hits.is_empty() {
+        v_hits
+    } else if v_hits.is_empty() {
+        b_hits
+    } else {
+        struct Candidate {
+            hit: SearchHit,
+            score: f64,
+            insert_index: usize,
+        }
+        let mut candidates: Vec<Candidate> = Vec::with_capacity(v_hits.len() + b_hits.len());
+        for (i, hit) in v_hits.into_iter().enumerate() {
+            let score = 1.0 / (60.0 + (i as f64) + 1.0);
+            candidates.push(Candidate {
+                hit,
+                score,
+                insert_index: 2 * i,
             });
-
-            // Step 3: Drop vector-only hits below min_similarity
-            // List 0 is vector, List 1 is BM25
-            rrf_results
-                .into_iter()
-                .filter(|res| {
-                    let is_vector_only = res.sources == vec![0];
-                    if is_vector_only {
-                        res.first.similarity >= opts.min_similarity
-                    } else {
-                        true
-                    }
-                })
-                .map(|res| res.first)
-                .collect()
         }
+        for (j, hit) in b_hits.into_iter().enumerate() {
+            let score = 1.0 / (60.0 + (j as f64) + 1.0);
+            candidates.push(Candidate {
+                hit,
+                score,
+                insert_index: 2 * j + 1,
+            });
+        }
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.insert_index.cmp(&b.insert_index))
+        });
+        candidates.into_iter().map(|c| c.hit).collect()
     };
 
     if fused_hits.is_empty() {
@@ -275,49 +313,52 @@ pub async fn execute_pipeline(
         });
     }
 
-    // 4. Rerank
-    let final_k = opts.rerank_final_k.clamp(1, 100);
-    let candidates: Vec<RerankCandidate> = fused_hits
-        .iter()
-        .map(|h| RerankCandidate {
-            id: h.chunk.id.clone(),
-            text: h.chunk.content.clone(),
-            original_rank: h.rank,
-            original_score: h.similarity,
-        })
-        .collect();
+    // 5. Optional rerank (only if rerank_enabled AND candidates exceed max_chunks)
+    let max_chunks = opts.max_chunks.clamp(1, 50) as usize;
+    let mut reranked_hits: Vec<SearchHit> = if opts.rerank_enabled && fused_hits.len() > max_chunks
+    {
+        let final_k = opts.rerank_final_k.clamp(1, 100);
+        let candidates: Vec<RerankCandidate> = fused_hits
+            .iter()
+            .map(|h| RerankCandidate {
+                id: h.chunk.id.clone(),
+                text: h.chunk.content.clone(),
+                original_rank: h.rank,
+                original_score: h.similarity,
+            })
+            .collect();
 
-    let rerank_res = reranker.rerank(query, candidates, final_k).await;
-    let mut reranked_hits: Vec<SearchHit> = match rerank_res {
-        Ok(ordered) => {
-            let mut hit_map: HashMap<String, SearchHit> = fused_hits
-                .into_iter()
-                .map(|h| (h.chunk.id.0.clone(), h))
-                .collect();
-            let mut reordered: Vec<SearchHit> = Vec::new();
-            for item in ordered {
-                if let Some(mut hit) = hit_map.remove(&item.id.0) {
-                    hit.similarity = item.score;
-                    hit.rank = item.final_rank;
-                    reordered.push(hit);
+        match reranker.rerank(query, candidates, final_k).await {
+            Ok(ordered) => {
+                let mut hit_map: HashMap<String, Vec<SearchHit>> = HashMap::new();
+                for h in fused_hits {
+                    hit_map.entry(h.chunk.id.0.clone()).or_default().push(h);
                 }
+                let mut reordered: Vec<SearchHit> = Vec::new();
+                for (rank, item) in ordered.into_iter().enumerate() {
+                    if let Some(hits) = hit_map.get_mut(&item.id.0) {
+                        if !hits.is_empty() {
+                            let mut hit = hits.remove(0);
+                            hit.rank = rank as u32;
+                            reordered.push(hit);
+                        }
+                    }
+                }
+                reordered
             }
-            reordered
+            Err(_) => {
+                degrades.push(RetrievalDegrade::RerankUnavailable);
+                fused_hits
+            }
         }
-        Err(_) => {
-            degrades.push(RetrievalDegrade::RerankUnavailable);
-            fused_hits
-        }
+    } else {
+        fused_hits
     };
 
-    // 5. Cut to max_chunks (1..=50)
-    let max_chunks = opts.max_chunks.clamp(1, 50) as usize;
+    // 6. Cut to max_chunks (1..=50)
     reranked_hits.truncate(max_chunks);
 
-    // 6. Enrich titles for cut chunks
-    enrich_titles(doc_store, scope.tenant(), &mut reranked_hits).await;
-
-    // 7. THEN add neighbours (never cut by max_chunks)
+    // 7. Neighbours (when window > 0)
     if opts.neighbour_window > 0 && !reranked_hits.is_empty() {
         let anchors: Vec<NeighbourAnchor> = reranked_hits
             .iter()
@@ -353,7 +394,7 @@ pub async fn execute_pipeline(
         }
     }
 
-    // 8. THEN append figures (never cut by max_chunks)
+    // 8. Figures (when figure_limit > 0)
     if opts.figure_limit > 0 && !reranked_hits.is_empty() {
         let mut retrieved_doc_ids: Vec<DocumentId> = Vec::new();
         let mut seen_docs: HashSet<DocumentId> = HashSet::new();
@@ -422,17 +463,20 @@ pub async fn execute_pipeline(
     }
 
     // 9. Build context string and sources with kb-core
-    let cat_holder: Vec<String> = Vec::new();
     let context_items: Vec<ContextItem<'_>> = reranked_hits
         .iter()
         .map(|hit| ContextItem {
             document_id: Some(hit.chunk.document_id.0.as_str()),
             document_title: &hit.chunk.document_title,
             section: hit.chunk.metadata.section.as_deref(),
-            categories: &cat_holder,
+            categories: &hit.chunk.categories,
             asset_key: hit.chunk.metadata.asset_key.as_deref(),
             page: hit.chunk.metadata.page,
-            chunk_type: Some(hit.chunk.chunk_type.as_storage()),
+            chunk_type: if hit.is_bm25 {
+                None
+            } else {
+                Some(hit.chunk.chunk_type.as_storage())
+            },
             content: &hit.chunk.content,
             contextual_prefix: hit.chunk.metadata.contextual_prefix.as_deref(),
         })

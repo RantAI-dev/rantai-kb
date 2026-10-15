@@ -423,6 +423,38 @@ The Rust migration runner in `crates/kb-store-pg/src/migrate.rs` achieves byte-f
 | 117 | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0, zero warnings across all crates under `-D warnings`. |
 | 118 | `cargo test --workspace` | exit 0. 399 tests across workspace (kb-core 93, kb-engine 32, kb-extract 86 + 10 integration, kb-inference 20, kb-ports 3, kb-server 30 unit + 53 integration, kb-store-blob 7, kb-store-pg 15, kb-store-surreal 20). |
 
+## R4 slice 9: Search Parity with TypeScript (RRF, BM25 Unscoped Query, Score Normalization, DTO Shapes)
+
+Cargo ledger (continuing numbering from 118):
+
+| # | command | result |
+|---|---|---|
+| 119 | `cargo test -p kb-engine` | exit 0. All 32 tests pass. |
+| 120 | `cargo test -p kb-server` | exit 0. All 30 unit and 66 integration tests pass. |
+| 121 | `cargo clippy --workspace --all-targets -- -D warnings` | exit 101. Found `unused-mut` in `retrieval.rs`, unused `DocumentScope` in `routes.rs`, `await_holding_lock` in `upload_tests.rs`, duplicated attribute in `server_tests.rs`, and `let_unit_value` in `runtime_tests.rs`. |
+| 122 | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0. Clean clippy across workspace under `-D warnings`. |
+| 123 | `cargo test --workspace` | exit 0. 400 tests across workspace. |
+| 124 | `cargo build -p kb-server --bin kb-server` | exit 0. Rebuilt binary. |
+| 125 | `cargo test --workspace` | exit 101. Missing `rerank_enabled` in test initializers. |
+| 126 | `cargo test --workspace` | exit 0. All 400 tests pass after updating fixtures and `test_6`. |
+| 127 | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0. Zero warnings across all workspace targets under `-D warnings`. |
+| 128 | `cargo build -p kb-server --bin kb-server` | exit 0. Built `kb-server` binary for live parity verification. |
+
+### Search Parity Root Causes and Architecture Details
+- **SurrealDB ID Normalization**:
+  - TypeScript stringifies SurrealDB IDs into `document_chunk:⟨id⟩` format (`<` / `>` angle brackets) rather than backtick formatting. Added `normalize_surreal_id` in `kb-store-surreal::client` to format record IDs identically.
+- **RRF Cross-Arm Non-Deduplication**:
+  - In TypeScript (`src/lib/rag/retriever.ts`), vector chunks and BM25 chunks arrive as separate SurrealDB `RecordId` object instances. JavaScript `Map.has()` and `scores.get()` perform object reference identity equality (`===`), which fails. As a result, chunks matching both vector and BM25 are treated as distinct candidates in RRF fusion rather than being deduplicated across arms. Rust now matches this behavior: vector hits retain cosine similarity, BM25 hits carry `similarity: 0.0`, and alternating candidate insertion indices preserve rank order.
+- **Unscoped BM25 Full-Text Search**:
+  - TypeScript's `bm25Search` (`src/lib/rag/bm25-search.ts`) runs across the entire `document_chunk` table without `WHERE document_id IN ...` filtering, relying on subsequent join against Postgres `findAliveMetaByIds(docIds)` for tenant isolation. Added `BM25_SEARCH_QUERY_UNSCOPED` and `bm25_search_global` to `kb-store-surreal` and `kb-ports`, followed by `find_alive_meta_by_ids` tenant scoping in `kb-engine::retrieval`.
+- **Reranker Disabled by Default & Score Normalization**:
+  - TypeScript (`src/lib/rag/config.ts`) defaults `rerankEnabled: false`. When rerank is disabled, `getDefaultReranker()` returns `null` and `retriever.ts` bypasses reranking entirely. In Rust, `NoopReranker` was previously returning synthetic linear scores (`(final_k - i) = 5.0`), and `retrieval.rs` was unconditionally invoking the reranker and overwriting `hit.similarity = item.score`, causing the observed `"similarity": 5.0` bug. Added `rerank_enabled` to `EngineSettings` / `RetrievalOptions` (default `false`), ensured `NoopReranker` preserves `original_score`, and prevented rerank from overwriting vector similarities.
+- **DTO Serialization Parity**:
+  - Vector chunks: serialize `"chunkType": "text"`, `"page": null`, `"assetKey": null`, and omit `contextualPrefix` when `null`.
+  - BM25 chunks: serialize `"contextualPrefix": null`, and omit `assetKey`, `page`, and `chunkType`.
+  - Sources: include `chunkType` (`"text"` for vector hits, `null` for BM25 hits) and all standard metadata keys.
+  - `documentIds` route: matches TS by querying allowed document IDs, performing vector search, and formatting `context` only when `format: "context"` is explicitly requested.
+
 ## Route table (Rust `feat/rust-port`)
 
 | Method | Path | TypeScript handler | Rust handler | Statuses |

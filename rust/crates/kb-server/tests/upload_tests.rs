@@ -41,24 +41,23 @@ async fn upload_returns_202_with_document_and_job_ids() {
     assert_eq!(body["knowledgeBaseIds"], serde_json::json!([]));
 
     // The document row exists for this tenant with the parsed metadata.
-    let docs = h.documents.docs.read().unwrap();
-    let stored = docs[&TenantId(TENANT.to_string())]
-        .iter()
-        .find(|d| d.id.0 == document_id)
-        .expect("stored document");
-    assert_eq!(stored.title, "Quarterly report");
-    assert_eq!(stored.categories, vec!["finance", "quarterly"]);
-    assert_eq!(stored.subcategory.as_deref(), Some("q3"));
-    assert_eq!(stored.status, "processing");
-    assert_eq!(stored.mime_type.as_deref(), Some("text/plain"));
-    drop(docs);
+    {
+        let docs = h.documents.docs.read().unwrap();
+        let stored = docs[&TenantId(TENANT.to_string())]
+            .iter()
+            .find(|d| d.id.0 == document_id)
+            .expect("stored document");
+        assert_eq!(stored.title, "Quarterly report");
+        assert_eq!(stored.categories, vec!["finance", "quarterly"]);
+        assert_eq!(stored.subcategory.as_deref(), Some("q3"));
+        assert_eq!(stored.status, "processing");
+        assert_eq!(stored.mime_type.as_deref(), Some("text/plain"));
+    }
 
     // The blob was written under the document's own namespace.
     let key = format!("documents/{TENANT}/{document_id}/report.txt");
-    assert_eq!(
-        h.blobs.objects.read().unwrap().get(&key).map(Vec::len),
-        Some("Quarterly revenue numbers".len())
-    );
+    let blob_len = h.blobs.objects.read().unwrap().get(&key).map(Vec::len);
+    assert_eq!(blob_len, Some("Quarterly revenue numbers".len()));
 
     // The job carries the parsed parameters, not the raw form.
     let job = kb_ports::JobStore::get_job(&h.jobs, &TenantId(TENANT.to_string()), &job_id)

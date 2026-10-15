@@ -6,7 +6,7 @@ use kb_ports::{
     StoredChunk,
 };
 
-use crate::bm25::execute_bm25_search;
+use crate::bm25::{execute_bm25_search, execute_bm25_search_global};
 use crate::chunks_meta::{execute_chunk_counts, execute_ordered_chunks};
 use crate::chunks_write::execute_store_chunks;
 use crate::client::SurrealChunkStore;
@@ -38,6 +38,14 @@ impl ChunkStore for SurrealChunkStore {
         limit: u32,
     ) -> Result<Vec<SearchHit>, PortError> {
         execute_bm25_search(self, scope, query, limit).await
+    }
+
+    async fn bm25_search_global(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<SearchHit>, PortError> {
+        execute_bm25_search_global(self, query, limit).await
     }
 
     async fn neighbours(

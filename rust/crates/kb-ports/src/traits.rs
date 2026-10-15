@@ -246,6 +246,18 @@ pub trait ChunkStore: Send + Sync {
         limit: u32,
     ) -> Result<Vec<SearchHit>, PortError>;
 
+    /// BM25 full-text search over `content` across all documents (unscoped in SurrealDB).
+    /// Used by retrieval to match Bun's unscoped BM25 query, which is subsequently
+    /// filtered and enriched against alive tenant documents in Postgres.
+    async fn bm25_search_global(
+        &self,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<SearchHit>, PortError> {
+        let _ = (query, limit);
+        Ok(Vec::new())
+    }
+
     /// Look up adjacent chunks within `window` offsets of each anchor chunk.
     /// Results must be within the provided `scope`.
     async fn neighbours(

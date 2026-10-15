@@ -58,6 +58,8 @@ pub struct EngineSettings {
     /// BM25 arm on/off (`KB_HYBRID_BM25_ENABLED`). When off the engine runs
     /// the vector arm alone and does not record a degrade.
     pub hybrid_bm25_enabled: bool,
+    /// Whether reranker is enabled (`KB_RERANK_ENABLED`). Default false.
+    pub rerank_enabled: bool,
 }
 
 impl Default for EngineSettings {
@@ -72,6 +74,7 @@ impl Default for EngineSettings {
             expansion_enabled: false,
             expansion_paraphrases: 3,
             hybrid_bm25_enabled: true,
+            rerank_enabled: false,
         }
     }
 }
@@ -169,6 +172,7 @@ impl Engine {
             expansion_paraphrases: self.settings.expansion_paraphrases,
             hybrid_bm25_enabled: self.settings.hybrid_bm25_enabled,
             figure_gate: self.inputs.figure_gate.clone(),
+            rerank_enabled: self.settings.rerank_enabled,
         };
 
         execute_pipeline(
