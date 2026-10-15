@@ -12,36 +12,67 @@
 //! established: a file that cannot be read produces a reason and no content.
 //! Nothing here ever returns placeholder text for a failed parse, because the
 //! chunker cannot tell it apart from real text and would index it.
-//!
-//! Not ported yet, and refused with an explicit error rather than guessed at:
-//! PDFs (text layer and layout extractors), images (OCR), and the legacy binary
-//! Office/OpenDocument formats that the TypeScript service hands to
-//! `officeparser`.
 
+pub mod builder;
+pub mod chain;
 mod code;
+pub mod config;
 mod detect;
 mod dispatch;
 mod docx;
 mod epub;
 mod gltf;
 mod html;
+pub mod hybrid;
+pub mod hybrid_merge;
 mod mime;
+pub mod mineru;
+pub mod mineru_api;
+pub mod mistral;
+pub mod ods;
+pub mod odt;
+pub mod openrouter_vision;
+pub mod pdfium;
 mod pptx;
 mod rtf;
+pub mod scanned;
+pub mod smart_router;
 #[cfg(test)]
 mod testkit;
 mod text;
+pub mod vision_llm;
 mod xlsx;
 mod xml;
 mod zip_read;
 
+pub use builder::{
+    PdfiumTextExtractor, ProductionExtractor, build_extractor, build_layout_chain,
+    build_production_extractor,
+};
+pub use chain::LayoutExtractorChain;
 pub use code::CODE_EXT_LANGUAGE;
+pub use config::ExtractConfig;
 pub use detect::{SupportedFileType, detect_file_type, extension_of};
-pub use dispatch::{extract, extract_from_buffer};
+pub use dispatch::{extract, extract_document, extract_from_buffer};
+pub use hybrid::HybridExtractor;
+pub use hybrid_merge::merge_structural_with_text_layer;
 pub use mime::{DOCUMENT_MIME_TYPES, ext_to_mime, is_document_mime, mime_to_ext};
+pub use mineru::MineruExtractor;
+pub use mineru_api::MineruApiExtractor;
+pub use mistral::MistralOcrExtractor;
+pub use ods::parse_ods;
+pub use odt::parse_odt;
+pub use openrouter_vision::OpenRouterVisionProvider;
+pub use pdfium::{
+    MINIMAL_BLANK_PDF, MINIMAL_PDF_HELLO_WORLD, extract_pdf_text_layer, get_pdf_page_count,
+    get_pdfium, init_pdfium, render_pdf_page_to_png, split_pdf_by_page_count,
+};
+pub use scanned::is_pdf_scanned;
+pub use smart_router::SmartRouterExtractor;
+pub use vision_llm::VisionLlmExtractor;
 
 use async_trait::async_trait;
-use kb_ports::{ExtractionResult, Extractor, PortError};
+use kb_ports::{ExtractionOptions, ExtractionResult, Extractor, PortError};
 
 /// Why a file could not be turned into text.
 ///
@@ -89,11 +120,8 @@ pub(crate) fn clip_reason(reason: &str) -> String {
     out
 }
 
-/// The extractor the production worker is bound to: everything local, no
+/// The extractor the local worker or tests can bind to: everything local, no
 /// network, no model.
-///
-/// PDFs and images are refused — the layout and OCR paths land in a later slice,
-/// and an empty result would be indexed as if it were the document's text.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LocalExtractor;
 
@@ -112,6 +140,17 @@ impl Extractor for LocalExtractor {
         filename: &str,
         mime_type: &str,
         file_bytes: &[u8],
+    ) -> Result<ExtractionResult, PortError> {
+        self.extract_with_options(filename, mime_type, file_bytes, ExtractionOptions::default())
+            .await
+    }
+
+    async fn extract_with_options(
+        &self,
+        filename: &str,
+        mime_type: &str,
+        file_bytes: &[u8],
+        _options: ExtractionOptions,
     ) -> Result<ExtractionResult, PortError> {
         let name = filename.to_string();
         let mime = mime_type.to_string();
