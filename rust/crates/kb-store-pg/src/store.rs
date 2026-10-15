@@ -14,7 +14,7 @@ use crate::auth::resolve_api_key_query;
 use crate::documents::row_to_doc_meta;
 use crate::queries::{
     MAX_LIMIT, SELECT_ALIVE_BY_IDS, SELECT_BY_ID, SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB,
-    SELECT_KNOWLEDGE_BASES, SET_DOCUMENT_STATUS, UPDATE_EXTRACTED_CONTENT,
+    SELECT_KNOWLEDGE_BASES, SET_DOCUMENT_STATUS, UPDATE_EXTRACTED_CONTENT, UPDATE_METADATA,
 };
 
 /// Postgres pool settings.
@@ -315,6 +315,20 @@ impl DocumentStore for PgDocumentStore {
             .execute(&self.pool)
             .await
             .map_err(|e| PortError::Unavailable(format!("pg update content: {e}")))?;
+        Ok(())
+    }
+
+    async fn update_metadata(
+        &self,
+        id: &DocumentId,
+        patch: &serde_json::Value,
+    ) -> Result<(), PortError> {
+        sqlx::query(UPDATE_METADATA)
+            .bind(id.as_str())
+            .bind(patch)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg update_metadata: {e}")))?;
         Ok(())
     }
 

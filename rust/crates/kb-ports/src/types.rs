@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use kb_core::intelligence::{Entity, Relation};
+
 use crate::ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 
 /// Chunk type as understood by retrieval, rendering and the policy in
@@ -115,12 +117,15 @@ pub struct JobRecord {
 }
 
 /// Options passed to [`Extractor::extract_with_options`](crate::Extractor::extract_with_options).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractionOptions {
     /// Request layout extractors to extract and return cropped figures.
     pub figures: bool,
     /// Force running layout extraction even if the PDF has a readable text layer.
     pub force_layout: bool,
+    /// Specific document type hint (e.g. "handwritten", "table", "form", "printed_text").
+    #[serde(default)]
+    pub document_type: Option<String>,
 }
 
 /// Result of running an [`Extractor`](crate::Extractor) over a stored file.
@@ -220,6 +225,20 @@ pub struct ExtractedFigure {
     /// Crop bytes. Stored as an asset by the caller; kept raw here so the port
     /// does not force an image encoding choice on every extractor.
     pub image_bytes: Vec<u8>,
+    /// Identifier matching `id` in `PageBlock` for reading order anchoring.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// Candidate figure presented to the figure gate.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FigureGateCandidate {
+    /// Chunk identifier
+    pub id: String,
+    /// Storage key of the crop image
+    pub asset_key: String,
+    /// Figure caption or title
+    pub caption: String,
 }
 
 /// A single hit from one retrieval arm. Multiple arms are fused upstream into a
@@ -236,9 +255,6 @@ pub struct SearchHit {
     pub rank: u32,
 }
 
-// `RrfItem` lives in `kb-core` because the fusion algorithm lives there, but
-// we add the impl here so the engine can fuse `SearchHit` lists without the
-// orphan rule biting.
 impl SearchHit {
     /// Stable id used by RRF. Mirrors the `RrfItem::id` contract.
     #[must_use]
@@ -261,21 +277,16 @@ pub struct DocumentMeta {
     pub file_type: Option<String>,
     pub file_size: Option<i32>,
     pub mime_type: Option<String>,
-    /// Object-store key of the stored original file, when the document has one.
-    /// Hard delete removes this object.
     pub s3_key: Option<String>,
-    /// RFC 3339 timestamps, UTC.
     pub created_at: String,
     pub updated_at: String,
-    /// Knowledge bases this document belongs to (from DocumentGroup).
     pub knowledge_base_ids: Vec<String>,
-    /// Raw `Document.metadata` JSON; figures are read from it by the server.
     pub metadata: Option<serde_json::Value>,
 }
 
 /// Summary of a knowledge base, as returned by the document store list path.
-/// Mirrors the shape the Bun service emits (`{ id, name, description, color,
-/// documentCount }`).
+/// Mirrors the shape the Bun service emits ({ id, name, description, color,
+/// documentCount }).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KnowledgeBaseSummary {
     pub id: KnowledgeBaseId,
@@ -298,7 +309,7 @@ pub struct AuthContext {
 }
 
 /// A candidate handed to a reranker. The reranker ranks the inputs by query
-/// relevance and returns [`ReRerankResult`]s.
+/// relevance and returns [RerankResult]s.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RerankCandidate {
     pub id: ChunkId,
@@ -307,7 +318,7 @@ pub struct RerankCandidate {
     pub original_score: f32,
 }
 
-/// Reranker output. `final_rank` is zero-based and contiguous.
+/// Reranker output. final_rank is zero-based and contiguous.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RerankResult {
     pub id: ChunkId,

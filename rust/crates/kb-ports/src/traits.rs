@@ -12,8 +12,9 @@ use crate::error::PortError;
 use crate::ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 use crate::scope::DocumentScope;
 use crate::types::{
-    AuthContext, ChunkMetadata, ChunkToStore, DocumentMeta, ExtractionOptions, ExtractionResult,
-    JobRecord, KnowledgeBaseSummary, RerankCandidate, RerankResult, SearchHit,
+    AuthContext, ChunkMetadata, ChunkToStore, DocumentMeta, Entity, ExtractionOptions,
+    ExtractionResult, FigureGateCandidate, JobRecord, KnowledgeBaseSummary, Relation,
+    RerankCandidate, RerankResult, SearchHit,
 };
 
 /// What the chunk store is allowed to look at. Currently the empty case is
@@ -43,7 +44,8 @@ pub struct NeighbourAnchor {
     pub chunk_index: u32,
 }
 
-/// Document-metadata and tenancy store (Postgres). Every read is tenant-\n/// filtered; every write preserves soft-delete (`deletedAt IS NULL`).
+/// Document-metadata and tenancy store (Postgres). Every read is tenant-
+/// filtered; every write preserves soft-delete (`deletedAt IS NULL`).
 #[async_trait]
 pub trait DocumentStore: Send + Sync {
     /// Build a [`DocumentScope`] for the given tenant + filter. This is the
@@ -107,6 +109,15 @@ pub trait DocumentStore: Send + Sync {
         file_size: Option<i32>,
     ) -> Result<(), PortError>;
 
+    /// Merge metadata fields into a document's JSON metadata column.
+    ///
+    /// Mirrors `kb("documents").updateMetadata(id, patch)` in TypeScript.
+    async fn update_metadata(
+        &self,
+        id: &DocumentId,
+        patch: &serde_json::Value,
+    ) -> Result<(), PortError>;
+
     /// Set a document's ingest status (`"ready"`, `"failed"`, `"processing"`).
     ///
     /// Failure to update is logged and swallowed by the worker, as in the TS
@@ -137,7 +148,7 @@ pub trait ChunkStore: Send + Sync {
     ) -> Result<Vec<SearchHit>, PortError>;
 
     /// Look up adjacent chunks within `window` offsets of each anchor chunk.
-    /// Results must be within the provided `scope`.
+    /// Results must be within the provided `scope`.\
     async fn neighbours(
         &self,
         scope: &DocumentScope,
@@ -185,6 +196,63 @@ pub trait ChunkStore: Send + Sync {
         anchored_chunks: &[(DocumentId, u32)],
         limit: u32,
     ) -> Result<Vec<SearchHit>, PortError>;
+}
+
+/// Storage port for document intelligence entities and relations in SurrealDB.
+#[async_trait]
+pub trait EntityStore: Send + Sync {
+    /// Upsert an entity for a document.
+    async fn upsert_entity(
+        &self,
+        document_id: &DocumentId,
+        sanitized_name: &str,
+        name: &str,
+        entity_type: &str,
+        confidence: f32,
+        metadata: Option<&serde_json::Value>,
+    ) -> Result<(), PortError>;
+
+    /// Relate two entities with a directed edge.
+    async fn relate_entities(
+        &self,
+        source_id: &str,
+        rel_type: &str,
+        target_id: &str,
+        confidence: f32,
+        document_id: &DocumentId,
+        context: Option<&str>,
+    ) -> Result<(), PortError>;
+}
+
+/// Document intelligence extractor port.
+#[async_trait]
+pub trait EntityExtractor: Send + Sync {
+    /// Extract entities from text.
+    async fn extract_entities(
+        &self,
+        text: &str,
+        document_id: Option<&str>,
+        chunk_id: Option<&str>,
+    ) -> Result<Vec<Entity>, PortError>;
+
+    /// Extract entities and relations in a single pass.
+    async fn extract_entities_and_relations(
+        &self,
+        text: &str,
+        document_id: Option<&str>,
+        user_id: Option<&str>,
+    ) -> Result<(Vec<Entity>, Vec<Relation>), PortError>;
+}
+
+/// Figure veto gate port for multimodal retrieval.
+#[async_trait]
+pub trait FigureGate: Send + Sync {
+    /// Keep only candidates the vision model vouches for. Returns survivor IDs.
+    async fn gate_figures(
+        &self,
+        query: &str,
+        candidates: &[FigureGateCandidate],
+    ) -> Result<Vec<String>, PortError>;
 }
 
 /// Ingest job queue (Postgres `IngestJob`).

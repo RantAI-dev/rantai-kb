@@ -20,11 +20,12 @@ pub use scope::DocumentScope;
 #[cfg(feature = "scope-adapter")]
 pub use scope::adapter;
 pub use traits::{
-    ChunkStore, DocumentFilter, DocumentStore, Embedder, Extractor, JobStore, NeighbourAnchor,
-    Reranker, ScopeRequest,
+    ChunkStore, DocumentFilter, DocumentStore, Embedder, EntityExtractor, EntityStore, Extractor,
+    FigureGate, JobStore, NeighbourAnchor, Reranker, ScopeRequest,
 };
 pub use types::{
-    AuthContext, Chunk, ChunkMetadata, ChunkToStore, ChunkType, DocumentMeta, ExtractedFigure,
-    ExtractionOptions, ExtractionResult, JobRecord, KnowledgeBaseSummary, PageBlock,
-    PageBlockKind, PageText, RerankCandidate, RerankResult, RerankScore, SearchHit,
+    AuthContext, Chunk, ChunkMetadata, ChunkToStore, ChunkType, DocumentMeta, Entity,
+    ExtractedFigure, ExtractionOptions, ExtractionResult, FigureGateCandidate, JobRecord,
+    KnowledgeBaseSummary, PageBlock, PageBlockKind, PageText, Relation, RerankCandidate,
+    RerankResult, RerankScore, SearchHit,
 };

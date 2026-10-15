@@ -171,3 +171,10 @@ pub const UPDATE_EXTRACTED_CONTENT: &str = r#"
        SET content = $2, "fileType" = $3, "fileSize" = $4, "updatedAt" = now()
      WHERE id = $1
 "#;
+
+/// Merge JSON fields into Document.metadata, matching Bun `kb("documents").updateMetadata`.
+pub const UPDATE_METADATA: &str = r#"
+    UPDATE "Document"
+       SET metadata = COALESCE(metadata, '{}'::jsonb) || $2::jsonb, "updatedAt" = now()
+     WHERE id = $1
+"#;

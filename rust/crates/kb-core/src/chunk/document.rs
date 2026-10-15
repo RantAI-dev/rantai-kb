@@ -26,6 +26,10 @@ pub struct ChunkMetadata {
     pub contextual_prefix: Option<String>,
     pub chunk_type: Option<String>,
     pub page: Option<u32>,
+    #[serde(default)]
+    pub asset_key: Option<String>,
+    #[serde(default)]
+    pub anchor_chunk_index: Option<u32>,
 }
 
 impl crate::page_map::HasContent<ChunkMetadata> for Chunk {
@@ -213,6 +217,8 @@ pub fn smart_chunk_document(
                 chunk_type: Some(sc.metadata.chunk_type),
                 page: sc.metadata.page_number,
                 contextual_prefix: None,
+                asset_key: None,
+                anchor_chunk_index: None,
             },
         })
         .filter(|c| !c.content.is_empty())

@@ -1,4 +1,4 @@
-//! Inference adapters — embedder, query expander, rerankers.
+//! Inference adapters — embedder, query expander, rerankers, entity extraction, figure gate.
 //!
 //! Selected by the engine at boot from `KB_*` env vars; the engine only sees
 //! the trait objects from `kb-ports`.
@@ -6,15 +6,21 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod embedder;
+pub mod llm_extractor;
 pub mod llm_reranker;
 pub mod query_cache;
 pub mod query_expansion;
 pub mod rerankers;
+pub mod vlm_gate;
 
 pub use embedder::{EmbedderImpl, EmbedderSettings};
+pub use llm_extractor::{ExtractorSettings, LlmCombinedExtractor};
+/// Type alias for ExtractorSettings.
+pub type ExtractorConfig = ExtractorSettings;
 pub use llm_reranker::LlmReranker;
 pub use query_expansion::{ExpansionSettings, QueryExpander};
 pub use rerankers::{CohereReranker, TeiReranker, VllmReranker};
+pub use vlm_gate::VlmFigureGate;
 
 use async_trait::async_trait;
 use kb_ports::{PortError, RerankCandidate, RerankResult, Reranker};

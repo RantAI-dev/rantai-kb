@@ -6,7 +6,10 @@
 
 pub mod chunk;
 mod context;
+pub mod figure_assets;
+pub mod figure_gate;
 mod fusion;
+pub mod intelligence;
 pub mod page_map;
 pub mod policy;
 mod progress;
@@ -22,8 +25,17 @@ pub use context::{
     ContextItem, NumberedSource, SourceDedupKey, SourceEntry, build_context_and_sources,
     numbered_source_list, source_dedupe_key,
 };
+pub use figure_assets::{
+    build_page_text, context_for_page, derive_label, figure_kind_word, normalize_figure_type,
+    resolve_figure_anchors,
+};
+pub use figure_gate::{GateConfig, PROMPT_STRICT, parse_verdict};
 pub use fusion::{
     IdRef, RrfItem, RrfOptions, RrfResult, reciprocal_rank_fusion, reciprocal_rank_fusion_with,
+};
+pub use intelligence::{
+    Entity, PatternEntityExtractor, PatternExtractionConfig, PatternRelationConfig,
+    PatternRelationExtractor, Relation,
 };
 pub use page_map::{PageBlock, assign_chunk_pages};
 pub use policy::{
