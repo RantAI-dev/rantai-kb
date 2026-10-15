@@ -7,10 +7,10 @@
 pub mod chunk;
 mod context;
 mod fusion;
-mod page_map;
-mod policy;
+pub mod page_map;
+pub mod policy;
 mod progress;
-mod signals;
+pub mod signals;
 mod weave;
 
 pub use chunk::{

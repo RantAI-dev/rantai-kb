@@ -25,6 +25,6 @@ pub use traits::{
 };
 pub use types::{
     AuthContext, Chunk, ChunkMetadata, ChunkToStore, ChunkType, DocumentMeta, ExtractedFigure,
-    ExtractionResult, JobRecord, KnowledgeBaseSummary, PageBlock, PageBlockKind, PageText,
-    RerankCandidate, RerankResult, RerankScore, SearchHit,
+    ExtractionOptions, ExtractionResult, JobRecord, KnowledgeBaseSummary, PageBlock,
+    PageBlockKind, PageText, RerankCandidate, RerankResult, RerankScore, SearchHit,
 };

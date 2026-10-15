@@ -25,6 +25,28 @@ pub struct ChunkMetadata {
     pub chunk_index: u32,
     pub contextual_prefix: Option<String>,
     pub chunk_type: Option<String>,
+    pub page: Option<u32>,
+}
+
+impl crate::page_map::HasContent<ChunkMetadata> for Chunk {
+    fn content_owned(&self) -> String {
+        self.content.clone()
+    }
+    fn content_for_meta(&self) -> String {
+        self.content.clone()
+    }
+    fn metadata_owned(&self) -> ChunkMetadata {
+        self.metadata.clone()
+    }
+    fn page(&self) -> Option<u32> {
+        self.metadata.page
+    }
+}
+
+impl crate::page_map::PageSettable for ChunkMetadata {
+    fn set_page(&mut self, page: Option<u32>) {
+        self.page = page;
+    }
 }
 
 /// Options for [`chunk_document`].
@@ -189,7 +211,8 @@ pub fn smart_chunk_document(
                     .or_else(|| sc.metadata.hierarchy_path.as_ref().map(|h| h.join(" > "))),
                 chunk_index: sc.chunk_index,
                 chunk_type: Some(sc.metadata.chunk_type),
-                ..Default::default()
+                page: sc.metadata.page_number,
+                contextual_prefix: None,
             },
         })
         .filter(|c| !c.content.is_empty())

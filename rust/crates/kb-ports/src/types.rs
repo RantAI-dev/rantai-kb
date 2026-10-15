@@ -114,6 +114,15 @@ pub struct JobRecord {
     pub params: Option<serde_json::Value>,
 }
 
+/// Options passed to [`Extractor::extract_with_options`](crate::Extractor::extract_with_options).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtractionOptions {
+    /// Request layout extractors to extract and return cropped figures.
+    pub figures: bool,
+    /// Force running layout extraction even if the PDF has a readable text layer.
+    pub force_layout: bool,
+}
+
 /// Result of running an [`Extractor`](crate::Extractor) over a stored file.
 ///
 /// Mirrors the TypeScript `ExtractionResult` (`src/lib/ingest/extract.ts:26`),

@@ -12,8 +12,8 @@ use crate::error::PortError;
 use crate::ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 use crate::scope::DocumentScope;
 use crate::types::{
-    AuthContext, ChunkMetadata, ChunkToStore, DocumentMeta, ExtractionResult, JobRecord,
-    KnowledgeBaseSummary, RerankCandidate, RerankResult, SearchHit,
+    AuthContext, ChunkMetadata, ChunkToStore, DocumentMeta, ExtractionOptions, ExtractionResult,
+    JobRecord, KnowledgeBaseSummary, RerankCandidate, RerankResult, SearchHit,
 };
 
 /// What the chunk store is allowed to look at. Currently the empty case is
@@ -43,8 +43,7 @@ pub struct NeighbourAnchor {
     pub chunk_index: u32,
 }
 
-/// Document-metadata and tenancy store (Postgres). Every read is tenant-
-/// filtered; every write preserves soft-delete (`deletedAt IS NULL`).
+/// Document-metadata and tenancy store (Postgres). Every read is tenant-\n/// filtered; every write preserves soft-delete (`deletedAt IS NULL`).
 #[async_trait]
 pub trait DocumentStore: Send + Sync {
     /// Build a [`DocumentScope`] for the given tenant + filter. This is the
@@ -243,8 +242,28 @@ pub trait Extractor: Send + Sync {
         filename: &str,
         mime_type: &str,
         file_bytes: &[u8],
-    ) -> Result<ExtractionResult, PortError>;
+    ) -> Result<ExtractionResult, PortError> {
+        self.extract_with_options(
+            filename,
+            mime_type,
+            file_bytes,
+            ExtractionOptions::default(),
+        )
+        .await
+    }
+
+    /// Extract text (and figures when configured) with explicit extraction options.
+    async fn extract_with_options(
+        &self,
+        filename: &str,
+        mime_type: &str,
+        file_bytes: &[u8],
+        _options: ExtractionOptions,
+    ) -> Result<ExtractionResult, PortError> {
+        self.extract(filename, mime_type, file_bytes).await
+    }
 }
+
 #[async_trait]
 pub trait Embedder: Send + Sync {
     /// Embed a single query string for retrieval.

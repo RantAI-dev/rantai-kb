@@ -1,21 +1,6 @@
-# Rust workspace for the KB read path (phase R1).
-
-# This file is intentionally minimal — version pinning happens in [workspace.dependencies]
-# below and nowhere else. Adding a crate-specific version is a smell; tell NOTES.md why.
-
 [workspace]
 resolver = "3"
-members = [
-    "crates/kb-core",
-    "crates/kb-ports",
-    "crates/kb-inference",
-    "crates/kb-store-pg",
-    "crates/kb-store-surreal",
-    "crates/kb-store-blob",
-    "crates/kb-extract",
-    "crates/kb-engine",
-    "crates/kb-server",
-]
+members = ["crates/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -47,6 +32,9 @@ calamine = { version = "0.36.1" }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 anyhow = "1.0.97"
+pdfium-render = { version = "0.9.4", features = ["thread_safe", "image_latest"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.22.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -58,20 +46,15 @@ missing_docs = "warn"
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+# Explicitly denied: silent misbehaviour hazards.
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 todo = "deny"
-dbg_macro = "deny"
-print_stdout = "deny"
-print_stderr = "deny"
-
-# The compile-friendliest profile: no debug info for dependencies, minimal opt.
-# This is the difference between "all crates fit in the budget" and "OOM killed"
-# at link time on this 2 GB free-memory machine.
-[profile.dev]
-debug = 0
-incremental = true
-
-[profile.test]
-debug = 0
+unimplemented = "deny"
+# Explicitly allowed: style opinions that fight idiomatic library code.
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+similar_names = "allow"
+struct_excessive_bools = "allow"
+doc_markdown = "warn"
