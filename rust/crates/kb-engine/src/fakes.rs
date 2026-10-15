@@ -497,6 +497,8 @@ pub struct FakeJobStore {
     pub progress: Arc<RwLock<Vec<(String, String, u32)>>>,
     pub finished: Arc<RwLock<Vec<FinishedJob>>>,
     pub reclaimed: Arc<RwLock<u64>>,
+    /// Job ids passed to `touch`, in call order: the heartbeat's trail.
+    pub touches: Arc<RwLock<Vec<String>>>,
 }
 
 impl FakeJobStore {
@@ -554,7 +556,8 @@ impl JobStore for FakeJobStore {
         Ok(())
     }
 
-    async fn touch(&self, _job_id: &str) -> Result<(), PortError> {
+    async fn touch(&self, job_id: &str) -> Result<(), PortError> {
+        self.touches.write().unwrap().push(job_id.to_string());
         Ok(())
     }
 

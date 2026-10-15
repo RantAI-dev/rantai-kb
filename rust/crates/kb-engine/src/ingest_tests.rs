@@ -8,13 +8,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kb_ports::{
-    BlobStore, DocumentId, DocumentMeta, Embedder, JobRecord, PortError, TenantId, document_path,
+    BlobStore, DocumentId, DocumentMeta, Embedder, ExtractionResult, Extractor, JobRecord, PortError,
+    TenantId, document_path,
 };
 
 use super::*;
 use crate::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeExtractor, FakeJobStore,
 };
+use crate::ingest::HEARTBEAT_INTERVAL;
 
 const TENANT: &str = "tenant-1";
 const DOC: &str = "doc_1";
@@ -105,7 +107,7 @@ fn worker_with(
     documents: Arc<FakeDocumentStore>,
     chunks: Arc<FakeChunkStore>,
     blobs: Arc<FakeBlobStore>,
-    extractor: Arc<FakeExtractor>,
+    extractor: Arc<dyn Extractor>,
     embedder: Arc<dyn Embedder>,
 ) -> IngestWorker {
     IngestWorker::new(
@@ -209,6 +211,10 @@ async fn happy_path_indexes_chunks_and_finishes_the_job() {
     for expected in ["extracting", "chunking", "embedding", "storing"] {
         assert!(steps.contains(&expected.to_string()), "{steps:?}");
     }
+
+    // A job this short finishes inside one heartbeat period, so nothing was
+    // touched — the guard stops the task rather than leaking a write per job.
+    assert!(h.jobs.touches.read().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -403,6 +409,74 @@ async fn cancellation_stops_the_poll_loop() {
 #[test]
 fn blob_key_layout_matches_the_helper_the_api_uses() {
     assert_eq!(document_path(Some(TENANT), DOC, "report.pdf"), BLOB_KEY);
+}
+
+/// Extractor that burns `delay` of runtime time before returning, so a
+/// heartbeat has time to fire while the job is still running.
+struct SlowExtractor {
+    delay: Duration,
+    inner: Arc<FakeExtractor>,
+}
+
+#[async_trait::async_trait]
+impl Extractor for SlowExtractor {
+    async fn extract(
+        &self,
+        filename: &str,
+        mime_type: &str,
+        file_bytes: &[u8],
+    ) -> Result<ExtractionResult, PortError> {
+        tokio::time::sleep(self.delay).await;
+        self.inner.extract(filename, mime_type, file_bytes).await
+    }
+}
+
+/// A step longer than `stale_after` must keep the job alive. Time is paused so
+/// a five-minute job costs no wall-clock time: tokio advances the clock to each
+/// pending timer as the test awaits.
+#[tokio::test(start_paused = true)]
+async fn heartbeat_touches_a_running_job_and_stops_when_it_finishes() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"x".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    // Two heartbeat periods fit inside the extraction step.
+    let slow = Arc::new(SlowExtractor {
+        delay: Duration::from_secs(150),
+        inner: extractor(),
+    });
+    let worker = IngestWorker::new(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        slow,
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings {
+            heartbeat_interval: HEARTBEAT_INTERVAL,
+            ..IngestSettings::default()
+        },
+    );
+    jobs.push(job());
+
+    assert!(worker.run_once().await.unwrap());
+    let touches = jobs.touches.read().unwrap().clone();
+    assert_eq!(touches, ["job_1", "job_1"], "touched at 60s and 120s");
+
+    // The guard is gone: time keeps passing, the job does not get touched again.
+    tokio::time::sleep(Duration::from_secs(600)).await;
+    assert_eq!(
+        jobs.touches.read().unwrap().len(),
+        touches.len(),
+        "heartbeat stopped when the job finished"
+    );
+    assert_eq!(document_status_of(&documents), "ready");
+}
+
+fn document_status_of(documents: &Arc<FakeDocumentStore>) -> String {
+    documents.docs.read().unwrap()[&tenant()][0].status.clone()
 }
 
 /// Embedder that answers with one vector fewer than it was asked for, which is

@@ -175,15 +175,18 @@ impl JobStore for PgJobStore {
         stale_after: Duration,
         max_attempts: i32,
     ) -> Result<u64, PortError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| PortError::Unavailable(format!("pg reclaim begin: {e}")))?;
-
+        // No transaction, and no row locks: the TypeScript sweep is a bare
+        // `findMany` followed by independent `update` calls, each with
+        // `.catch(() => {})` (`src/service/adapters.ts`, `reclaimStale`). One
+        // bad row there costs that row only; inside a Postgres transaction the
+        // same failed statement would abort the sweep and roll back the rows
+        // that had already been handled. `FOR UPDATE SKIP LOCKED` was the other
+        // half of that safety: without the transaction there is nothing to hold
+        // a lock, so the per-row updates carry the guard instead.
+        let cutoff = stale_after.as_secs_f64();
         let stale = sqlx::query(SELECT_STALE_JOBS)
-            .bind(stale_after.as_secs_f64())
-            .fetch_all(&mut *tx)
+            .bind(cutoff)
+            .fetch_all(&self.pool)
             .await
             .map_err(|e| PortError::Unavailable(format!("pg reclaim select: {e}")))?;
 
@@ -198,38 +201,53 @@ impl JobStore for PgJobStore {
             let document_id: Option<String> = row
                 .try_get("documentId")
                 .map_err(|e| PortError::Unavailable(format!("pg reclaim documentId: {e}")))?;
+            let exhausted = attempt >= max_attempts;
 
-            if attempt >= max_attempts {
+            let updated = if exhausted {
                 sqlx::query(FAIL_JOB_STALLED)
                     .bind(&id)
-                    .execute(&mut *tx)
+                    .bind(cutoff)
+                    .execute(&self.pool)
                     .await
-                    .map_err(|e| PortError::Unavailable(format!("pg reclaim fail: {e}")))?;
-                if let Some(doc_id) = document_id {
-                    // Best effort: the job row is the source of truth, and a
-                    // missing document must not abort the whole sweep.
-                    if let Err(err) = sqlx::query(SET_DOCUMENT_STATUS)
-                        .bind(&doc_id)
-                        .bind("failed")
-                        .execute(&mut *tx)
-                        .await
-                    {
-                        tracing::warn!(error = %err, document_id = %doc_id, "reclaim could not mark document failed");
-                    }
-                }
             } else {
                 sqlx::query(REQUEUE_JOB)
                     .bind(&id)
-                    .execute(&mut *tx)
+                    .bind(cutoff)
+                    .execute(&self.pool)
                     .await
-                    .map_err(|e| PortError::Unavailable(format!("pg reclaim requeue: {e}")))?;
-            }
-            reclaimed += 1;
-        }
+            };
 
-        tx.commit()
-            .await
-            .map_err(|e| PortError::Unavailable(format!("pg reclaim commit: {e}")))?;
+            match updated {
+                Ok(result) => {
+                    // 0 rows means a concurrent sweep already requeued the job,
+                    // or its worker heartbeat arrived between our SELECT and this
+                    // UPDATE. Either way this sweep must not count it twice.
+                    if result.rows_affected() == 0 {
+                        tracing::debug!(job_id = %id, "stale job already handled elsewhere");
+                        continue;
+                    }
+                    reclaimed += 1;
+                    if exhausted {
+                        if let Some(doc_id) = document_id {
+                            // Best effort, on its own connection: the job row is
+                            // the source of truth, and a document row that cannot
+                            // be reached must not cost the sweep the rest.
+                            if let Err(err) = sqlx::query(SET_DOCUMENT_STATUS)
+                                .bind(&doc_id)
+                                .bind("failed")
+                                .execute(&self.pool)
+                                .await
+                            {
+                                tracing::warn!(error = %err, document_id = %doc_id, "reclaim could not mark document failed");
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, job_id = %id, "reclaim could not update job");
+                }
+            }
+        }
         Ok(reclaimed)
     }
 }
@@ -255,9 +273,22 @@ mod tests {
     }
 
     #[test]
-    fn stale_select_also_skips_locked_rows() {
-        assert!(SELECT_STALE_JOBS.contains("FOR UPDATE SKIP LOCKED"));
+    fn stale_select_takes_no_locks() {
+        // The sweep is a bare SELECT, as the TypeScript one is, because each
+        // row is then updated on its own: a shared transaction would roll every
+        // handled row back as soon as one statement failed.
         assert!(SELECT_STALE_JOBS.contains("status = 'processing'"));
+        assert!(!SELECT_STALE_JOBS.contains("FOR UPDATE"));
+    }
+
+    #[test]
+    fn stale_updates_are_conditional_because_the_select_takes_no_locks() {
+        // Without a row lock, two sweeps can select the same job. The guards
+        // make the second update a no-op instead of a second attempt++.
+        for statement in [REQUEUE_JOB, FAIL_JOB_STALLED] {
+            assert!(statement.contains("status = 'processing'"), "{statement}");
+            assert!(statement.contains("\"updatedAt\" < now()"), "{statement}");
+        }
     }
 
     #[test]

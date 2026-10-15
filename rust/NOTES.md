@@ -137,3 +137,13 @@ a unit test rather than a live S3 call.
 Not wired to a binary yet: there is no `Extractor` adapter in this slice, so a worker
 process would have nothing to extract with. `IngestWorker` is the composition seam and
 takes every port as a constructor argument.
+
+## R3 slice 2: heartbeat, independent reclaim, extraction dispatch
+
+Cargo ledger (one process at a time, budget 8 for this slice; the reviewer's run 29 was
+one `cargo test --workspace` and is not counted here):
+
+| # | command | result |
+|---|---|---|
+| 30 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101. One error: `ingest_tests.rs` could not see the new `HEARTBEAT_INTERVAL` (it is re-exported from `ingest`, not from the crate root). Everything else warnings. |
+| 31 | same | exit 0, zero errors after the import fix. |

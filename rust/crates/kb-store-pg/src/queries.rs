@@ -131,29 +131,35 @@ pub const FINISH_JOB_FAILURE: &str = r#"
 /// Heartbeat. A long emit-less step would otherwise trip the stale reclaim.
 pub const TOUCH_JOB: &str = r#"UPDATE "IngestJob" SET "updatedAt" = now() WHERE id = $1"#;
 
-/// Jobs whose worker died mid-run. `SKIP LOCKED` keeps a reclaim sweep from
-/// blocking behind a live worker's transaction.
+/// Jobs whose worker died mid-run. Takes no row locks, exactly like the
+/// TypeScript sweep's `findMany`; `REQUEUE_JOB` and `FAIL_JOB_STALLED` carry
+/// the guard that the missing lock used to provide.
 pub const SELECT_STALE_JOBS: &str = r#"
     SELECT id, attempt, "documentId"
       FROM "IngestJob"
      WHERE status = 'processing' AND "updatedAt" < now() - make_interval(secs => $1::double precision)
      ORDER BY "createdAt" ASC
-     FOR UPDATE SKIP LOCKED
 "#;
 
 /// Give a stranded job another attempt.
+///
+/// The guards make the update idempotent per sweep: a row another sweep already
+/// requeued is no longer `processing`, and a job whose worker heartbeated after
+/// our SELECT is no longer stale. Either way `attempt` is not incremented twice.
 pub const REQUEUE_JOB: &str = r#"
     UPDATE "IngestJob"
        SET status = 'pending', attempt = attempt + 1, "startedAt" = NULL,
            step = 'queued', progress = 0, "updatedAt" = now()
-     WHERE id = $1
+     WHERE id = $1 AND status = 'processing'
+       AND "updatedAt" < now() - make_interval(secs => $2::double precision)
 "#;
 
 /// Attempts exhausted: the job and its document both go to `failed`.
 pub const FAIL_JOB_STALLED: &str = r#"
     UPDATE "IngestJob"
        SET status = 'failed', error = 'ingest stalled (max attempts reached)', "updatedAt" = now()
-     WHERE id = $1
+     WHERE id = $1 AND status = 'processing'
+       AND "updatedAt" < now() - make_interval(secs => $2::double precision)
 "#;
 
 /// Document status transition, shared by the store and the reclaim sweep.

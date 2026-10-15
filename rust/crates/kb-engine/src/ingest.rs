@@ -34,6 +34,10 @@ pub const INGEST_CHUNKING: SmartChunkingOptions = SmartChunkingOptions {
     strategy: None,
 };
 
+/// How often a running job is touched, as the Bun worker does
+/// (`src/lib/ingest/worker.ts:49`).
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
 /// How a claimed job ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobOutcome {
@@ -60,6 +64,9 @@ pub struct IngestSettings {
     pub stale_after: Duration,
     /// Attempts before a stranded job is failed instead of retried.
     pub max_attempts: i32,
+    /// How often a running job is touched so the stranded-job sweep leaves it
+    /// alone. Must stay well under `stale_after`.
+    pub heartbeat_interval: Duration,
     /// How often the stranded-job sweep runs.
     pub reclaim_interval: Duration,
     /// Stored on each chunk so a later query can tell which model indexed it.
@@ -75,6 +82,7 @@ impl Default for IngestSettings {
             poll_interval: Duration::from_secs(3),
             stale_after: Duration::from_secs(300),
             max_attempts: 3,
+            heartbeat_interval: HEARTBEAT_INTERVAL,
             reclaim_interval: Duration::from_secs(60),
             embedding_model: None,
             chunking: INGEST_CHUNKING,
@@ -220,7 +228,11 @@ impl IngestWorker {
     }
 
     /// Run a claimed job and record its terminal state.
+    ///
+    /// The heartbeat guard is held for the whole call, so it stops on every
+    /// exit path — success, failure, or a `run_job` the caller dropped.
     pub async fn run_job(&self, job: JobRecord) -> JobOutcome {
+        let _heartbeat = self.start_heartbeat(&job.id);
         let started = Instant::now();
         tracing::info!(job_id = %job.id, filename = %job.filename, "ingest claimed");
         let outcome = match self.index(&job, started).await {
@@ -240,6 +252,34 @@ impl IngestWorker {
         };
         tracing::info!(job_id = %job.id, outcome = ?outcome, "ingest finished");
         outcome
+    }
+
+    /// Start touching `job_id` every `heartbeat_interval`.
+    ///
+    /// Steps that emit no progress (a long extraction, a big embedding batch)
+    /// would otherwise leave `updatedAt` untouched for longer than
+    /// `stale_after`, and the reclaim sweep would requeue a job that is still
+    /// running — the Bun worker heartbeats for exactly this reason
+    /// (`src/lib/ingest/worker.ts:49`).
+    fn start_heartbeat(&self, job_id: &str) -> Heartbeat {
+        let jobs = Arc::clone(&self.jobs);
+        let job_id = job_id.to_string();
+        let every = self.settings.heartbeat_interval;
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(every);
+            // A stalled runtime should not then fire a burst of catch-up ticks.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // `setInterval` waits a full period before its first call, and the
+            // claim already wrote `updatedAt`, so skip the immediate tick.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if let Err(err) = jobs.touch(&job_id).await {
+                    tracing::warn!(error = %err, job_id = %job_id, "heartbeat touch failed");
+                }
+            }
+        });
+        Heartbeat(handle)
     }
 
     /// The pipeline proper. Every failure is a `reason` string rather than an
@@ -431,6 +471,19 @@ impl IngestWorker {
             Ok(_) => {}
             Err(err) => tracing::warn!(error = %err, "stale job reclaim failed"),
         }
+    }
+}
+
+/// Owns a job's heartbeat task and stops it when dropped.
+///
+/// `Drop` rather than an explicit call at each exit: the task must also stop
+/// when a caller drops a `run_job` future mid-job, or the job would keep being
+/// touched long after the worker stopped working on it.
+struct Heartbeat(tokio::task::JoinHandle<()>);
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
