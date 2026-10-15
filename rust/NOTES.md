@@ -259,3 +259,30 @@ ${chunk.content}`.
 - **Single OCR error prefix bug fix** (`kb-extract/src/chain.rs`, `kb-extract/src/dispatch.rs`):
   - Fixed double prefix bug on scanned-PDF fallback failure; prevents `OCR failed for "x": OCR failed for "x": ...`.
   - Verified by integration test `test_scanned_pdf_chain_failure_single_error_prefix`.
+
+## R4 slice 1: inherited port methods reconciled (documents, jobs, KB, categories, intelligence)
+
+Cargo ledger (continuing numbering from 55):
+
+| # | command | result |
+|---|---|---|
+| 56 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101. Inherited uncommitted work had two literal `\n`/backslash corruptions (`kb-store-surreal/src/entities.rs`, `kb-ports/src/traits.rs`), a `{` on the wrong line in `fakes.rs`, and fakes written against a different trait signature than the ports. |
+| 57 | same | exit 101, 5 error groups: `Ordering` imported twice in fakes, `patch_document` missing from `FakeDocumentStore`, `KnowledgeBaseId` vs `String` comparisons, `ChunkToStore.metadata` is raw JSON (not `ChunkMetadata`). |
+| 58 | same | exit 101, 2 errors: unbalanced delimiters in the `KnowledgeBaseRecord` constructions in `kb-store-pg/src/store.rs`. |
+| 59 | same | exit 101, 1 error: same delimiters after the first fix. |
+| 60 | same | exit 101, 1 error. A regex repair of the previous edits deleted most of `store.rs`; reverted to `HEAD` and rewrote the block by hand. |
+| 61 | same | exit 101, 1 error: `kb-store-pg/src/auth.rs` spawns the best-effort `lastUsedAt` stamp, so the crate needs `tokio`. |
+| 62 | same | exit 0, zero errors. |
+| 63 | `cargo test --workspace` | exit 0, every suite passes. |
+
+Decisions taken in this slice:
+- `RetryJobOutcome::Success { job_id, document_id }`: resetting the job and flipping the
+  document back to `processing` are separate operations in `retryJob`
+  (src/service/api.ts:667-683), and the document update is explicitly allowed to fail.
+  Keeping them apart in the port is what preserves that.
+- `JobStore::create_job` takes a `CreateJobInput` (no tenant argument): the tenant is on the
+  input, so the fake and the Postgres store cannot disagree about whose queue a job lands in.
+- Progress frames are throttled inside the worker (`PROGRESS_EMIT_MIN_GAP`, 900 ms, always on a
+  step change) so the SSE stream gets the same frames the Bun worker emits.
+- `IntelligenceStats` is computed in the HTTP layer, not the port: the TypeScript handler
+  derives it from the rows it already has.

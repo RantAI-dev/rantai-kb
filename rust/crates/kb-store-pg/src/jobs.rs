@@ -9,14 +9,19 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use kb_ports::{DocumentId, JobRecord, JobStore, PortError, TenantId};
+use kb_ports::{
+    CreateJobInput, DocumentId, JobRecord, JobStore, JobView, PortError, ReapableJob,
+    RetryJobOutcome, TenantId,
+};
 use sqlx::PgPool;
 use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
 
 use crate::queries::{
-    CLAIM_NEXT_PENDING, FAIL_JOB_STALLED, FINISH_JOB_FAILURE, FINISH_JOB_SUCCESS, REQUEUE_JOB,
-    SELECT_STALE_JOBS, SET_DOCUMENT_STATUS, TOUCH_JOB, UPDATE_JOB_PROGRESS,
+    CLAIM_NEXT_PENDING, CLEAR_JOB_S3_KEY, FAIL_JOB_STALLED, FINISH_JOB_FAILURE, FINISH_JOB_SUCCESS,
+    INSERT_INGEST_JOB, REQUEUE_JOB, RESET_JOB_FOR_RETRY, SELECT_JOB_BY_ID_TENANT,
+    SELECT_JOB_FOR_RETRY, SELECT_REAPABLE_JOBS, SELECT_STALE_JOBS, SET_DOCUMENT_STATUS, TOUCH_JOB,
+    UPDATE_JOB_PROGRESS,
 };
 use crate::store::PgSettings;
 
@@ -117,8 +122,6 @@ impl JobStore for PgJobStore {
         step_total: Option<u32>,
         eta_seconds: Option<i32>,
     ) -> Result<(), PortError> {
-        // `progress` is an INTEGER column and the value is an engine-controlled
-        // percentage, but it still travels as a bound parameter.
         let progress = i64::from(progress);
         sqlx::query(UPDATE_JOB_PROGRESS)
             .bind(job_id)
@@ -175,14 +178,6 @@ impl JobStore for PgJobStore {
         stale_after: Duration,
         max_attempts: i32,
     ) -> Result<u64, PortError> {
-        // No transaction, and no row locks: the TypeScript sweep is a bare
-        // `findMany` followed by independent `update` calls, each with
-        // `.catch(() => {})` (`src/service/adapters.ts`, `reclaimStale`). One
-        // bad row there costs that row only; inside a Postgres transaction the
-        // same failed statement would abort the sweep and roll back the rows
-        // that had already been handled. `FOR UPDATE SKIP LOCKED` was the other
-        // half of that safety: without the transaction there is nothing to hold
-        // a lock, so the per-row updates carry the guard instead.
         let cutoff = stale_after.as_secs_f64();
         let stale = sqlx::query(SELECT_STALE_JOBS)
             .bind(cutoff)
@@ -219,9 +214,6 @@ impl JobStore for PgJobStore {
 
             match updated {
                 Ok(result) => {
-                    // 0 rows means a concurrent sweep already requeued the job,
-                    // or its worker heartbeat arrived between our SELECT and this
-                    // UPDATE. Either way this sweep must not count it twice.
                     if result.rows_affected() == 0 {
                         tracing::debug!(job_id = %id, "stale job already handled elsewhere");
                         continue;
@@ -229,9 +221,6 @@ impl JobStore for PgJobStore {
                     reclaimed += 1;
                     if exhausted {
                         if let Some(doc_id) = document_id {
-                            // Best effort, on its own connection: the job row is
-                            // the source of truth, and a document row that cannot
-                            // be reached must not cost the sweep the rest.
                             if let Err(err) = sqlx::query(SET_DOCUMENT_STATUS)
                                 .bind(&doc_id)
                                 .bind("failed")
@@ -250,6 +239,124 @@ impl JobStore for PgJobStore {
         }
         Ok(reclaimed)
     }
+
+    async fn create_job(&self, input: &CreateJobInput) -> Result<String, PortError> {
+        let job_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(INSERT_INGEST_JOB)
+            .bind(&job_id)
+            .bind(input.tenant_id.0.as_str())
+            .bind(input.user_id.as_deref())
+            .bind(&input.filename)
+            .bind(input.file_size)
+            .bind(input.mime_type.as_deref())
+            .bind(input.s3_key.as_deref())
+            .bind(input.document_id.as_ref().map(|d| d.as_str()))
+            .bind(&input.params)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg insert ingest job: {e}")))?;
+
+        Ok(job_id)
+    }
+
+    async fn get_job(&self, tenant: &TenantId, id: &str) -> Result<Option<JobView>, PortError> {
+        let row = sqlx::query(SELECT_JOB_BY_ID_TENANT)
+            .bind(id)
+            .bind(tenant.0.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg get job: {e}")))?;
+
+        match row {
+            Some(r) => {
+                let id: String = r.try_get("id").map_err(|e| PortError::Unavailable(format!("pg id: {e}")))?;
+                let status: String = r.try_get("status").map_err(|e| PortError::Unavailable(format!("pg status: {e}")))?;
+                let step: Option<String> = r.try_get("step").map_err(|e| PortError::Unavailable(format!("pg step: {e}")))?;
+                let progress: i32 = r.try_get("progress").unwrap_or(0);
+                let step_current: Option<i32> = r.try_get("stepCurrent").map_err(|e| PortError::Unavailable(format!("pg stepCurrent: {e}")))?;
+                let step_total: Option<i32> = r.try_get("stepTotal").map_err(|e| PortError::Unavailable(format!("pg stepTotal: {e}")))?;
+                let eta_seconds: Option<i32> = r.try_get("etaSeconds").map_err(|e| PortError::Unavailable(format!("pg etaSeconds: {e}")))?;
+                let attempt: i32 = r.try_get("attempt").map_err(|e| PortError::Unavailable(format!("pg attempt: {e}")))?;
+                let error: Option<String> = r.try_get("error").map_err(|e| PortError::Unavailable(format!("pg error: {e}")))?;
+                let document_id: Option<String> = r.try_get("documentId").map_err(|e| PortError::Unavailable(format!("pg documentId: {e}")))?;
+
+                Ok(Some(JobView {
+                    id,
+                    status,
+                    step,
+                    progress: progress.max(0) as u32,
+                    step_current: step_current.map(|v| v.max(0) as u32),
+                    step_total: step_total.map(|v| v.max(0) as u32),
+                    eta_seconds,
+                    attempt,
+                    error,
+                    document_id,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn retry_job(&self, tenant: &TenantId, id: &str) -> Result<RetryJobOutcome, PortError> {
+        let row = sqlx::query(SELECT_JOB_FOR_RETRY)
+            .bind(id)
+            .bind(tenant.0.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg select job for retry: {e}")))?;
+
+        let Some(r) = row else {
+            return Ok(RetryJobOutcome::NotFound);
+        };
+
+        let status: String = r.try_get("status").map_err(|e| PortError::Unavailable(format!("pg status: {e}")))?;
+        if status != "failed" {
+            return Ok(RetryJobOutcome::NotFailed);
+        }
+
+        let document_id: Option<String> = r.try_get("documentId").map_err(|e| PortError::Unavailable(format!("pg documentId: {e}")))?;
+
+        // Only the job row is reset here. The document goes back to
+        // "processing" as its own best-effort update, exactly as the TypeScript
+        // route does (`.catch(() => {})`), so an unreachable document row
+        // cannot fail a retry that has already been accepted.
+        sqlx::query(RESET_JOB_FOR_RETRY)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg reset job for retry: {e}")))?;
+
+        Ok(RetryJobOutcome::Success {
+            job_id: id.to_string(),
+            document_id,
+        })
+    }
+
+    async fn list_reapable(&self, max_age_days: u32, limit: u32) -> Result<Vec<ReapableJob>, PortError> {
+        let rows = sqlx::query(SELECT_REAPABLE_JOBS)
+            .bind(max_age_days as i32)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg list reapable: {e}")))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row.try_get("id").map_err(|e| PortError::Unavailable(format!("pg id: {e}")))?;
+            let s3_key: String = row.try_get("s3Key").map_err(|e| PortError::Unavailable(format!("pg s3Key: {e}")))?;
+            out.push(ReapableJob { id, s3_key });
+        }
+        Ok(out)
+    }
+
+    async fn clear_s3_key(&self, job_id: &str) -> Result<(), PortError> {
+        sqlx::query(CLEAR_JOB_S3_KEY)
+            .bind(job_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg clear s3Key: {e}")))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -266,8 +373,6 @@ mod tests {
 
     #[test]
     fn claim_statement_uses_skip_locked() {
-        // The claim is only safe against a concurrent Bun worker if both the
-        // row lock and the skip are in the statement.
         assert!(CLAIM_NEXT_PENDING.contains("FOR UPDATE SKIP LOCKED"));
         assert!(CLAIM_NEXT_PENDING.contains("SET status = 'processing'"));
     }

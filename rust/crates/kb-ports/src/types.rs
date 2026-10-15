@@ -333,3 +333,180 @@ pub struct RerankScore {
     pub chunk_id: ChunkId,
     pub score: f32,
 }
+
+/// Detailed view of an ingest job, as returned by `GET /v1/jobs/:id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobView {
+    pub id: String,
+    pub status: String,
+    pub step: Option<String>,
+    pub progress: u32,
+    pub step_current: Option<u32>,
+    pub step_total: Option<u32>,
+    pub eta_seconds: Option<i32>,
+    pub attempt: i32,
+    pub error: Option<String>,
+    pub document_id: Option<String>,
+}
+
+/// Parameters to create a new pending ingest job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateJobInput {
+    pub tenant_id: TenantId,
+    pub user_id: Option<String>,
+    pub filename: String,
+    pub file_size: Option<i32>,
+    pub mime_type: Option<String>,
+    pub s3_key: Option<String>,
+    pub document_id: Option<DocumentId>,
+    pub params: serde_json::Value,
+}
+
+/// A new document row before storage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewDocument {
+    pub id: DocumentId,
+    pub tenant_id: TenantId,
+    pub title: String,
+    pub content: String,
+    pub categories: Vec<String>,
+    pub subcategory: Option<String>,
+    pub s3_key: Option<String>,
+    pub file_size: Option<i32>,
+    pub mime_type: Option<String>,
+    pub status: String,
+    pub external_ref: Option<String>,
+}
+
+/// Metadata update patch for a document.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PatchDocument {
+    pub title: Option<String>,
+    pub categories: Option<Vec<String>>,
+    pub subcategory: Option<Option<String>>,
+    pub knowledge_base_ids: Option<Vec<KnowledgeBaseId>>,
+}
+
+/// Minimal document metadata needed to stream raw bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentDownloadMeta {
+    pub id: DocumentId,
+    pub s3_key: Option<String>,
+    pub mime_type: Option<String>,
+    pub title: String,
+}
+
+/// A failed job eligible for S3 blob reaping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReapableJob {
+    pub id: String,
+    pub s3_key: String,
+}
+
+/// Full record of a knowledge base in Postgres.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeBaseRecord {
+    pub id: KnowledgeBaseId,
+    pub tenant_id: TenantId,
+    pub name: String,
+    pub description: Option<String>,
+    pub color: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Input to create a knowledge base.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateKnowledgeBase {
+    pub id: KnowledgeBaseId,
+    pub name: String,
+    pub description: Option<String>,
+    pub color: Option<String>,
+}
+
+/// Input to patch a knowledge base.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PatchKnowledgeBase {
+    pub name: Option<String>,
+    pub description: Option<Option<String>>,
+    pub color: Option<Option<String>>,
+}
+
+/// Category record as stored in Postgres.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryRecord {
+    pub id: String,
+    pub name: String,
+    pub label: String,
+    pub color: Option<String>,
+}
+
+/// Input to create a category.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCategory {
+    pub id: String,
+    pub name: String,
+    pub label: String,
+    pub color: Option<String>,
+}
+
+/// Input to patch a category.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PatchCategory {
+    pub name: Option<String>,
+    pub label: Option<String>,
+    pub color: Option<Option<String>>,
+}
+
+/// Entity item in `GET /v1/documents/:id/intelligence`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityView {
+    pub id: String,
+    pub name: String,
+    pub r#type: String,
+    pub confidence: f32,
+    pub metadata: serde_json::Value,
+}
+
+/// Relation item in `GET /v1/documents/:id/intelligence`. `in`/`out` are the
+/// record ids of the edge's endpoints, and the relation type is the dynamic
+/// table the edge lives in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelationView {
+    pub id: String,
+    #[serde(rename = "in")]
+    pub from_id: String,
+    pub out: String,
+    pub relation_type: String,
+    pub confidence: f32,
+    pub metadata: serde_json::Value,
+}
+
+/// Combined intelligence data for a document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentIntelligenceData {
+    pub entities: Vec<EntityView>,
+    pub relations: Vec<RelationView>,
+}
+
+/// Outcome of attempting to retry an ingest job.
+///
+/// The document status flip is deliberately left to the caller: the TypeScript
+/// retry route performs it as a separate best-effort update that is allowed to
+/// fail without failing the retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetryJobOutcome {
+    /// The job was reset to `pending`, carrying the document it indexes.
+    Success {
+        /// The retried job id.
+        job_id: String,
+        /// The document the job indexes, when the row carried one.
+        document_id: Option<String>,
+    },
+    /// The job exists but is not in `failed` state (409 in the API).
+    NotFailed,
+    /// No job with that id is visible to the tenant (404 in the API).
+    NotFound,
+}

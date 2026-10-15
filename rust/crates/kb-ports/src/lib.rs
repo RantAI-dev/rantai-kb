@@ -21,11 +21,14 @@ pub use scope::DocumentScope;
 pub use scope::adapter;
 pub use traits::{
     ChunkStore, DocumentFilter, DocumentStore, Embedder, EntityExtractor, EntityStore, Extractor,
-    FigureGate, JobStore, NeighbourAnchor, Reranker, ScopeRequest,
+    FigureGate, JobStore, NeighbourAnchor, ProgressSink, Reranker, ScopeRequest,
 };
 pub use types::{
-    AuthContext, Chunk, ChunkMetadata, ChunkToStore, ChunkType, DocumentMeta, Entity,
-    ExtractedFigure, ExtractionOptions, ExtractionResult, FigureGateCandidate, JobRecord,
-    KnowledgeBaseSummary, PageBlock, PageBlockKind, PageText, Relation, RerankCandidate,
-    RerankResult, RerankScore, SearchHit,
+    AuthContext, CategoryRecord, Chunk, ChunkMetadata, ChunkToStore, ChunkType, CreateCategory,
+    CreateJobInput, CreateKnowledgeBase, DocumentDownloadMeta, DocumentIntelligenceData,
+    DocumentMeta, Entity, EntityView, ExtractedFigure, ExtractionOptions, ExtractionResult,
+    FigureGateCandidate, JobRecord, JobView, KnowledgeBaseRecord,
+    KnowledgeBaseSummary, NewDocument, PageBlock, PageBlockKind, PageText, PatchCategory,
+    PatchDocument, PatchKnowledgeBase, ReapableJob, Relation, RelationView, RerankCandidate,
+    RerankResult, RerankScore, RetryJobOutcome, SearchHit,
 };

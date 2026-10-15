@@ -33,7 +33,7 @@ mod ingest_tests;
 #[cfg(test)]
 mod tests;
 
-pub use ingest::{CancelToken, IngestSettings, IngestWorker, JobOutcome};
+pub use ingest::{CancelToken, IngestSettings, IngestWorker, JobOutcome, reap_failed_job_uploads};
 pub use retrieval::{RetrievalOptions, RetrievalOutcome, enrich_titles, execute_pipeline};
 
 /// Tunable engine knobs.

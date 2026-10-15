@@ -11,15 +11,52 @@ use std::sync::{
 };
 
 use async_trait::async_trait;
+
+/// Timestamp the fakes stamp on every row they create.
+const FAKE_TIMESTAMP: &str = "2026-01-01T00:00:00.000Z";
+
+/// Monotonic id source for rows the fakes create themselves. A counter keeps
+/// `kb-engine` free of a uuid dependency and makes ids readable in failures.
+fn next_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 use kb_ports::{
-    AuthContext, BlobStore, Chunk, ChunkId, ChunkMetadata, ChunkStore, ChunkToStore, ChunkType,
-    DocumentId, DocumentMeta, DocumentScope, DocumentStore, Embedder, Entity, EntityExtractor,
-    EntityStore, ExtractionOptions, ExtractionResult, Extractor, FigureGate, FigureGateCandidate,
-    JobRecord, JobStore, KnowledgeBaseId, KnowledgeBaseSummary, NeighbourAnchor, PortError,
-    Relation, RerankCandidate, RerankResult, Reranker, ScopeRequest, SearchHit, TenantId,
-    adapter::ScopeToken,
+    AuthContext, BlobStore, CategoryRecord, Chunk, ChunkId, ChunkMetadata, ChunkStore,
+    ChunkToStore, ChunkType, CreateCategory, CreateJobInput, CreateKnowledgeBase,
+    DocumentDownloadMeta, DocumentId, DocumentIntelligenceData, DocumentMeta, DocumentScope,
+    DocumentStore, Embedder, Entity, EntityExtractor, EntityStore, EntityView, ExtractionOptions,
+    ExtractionResult, Extractor, FigureGate, FigureGateCandidate, JobRecord,
+    JobStore, JobView, KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary,
+    NeighbourAnchor, NewDocument, PatchCategory, PatchDocument, PatchKnowledgeBase, PortError,
+    ProgressSink, ReapableJob, Relation, RelationView, RerankCandidate, RerankResult, Reranker,
+    RetryJobOutcome, ScopeRequest, SearchHit, TenantId, adapter::ScopeToken,
 };
+use std::sync::atomic::AtomicU64;
 use std::time::Duration;
+
+/// Metadata as read back from a stored chunk's JSON metadata object.
+fn stored_chunk_metadata(value: &serde_json::Value) -> ChunkMetadata {
+    let get_u32 = |key: &str| value.get(key).and_then(serde_json::Value::as_u64).map(|n| n as u32);
+    ChunkMetadata {
+        section: value
+            .get("section")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        page: get_u32("page"),
+        chunk_index: get_u32("chunkIndex"),
+        asset_key: value
+            .get("assetKey")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        anchor_chunk_index: get_u32("anchorChunkIndex"),
+        contextual_prefix: value
+            .get("contextualPrefix")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    }
+}
 
 /// Helper to create a synthetic SearchHit.
 #[must_use]
@@ -61,6 +98,9 @@ pub struct FakeDocumentStore {
     pub docs: Arc<RwLock<HashMap<TenantId, Vec<DocumentMeta>>>>,
     pub api_keys: Arc<RwLock<HashMap<String, AuthContext>>>,
     pub kbs: Arc<RwLock<HashMap<TenantId, Vec<KnowledgeBaseSummary>>>>,
+    pub kb_records: Arc<RwLock<HashMap<TenantId, Vec<KnowledgeBaseRecord>>>>,
+    pub categories: Arc<RwLock<HashMap<TenantId, Vec<CategoryRecord>>>>,
+    pub download_metas: Arc<RwLock<HashMap<(TenantId, DocumentId), DocumentDownloadMeta>>>,
     pub fail_scope: Arc<AtomicBool>,
     /// Soft-deleted documents, kept so tests can assert on them.
     pub deleted: Arc<RwLock<Vec<DocumentMeta>>>,
@@ -117,8 +157,6 @@ impl DocumentStore for FakeDocumentStore {
         scope: &DocumentScope,
         id: &DocumentId,
     ) -> Result<Option<DocumentMeta>, PortError> {
-        // Mirror PgDocumentStore: a scope is the visibility rule, so a lookup
-        // outside it must miss even when the id exists for another tenant.
         if !scope.document_ids().contains(id) {
             return Ok(None);
         }
@@ -132,8 +170,6 @@ impl DocumentStore for FakeDocumentStore {
     }
 
     async fn soft_delete(&self, tenant: &TenantId, id: &DocumentId) -> Result<bool, PortError> {
-        // Tenant-scoped: another tenant's document is simply not found. The fake
-        // has no deleted_at column, so a soft-deleted doc is moved to `deleted`.
         let mut map = self.docs.write().unwrap();
         let Some(list) = map.get_mut(tenant) else {
             return Ok(false);
@@ -159,7 +195,6 @@ impl DocumentStore for FakeDocumentStore {
             return Ok(None);
         };
         list.remove(pos);
-        // The fake keeps no blob keys, so none is reported.
         Ok(Some(None))
     }
 
@@ -257,6 +292,256 @@ impl DocumentStore for FakeDocumentStore {
         let map = self.api_keys.read().unwrap();
         Ok(map.get(key).cloned())
     }
+
+    async fn create_document(
+        &self,
+        doc: &NewDocument,
+        group_kb_ids: &[KnowledgeBaseId],
+    ) -> Result<(), PortError> {
+        let meta = DocumentMeta {
+            id: doc.id.clone(),
+            title: doc.title.clone(),
+            categories: doc.categories.clone(),
+            subcategory: doc.subcategory.clone(),
+            status: doc.status.clone(),
+            chunk_count: 0,
+            // The upload route stores the original's MIME type; `fileType` is
+            // only filled in by the worker after extraction.
+            file_type: None,
+            file_size: doc.file_size,
+            mime_type: doc.mime_type.clone(),
+            s3_key: doc.s3_key.clone(),
+            created_at: FAKE_TIMESTAMP.to_string(),
+            updated_at: FAKE_TIMESTAMP.to_string(),
+            knowledge_base_ids: group_kb_ids.iter().map(|k| k.0.clone()).collect(),
+            metadata: None,
+        };
+        self.insert_doc(doc.tenant_id.clone(), meta);
+        self.download_metas.write().unwrap().insert(
+            (doc.tenant_id.clone(), doc.id.clone()),
+            DocumentDownloadMeta {
+                id: doc.id.clone(),
+                s3_key: doc.s3_key.clone(),
+                mime_type: doc.mime_type.clone(),
+                title: doc.title.clone(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn patch_document(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+        patch: &PatchDocument,
+    ) -> Result<Option<DocumentMeta>, PortError> {
+        let mut map = self.docs.write().unwrap();
+        let Some(list) = map.get_mut(tenant) else {
+            return Ok(None);
+        };
+        let Some(doc) = list.iter_mut().find(|d| &d.id == id) else {
+            return Ok(None);
+        };
+        if let Some(t) = &patch.title {
+            doc.title = t.clone();
+        }
+        if let Some(c) = &patch.categories {
+            doc.categories = c.clone();
+        }
+        if let Some(s) = &patch.subcategory {
+            doc.subcategory = s.clone();
+        }
+        if let Some(k) = &patch.knowledge_base_ids {
+            doc.knowledge_base_ids = k.iter().map(|kb| kb.0.clone()).collect();
+        }
+        doc.updated_at = FAKE_TIMESTAMP.to_string();
+        Ok(Some(doc.clone()))
+    }
+
+    async fn find_for_download(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+    ) -> Result<Option<DocumentDownloadMeta>, PortError> {
+        if let Some(meta) = self
+            .download_metas
+            .read()
+            .unwrap()
+            .get(&(tenant.clone(), id.clone()))
+        {
+            return Ok(Some(meta.clone()));
+        }
+        let docs = self.docs.read().unwrap();
+        let Some(doc) = docs.get(tenant).and_then(|list| list.iter().find(|m| &m.id == id))
+        else {
+            return Ok(None);
+        };
+        Ok(Some(DocumentDownloadMeta {
+            id: doc.id.clone(),
+            s3_key: doc.s3_key.clone(),
+            mime_type: doc.mime_type.clone(),
+            title: doc.title.clone(),
+        }))
+    }
+
+    async fn filter_owned_kb_ids(
+        &self,
+        tenant: &TenantId,
+        kb_ids: &[KnowledgeBaseId],
+    ) -> Result<Vec<KnowledgeBaseId>, PortError> {
+        let map = self.kb_records.read().unwrap();
+        let owned = map.get(tenant).cloned().unwrap_or_default();
+        let owned: std::collections::HashSet<&str> =
+            owned.iter().map(|k| k.id.0.as_str()).collect();
+        Ok(kb_ids
+            .iter()
+            .filter(|k| owned.contains(k.0.as_str()))
+            .cloned()
+            .collect())
+    }
+
+    async fn create_knowledge_base(
+        &self,
+        tenant: &TenantId,
+        input: &CreateKnowledgeBase,
+    ) -> Result<KnowledgeBaseRecord, PortError> {
+        let record = KnowledgeBaseRecord {
+            id: input.id.clone(),
+            tenant_id: tenant.clone(),
+            name: input.name.clone(),
+            description: input.description.clone(),
+            color: input.color.clone(),
+            created_at: FAKE_TIMESTAMP.to_string(),
+            updated_at: FAKE_TIMESTAMP.to_string(),
+        };
+        self.kb_records
+            .write()
+            .unwrap()
+            .entry(tenant.clone())
+            .or_default()
+            .push(record.clone());
+        self.kbs
+            .write()
+            .unwrap()
+            .entry(tenant.clone())
+            .or_default()
+            .push(KnowledgeBaseSummary {
+                id: input.id.clone(),
+                name: input.name.clone(),
+                description: input.description.clone(),
+                color: input.color.clone(),
+                document_count: 0,
+            });
+        Ok(record)
+    }
+
+    async fn patch_knowledge_base(
+        &self,
+        tenant: &TenantId,
+        id: &KnowledgeBaseId,
+        patch: &PatchKnowledgeBase,
+    ) -> Result<Option<KnowledgeBaseRecord>, PortError> {
+        let mut map = self.kb_records.write().unwrap();
+        let Some(list) = map.get_mut(tenant) else {
+            return Ok(None);
+        };
+        let Some(rec) = list.iter_mut().find(|k| &k.id == id) else {
+            return Ok(None);
+        };
+        if let Some(n) = &patch.name {
+            rec.name = n.clone();
+        }
+        if let Some(d) = &patch.description {
+            rec.description = d.clone();
+        }
+        if let Some(c) = &patch.color {
+            rec.color = c.clone();
+        }
+        rec.updated_at = FAKE_TIMESTAMP.to_string();
+        Ok(Some(rec.clone()))
+    }
+
+    async fn delete_knowledge_base(
+        &self,
+        tenant: &TenantId,
+        id: &KnowledgeBaseId,
+    ) -> Result<bool, PortError> {
+        let mut map = self.kb_records.write().unwrap();
+        let Some(list) = map.get_mut(tenant) else {
+            return Ok(false);
+        };
+        let Some(pos) = list.iter().position(|k| k.id.0 == id.0) else {
+            return Ok(false);
+        };
+        list.remove(pos);
+        let mut kbs = self.kbs.write().unwrap();
+        if let Some(kblist) = kbs.get_mut(tenant) {
+            kblist.retain(|k| k.id.0 != id.0);
+        }
+        Ok(true)
+    }
+
+    async fn list_categories(&self, tenant: &TenantId) -> Result<Vec<CategoryRecord>, PortError> {
+        let map = self.categories.read().unwrap();
+        Ok(map.get(tenant).cloned().unwrap_or_default())
+    }
+
+    async fn create_category(
+        &self,
+        tenant: &TenantId,
+        input: &CreateCategory,
+    ) -> Result<CategoryRecord, PortError> {
+        let record = CategoryRecord {
+            id: input.id.clone(),
+            name: input.name.clone(),
+            label: input.label.clone(),
+            color: input.color.clone(),
+        };
+        self.categories
+            .write()
+            .unwrap()
+            .entry(tenant.clone())
+            .or_default()
+            .push(record.clone());
+        Ok(record)
+    }
+
+    async fn patch_category(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        patch: &PatchCategory,
+    ) -> Result<Option<CategoryRecord>, PortError> {
+        let mut map = self.categories.write().unwrap();
+        let Some(list) = map.get_mut(tenant) else {
+            return Ok(None);
+        };
+        let Some(rec) = list.iter_mut().find(|c| c.id == id) else {
+            return Ok(None);
+        };
+        if let Some(n) = &patch.name {
+            rec.name = n.clone();
+        }
+        if let Some(l) = &patch.label {
+            rec.label = l.clone();
+        }
+        if let Some(c) = &patch.color {
+            rec.color = c.clone();
+        }
+        Ok(Some(rec.clone()))
+    }
+
+    async fn delete_category(&self, tenant: &TenantId, id: &str) -> Result<bool, PortError> {
+        let mut map = self.categories.write().unwrap();
+        let Some(list) = map.get_mut(tenant) else {
+            return Ok(false);
+        };
+        let Some(pos) = list.iter().position(|c| c.id == id) else {
+            return Ok(false);
+        };
+        list.remove(pos);
+        Ok(true)
+    }
 }
 
 /// Fake in-memory chunk store.
@@ -322,9 +607,24 @@ impl ChunkStore for FakeChunkStore {
 
     async fn ordered_chunks(
         &self,
-        _document_id: &DocumentId,
+        document_id: &DocumentId,
     ) -> Result<Vec<(u32, String, ChunkMetadata)>, PortError> {
-        Ok(Vec::new())
+        let stored = self.stored_chunks.read().unwrap();
+        let Some(chunks) = stored.get(document_id) else {
+            return Ok(Vec::new());
+        };
+        // `ChunkToStore.metadata` is the SurrealDB metadata object verbatim, so
+        // the read shape is derived from it the same way the Surreal adapter
+        // derives `ChunkMetadata`.
+        let mut out: Vec<(u32, String, ChunkMetadata)> = chunks
+            .iter()
+            .map(|c| {
+                let meta = stored_chunk_metadata(&c.metadata);
+                (meta.chunk_index.unwrap_or(0), c.content.clone(), meta)
+            })
+            .collect();
+        out.sort_by_key(|(idx, _, _)| *idx);
+        Ok(out)
     }
 
     async fn vector_search(
@@ -516,7 +816,7 @@ pub struct FinishedJob {
 /// same guarantee `FOR UPDATE SKIP LOCKED` gives in Postgres.
 #[derive(Clone, Default)]
 pub struct FakeJobStore {
-    pending: Arc<RwLock<std::collections::VecDeque<JobRecord>>>,
+    pub pending: Arc<RwLock<std::collections::VecDeque<JobRecord>>>,
     /// `(job_id, step, progress)` in call order.
     pub progress: Arc<RwLock<Vec<(String, String, u32)>>>,
     /// Detailed step updates with sub-counters.
@@ -525,6 +825,8 @@ pub struct FakeJobStore {
     pub reclaimed: Arc<RwLock<u64>>,
     /// Job ids passed to `touch`, in call order: the heartbeat's trail.
     pub touches: Arc<RwLock<Vec<String>>>,
+    pub job_views: Arc<RwLock<HashMap<(TenantId, String), JobView>>>,
+    pub reapables: Arc<RwLock<Vec<ReapableJob>>>,
 }
 
 impl FakeJobStore {
@@ -551,7 +853,7 @@ impl JobStore for FakeJobStore {
         progress: u32,
         step_current: Option<u32>,
         step_total: Option<u32>,
-        _eta_seconds: Option<i32>,
+        eta_seconds: Option<i32>,
     ) -> Result<(), PortError> {
         self.progress
             .write()
@@ -567,6 +869,16 @@ impl JobStore for FakeJobStore {
                 step_current,
                 step_total,
             ));
+        let mut views = self.job_views.write().unwrap();
+        for ((_, jid), view) in views.iter_mut() {
+            if jid == job_id {
+                view.step = Some(step.to_string());
+                view.progress = progress;
+                view.step_current = step_current;
+                view.step_total = step_total;
+                view.eta_seconds = eta_seconds;
+            }
+        }
         Ok(())
     }
 
@@ -580,6 +892,15 @@ impl JobStore for FakeJobStore {
             success: true,
             detail: document_id.0.clone(),
         });
+        let mut views = self.job_views.write().unwrap();
+        for ((_, jid), view) in views.iter_mut() {
+            if jid == job_id {
+                view.status = "success".to_string();
+                view.step = Some("done".to_string());
+                view.progress = 100;
+                view.document_id = Some(document_id.0.clone());
+            }
+        }
         Ok(())
     }
 
@@ -589,6 +910,13 @@ impl JobStore for FakeJobStore {
             success: false,
             detail: error.to_string(),
         });
+        let mut views = self.job_views.write().unwrap();
+        for ((_, jid), view) in views.iter_mut() {
+            if jid == job_id {
+                view.status = "failed".to_string();
+                view.error = Some(error.to_string());
+            }
+        }
         Ok(())
     }
 
@@ -603,6 +931,80 @@ impl JobStore for FakeJobStore {
         _max_attempts: i32,
     ) -> Result<u64, PortError> {
         Ok(*self.reclaimed.read().unwrap())
+    }
+
+    async fn create_job(&self, input: &CreateJobInput) -> Result<String, PortError> {
+        let job_id = format!("job-{}", next_id());
+        let view = JobView {
+            id: job_id.clone(),
+            status: "pending".to_string(),
+            step: Some("queued".to_string()),
+            progress: 0,
+            step_current: None,
+            step_total: None,
+            eta_seconds: None,
+            // Postgres defaults `attempt` to 1.
+            attempt: 1,
+            error: None,
+            document_id: input.document_id.as_ref().map(|d| d.0.clone()),
+        };
+        self.job_views
+            .write()
+            .unwrap()
+            .insert((input.tenant_id.clone(), job_id.clone()), view);
+        self.pending.write().unwrap().push_back(JobRecord {
+            id: job_id.clone(),
+            tenant_id: input.tenant_id.clone(),
+            user_id: input.user_id.clone(),
+            document_id: input.document_id.clone(),
+            s3_key: input.s3_key.clone(),
+            filename: input.filename.clone(),
+            mime_type: input.mime_type.clone(),
+            attempt: 1,
+            params: Some(input.params.clone()),
+        });
+        Ok(job_id)
+    }
+
+    async fn get_job(&self, tenant: &TenantId, job_id: &str) -> Result<Option<JobView>, PortError> {
+        let map = self.job_views.read().unwrap();
+        Ok(map.get(&(tenant.clone(), job_id.to_string())).cloned())
+    }
+
+    async fn retry_job(&self, tenant: &TenantId, id: &str) -> Result<RetryJobOutcome, PortError> {
+        let mut map = self.job_views.write().unwrap();
+        let Some(view) = map.get_mut(&(tenant.clone(), id.to_string())) else {
+            return Ok(RetryJobOutcome::NotFound);
+        };
+        if view.status != "failed" {
+            return Ok(RetryJobOutcome::NotFailed);
+        }
+        view.status = "pending".to_string();
+        view.attempt += 1;
+        view.error = None;
+        view.step = Some("queued".to_string());
+        view.progress = 0;
+        view.step_current = None;
+        view.step_total = None;
+        view.eta_seconds = None;
+        Ok(RetryJobOutcome::Success {
+            job_id: view.id.clone(),
+            document_id: view.document_id.clone(),
+        })
+    }
+
+    async fn list_reapable(
+        &self,
+        _max_age_days: u32,
+        _limit: u32,
+    ) -> Result<Vec<ReapableJob>, PortError> {
+        Ok(self.reapables.read().unwrap().clone())
+    }
+
+    async fn clear_s3_key(&self, job_id: &str) -> Result<(), PortError> {
+        let mut list = self.reapables.write().unwrap();
+        list.retain(|j| j.id != job_id);
+        Ok(())
     }
 }
 
@@ -681,6 +1083,7 @@ pub struct FakeEntityStore {
     pub upserted_entities:
         Arc<RwLock<Vec<(DocumentId, String, String, String, f32, Option<serde_json::Value>)>>>,
     pub relations: Arc<RwLock<Vec<(String, String, String, f32, DocumentId, Option<String>)>>>,
+    pub intelligences: Arc<RwLock<HashMap<DocumentId, DocumentIntelligenceData>>>,
     pub fail_upsert: Arc<AtomicBool>,
 }
 
@@ -728,7 +1131,73 @@ impl EntityStore for FakeEntityStore {
         ));
         Ok(())
     }
+
+    async fn get_document_intelligence(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<DocumentIntelligenceData, PortError> {
+        if let Some(data) = self.intelligences.read().unwrap().get(document_id) {
+            return Ok(data.clone());
+        }
+        let entities: Vec<EntityView> = self
+            .upserted_entities
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(doc, ..)| doc == document_id)
+            .map(|(_, id, name, etype, conf, meta)| EntityView {
+                id: id.clone(),
+                name: name.clone(),
+                r#type: etype.clone(),
+                confidence: *conf,
+                metadata: meta.clone().unwrap_or_else(|| serde_json::json!({})),
+            })
+            .collect();
+        let relations: Vec<RelationView> = self
+            .relations
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, _, _, _, doc, _)| doc == document_id)
+            .map(|(from, rel, to, conf, _, ctx)| RelationView {
+                id: format!("{from}-{rel}-{to}"),
+                from_id: from.clone(),
+                out: to.clone(),
+                relation_type: rel.clone(),
+                confidence: *conf,
+                metadata: serde_json::json!({ "context": ctx }),
+            })
+            .collect();
+
+        Ok(DocumentIntelligenceData {
+            entities,
+            relations,
+        })
+    }
 }
+
+/// Fake progress sink recording emitted events.
+#[derive(Clone, Default)]
+pub struct FakeProgressSink {
+    pub events: Arc<RwLock<Vec<(TenantId, String, serde_json::Value)>>>,
+}
+
+#[async_trait]
+impl ProgressSink for FakeProgressSink {
+    async fn emit(
+        &self,
+        tenant: &TenantId,
+        event: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), PortError> {
+        self.events
+            .write()
+            .unwrap()
+            .push((tenant.clone(), event.to_string(), payload));
+        Ok(())
+    }
+}
+
 
 /// Fake entity extractor.
 #[derive(Clone, Default)]

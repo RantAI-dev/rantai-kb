@@ -9,7 +9,7 @@
 //! mirroring `src/lib/ingest/index-document.ts`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use kb_core::chunk::{Chunk, ChunkMetadata, SmartChunkingOptions, smart_chunk_document};
@@ -24,7 +24,7 @@ use kb_core::{
 use kb_ports::{
     BlobStore, ChunkStore, ChunkToStore, DocumentId, DocumentStore, Embedder, EntityExtractor,
     EntityStore, ExtractedFigure, ExtractionOptions, Extractor, JobRecord, JobStore, PortError,
-    asset_path,
+    ProgressSink, asset_path,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
@@ -43,6 +43,10 @@ pub const INGEST_CHUNKING: SmartChunkingOptions = SmartChunkingOptions {
 /// How often a running job is touched, as the Bun worker does
 /// (`src/lib/ingest/worker.ts:49`).
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Minimum gap between two progress frames for the same step, as
+/// `updateIngestJobProgress` throttles in `src/lib/ingest/job.ts:72`.
+pub const PROGRESS_EMIT_MIN_GAP: Duration = Duration::from_millis(900);
 
 /// How a claimed job ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +147,12 @@ pub struct IngestWorker {
     embedder: Arc<dyn Embedder>,
     entities: Option<Arc<dyn EntityStore>>,
     entity_extractor: Option<Arc<dyn EntityExtractor>>,
+    progress_sink: Option<Arc<dyn ProgressSink>>,
+    /// Per-job throttle state for progress emits, mirroring `lastEmit` in
+    /// `src/lib/ingest/job.ts`: always emit on a step change, otherwise at most
+    /// one emit per `PROGRESS_EMIT_MIN_GAP`. Without it a large book produces
+    /// hundreds of socket frames per second for a single document.
+    emit_state: Mutex<HashMap<String, (Instant, String)>>,
     settings: IngestSettings,
 }
 
@@ -167,6 +177,8 @@ impl IngestWorker {
             embedder,
             entities: None,
             entity_extractor: None,
+            progress_sink: None,
+            emit_state: Mutex::new(HashMap::new()),
             settings,
         }
     }
@@ -194,6 +206,13 @@ impl IngestWorker {
     #[must_use]
     pub fn with_entity_extractor(mut self, extractor: Arc<dyn EntityExtractor>) -> Self {
         self.entity_extractor = Some(extractor);
+        self
+    }
+
+    /// Equip the worker with a progress sink.
+    #[must_use]
+    pub fn with_progress_sink(mut self, sink: Arc<dyn ProgressSink>) -> Self {
+        self.progress_sink = Some(sink);
         self
     }
 
@@ -904,6 +923,10 @@ impl IngestWorker {
         self.progress(job, StepProgress::of(IngestStep::Done), started, flags)
             .await;
 
+        // A ready job carries no error text.
+        self.emit_terminal(job, "ready", Some(&document_id.0), "")
+            .await;
+
         Ok((chunks, document_id.clone()))
     }
 
@@ -917,6 +940,8 @@ impl IngestWorker {
                 tracing::error!(error = %err, "could not mark document failed");
             }
         }
+        self.emit_terminal(job, "failed", job.document_id.as_ref().map(|d| d.0.as_str()), reason)
+            .await;
     }
 
     /// Record progress. A failed progress write is logged and dropped: it must
@@ -944,6 +969,77 @@ impl IngestWorker {
         {
             tracing::warn!(error = %err, job_id = %job.id, "progress update failed");
         }
+        let step_name = step.step.as_str();
+        if self.should_emit(&job.id, step_name) {
+            let payload = json!({
+                "jobId": job.id,
+                "documentId": job.document_id.as_ref().map(|d| &d.0),
+                "status": "processing",
+                "step": step_name,
+                "progress": overall,
+                "stepCurrent": step.current,
+                "stepTotal": step.total,
+                "etaSeconds": eta,
+            });
+            self.emit(job, payload).await;
+        }
+    }
+
+    /// Emit the one frame that ends the job's stream (`emitIngestTerminal` in
+    /// `src/lib/ingest/job.ts`). Always sent, never throttled, and it also
+    /// clears the throttle state so a retried job starts clean.
+    async fn emit_terminal(
+        &self,
+        job: &JobRecord,
+        status: &str,
+        document_id: Option<&str>,
+        error: &str,
+    ) {
+        if let Ok(mut state) = self.emit_state.lock() {
+            state.remove(&job.id);
+        }
+        let ready = status == "ready";
+        let payload = json!({
+            "jobId": job.id,
+            "documentId": document_id,
+            "status": status,
+            "step": if ready { Value::String("done".into()) } else { Value::Null },
+            "progress": if ready { 100 } else { 0 },
+            "stepCurrent": Value::Null,
+            "stepTotal": Value::Null,
+            "etaSeconds": 0,
+            "error": if ready { Value::Null } else { Value::String(error.to_string()) },
+        });
+        self.emit(job, payload).await;
+    }
+
+    /// Throttle gate for progress frames: always emit on a step change,
+    /// otherwise at most one per [`PROGRESS_EMIT_MIN_GAP`].
+    fn should_emit(&self, job_id: &str, step: &str) -> bool {
+        let Ok(mut state) = self.emit_state.lock() else {
+            return true;
+        };
+        let now = Instant::now();
+        let prev = state.insert(job_id.to_string(), (now, step.to_string()));
+        match prev {
+            Some((at, prev_step)) if prev_step == step && now.duration_since(at) < PROGRESS_EMIT_MIN_GAP => {
+                false
+            }
+            _ => true,
+        }
+    }
+
+    /// Push one frame to the sink, if the process wired one.
+    async fn emit(&self, job: &JobRecord, payload: serde_json::Value) {
+        let Some(sink) = &self.progress_sink else {
+            return;
+        };
+        if let Err(err) = sink
+            .emit(&job.tenant_id, "ingest:job:update", payload)
+            .await
+        {
+            tracing::warn!(error = %err, "progress emit failed");
+        }
     }
 
     /// Sweep jobs whose worker died mid-run.
@@ -958,6 +1054,29 @@ impl IngestWorker {
             Err(err) => tracing::warn!(error = %err, "stale job reclaim failed"),
         }
     }
+}
+
+/// Reap stored files of failed jobs nobody retried.
+pub async fn reap_failed_job_uploads(
+    jobs: &dyn JobStore,
+    blobs: &dyn BlobStore,
+    max_age_days: u32,
+    limit: u32,
+) -> Result<usize, PortError> {
+    let reapable = jobs.list_reapable(max_age_days, limit).await?;
+    let mut reaped = 0;
+    for job in reapable {
+        if let Err(e) = blobs.delete(&job.s3_key).await {
+            tracing::warn!(error = %e, job_id = %job.id, "reap blob delete failed");
+            continue;
+        }
+        if let Err(e) = jobs.clear_s3_key(&job.id).await {
+            tracing::warn!(error = %e, job_id = %job.id, "reap clear s3 key failed");
+            continue;
+        }
+        reaped += 1;
+    }
+    Ok(reaped)
 }
 
 /// Owns a job's heartbeat task and stops it when dropped.

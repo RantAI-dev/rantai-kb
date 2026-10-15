@@ -12,9 +12,12 @@ use crate::error::PortError;
 use crate::ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 use crate::scope::DocumentScope;
 use crate::types::{
-    AuthContext, ChunkMetadata, ChunkToStore, DocumentMeta, Entity, ExtractionOptions,
-    ExtractionResult, FigureGateCandidate, JobRecord, KnowledgeBaseSummary, Relation,
-    RerankCandidate, RerankResult, SearchHit,
+    AuthContext, CategoryRecord, ChunkMetadata, ChunkToStore, CreateCategory, CreateJobInput,
+    CreateKnowledgeBase, DocumentDownloadMeta, DocumentIntelligenceData, DocumentMeta, Entity,
+    ExtractionOptions, ExtractionResult, FigureGateCandidate, JobRecord, JobView,
+    KnowledgeBaseRecord, KnowledgeBaseSummary, NewDocument, PatchCategory, PatchDocument,
+    PatchKnowledgeBase, ReapableJob, Relation, RerankCandidate, RerankResult, RetryJobOutcome,
+    SearchHit,
 };
 
 /// What the chunk store is allowed to look at. Currently the empty case is
@@ -123,6 +126,88 @@ pub trait DocumentStore: Send + Sync {
     /// Failure to update is logged and swallowed by the worker, as in the TS
     /// adapter, so a missing row does not mask the job's own outcome.
     async fn set_status(&self, id: &DocumentId, status: &str) -> Result<(), PortError>;
+
+    /// Create a new document and link it to knowledge bases.
+    async fn create_document(
+        &self,
+        doc: &NewDocument,
+        group_kb_ids: &[KnowledgeBaseId],
+    ) -> Result<(), PortError>;
+
+    /// Patch an existing document's metadata or knowledge base links.
+    ///
+    /// Must resolve the document within the tenant scope first.
+    /// Returns `Ok(None)` if no document was found.
+    async fn patch_document(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+        patch: &PatchDocument,
+    ) -> Result<Option<DocumentMeta>, PortError>;
+
+    /// Find document download metadata by id (tenant-filtered, not deleted).
+    async fn find_for_download(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+    ) -> Result<Option<DocumentDownloadMeta>, PortError>;
+
+    /// Filter requested knowledge base IDs to those actually owned by the tenant.
+    async fn filter_owned_kb_ids(
+        &self,
+        tenant: &TenantId,
+        kb_ids: &[KnowledgeBaseId],
+    ) -> Result<Vec<KnowledgeBaseId>, PortError>;
+
+    /// Create a new knowledge base.
+    async fn create_knowledge_base(
+        &self,
+        tenant: &TenantId,
+        input: &CreateKnowledgeBase,
+    ) -> Result<KnowledgeBaseRecord, PortError>;
+
+    /// Patch a knowledge base by ID (tenant-scoped).
+    async fn patch_knowledge_base(
+        &self,
+        tenant: &TenantId,
+        id: &KnowledgeBaseId,
+        input: &PatchKnowledgeBase,
+    ) -> Result<Option<KnowledgeBaseRecord>, PortError>;
+
+    /// Delete a knowledge base and its document links (tenant-scoped).
+    async fn delete_knowledge_base(
+        &self,
+        tenant: &TenantId,
+        id: &KnowledgeBaseId,
+    ) -> Result<bool, PortError>;
+
+    /// List categories for a tenant.
+    async fn list_categories(
+        &self,
+        tenant: &TenantId,
+    ) -> Result<Vec<CategoryRecord>, PortError>;
+
+    /// Create a category for a tenant.
+    async fn create_category(
+        &self,
+        tenant: &TenantId,
+        input: &CreateCategory,
+    ) -> Result<CategoryRecord, PortError>;
+
+    /// Patch a category by ID (tenant-scoped).
+    async fn patch_category(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+        input: &PatchCategory,
+    ) -> Result<Option<CategoryRecord>, PortError>;
+
+    /// Delete a category by ID (tenant-scoped).
+    async fn delete_category(
+        &self,
+        tenant: &TenantId,
+        id: &str,
+    ) -> Result<bool, PortError>;
 }
 
 /// Chunk store: vector + BM25 + neighbours + figure co-retrieval over the
@@ -148,7 +233,7 @@ pub trait ChunkStore: Send + Sync {
     ) -> Result<Vec<SearchHit>, PortError>;
 
     /// Look up adjacent chunks within `window` offsets of each anchor chunk.
-    /// Results must be within the provided `scope`.\
+    /// Results must be within the provided `scope`.
     async fn neighbours(
         &self,
         scope: &DocumentScope,
@@ -222,6 +307,12 @@ pub trait EntityStore: Send + Sync {
         document_id: &DocumentId,
         context: Option<&str>,
     ) -> Result<(), PortError>;
+
+    /// Retrieve extracted entities and relations for a document.
+    async fn get_document_intelligence(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<DocumentIntelligenceData, PortError>;
 }
 
 /// Document intelligence extractor port.
@@ -298,6 +389,38 @@ pub trait JobStore: Send + Sync {
         stale_after: Duration,
         max_attempts: i32,
     ) -> Result<u64, PortError>;
+
+    /// Create a new pending ingest job. Returns the created job ID.
+    async fn create_job(&self, input: &CreateJobInput) -> Result<String, PortError>;
+
+    /// Get a job by ID (tenant-scoped).
+    async fn get_job(&self, tenant: &TenantId, id: &str) -> Result<Option<JobView>, PortError>;
+
+    /// Retry a failed job (tenant-scoped).
+    async fn retry_job(&self, tenant: &TenantId, id: &str) -> Result<RetryJobOutcome, PortError>;
+
+    /// List failed jobs older than `max_age_days` with a non-null `s3Key`, so
+    /// their stored file can be reaped.
+    async fn list_reapable(
+        &self,
+        max_age_days: u32,
+        limit: u32,
+    ) -> Result<Vec<ReapableJob>, PortError>;
+
+    /// Clear the s3_key of a reaped job.
+    async fn clear_s3_key(&self, job_id: &str) -> Result<(), PortError>;
+}
+
+/// Progress sink for streaming job updates and SSE event frames.
+#[async_trait]
+pub trait ProgressSink: Send + Sync {
+    /// Emit an event with a JSON payload to a tenant's subscribers.
+    async fn emit(
+        &self,
+        tenant_id: &TenantId,
+        event: &str,
+        payload: serde_json::Value,
+    ) -> Result<(), PortError>;
 }
 
 /// Turns a stored file into text. Implementations wrap MinerU, a VLM endpoint,
