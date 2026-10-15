@@ -12,6 +12,25 @@ use std::sync::{
 
 use async_trait::async_trait;
 
+/// `(job_id, step, progress)` recorded by [`FakeJobStore::update_progress`].
+pub type ProgressCall = (String, String, u32);
+/// `(job_id, step, progress, step_current, step_total)` recorded by
+/// [`FakeJobStore::update_detailed`].
+pub type DetailedProgressCall = (String, String, u32, Option<u32>, Option<u32>);
+/// `(document_id, id, name, type, confidence, metadata)` recorded by
+/// [`FakeEntityStore::upsert_entity`].
+pub type UpsertedEntity = (
+    DocumentId,
+    String,
+    String,
+    String,
+    f32,
+    Option<serde_json::Value>,
+);
+/// `(source, target, type, confidence, document_id, description)` recorded by
+/// [`FakeEntityStore::relate`].
+pub type StoredRelation = (String, String, String, f32, DocumentId, Option<String>);
+
 /// Timestamp the fakes stamp on every row they create.
 const FAKE_TIMESTAMP: &str = "2026-01-01T00:00:00.000Z";
 
@@ -885,9 +904,9 @@ pub struct FinishedJob {
 pub struct FakeJobStore {
     pub pending: Arc<RwLock<std::collections::VecDeque<JobRecord>>>,
     /// `(job_id, step, progress)` in call order.
-    pub progress: Arc<RwLock<Vec<(String, String, u32)>>>,
+    pub progress: Arc<RwLock<Vec<ProgressCall>>>,
     /// Detailed step updates with sub-counters.
-    pub detailed_progress: Arc<RwLock<Vec<(String, String, u32, Option<u32>, Option<u32>)>>>,
+    pub detailed_progress: Arc<RwLock<Vec<DetailedProgressCall>>>,
     pub finished: Arc<RwLock<Vec<FinishedJob>>>,
     pub reclaimed: Arc<RwLock<u64>>,
     /// Job ids passed to `touch`, in call order: the heartbeat's trail.
@@ -1148,20 +1167,8 @@ impl Extractor for FakeExtractor {
 /// Fake in-memory entity store.
 #[derive(Clone, Default)]
 pub struct FakeEntityStore {
-    #[allow(clippy::type_complexity)]
-    pub upserted_entities: Arc<
-        RwLock<
-            Vec<(
-                DocumentId,
-                String,
-                String,
-                String,
-                f32,
-                Option<serde_json::Value>,
-            )>,
-        >,
-    >,
-    pub relations: Arc<RwLock<Vec<(String, String, String, f32, DocumentId, Option<String>)>>>,
+    pub upserted_entities: Arc<RwLock<Vec<UpsertedEntity>>>,
+    pub relations: Arc<RwLock<Vec<StoredRelation>>>,
     pub intelligences: Arc<RwLock<HashMap<DocumentId, DocumentIntelligenceData>>>,
     pub fail_upsert: Arc<AtomicBool>,
 }

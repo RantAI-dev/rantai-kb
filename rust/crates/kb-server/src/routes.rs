@@ -46,7 +46,6 @@ pub fn upload_body_limit() -> usize {
 }
 
 /// Top-level router. Authenticated routes go here.
-#[must_use]
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/search", post(search))
@@ -89,7 +88,6 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 /// Unauthenticated router (health + formats).
-#[must_use]
 pub fn health_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/health", get(health))
@@ -129,7 +127,7 @@ pub async fn cors(req: Request, next: Next) -> Response {
 }
 
 /// Fallback for any path the router does not know: authenticate, then 404.
-pub async fn not_found(State(state): State<Arc<AppState>>, mut req: Request) -> Response {
+pub async fn not_found(State(state): State<Arc<AppState>>, req: Request) -> Response {
     let (mut parts, _body) = req.into_parts();
     if Authed::from_request_parts(&mut parts, &state)
         .await

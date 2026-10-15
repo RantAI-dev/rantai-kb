@@ -56,7 +56,10 @@ pub fn context_for_page(page_text: &HashMap<u32, String>, page: u32) -> String {
     if let Some(text) = page_text.get(&page).filter(|t| !t.trim().is_empty()) {
         return text.trim().to_string();
     }
-    if let Some(text) = page_text.get(&(page.saturating_add(1))).filter(|t| !t.trim().is_empty()) {
+    if let Some(text) = page_text
+        .get(&(page.saturating_add(1)))
+        .filter(|t| !t.trim().is_empty())
+    {
         return text.trim().to_string();
     }
     if page > 0 {
@@ -76,7 +79,7 @@ pub fn derive_label(context: &str) -> Option<String> {
         return None;
     }
 
-    let parts = context.split(|c| c == '\n' || c == '.' || c == ';');
+    let parts = context.split(['\n', '.', ';']);
     for part in parts {
         let trimmed = part.trim();
         if trimmed.len() >= 8 && trimmed.len() <= 120 {
@@ -161,7 +164,10 @@ pub fn resolve_figure_anchors(
             let mut matched_idx = None;
             for n in (4..=word_vec.len().min(10)).rev() {
                 let probe = word_vec[..n].join(" ");
-                if let Some((idx, _)) = normalized_chunks.iter().find(|(_, text)| text.contains(&probe)) {
+                if let Some((idx, _)) = normalized_chunks
+                    .iter()
+                    .find(|(_, text)| text.contains(&probe))
+                {
                     matched_idx = Some(*idx);
                     break;
                 }
@@ -198,18 +204,31 @@ mod tests {
             (Some(2), "Page 2 content text."),
         ];
         let map = build_page_text(&chunks);
-        assert!(map.get(&1).unwrap().contains("Page 1 intro text. Page 1 second paragraph."));
+        assert!(
+            map.get(&1)
+                .unwrap()
+                .contains("Page 1 intro text. Page 1 second paragraph.")
+        );
 
-        assert_eq!(context_for_page(&map, 1), "Page 1 intro text. Page 1 second paragraph.");
+        assert_eq!(
+            context_for_page(&map, 1),
+            "Page 1 intro text. Page 1 second paragraph."
+        );
         // Fallback to neighbour
-        assert_eq!(context_for_page(&map, 0), "Page 1 intro text. Page 1 second paragraph.");
+        assert_eq!(
+            context_for_page(&map, 0),
+            "Page 1 intro text. Page 1 second paragraph."
+        );
     }
 
     #[test]
     fn derive_label_extracts_sentence_or_fragment() {
         let ctx = "Siklus air menjelaskan perpindahan air dari bumi ke atmosfer. Proses ini terus berulang.";
         let label = derive_label(ctx).unwrap();
-        assert_eq!(label, "Siklus air menjelaskan perpindahan air dari bumi ke atmosfer");
+        assert_eq!(
+            label,
+            "Siklus air menjelaskan perpindahan air dari bumi ke atmosfer"
+        );
     }
 
     #[test]
@@ -229,7 +248,10 @@ mod tests {
 
         let text_chunks = vec![
             (0, "Pengantar fisika dasar."),
-            (1, "Gerak benda pada permukaan kasar menghasilkan gaya gesek yang besar dan panas."),
+            (
+                1,
+                "Gerak benda pada permukaan kasar menghasilkan gaya gesek yang besar dan panas.",
+            ),
         ];
 
         let anchors = resolve_figure_anchors(&blocks, &text_chunks);

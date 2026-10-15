@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn numbered_list_includes_figure_tag() {
-        let sources = vec![
+        let sources = [
             ("Apple 10-K", Some("Income Statement"), false),
             ("Digestive system", Some("Figure 1.15"), true),
         ];

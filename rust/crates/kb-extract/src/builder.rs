@@ -71,8 +71,13 @@ impl Extractor for ProductionExtractor {
         mime_type: &str,
         file_bytes: &[u8],
     ) -> Result<ExtractionResult, PortError> {
-        self.extract_with_options(filename, mime_type, file_bytes, ExtractionOptions::default())
-            .await
+        self.extract_with_options(
+            filename,
+            mime_type,
+            file_bytes,
+            ExtractionOptions::default(),
+        )
+        .await
     }
 
     async fn extract_with_options(
@@ -94,7 +99,9 @@ impl Extractor for ProductionExtractor {
 }
 
 /// Build the full production extractor wired to the configured layout chain and vision OCR.
-pub fn build_production_extractor(cfg: &ExtractConfig) -> Result<ProductionExtractor, ExtractError> {
+pub fn build_production_extractor(
+    cfg: &ExtractConfig,
+) -> Result<ProductionExtractor, ExtractError> {
     let chain = build_layout_chain(cfg)?;
     let vision_ocr = if !cfg.openrouter_api_key.is_empty() {
         OpenRouterVisionProvider::new(
@@ -181,16 +188,14 @@ pub fn build_layout_chain(cfg: &ExtractConfig) -> Result<LayoutExtractorChain, E
                     }
                 }
             }
-            "mistral" => {
-                if !cfg.mistral_ocr_key.is_empty() {
-                    if let Ok(mistral) = MistralOcrExtractor::new(
-                        &cfg.mistral_ocr_key,
-                        Some(cfg.mistral_ocr_base.clone()),
-                        Some(cfg.mistral_ocr_model.clone()),
-                        None,
-                    ) {
-                        extractors.push(("mistral".to_string(), Arc::new(mistral)));
-                    }
+            "mistral" if !cfg.mistral_ocr_key.is_empty() => {
+                if let Ok(mistral) = MistralOcrExtractor::new(
+                    &cfg.mistral_ocr_key,
+                    Some(cfg.mistral_ocr_base.clone()),
+                    Some(cfg.mistral_ocr_model.clone()),
+                    None,
+                ) {
+                    extractors.push(("mistral".to_string(), Arc::new(mistral)));
                 }
             }
             _ => {}
@@ -219,8 +224,10 @@ mod tests {
 
     #[test]
     fn build_extractor_detects_smart_infinite_recursion() {
-        let mut cfg = ExtractConfig::default();
-        cfg.smart_fallback = "smart".to_string();
+        let cfg = ExtractConfig {
+            smart_fallback: "smart".to_string(),
+            ..Default::default()
+        };
         match build_extractor("smart", &cfg) {
             Err(err) => {
                 assert!(err.to_string().contains("cannot be \"smart\""));

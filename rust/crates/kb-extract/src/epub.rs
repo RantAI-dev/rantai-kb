@@ -33,7 +33,7 @@ pub fn parse(bytes: &[u8], file_name: &str) -> Result<String, ExtractError> {
 
     let mut chapters: Vec<String> = Vec::new();
     for href in spine_hrefs(&opf) {
-        let entry = resolve(&base, &href);
+        let entry = resolve(base, &href);
         let Ok(xhtml) = zip_read::read_text(&mut archive, &entry) else {
             // A chapter listed in the spine but missing from the package is
             // skipped, as the TypeScript loop's `catch {}` does.
@@ -176,10 +176,7 @@ mod tests {
 
     #[test]
     fn a_missing_chapter_is_skipped_not_fatal() {
-        let bytes = epub_of(&[(
-            "OEBPS/only.xhtml",
-            &chapter("Only", "The one body"),
-        )]);
+        let bytes = epub_of(&[("OEBPS/only.xhtml", &chapter("Only", "The one body"))]);
         let text = parse(&bytes, "book.epub").unwrap();
         assert!(text.contains("The one body"), "{text}");
     }
@@ -187,7 +184,10 @@ mod tests {
     #[test]
     fn hrefs_resolve_against_the_package_document() {
         assert_eq!(resolve("OEBPS", "chapter1.xhtml"), "OEBPS/chapter1.xhtml");
-        assert_eq!(resolve("OEBPS", "Text/chap%201.xhtml"), "OEBPS/Text/chap 1.xhtml");
+        assert_eq!(
+            resolve("OEBPS", "Text/chap%201.xhtml"),
+            "OEBPS/Text/chap 1.xhtml"
+        );
         assert_eq!(resolve("OEBPS", "../shared/x.xhtml"), "shared/x.xhtml");
         assert_eq!(resolve("OEBPS", "/top.xhtml"), "top.xhtml");
         assert_eq!(resolve("", "top.xhtml"), "top.xhtml");

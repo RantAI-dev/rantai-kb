@@ -4,7 +4,13 @@
 //! rather than committed as a binary: a reviewer can read exactly what the
 //! parser was given, and a fixture cannot rot against a library upgrade.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::format_collect, clippy::doc_markdown)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::format_collect,
+    clippy::doc_markdown
+)]
 
 use std::io::{Cursor, Write};
 
@@ -65,7 +71,10 @@ pub fn xlsx_of(sheets: &[(&str, &str)], shared: &[&str]) -> Vec<u8> {
         ),
     ];
     for (index, (_, sheet_xml)) in sheets.iter().enumerate() {
-        entries.push((format!("xl/worksheets/sheet{}.xml", index + 1), (*sheet_xml).to_string()));
+        entries.push((
+            format!("xl/worksheets/sheet{}.xml", index + 1),
+            (*sheet_xml).to_string(),
+        ));
     }
     let borrowed: Vec<(&str, &str)> = entries
         .iter()
@@ -159,7 +168,9 @@ pub fn epub_of(chapters: &[(&str, &str)]) -> Vec<u8> {
         .enumerate()
         .map(|(index, (name, _))| {
             let file = name.rsplit('/').next().unwrap_or(name);
-            format!("<item id=\"item{index}\" href=\"{file}\" media-type=\"application/xhtml+xml\"/>")
+            format!(
+                "<item id=\"item{index}\" href=\"{file}\" media-type=\"application/xhtml+xml\"/>"
+            )
         })
         .collect();
     let spine: String = chapters
@@ -198,5 +209,7 @@ pub fn epub_of(chapters: &[(&str, &str)]) -> Vec<u8> {
 /// One XHTML chapter as the parser will see it after markup is stripped.
 #[must_use]
 pub fn chapter(title: &str, body: &str) -> String {
-    format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html><body><h1>{title}</h1><p>{body}</p></body></html>")
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html><body><h1>{title}</h1><p>{body}</p></body></html>"
+    )
 }

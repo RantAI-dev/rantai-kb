@@ -113,7 +113,8 @@ impl ExtractConfig {
             primary: lookup("KB_EXTRACT_PRIMARY").unwrap_or(default.primary),
             fallback: lookup("KB_EXTRACT_FALLBACK").unwrap_or(default.fallback),
             smart_fallback: lookup("KB_EXTRACT_SMART_FALLBACK").unwrap_or(default.smart_fallback),
-            mineru_base_url: lookup("KB_EXTRACT_MINERU_BASE_URL").unwrap_or(default.mineru_base_url),
+            mineru_base_url: lookup("KB_EXTRACT_MINERU_BASE_URL")
+                .unwrap_or(default.mineru_base_url),
             mineru_timeout,
             mineru_api_key: lookup("KB_MINERU_API_KEY").unwrap_or(default.mineru_api_key),
             mineru_api_base: lookup("KB_MINERU_API_BASE").unwrap_or(default.mineru_api_base),
@@ -123,7 +124,8 @@ impl ExtractConfig {
             mistral_ocr_base: lookup("KB_MISTRAL_OCR_BASE").unwrap_or(default.mistral_ocr_base),
             mistral_ocr_model: lookup("KB_MISTRAL_OCR_MODEL").unwrap_or(default.mistral_ocr_model),
             layout_extractor_order,
-            vision_base_url: lookup("KB_EXTRACT_VISION_BASE_URL").unwrap_or(default.vision_base_url),
+            vision_base_url: lookup("KB_EXTRACT_VISION_BASE_URL")
+                .unwrap_or(default.vision_base_url),
             vision_api_key,
             openrouter_api_key,
             ocr_fallback_model: lookup("OCR_FALLBACK_MODEL").unwrap_or(default.ocr_fallback_model),

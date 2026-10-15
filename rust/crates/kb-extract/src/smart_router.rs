@@ -72,9 +72,8 @@ impl Extractor for SmartRouterExtractor {
         {
             Ok(fb_res) => Ok(fb_res),
             Err(fb_err) => {
-                let msg = format!(
-                    "Both extractors failed — textLayer: {tl_err_msg}; fallback: {fb_err}"
-                );
+                let msg =
+                    format!("Both extractors failed — textLayer: {tl_err_msg}; fallback: {fb_err}");
                 Err(PortError::from(ExtractError::Container(msg)))
             }
         }

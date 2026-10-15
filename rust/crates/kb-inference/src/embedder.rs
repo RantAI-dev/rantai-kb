@@ -263,7 +263,7 @@ impl EmbedderImpl {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EmbedKind {
+pub enum EmbedKind {
     Query,
     Passage,
 }

@@ -46,7 +46,6 @@ struct Harness {
     documents: Arc<FakeDocumentStore>,
     chunks: Arc<FakeChunkStore>,
     blobs: Arc<FakeBlobStore>,
-    extractor: Arc<FakeExtractor>,
 }
 
 fn tenant() -> TenantId {
@@ -148,7 +147,6 @@ async fn harness(extractor: Arc<FakeExtractor>) -> Harness {
         documents,
         chunks,
         blobs,
-        extractor,
     }
 }
 
@@ -385,8 +383,12 @@ async fn two_workers_never_claim_the_same_job() {
     }
     assert_eq!(runs, 3);
 
-    let finished = jobs.finished.read().unwrap();
-    let mut ids: Vec<String> = finished.iter().map(|f| f.job_id.clone()).collect();
+    let mut ids: Vec<String> = {
+        // Scoped so the read guard is dropped before the awaits below; a
+        // guard held across an await would block the worker that writes it.
+        let finished = jobs.finished.read().unwrap();
+        finished.iter().map(|f| f.job_id.clone()).collect()
+    };
     ids.sort();
     assert_eq!(ids, ["job_0", "job_1", "job_2"], "no job ran twice");
     assert_eq!(jobs.pending_len(), 0);

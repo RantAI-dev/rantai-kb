@@ -5,6 +5,9 @@
 //! takes in production from auth onward.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Each integration test is its own binary and shares this module, so a helper
+// used by only some of them reads as dead code in the rest.
+#![allow(dead_code)]
 
 use std::sync::Arc;
 

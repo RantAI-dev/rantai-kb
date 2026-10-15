@@ -113,6 +113,13 @@ pub async fn enrich_titles(
 }
 
 /// Execute the full retrieval pipeline.
+///
+/// Every collaborator is passed explicitly rather than behind a context
+/// object: the engine receives its stores as arguments, which is the whole
+/// point of the port boundary.
+// The argument list mirrors the pipeline's stages, so it is kept even though
+// the lint would rather it were bundled.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_pipeline(
     doc_store: &Arc<dyn DocumentStore>,
     chunk_store: &Arc<dyn ChunkStore>,

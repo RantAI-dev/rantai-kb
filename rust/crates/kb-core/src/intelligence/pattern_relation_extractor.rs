@@ -23,9 +23,6 @@ pub struct PatternRelationExtractor {
     patterns: Vec<RelationPattern>,
 }
 
-
-
-
 fn make_pat(
     pattern: &str,
     relation_type: &'static str,
@@ -125,13 +122,52 @@ impl PatternRelationExtractor {
 
     fn universal_patterns() -> Vec<RelationPattern> {
         [
-            make_pat(r"(?i)(\w+)\s+(?:mentions?|refers? to|discusses?)\s+(\w+)", "MENTIONS", 0.7, 1, 2),
-            make_pat(r"(?i)(\w+)\s+(?:is part of|belongs to|in)\s+(\w+)", "PART_OF", 0.8, 1, 2),
-            make_pat(r"(?i)(\w+)\s+(?:cites?|references?|according to)\s+(\w+)", "CITES", 0.85, 1, 2),
-            make_pat(r"(?i)(\w+)\s+(?:works? for|employed by|at)\s+(\w+)", "WORKS_FOR", 0.8, 1, 2),
-            make_pat(r"(?i)(\w+)\s+(?:created|developed|built) by\s+(\w+)", "CREATED_BY", 0.8, 1, 2),
-            make_pat(r"(?i)(\w+)\s+(?:located in|based in|headquartered in)\s+(\w+)", "LOCATED_IN", 0.8, 1, 2),
-        ].into_iter().flatten().collect()
+            make_pat(
+                r"(?i)(\w+)\s+(?:mentions?|refers? to|discusses?)\s+(\w+)",
+                "MENTIONS",
+                0.7,
+                1,
+                2,
+            ),
+            make_pat(
+                r"(?i)(\w+)\s+(?:is part of|belongs to|in)\s+(\w+)",
+                "PART_OF",
+                0.8,
+                1,
+                2,
+            ),
+            make_pat(
+                r"(?i)(\w+)\s+(?:cites?|references?|according to)\s+(\w+)",
+                "CITES",
+                0.85,
+                1,
+                2,
+            ),
+            make_pat(
+                r"(?i)(\w+)\s+(?:works? for|employed by|at)\s+(\w+)",
+                "WORKS_FOR",
+                0.8,
+                1,
+                2,
+            ),
+            make_pat(
+                r"(?i)(\w+)\s+(?:created|developed|built) by\s+(\w+)",
+                "CREATED_BY",
+                0.8,
+                1,
+                2,
+            ),
+            make_pat(
+                r"(?i)(\w+)\s+(?:located in|based in|headquartered in)\s+(\w+)",
+                "LOCATED_IN",
+                0.8,
+                1,
+                2,
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     fn legal_patterns() -> Vec<RelationPattern> {
@@ -147,19 +183,55 @@ impl PatternRelationExtractor {
 
     fn financial_patterns() -> Vec<RelationPattern> {
         [
-            make_pat(r"(?i)(\w+)\s+(?:pays?|transfers?)\s+[\d\s$,.prp£€]+ to\s+(\w+)", "PAYS", 0.85, 1, 2),
-            make_pat(r"(?i)(\w+)\s+(?:owns?|possesses?)\s+(\w+)", "OWNED_BY", 0.8, 2, 1),
-            make_pat(r"(?i)(\w+)\s+(?:transfers?|sends?)\s+(?:to|ke)\s+(\w+)", "TRANSFERS", 0.8, 1, 2),
-        ].into_iter().flatten().collect()
+            make_pat(
+                r"(?i)(\w+)\s+(?:pays?|transfers?)\s+[\d\s$,.prp£€]+ to\s+(\w+)",
+                "PAYS",
+                0.85,
+                1,
+                2,
+            ),
+            make_pat(
+                r"(?i)(\w+)\s+(?:owns?|possesses?)\s+(\w+)",
+                "OWNED_BY",
+                0.8,
+                2,
+                1,
+            ),
+            make_pat(
+                r"(?i)(\w+)\s+(?:transfers?|sends?)\s+(?:to|ke)\s+(\w+)",
+                "TRANSFERS",
+                0.8,
+                1,
+                2,
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     fn technical_patterns() -> Vec<RelationPattern> {
         [
             make_pat(r"(?i)(\w+\(\))\s+calls?\s+(\w+\(\))", "CALLS", 0.9, 1, 2),
-            make_pat(r"(?i)(\w+\(\))\s+throws?\s+(\w+(?:error|exception))", "THROWS", 0.9, 1, 2),
-            make_pat(r"(?i)(\w+)\s+(?:depends on|requires?)\s+(\w+)", "DEPENDS_ON", 0.8, 1, 2),
+            make_pat(
+                r"(?i)(\w+\(\))\s+throws?\s+(\w+(?:error|exception))",
+                "THROWS",
+                0.9,
+                1,
+                2,
+            ),
+            make_pat(
+                r"(?i)(\w+)\s+(?:depends on|requires?)\s+(\w+)",
+                "DEPENDS_ON",
+                0.8,
+                1,
+                2,
+            ),
             make_pat(r"(?i)(\w+\(\))\s+returns?\s+(\w+)", "RETURNS", 0.85, 1, 2),
-        ].into_iter().flatten().collect()
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     fn deduplicate(relations: Vec<Relation>) -> Vec<Relation> {

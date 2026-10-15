@@ -106,9 +106,7 @@ pub fn find_pdfium_library_path() -> Option<PathBuf> {
 pub fn init_pdfium() -> Result<Pdfium, ExtractError> {
     if let Some(path) = find_pdfium_library_path() {
         let bindings = Pdfium::bind_to_library(path).map_err(|e| {
-            ExtractError::Unsupported(format!(
-                "Failed to bind to libpdfium at found path: {e}"
-            ))
+            ExtractError::Unsupported(format!("Failed to bind to libpdfium at found path: {e}"))
         })?;
         Ok(Pdfium::new(bindings))
     } else {

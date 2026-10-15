@@ -96,8 +96,8 @@ impl LruCache {
         Some(v.0.clone())
     }
     fn put(&mut self, k: String, v: Vec<String>) {
-        if self.map.contains_key(&k) {
-            self.map.insert(k, (v, Instant::now()));
+        if let Some(slot) = self.map.get_mut(&k) {
+            *slot = (v, Instant::now());
             return;
         }
         if self.order.len() >= self.capacity {

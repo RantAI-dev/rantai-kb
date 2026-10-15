@@ -37,7 +37,7 @@ fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
             && haystack_bytes[i..i + needle_bytes.len()]
                 .iter()
                 .zip(needle_bytes.iter())
-                .all(|(h, n)| h.to_ascii_lowercase() == n.to_ascii_lowercase())
+                .all(|(h, n)| h.eq_ignore_ascii_case(n))
         {
             return Some(i);
         }
@@ -55,16 +55,15 @@ fn drop_elements(input: &str, name: &str) -> String {
     let close = format!("</{name}");
     let mut out = String::with_capacity(input.len());
     let mut cursor = 0usize;
-    loop {
-        let Some(found) = find_ascii_case_insensitive(&input[cursor..], &open) else {
-            break;
-        };
+    while let Some(found) = find_ascii_case_insensitive(&input[cursor..], &open) {
         let tag_start = cursor + found;
         // `[^>]*` in the TypeScript pattern: the tag ends at the first `>`.
         let Some(tag_end) = input[tag_start..].find('>').map(|i| tag_start + i + 1) else {
             break;
         };
-        let Some(close_at) = find_ascii_case_insensitive(&input[tag_end..], &close).map(|i| tag_end + i) else {
+        let Some(close_at) =
+            find_ascii_case_insensitive(&input[tag_end..], &close).map(|i| tag_end + i)
+        else {
             break;
         };
         let Some(close_end) = input[close_at..].find('>').map(|i| close_at + i + 1) else {
@@ -128,19 +127,13 @@ mod tests {
 
     #[test]
     fn tags_become_spaces_and_whitespace_collapses() {
-        assert_eq!(
-            strip_html("<p>Hello <b>world</b></p>"),
-            "Hello world"
-        );
+        assert_eq!(strip_html("<p>Hello <b>world</b></p>"), "Hello world");
         assert_eq!(strip_html("<div>a\n\n  b</div>"), "a b");
     }
 
     #[test]
     fn script_and_style_bodies_are_dropped() {
-        assert_eq!(
-            strip_html("<style>p{color:red}</style><p>text</p>"),
-            "text"
-        );
+        assert_eq!(strip_html("<style>p{color:red}</style><p>text</p>"), "text");
         assert_eq!(
             strip_html("<SCRIPT>var x = 1 < 2;</SCRIPT><p>text</p>"),
             "text"

@@ -141,8 +141,7 @@ mod tests {
 
     #[test]
     fn columnar_true_above_threshold() {
-        let tabular = std::iter::repeat("Cash   $29,943   $29,965")
-            .take(6)
+        let tabular = std::iter::repeat_n("Cash   $29,943   $29,965", 6)
             .collect::<Vec<_>>()
             .join("\n");
         assert!(has_columnar_lines(&tabular, 5));
@@ -150,8 +149,7 @@ mod tests {
 
     #[test]
     fn columnar_ignores_short_lines() {
-        let text = std::iter::repeat("A   B   C")
-            .take(10)
+        let text = std::iter::repeat_n("A   B   C", 10)
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!has_columnar_lines(&text, 5));
@@ -159,8 +157,7 @@ mod tests {
 
     #[test]
     fn columnar_threshold_is_exclusive() {
-        let text = std::iter::repeat("Long row   $1,000   $2,000")
-            .take(5)
+        let text = std::iter::repeat_n("Long row   $1,000   $2,000", 5)
             .collect::<Vec<_>>()
             .join("\n");
         assert!(!has_columnar_lines(&text, 5));
@@ -168,8 +165,7 @@ mod tests {
 
     #[test]
     fn columnar_gate_rejects_even_with_volume() {
-        let tabular = std::iter::repeat("Cash   $29,943   $29,965")
-            .take(6)
+        let tabular = std::iter::repeat_n("Cash   $29,943   $29,965", 6)
             .collect::<Vec<_>>()
             .join("\n");
         let padding = "prose text ".repeat(40);
@@ -187,8 +183,7 @@ mod tests {
 
     #[test]
     fn currency_false_below_threshold() {
-        let text = std::iter::repeat("$1,234")
-            .take(5)
+        let text = std::iter::repeat_n("$1,234", 5)
             .collect::<Vec<_>>()
             .join(" ");
         assert!(!has_dense_currency(&text, 10));
@@ -196,8 +191,7 @@ mod tests {
 
     #[test]
     fn currency_true_above_threshold() {
-        let text = std::iter::repeat("$1,234")
-            .take(11)
+        let text = std::iter::repeat_n("$1,234", 11)
             .collect::<Vec<_>>()
             .join(" ");
         assert!(has_dense_currency(&text, 10));
@@ -205,8 +199,7 @@ mod tests {
 
     #[test]
     fn currency_matches_space_and_decimals() {
-        let text = std::iter::repeat("$ 29,943.50")
-            .take(11)
+        let text = std::iter::repeat_n("$ 29,943.50", 11)
             .collect::<Vec<_>>()
             .join("\n");
         assert!(has_dense_currency(&text, 10));
@@ -215,8 +208,7 @@ mod tests {
     #[test]
     fn currency_gate_rejects_even_with_volume() {
         let padded = "description text ".repeat(40);
-        let currency = std::iter::repeat("$29,943")
-            .take(11)
+        let currency = std::iter::repeat_n("$29,943", 11)
             .collect::<Vec<_>>()
             .join(" ");
         assert!(!is_unpdf_sufficient(

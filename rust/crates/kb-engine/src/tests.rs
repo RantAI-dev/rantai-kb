@@ -186,8 +186,10 @@ mod pipeline_tests {
             0.10,
         ));
 
-        let mut opts = RetrievalOptions::default();
-        opts.min_similarity = 0.30;
+        let opts = RetrievalOptions {
+            min_similarity: 0.30,
+            ..Default::default()
+        };
 
         let outcome = execute_pipeline(
             &(doc_store as Arc<_>),
@@ -275,10 +277,13 @@ mod pipeline_tests {
         fig_hit.chunk.chunk_type = ChunkType::Figure;
         chunk_store.figure_hits.write().unwrap().push(fig_hit);
 
-        let mut opts = RetrievalOptions::default();
-        opts.max_chunks = 2; // Cut to 2 chunks before adding neighbour and figure
-        opts.neighbour_window = 10;
-        opts.figure_limit = 2;
+        // Cut to 2 chunks before adding neighbour and figure.
+        let opts = RetrievalOptions {
+            max_chunks: 2,
+            neighbour_window: 10,
+            figure_limit: 2,
+            ..Default::default()
+        };
 
         let outcome = execute_pipeline(
             &(doc_store as Arc<_>),
@@ -346,11 +351,13 @@ mod pipeline_tests {
             paraphrases: vec!["para one".into(), "para two".into()],
             fail: false,
         });
-        let mut opts = RetrievalOptions::default();
-        opts.expansion_enabled = true;
-        opts.expansion_paraphrases = 2;
-        opts.neighbour_window = 0;
-        opts.figure_limit = 0;
+        let opts = RetrievalOptions {
+            expansion_enabled: true,
+            expansion_paraphrases: 2,
+            neighbour_window: 0,
+            figure_limit: 0,
+            ..Default::default()
+        };
 
         let outcome = execute_pipeline(
             &(doc_store as Arc<_>),
@@ -387,10 +394,12 @@ mod pipeline_tests {
             paraphrases: Vec::new(),
             fail: true,
         });
-        let mut opts = RetrievalOptions::default();
-        opts.expansion_enabled = true;
-        opts.neighbour_window = 0;
-        opts.figure_limit = 0;
+        let opts = RetrievalOptions {
+            expansion_enabled: true,
+            neighbour_window: 0,
+            figure_limit: 0,
+            ..Default::default()
+        };
 
         let outcome = execute_pipeline(
             &(doc_store as Arc<_>),
@@ -445,9 +454,11 @@ mod pipeline_tests {
             0.7,
         ));
 
-        let mut opts = RetrievalOptions::default();
-        opts.neighbour_window = 0;
-        opts.figure_limit = 0;
+        let opts = RetrievalOptions {
+            neighbour_window: 0,
+            figure_limit: 0,
+            ..Default::default()
+        };
 
         let outcome = execute_pipeline(
             &(doc_store as Arc<_>),
@@ -496,9 +507,11 @@ mod pipeline_tests {
         let gate = Arc::new(crate::fakes::FakeFigureGate::default());
         *gate.kept_ids.write().unwrap() = vec!["fig_1".to_string()];
 
-        let mut opts = RetrievalOptions::default();
-        opts.figure_limit = 2;
-        opts.figure_gate = Some(gate);
+        let opts = RetrievalOptions {
+            figure_limit: 2,
+            figure_gate: Some(gate),
+            ..Default::default()
+        };
 
         let outcome = execute_pipeline(
             &(doc_store as Arc<_>),

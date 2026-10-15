@@ -116,11 +116,9 @@ pub fn render(document: &str) -> Result<String, ExtractError> {
                     b"pPr" => in_paragraph_properties = in_paragraph_properties.saturating_sub(1),
                     b"rPr" => in_run_properties = in_run_properties.saturating_sub(1),
                     b"tcPr" => in_cell_properties = in_cell_properties.saturating_sub(1),
-                    b"tc" => {
-                        if skipped_cells.last() == Some(&skip_depth) && skip_depth > 0 {
-                            skipped_cells.pop();
-                            skip_depth -= 1;
-                        }
+                    b"tc" if skipped_cells.last() == Some(&skip_depth) && skip_depth > 0 => {
+                        skipped_cells.pop();
+                        skip_depth -= 1;
                     }
                     _ => {}
                 }

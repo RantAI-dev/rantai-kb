@@ -96,7 +96,7 @@ pub async fn events_stream(
     State(state): State<Arc<crate::state::AppState>>,
     Authed(auth): Authed,
 ) -> Response {
-    let mut receiver = state.events.subscribe();
+    let receiver = state.events.subscribe();
     // A tokio interval fires immediately on its first tick; the TypeScript
     // `setInterval` waits a full period, and a ping on frame one would be a
     // frame no client expects.

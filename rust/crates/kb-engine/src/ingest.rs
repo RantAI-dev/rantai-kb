@@ -1033,14 +1033,11 @@ impl IngestWorker {
         };
         let now = Instant::now();
         let prev = state.insert(job_id.to_string(), (now, step.to_string()));
-        match prev {
+        !matches!(
+            prev,
             Some((at, prev_step))
-                if prev_step == step && now.duration_since(at) < PROGRESS_EMIT_MIN_GAP =>
-            {
-                false
-            }
-            _ => true,
-        }
+                if prev_step == step && now.duration_since(at) < PROGRESS_EMIT_MIN_GAP
+        )
     }
 
     /// Push one frame to the sink, if the process wired one.

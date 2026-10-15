@@ -175,7 +175,11 @@ impl VisionLlmExtractor {
 
         if !res.status().is_success() {
             let body = res.text().await.unwrap_or_default();
-            let preview = if body.len() > 300 { &body[..300] } else { &body };
+            let preview = if body.len() > 300 {
+                &body[..300]
+            } else {
+                &body
+            };
             return Err(ExtractError::Container(format!(
                 "vision-llm {} error: {preview}",
                 self.model
@@ -207,9 +211,7 @@ impl Extractor for VisionLlmExtractor {
         file_bytes: &[u8],
         _options: ExtractionOptions,
     ) -> Result<ExtractionResult, PortError> {
-        self.extract_pdf(file_bytes)
-            .await
-            .map_err(PortError::from)
+        self.extract_pdf(file_bytes).await.map_err(PortError::from)
     }
 }
 
@@ -270,6 +272,8 @@ mod tests {
 
     #[test]
     fn vision_extractor_requires_api_key() {
-        assert!(VisionLlmExtractor::new("openai/gpt-4.1-nano", None, "", None, None, None).is_err());
+        assert!(
+            VisionLlmExtractor::new("openai/gpt-4.1-nano", None, "", None, None, None).is_err()
+        );
     }
 }

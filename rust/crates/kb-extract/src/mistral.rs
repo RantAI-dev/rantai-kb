@@ -25,8 +25,7 @@ static CAPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static IMG_MD_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"!\[([^\]]*)\]\([^)]*\)")
-        .unwrap_or_else(|_| std::process::abort())
+    Regex::new(r"!\[([^\]]*)\]\([^)]*\)").unwrap_or_else(|_| std::process::abort())
 });
 
 /// Client for the Mistral OCR API.
@@ -101,8 +100,14 @@ impl MistralOcrExtractor {
 
         if !res.status().is_success() {
             let body = res.text().await.unwrap_or_default();
-            let preview = if body.len() > 300 { &body[..300] } else { &body };
-            return Err(ExtractError::Container(format!("mistral ocr error: {preview}")));
+            let preview = if body.len() > 300 {
+                &body[..300]
+            } else {
+                &body
+            };
+            return Err(ExtractError::Container(format!(
+                "mistral ocr error: {preview}"
+            )));
         }
 
         let resp_json: MistralOcrResponse = res
@@ -267,8 +272,13 @@ pub fn blocks_from_markdown(markdown: &str, page_index: u32) -> Vec<PageBlock> {
 
 fn clean_caption_line(l: &str) -> String {
     let mut s = l.trim();
-    while s.starts_with('#') || s.starts_with('>') || s.starts_with('*') || s.starts_with('-') || s.starts_with(' ') {
-        s = &s[1..].trim_start();
+    while s.starts_with('#')
+        || s.starts_with('>')
+        || s.starts_with('*')
+        || s.starts_with('-')
+        || s.starts_with(' ')
+    {
+        s = s[1..].trim_start();
     }
     s.chars().take(200).collect()
 }
@@ -286,11 +296,12 @@ fn caption_for_image(markdown: &str, image_id: &str) -> Option<String> {
     let is_img = |l: &str| IMG_MD_RE.is_match(l).unwrap_or(false);
 
     // 1. Look for explicit caption-like pattern within window +/- 3 lines
-    for i in (ref_idx.saturating_sub(3))..=(ref_idx + 3).min(lines.len().saturating_sub(1)) {
-        if i == ref_idx {
+    for (i, line) in lines.iter().enumerate() {
+        // The same window as `ref_idx ± 3`, without indexing.
+        if i == ref_idx || i.abs_diff(ref_idx) > 3 {
             continue;
         }
-        let raw = lines[i].trim();
+        let raw = line.trim();
         if raw.is_empty() || is_img(raw) {
             continue;
         }
@@ -409,7 +420,13 @@ mod tests {
 
     #[test]
     fn identifies_table_and_chart_types() {
-        assert_eq!(figure_type_from_caption(Some("Tabel 3.1 Data Nilai")), "table");
-        assert_eq!(figure_type_from_caption(Some("Grafik Pertumbuhan Penduduk")), "chart");
+        assert_eq!(
+            figure_type_from_caption(Some("Tabel 3.1 Data Nilai")),
+            "table"
+        );
+        assert_eq!(
+            figure_type_from_caption(Some("Grafik Pertumbuhan Penduduk")),
+            "chart"
+        );
     }
 }

@@ -168,7 +168,11 @@ impl OpenRouterVisionProvider {
 
         if !res.status().is_success() {
             let body = res.text().await.unwrap_or_default();
-            let preview = if body.len() > 300 { &body[..300] } else { &body };
+            let preview = if body.len() > 300 {
+                &body[..300]
+            } else {
+                &body
+            };
             return Err(ExtractError::Container(format!(
                 "vision OCR {} error: {preview}",
                 self.model

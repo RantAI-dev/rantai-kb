@@ -172,7 +172,10 @@ mod tests {
     #[test]
     fn every_sheet_gets_its_own_block() {
         let bytes = xlsx_of(
-            &[("First", worksheet_with_gap()), ("Second", empty_worksheet())],
+            &[
+                ("First", worksheet_with_gap()),
+                ("Second", empty_worksheet()),
+            ],
             &["name", "value", "alpha"],
         );
         let text = parse(&bytes, "book.xlsx").unwrap();

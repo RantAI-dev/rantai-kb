@@ -23,8 +23,9 @@ macro_rules! lazy_regex {
 
 // Universal patterns
 static RE_EMAIL: LazyLock<Regex> = lazy_regex!(r"\b[\w%+.-]+@[\d.A-Za-z-]+\.[A-Za-z]{2,}\b");
-static RE_URL: LazyLock<Regex> =
-    lazy_regex!(r"https?://(?:www\.)?[\w#%+.:=@~-]{1,256}\.[\d()A-Za-z]{1,6}\b(?:[\w#%&()+./:=?@~-]*)");
+static RE_URL: LazyLock<Regex> = lazy_regex!(
+    r"https?://(?:www\.)?[\w#%+.:=@~-]{1,256}\.[\d()A-Za-z]{1,6}\b(?:[\w#%&()+./:=?@~-]*)"
+);
 static RE_PHONE1: LazyLock<Regex> =
     lazy_regex!(r"(?:\+?(\d{1,3}))?[ (.-]*(\d{3})[ ).-]*(\d{3})[ .-]*(\d{4})");
 static RE_PHONE2: LazyLock<Regex> =
@@ -34,9 +35,8 @@ static RE_DATE2: LazyLock<Regex> = lazy_regex!(r"\d{4}(?:[/-]\d{1,2}){2}");
 static RE_DATE3: LazyLock<Regex> = lazy_regex!(
     r"(?i)\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b"
 );
-static RE_DATE4: LazyLock<Regex> = lazy_regex!(
-    r"(?i)\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}\b"
-);
+static RE_DATE4: LazyLock<Regex> =
+    lazy_regex!(r"(?i)\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},?\s+\d{4}\b");
 
 // Financial patterns
 static RE_CURR_USD1: LazyLock<Regex> = lazy_regex!(r"\$\s*[\d,]+(?:\.\d{2})?");
@@ -65,8 +65,7 @@ static RE_PERCENT: LazyLock<Regex> = lazy_regex!(r"\b\d+(?:\.\d+)?%");
 // Technical patterns
 static RE_API: LazyLock<Regex> = lazy_regex!(r"/api/[\w/-]+");
 static RE_FUNCTION: LazyLock<Regex> = lazy_regex!(r"\b[A-Z_a-z]\w*\s*\(\)");
-static RE_ENV_VAR: LazyLock<Regex> =
-    lazy_regex!(r"\b[A-Z][A-Z0-9_]{2,}\b(?=\s*[=:]|\s+is|\s+set)");
+static RE_ENV_VAR: LazyLock<Regex> = lazy_regex!(r"\b[A-Z][A-Z0-9_]{2,}\b(?=\s*[=:]|\s+is|\s+set)");
 static RE_ERROR_CODE: LazyLock<Regex> = lazy_regex!(r"(?i)\b(?:ERR|ERROR|E)[-_]?\d{3,5}\b");
 
 /// Pattern-based Entity Extractor.
@@ -144,7 +143,10 @@ impl PatternEntityExtractor {
         for re in [&RE_PHONE1, &RE_PHONE2] {
             for mat in re.find_iter(text).flatten() {
                 let val = mat.as_str();
-                if !entities.iter().any(|e| e.name == val && e.entity_type == "Phone") {
+                if !entities
+                    .iter()
+                    .any(|e| e.name == val && e.entity_type == "Phone")
+                {
                     entities.push(Entity {
                         name: val.to_string(),
                         entity_type: "Phone".to_string(),
@@ -161,7 +163,10 @@ impl PatternEntityExtractor {
         for re in [&RE_DATE1, &RE_DATE2, &RE_DATE3, &RE_DATE4] {
             for mat in re.find_iter(text).flatten() {
                 let val = mat.as_str();
-                if !entities.iter().any(|e| e.name == val && e.entity_type == "Date") {
+                if !entities
+                    .iter()
+                    .any(|e| e.name == val && e.entity_type == "Date")
+                {
                     entities.push(Entity {
                         name: val.to_string(),
                         entity_type: "Date".to_string(),
@@ -308,7 +313,8 @@ mod tests {
     #[test]
     fn extracts_financial_entities() {
         let extractor = PatternEntityExtractor::default();
-        let text = "Total revenue was $1,234.56 or Rp 15.000.000 representing an increase of 25.5%.";
+        let text =
+            "Total revenue was $1,234.56 or Rp 15.000.000 representing an increase of 25.5%.";
         let entities = extractor.extract(text, Some("doc1"), None);
 
         let types: Vec<&str> = entities.iter().map(|e| e.entity_type.as_str()).collect();
@@ -319,7 +325,8 @@ mod tests {
     #[test]
     fn extracts_technical_entities() {
         let extractor = PatternEntityExtractor::default();
-        let text = "API /api/v1/search returned ERROR-404 when processData() ran with DATABASE_URL set.";
+        let text =
+            "API /api/v1/search returned ERROR-404 when processData() ran with DATABASE_URL set.";
         let entities = extractor.extract(text, Some("doc1"), None);
 
         let types: Vec<&str> = entities.iter().map(|e| e.entity_type.as_str()).collect();

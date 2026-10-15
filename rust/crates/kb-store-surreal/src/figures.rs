@@ -168,7 +168,7 @@ pub async fn execute_figures(
         scored_rows.push((score, chunk_row));
     }
 
-    scored_rows.sort_by(|a, b| b.0.cmp(&a.0));
+    scored_rows.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
     let limit = safe_limit(limit) as usize;
     let mut hits = Vec::with_capacity(limit.min(scored_rows.len()));
     for (_, r) in scored_rows.into_iter().take(limit) {

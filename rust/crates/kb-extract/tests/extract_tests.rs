@@ -5,12 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{
-    Router,
-    http::StatusCode,
-    response::Json,
-    routing::post,
-};
+use axum::{Router, http::StatusCode, response::Json, routing::post};
 use kb_extract::*;
 use kb_ports::*;
 use serde_json::json;
@@ -121,7 +116,10 @@ async fn test_mineru_sidecar_mock() {
     assert_eq!(res.content, "# Extracted Title\n\nSome body text.");
     assert_eq!(res.file_type, "pdf");
     assert!(res.used_ocr);
-    assert_eq!(res.page_map.unwrap()[0].text, "# Extracted Title\n\nSome body text.");
+    assert_eq!(
+        res.page_map.unwrap()[0].text,
+        "# Extracted Title\n\nSome body text."
+    );
 }
 
 #[tokio::test]
@@ -213,7 +211,10 @@ async fn test_openrouter_vision_image_formatting() {
 async fn test_layout_chain_fallthrough() {
     // Mock server where sidecar returns 500 error, mistral returns 200 OK
     let app = Router::new()
-        .route("/sidecar/extract", post(|| async { StatusCode::INTERNAL_SERVER_ERROR }))
+        .route(
+            "/sidecar/extract",
+            post(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+        )
         .route(
             "/mistral/v1/ocr",
             post(|| async {

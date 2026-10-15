@@ -43,7 +43,7 @@ fn presentation_parts(archive: &zip_read::Archive<'_>) -> Vec<String> {
         .into_iter()
         .filter_map(|name| part_number(&name).map(|(is_notes, number)| (is_notes, number, name)))
         .collect();
-    parts.sort_by(|left, right| (left.0, left.1).cmp(&(right.0, right.1)));
+    parts.sort_by_key(|part| (part.0, part.1));
     parts.into_iter().map(|(_, _, name)| name).collect()
 }
 
@@ -51,10 +51,9 @@ fn presentation_parts(archive: &zip_read::Archive<'_>) -> Vec<String> {
 fn part_number(name: &str) -> Option<(u8, u32)> {
     let (prefix, is_notes) = if let Some(rest) = name.strip_prefix("ppt/slides/slide") {
         (rest, 0u8)
-    } else if let Some(rest) = name.strip_prefix("ppt/notesSlides/notesSlide") {
-        (rest, 1u8)
     } else {
-        return None;
+        let rest = name.strip_prefix("ppt/notesSlides/notesSlide")?;
+        (rest, 1u8)
     };
     prefix
         .strip_suffix(".xml")
@@ -93,10 +92,8 @@ fn paragraphs(slide: &str) -> Result<Vec<String>, ExtractError> {
                     current.push_str(&xml::text_of(&text));
                 }
             }
-            Event::GeneralRef(reference) => {
-                if in_text_run {
-                    current.push_str(&xml::reference_of(&String::from_utf8_lossy(&reference)));
-                }
+            Event::GeneralRef(reference) if in_text_run => {
+                current.push_str(&xml::reference_of(&String::from_utf8_lossy(&reference)));
             }
             _ => {}
         }
@@ -127,7 +124,10 @@ mod tests {
     #[test]
     fn notes_follow_the_slides() {
         let bytes = zip_of(&[
-            ("ppt/notesSlides/notesSlide1.xml", &slide_with(&["Speaker notes"])),
+            (
+                "ppt/notesSlides/notesSlide1.xml",
+                &slide_with(&["Speaker notes"]),
+            ),
             ("ppt/slides/slide1.xml", &slide_with(&["Title", "Body"])),
         ]);
         assert_eq!(parse(&bytes).unwrap(), "Title\nBody\nSpeaker notes");

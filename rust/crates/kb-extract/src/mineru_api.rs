@@ -10,9 +10,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use fancy_regex::Regex;
-use kb_ports::{
-    ExtractedFigure, ExtractionOptions, ExtractionResult, PageText, PortError,
-};
+use kb_ports::{ExtractedFigure, ExtractionOptions, ExtractionResult, PageText, PortError};
 use serde::{Deserialize, Serialize};
 
 use crate::ExtractError;
@@ -100,7 +98,9 @@ impl MineruApiExtractor {
             .json(&batch_req)
             .send()
             .await
-            .map_err(|e| ExtractError::Container(format!("mineru api batch request failed: {e}")))?;
+            .map_err(|e| {
+                ExtractError::Container(format!("mineru api batch request failed: {e}"))
+            })?;
 
         if !batch_res.status().is_success() {
             let body = batch_res.text().await.unwrap_or_default();
@@ -126,10 +126,9 @@ impl MineruApiExtractor {
             ExtractError::Container("mineru api batch missing data object".to_string())
         })?;
         let batch_id = data.batch_id;
-        let file_url = data
-            .file_urls
-            .first()
-            .ok_or_else(|| ExtractError::Container("mineru api returned empty file_urls".to_string()))?;
+        let file_url = data.file_urls.first().ok_or_else(|| {
+            ExtractError::Container("mineru api returned empty file_urls".to_string())
+        })?;
 
         // 2. Upload file via PUT
         let put_res = self
@@ -199,12 +198,10 @@ impl MineruApiExtractor {
         }
 
         // 4. Download and unzip
-        let zip_res = self
-            .client
-            .get(&zip_url)
-            .send()
-            .await
-            .map_err(|e| ExtractError::Container(format!("mineru api zip download failed: {e}")))?;
+        let zip_res =
+            self.client.get(&zip_url).send().await.map_err(|e| {
+                ExtractError::Container(format!("mineru api zip download failed: {e}"))
+            })?;
 
         if !zip_res.status().is_success() {
             return Err(ExtractError::Container(format!(
@@ -361,7 +358,11 @@ fn find_nearby_caption(blocks: &[ContentBlock], fig: &ContentBlock) -> Option<St
         };
         let top = b.bbox.map_or(0.0, |bbox| bbox[1]);
         let gap = top - fig_bottom;
-        if gap >= -30.0 && gap < best_gap && gap < 200.0 && CAPTION_RE.is_match(text).unwrap_or(false) {
+        if gap >= -30.0
+            && gap < best_gap
+            && gap < 200.0
+            && CAPTION_RE.is_match(text).unwrap_or(false)
+        {
             best_gap = gap;
             best = Some(text.to_string());
         }

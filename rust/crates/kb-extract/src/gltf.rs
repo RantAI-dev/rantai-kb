@@ -22,7 +22,9 @@ pub fn parse_gltf(bytes: &[u8], file_name: &str) -> Result<String, ExtractError>
     let json: Value = serde_json::from_str(&text)
         .map_err(|e| ExtractError::Container(format!("not a glTF JSON document: {e}")))?;
     if !json.is_object() {
-        return Err(ExtractError::Container("glTF JSON must be an object".to_string()));
+        return Err(ExtractError::Container(
+            "glTF JSON must be an object".to_string(),
+        ));
     }
     Ok(summarize(&json, file_name))
 }
@@ -39,12 +41,16 @@ pub fn parse_glb(bytes: &[u8], file_name: &str) -> Result<String, ExtractError> 
         ));
     }
     let json_length = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
-    let end = GLB_HEADER_BYTES.saturating_add(json_length).min(bytes.len());
+    let end = GLB_HEADER_BYTES
+        .saturating_add(json_length)
+        .min(bytes.len());
     let text = crate::text::to_utf8(&bytes[GLB_HEADER_BYTES..end]);
     let json: Value = serde_json::from_str(&text)
         .map_err(|e| ExtractError::Container(format!("GLB JSON chunk is unreadable: {e}")))?;
     if !json.is_object() {
-        return Err(ExtractError::Container("GLB JSON must be an object".to_string()));
+        return Err(ExtractError::Container(
+            "GLB JSON must be an object".to_string(),
+        ));
     }
     Ok(summarize(&json, file_name))
 }
@@ -78,7 +84,10 @@ fn summarize(json: &Value, file_name: &str) -> String {
         }
         lines.push(format!("{label} ({}):", entries.len()));
         for entry in entries {
-            lines.push(format!("  - {}", truthy(entry.get("name")).unwrap_or("(unnamed)")));
+            lines.push(format!(
+                "  - {}",
+                truthy(entry.get("name")).unwrap_or("(unnamed)")
+            ));
         }
         lines.push(String::new());
     }
@@ -89,8 +98,7 @@ fn summarize(json: &Value, file_name: &str) -> String {
     if let Some(count) = array(json.get("images")).filter(|items| !items.is_empty()) {
         lines.push(format!("Images: {}", count.len()));
     }
-    if let Some(extensions) = array(json.get("extensionsUsed")).filter(|items| !items.is_empty())
-    {
+    if let Some(extensions) = array(json.get("extensionsUsed")).filter(|items| !items.is_empty()) {
         let names: Vec<&str> = extensions.iter().filter_map(Value::as_str).collect();
         lines.push(format!("Extensions: {}", names.join(", ")));
     }
@@ -111,7 +119,12 @@ fn array(value: Option<&Value>) -> Option<&Vec<Value>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::cast_possible_truncation
+)]
 mod tests {
     use super::*;
 

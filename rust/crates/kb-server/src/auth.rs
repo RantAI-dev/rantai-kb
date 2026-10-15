@@ -48,7 +48,7 @@ pub fn has_scope(auth: &AuthContext, scope: &str) -> bool {
     auth.scopes.is_empty() || auth.scopes.iter().any(|s| s == scope || s == "*")
 }
 
-fn extract_raw_key<'a>(parts: &'a Parts) -> Option<&'a str> {
+fn extract_raw_key(parts: &Parts) -> Option<&str> {
     if let Some(auth) = parts.headers.get("Authorization") {
         if let Ok(val) = auth.to_str() {
             // `header.toLowerCase().startsWith("bearer ")` in TypeScript: the

@@ -3,7 +3,7 @@
 //! Chunks live in SurrealDB (`document_chunk`), not Postgres. Mirrors
 //! `getDocumentChunkCounts` and the chunk listing in `src/lib/rag/vector-store.ts`.
 
-use kb_ports::{ChunkMetadata, DocumentId, PortError, StoredChunk};
+use kb_ports::{DocumentId, PortError, StoredChunk};
 use serde_json::Value;
 
 use crate::client::{SurrealChunkStore, row_meta, row_to_chunk};

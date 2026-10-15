@@ -198,7 +198,7 @@ JSON format:\n\
                     chunks.push(std::mem::take(&mut current_chunk));
                 }
                 // Split large paragraph by sentence delimiters
-                let sentences = p.split(|c| c == '.' || c == '!' || c == '?');
+                let sentences = p.split(['.', '!', '?']);
                 for s in sentences {
                     let st = s.trim();
                     if st.is_empty() {
@@ -443,9 +443,8 @@ fn repair_truncated_json(content: &str) -> Option<Value> {
     if in_string {
         candidate.push('"');
     }
-    let trimmed_c = candidate.trim_end();
-    if trimmed_c.ends_with(',') {
-        candidate = trimmed_c[..trimmed_c.len() - 1].to_string();
+    if let Some(trimmed) = candidate.trim_end().strip_suffix(',') {
+        candidate = trimmed.to_string();
     }
     for &closer in stack.iter().rev() {
         candidate.push(closer);

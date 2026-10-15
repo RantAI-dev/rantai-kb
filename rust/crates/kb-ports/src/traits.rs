@@ -12,12 +12,11 @@ use crate::error::PortError;
 use crate::ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 use crate::scope::DocumentScope;
 use crate::types::{
-    AuthContext, CategoryRecord, ChunkMetadata, ChunkToStore, CreateCategory, CreateJobInput,
-    CreateKnowledgeBase, DocumentDownloadMeta, DocumentIntelligenceData, DocumentMeta, Entity,
-    ExtractionOptions, ExtractionResult, FigureGateCandidate, JobRecord, JobView,
-    KnowledgeBaseRecord, KnowledgeBaseSummary, NewDocument, PatchCategory, PatchDocument,
-    PatchKnowledgeBase, ReapableJob, Relation, RerankCandidate, RerankResult, RetryJobOutcome,
-    SearchHit, StoredChunk,
+    AuthContext, CategoryRecord, ChunkToStore, CreateCategory, CreateJobInput, CreateKnowledgeBase,
+    DocumentDownloadMeta, DocumentIntelligenceData, DocumentMeta, Entity, ExtractionOptions,
+    ExtractionResult, FigureGateCandidate, JobRecord, JobView, KnowledgeBaseRecord,
+    KnowledgeBaseSummary, NewDocument, PatchCategory, PatchDocument, PatchKnowledgeBase,
+    ReapableJob, Relation, RerankCandidate, RerankResult, RetryJobOutcome, SearchHit, StoredChunk,
 };
 
 /// What the chunk store is allowed to look at. Currently the empty case is

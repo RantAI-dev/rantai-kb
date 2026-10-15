@@ -112,7 +112,7 @@ impl SmartChunker {
         let mut chunks: Vec<SmartChunk> = Vec::new();
         let mut chunk_index: u32 = 0;
 
-        let mut blocks = Self::split_into_blocks(markdown);
+        let mut blocks = Self::split_into_blocks(markdown, self.opts.preserve_code_blocks);
         let total_length = utf16_len(markdown);
         let avg_block_size = if blocks.is_empty() {
             total_length
@@ -403,7 +403,7 @@ impl SmartChunker {
         blocks
     }
 
-    fn split_into_blocks(text: &str) -> Vec<String> {
+    fn split_into_blocks(text: &str, preserve_code_blocks: bool) -> Vec<String> {
         let mut blocks: Vec<String> = Vec::new();
         let mut current = String::new();
         let mut in_code_block = false;
@@ -414,7 +414,12 @@ impl SmartChunker {
                 in_code_block = !in_code_block;
                 current.push_str(line);
                 current.push('\n');
-                if !in_code_block {
+                // Only a code block that is its own block gets flushed here.
+                // With the option off, the fence's lines stay in `current` and
+                // are flushed with the surrounding paragraph, exactly as
+                // `if (!inCodeBlock && this.options.preserveCodeBlocks)` does
+                // in the TypeScript chunker.
+                if !in_code_block && preserve_code_blocks {
                     let trimmed = current.trim().to_string();
                     if !trimmed.is_empty() {
                         blocks.push(trimmed);

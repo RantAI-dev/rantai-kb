@@ -27,7 +27,10 @@ pub struct MineruExtractor {
 
 impl MineruExtractor {
     /// Create a new extractor client pointing at the sidecar base URL.
-    pub fn new(base_url: impl Into<String>, timeout: Option<Duration>) -> Result<Self, ExtractError> {
+    pub fn new(
+        base_url: impl Into<String>,
+        timeout: Option<Duration>,
+    ) -> Result<Self, ExtractError> {
         let raw = base_url.into();
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -35,7 +38,10 @@ impl MineruExtractor {
                 "MineruExtractor requires a base URL — set KB_EXTRACT_MINERU_BASE_URL (e.g. http://localhost:8100)".to_string(),
             ));
         }
-        let normalized = trimmed.trim_end_matches('/').trim_end_matches("/extract").to_string();
+        let normalized = trimmed
+            .trim_end_matches('/')
+            .trim_end_matches("/extract")
+            .to_string();
         let timeout = timeout.unwrap_or(Duration::from_secs(20 * 60)); // 20 minutes default
         let client = reqwest::Client::builder()
             .timeout(timeout)

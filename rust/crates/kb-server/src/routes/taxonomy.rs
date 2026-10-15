@@ -149,12 +149,18 @@ pub async fn delete_knowledge_base(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
+/// One category on the wire. The TypeScript service sends the row as-is, so
+/// the field names are the column names.
 #[derive(Debug, Serialize)]
-struct CategoryView {
-    id: String,
-    name: String,
-    label: String,
-    color: Option<String>,
+pub struct CategoryView {
+    /// Row id.
+    pub id: String,
+    /// Machine name, unique per tenant.
+    pub name: String,
+    /// Human label.
+    pub label: String,
+    /// Optional display colour.
+    pub color: Option<String>,
 }
 
 impl From<CategoryRecord> for CategoryView {

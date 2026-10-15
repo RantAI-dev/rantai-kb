@@ -7,8 +7,8 @@
 //! from the spec.
 
 use quick_xml::Reader;
-use quick_xml::events::Event;
 use quick_xml::events::BytesText;
+use quick_xml::events::Event;
 
 use crate::ExtractError;
 
@@ -126,7 +126,9 @@ mod tests {
         let mut reader = reader_from_str("<item href=\"a&amp;b.xhtml\"/>");
         let mut buffer = Vec::new();
         let mut href = None;
-        while let Some(Event::Start(element) | Event::Empty(element)) = next_event(&mut reader, &mut buffer).unwrap() {
+        while let Some(Event::Start(element) | Event::Empty(element)) =
+            next_event(&mut reader, &mut buffer).unwrap()
+        {
             href = attribute(&element, "href");
         }
         assert_eq!(href.as_deref(), Some("a&b.xhtml"));

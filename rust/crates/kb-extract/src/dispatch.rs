@@ -13,6 +13,7 @@
 
 use kb_ports::{ExtractionOptions, ExtractionResult};
 
+use crate::ExtractError;
 use crate::chain::LayoutExtractorChain;
 use crate::clip_reason;
 use crate::code;
@@ -31,13 +32,10 @@ use crate::rtf;
 use crate::scanned::is_pdf_scanned;
 use crate::text::to_utf8;
 use crate::xlsx;
-use crate::ExtractError;
 
-const MIME_DOCX: &str =
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+const MIME_DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 const MIME_XLSX: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-const MIME_PPTX: &str =
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+const MIME_PPTX: &str = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
 const MIME_RTF: &str = "application/rtf";
 const MIME_EPUB: &str = "application/epub+zip";
 const MIME_GLTF: &str = "model/gltf+json";
@@ -239,11 +237,7 @@ pub fn extract_from_buffer(
 }
 
 fn non_empty(value: &str) -> Option<&str> {
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 #[cfg(test)]
@@ -397,9 +391,8 @@ mod tests {
         ];
 
         for case in &cases {
-            let result = extract(case.file_name, case.mime_type, &case.bytes).unwrap_or_else(
-                |e| panic!("{}: unexpected error {e}", case.name),
-            );
+            let result = extract(case.file_name, case.mime_type, &case.bytes)
+                .unwrap_or_else(|e| panic!("{}: unexpected error {e}", case.name));
             assert!(result.error.is_none(), "{}: {:?}", case.name, result.error);
             assert_eq!(result.content, case.expected, "{}", case.name);
             assert_eq!(result.file_type, "markdown", "{}", case.name);

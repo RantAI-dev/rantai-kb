@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use kb_ports::{
-    ChunkMetadata, ChunkStore, ChunkToStore, DocumentId, DocumentScope, NeighbourAnchor, PortError,
-    SearchHit, StoredChunk,
+    ChunkStore, ChunkToStore, DocumentId, DocumentScope, NeighbourAnchor, PortError, SearchHit,
+    StoredChunk,
 };
 
 use crate::bm25::execute_bm25_search;

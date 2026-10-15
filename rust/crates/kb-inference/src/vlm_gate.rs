@@ -147,8 +147,7 @@ impl FigureGate for VlmFigureGate {
             return Ok(Vec::new());
         }
 
-        let seen: Vec<&FigureGateCandidate> =
-            candidates.iter().take(self.config.top_n as usize).collect();
+        let seen: Vec<&FigureGateCandidate> = candidates.iter().take(self.config.top_n).collect();
 
         let mut kept: Vec<String> = Vec::new();
         for c in seen {
@@ -162,7 +161,7 @@ impl FigureGate for VlmFigureGate {
             let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
             if self.judge(query, &b64).await {
                 kept.push(c.id.clone());
-                if kept.len() >= self.config.max_keep as usize {
+                if kept.len() >= self.config.max_keep {
                     break;
                 }
             }

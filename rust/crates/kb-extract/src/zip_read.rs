@@ -48,7 +48,10 @@ mod tests {
     fn entries_can_be_read_by_name() {
         let bytes = zip_of(&[("word/document.xml", "<w:document/>")]);
         let mut archive = open(&bytes).unwrap();
-        assert_eq!(read_text(&mut archive, "word/document.xml").unwrap(), "<w:document/>");
+        assert_eq!(
+            read_text(&mut archive, "word/document.xml").unwrap(),
+            "<w:document/>"
+        );
         assert_eq!(names(&archive), ["word/document.xml"]);
     }
 
@@ -57,10 +60,7 @@ mod tests {
         let bytes = zip_of(&[("a.txt", "a")]);
         let mut archive = open(&bytes).unwrap();
         let err = read_text(&mut archive, "ppt/slides/slide1.xml").unwrap_err();
-        assert!(
-            err.to_string().contains("ppt/slides/slide1.xml"),
-            "{err}"
-        );
+        assert!(err.to_string().contains("ppt/slides/slide1.xml"), "{err}");
     }
 
     #[test]

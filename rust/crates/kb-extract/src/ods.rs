@@ -74,11 +74,9 @@ pub fn parse_ods_content_xml(xml_str: &str) -> Result<String, ExtractError> {
                             }
                         }
                     }
-                    b"p" => {
-                        if in_cell {
-                            in_p = true;
-                            current_p.clear();
-                        }
+                    b"p" if in_cell => {
+                        in_p = true;
+                        current_p.clear();
                     }
                     _ => {}
                 }
@@ -166,21 +164,19 @@ pub fn parse_ods_content_xml(xml_str: &str) -> Result<String, ExtractError> {
                             current_cell_paragraphs.clear();
                         }
                     }
-                    b"table-row" => {
-                        if in_row {
-                            in_row = false;
-                            // Trim trailing empty cells from row
-                            while current_row_cells.last().is_some_and(String::is_empty) {
-                                current_row_cells.pop();
-                            }
-                            if !current_row_cells.is_empty() {
-                                let row_csv = format_csv_row(&current_row_cells);
-                                for _ in 0..row_repeated {
-                                    lines.push(row_csv.clone());
-                                }
-                            }
-                            current_row_cells.clear();
+                    b"table-row" if in_row => {
+                        in_row = false;
+                        // Trim trailing empty cells from row
+                        while current_row_cells.last().is_some_and(String::is_empty) {
+                            current_row_cells.pop();
                         }
+                        if !current_row_cells.is_empty() {
+                            let row_csv = format_csv_row(&current_row_cells);
+                            for _ in 0..row_repeated {
+                                lines.push(row_csv.clone());
+                            }
+                        }
+                        current_row_cells.clear();
                     }
                     _ => {}
                 }

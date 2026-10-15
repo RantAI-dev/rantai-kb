@@ -141,8 +141,13 @@ impl Extractor for LocalExtractor {
         mime_type: &str,
         file_bytes: &[u8],
     ) -> Result<ExtractionResult, PortError> {
-        self.extract_with_options(filename, mime_type, file_bytes, ExtractionOptions::default())
-            .await
+        self.extract_with_options(
+            filename,
+            mime_type,
+            file_bytes,
+            ExtractionOptions::default(),
+        )
+        .await
     }
 
     async fn extract_with_options(

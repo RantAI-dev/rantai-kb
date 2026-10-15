@@ -33,7 +33,7 @@ fn long_text_yields_multiple_chunks() {
         overlap_size: Some(0),
         ..Default::default()
     })
-    .chunk(&vec!["This is a paragraph of moderate length for testing."; 10].join("\n\n"));
+    .chunk(&["This is a paragraph of moderate length for testing."; 10].join("\n\n"));
     assert!(out.len() > 1);
 }
 
@@ -133,6 +133,42 @@ fn code_blocks_preserved_atomically() {
 }
 
 #[test]
+fn disabling_code_block_preservation_merges_the_fence_into_its_paragraph() {
+    // `preserveCodeBlocks: false` must not flush at the closing fence: the
+    // fence's lines keep accumulating and are flushed by whatever comes next,
+    // so a line that follows the fence immediately lands in the same block.
+    // (With a blank line after the fence both settings agree — the blank line
+    // ends the block either way, which is why this test needs no blank line.)
+    let text = "```javascript\nconst x = 1;\nconst y = 2;\n```\nRight after the fence.";
+    let merged = SmartChunker::new(SmartChunkingOptions {
+        preserve_code_blocks: Some(false),
+        ..Default::default()
+    })
+    .chunk(text);
+    assert!(
+        merged
+            .iter()
+            .any(|c| c.text.contains("const x = 1") && c.text.contains("Right after the fence.")),
+        "expected the code block folded into the following paragraph, got {:?}",
+        merged.iter().map(|c| &c.text).collect::<Vec<_>>()
+    );
+
+    let separate = SmartChunker::new(SmartChunkingOptions {
+        preserve_code_blocks: Some(true),
+        ..Default::default()
+    })
+    .chunk(text);
+    assert!(
+        separate
+            .iter()
+            .any(|c| c.text.contains("const x = 1") && !c.text.contains("Right after the fence.")),
+        "expected the code block to be its own chunk, got {:?}",
+        separate.iter().map(|c| &c.text).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+
 fn code_chunk_type_detected() {
     let out =
         SmartChunker::new(SmartChunkingOptions::default()).chunk("```python\nprint('hi')\n```");
@@ -159,8 +195,7 @@ fn list_chunk_type_detected() {
 
 #[test]
 fn multiple_chunks_when_exceeding_max() {
-    let paragraphs = std::iter::repeat("Short sentence here.")
-        .take(20)
+    let paragraphs = std::iter::repeat_n("Short sentence here.", 20)
         .collect::<Vec<_>>()
         .join("\n\n");
     let out = SmartChunker::new(SmartChunkingOptions {
@@ -174,8 +209,7 @@ fn multiple_chunks_when_exceeding_max() {
 
 #[test]
 fn wall_of_text_falls_back_to_sentence_splitting() {
-    let text = std::iter::repeat("This is a sentence. Another sentence here.")
-        .take(50)
+    let text = std::iter::repeat_n("This is a sentence. Another sentence here.", 50)
         .collect::<Vec<_>>()
         .join(" ");
     let out = SmartChunker::new(SmartChunkingOptions {
@@ -250,9 +284,8 @@ fn prepare_chunk_includes_contextual_prefix() {
     assert!(out.contains("This chunk continues the Q4 2024 earnings summary."));
     let prefix_pos = out.find("This chunk continues");
     let body_pos = out.find("Revenue was $94.9B");
-    match (prefix_pos, body_pos) {
-        (Some(p), Some(b)) => assert!(p < b),
-        _ => {}
+    if let (Some(p), Some(b)) = (prefix_pos, body_pos) {
+        assert!(p < b);
     }
 }
 
