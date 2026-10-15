@@ -5,9 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR="${1:-"$SCRIPT_DIR/../.vendor/pdfium"}"
 PDFIUM_VERSION="${PDFIUM_VERSION:-8100}"
 
-ARCH="$(uname -m)"
+ARCH="${TARGETARCH:-$(uname -m)}"
 case "$ARCH" in
-  x86_64)
+  x86_64|amd64)
     PDFIUM_ARCH="linux-x64"
     ;;
   aarch64|arm64)
