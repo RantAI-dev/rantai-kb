@@ -106,6 +106,54 @@ pub const UPDATE_API_KEY_LAST_USED: &str = r#"
     UPDATE "ApiKey" SET "lastUsedAt" = now() WHERE id = $1
 "#;
 
+/// Row for a minted key. Defaults for `lastUsedAt`, `revokedAt` and
+/// `createdAt` are left to the schema, exactly as Prisma's `create` does.
+pub const INSERT_API_KEY: &str = r#"
+    INSERT INTO "ApiKey" (id, "tenantId", name, hash, scopes, "knowledgeBaseIds")
+    VALUES ($1, $2, $3, $4, $5, $6)
+"#;
+
+// ─── Migrations ──────────────────────────────────────────────────────────────
+// Prisma's own bookkeeping table, so `kb-server migrate` and
+// `bunx prisma migrate deploy` agree about what has been applied to the same
+// database. Column names, types and the primary key are Prisma's.
+
+/// Created defensively: the table usually exists because Prisma made it, but a
+/// database that has only ever seen the Rust binary must still work.
+pub const CREATE_MIGRATIONS_TABLE: &str = r#"
+    CREATE TABLE IF NOT EXISTS "_prisma_migrations" (
+        "id" TEXT NOT NULL,
+        "checksum" TEXT NOT NULL,
+        "migration_name" TEXT NOT NULL,
+        "started_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "finished_at" TIMESTAMP(3),
+        "rolled_back_at" TIMESTAMP(3),
+        "logs" TEXT,
+        "applied_steps_count" INTEGER NOT NULL DEFAULT 0,
+        CONSTRAINT "_prisma_migrations_pkey" PRIMARY KEY ("id")
+    )
+"#;
+
+/// A migration counts as applied only once it finished and was not rolled back.
+pub const SELECT_APPLIED_MIGRATION: &str = r#"
+    SELECT "checksum", "finished_at", "rolled_back_at"
+      FROM "_prisma_migrations"
+     WHERE "migration_name" = $1
+     ORDER BY "started_at" ASC
+     LIMIT 1
+"#;
+
+pub const INSERT_MIGRATION: &str = r#"
+    INSERT INTO "_prisma_migrations" (id, "checksum", "migration_name", "started_at", "applied_steps_count")
+    VALUES ($1, $2, $3, now(), 0)
+"#;
+
+pub const FINISH_MIGRATION: &str = r#"
+    UPDATE "_prisma_migrations"
+       SET "finished_at" = now(), "applied_steps_count" = 1, "logs" = NULL
+     WHERE id = $1
+"#;
+
 // ─── Ingest jobs ─────────────────────────────────────────────────────────────
 // Column names and shapes are copied verbatim from the Bun adapter
 // (src/service/adapters.ts, `const jobs: JobStore`) so a Rust worker and a Bun

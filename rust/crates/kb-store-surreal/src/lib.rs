@@ -16,6 +16,7 @@ pub mod entities;
 mod figures;
 mod neighbours;
 mod queries;
+pub mod schema;
 mod store;
 mod vector;
 
