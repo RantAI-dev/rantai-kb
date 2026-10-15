@@ -1,4 +1,4 @@
-//! Read-path engine.
+//! Retrieval and ingest orchestration.
 //!
 //! Owns the retrieval pipeline:
 //! 1. Parallel vector & BM25 search.
@@ -10,6 +10,10 @@
 //! 7. Append figures.
 //! 8. Enrich document titles via `find_alive_meta_by_ids`.
 //! 9. Build context string and numbered sources with `kb-core`.
+//!
+//! Also owns the ingest worker (`ingest`), which drives one claimed job from a
+//! stored file through extraction, chunking, embedding and storage. Both go
+//! through `kb-ports`; neither names an adapter.
 
 use std::sync::Arc;
 
@@ -20,11 +24,15 @@ use kb_ports::{
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod fakes;
+pub mod ingest;
 pub mod retrieval;
 
 #[cfg(test)]
+mod ingest_tests;
+#[cfg(test)]
 mod tests;
 
+pub use ingest::{CancelToken, IngestSettings, IngestWorker, JobOutcome};
 pub use retrieval::{RetrievalOptions, RetrievalOutcome, enrich_titles, execute_pipeline};
 
 /// Tunable engine knobs.
