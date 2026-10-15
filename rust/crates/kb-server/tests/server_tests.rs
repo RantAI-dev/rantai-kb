@@ -205,6 +205,34 @@ async fn test_search_happy_path_fields() {
 }
 
 #[tokio::test]
+async fn test_key_is_accepted_from_bearer_in_any_case_or_from_x_api_key() {
+    let harness = Harness::new();
+    harness
+        .documents
+        .insert_api_key("valid-key", TenantId("tenant-1".into()));
+
+    for header in ["Bearer valid-key", "bearer valid-key", "BEARER  valid-key "] {
+        let request = Request::builder()
+            .uri("/v1/documents")
+            .method("GET")
+            .header("authorization", header)
+            .body(Body::empty())
+            .unwrap();
+        let response = harness.app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "header {header}");
+    }
+
+    let request = Request::builder()
+        .uri("/v1/documents")
+        .method("GET")
+        .header("x-api-key", "valid-key")
+        .body(Body::empty())
+        .unwrap();
+    let response = harness.app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn test_search_with_an_empty_knowledge_base_list_answers_with_the_note() {
     let harness = Harness::new();
     let tenant = TenantId("tenant-1".into());

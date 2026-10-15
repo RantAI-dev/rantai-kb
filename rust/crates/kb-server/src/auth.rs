@@ -51,8 +51,11 @@ pub fn has_scope(auth: &AuthContext, scope: &str) -> bool {
 fn extract_raw_key<'a>(parts: &'a Parts) -> Option<&'a str> {
     if let Some(auth) = parts.headers.get("Authorization") {
         if let Ok(val) = auth.to_str() {
-            if let Some(token) = val.strip_prefix("Bearer ") {
-                let trimmed = token.trim();
+            // `header.toLowerCase().startsWith("bearer ")` in TypeScript: the
+            // scheme is matched case-insensitively, and the value that follows
+            // is the original text trimmed.
+            if val.len() > 7 && val[..7].eq_ignore_ascii_case("bearer ") {
+                let trimmed = val[7..].trim();
                 if !trimmed.is_empty() {
                     return Some(trimmed);
                 }
