@@ -87,8 +87,10 @@ Status after the follow-up pass (user: shape may differ if functionality is the 
 
 ## Dependencies
 
-No external dependencies added beyond workspace baseline. All fakes implemented in-tree.
-
+New dependencies added in R3 slice 2 (pure Rust only):
+- `zip` (8.6.0, deflate only): in-memory zip archive extraction for OpenXML (docx/pptx), epub containers, and test fixture generation.
+- `quick-xml` (0.41.0): streaming event-based XML parsing for docx document bodies, pptx slide text, epub OPF manifests, and generic xml text stripping.
+- `calamine` (0.36.1): pure-Rust spreadsheet parser reading xlsx/xlsm/xlsb sheets into CSV text, matching SheetJS behavior.
 
 ## R4 slice: document DELETE (soft and hard)
 
@@ -140,10 +142,35 @@ takes every port as a constructor argument.
 
 ## R3 slice 2: heartbeat, independent reclaim, extraction dispatch
 
-Cargo ledger (one process at a time, budget 8 for this slice; the reviewer's run 29 was
-one `cargo test --workspace` and is not counted here):
+Cargo ledger (continuing numbering from 31):
 
 | # | command | result |
 |---|---|---|
 | 30 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101. One error: `ingest_tests.rs` could not see the new `HEARTBEAT_INTERVAL` (it is re-exported from `ingest`, not from the crate root). Everything else warnings. |
 | 31 | same | exit 0, zero errors after the import fix. |
+| 32 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101. 47 errors across kb-extract (test unwrap lints, trait bounds, elided lifetimes) and kb-server state.rs (build_worker / build_ingest_worker signature). |
+| 33 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101. 2 errors: `zip_read.rs` open return lifetime and `rtf.rs` copied() type mismatch. |
+| 34 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0, zero errors. Clean clippy across workspace. |
+| 35 | `cargo test --workspace` | exit 101. 15 test failures in kb-extract (html collapse whitespace, docx text run tracking & blank lines, pptx tag matching, epub self-closing tags & spine order, rtf index advancement & latin-1 chars, gltf json root object check). |
+| 36 | `cargo test -p kb-extract` | exit 101. 1 error: `kb-ports` re-export of `scope::adapter` failed when compiled without `scope-adapter` feature. |
+| 37 | `cargo test --workspace` | exit 101. `kb-ports` scope-adapter fix verified. 1 failure in `rtf::tests::ignorable_destinations_are_dropped` where `\*` did not mark the enclosing group ignorable. |
+| 38 | `cargo test --workspace` | exit 101. `rtf.rs` had incorrect imports `use crate::error::ExtractError` and `ExtractionResult::text_only`. |
+| 39 | `cargo test --workspace` | exit 101. `rtf.rs` import path and return signature fixed to `Result<String, ExtractError>`. |
+| 40 | `cargo test --workspace` | exit 0. All 238 tests pass across all workspace crates (kb-chunker: 76, kb-engine: 27, kb-extract: 68, kb-inference: 16, kb-ports: 3, kb-server: 9 unit + 10 integration, kb-store-blob: 6, kb-store-pg: 9, kb-store-surreal: 14). |
+| 41 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0. Zero errors across workspace. |
+
+### Architecture and Parity Details
+- **kb-extract crate**: pure-Rust extraction library implementing `kb_ports::Extractor` via `LocalExtractor`. Dispatches by MIME type / extension mapping ported from `src/lib/files/mime-types.ts`, `src/lib/rag` (`detectFileType`), and `src/lib/ingest/extract.ts`.
+- **Pure-Rust parsers**:
+  - `docx`: parses `word/document.xml` using `quick-xml`, matching `mammoth.extractRawText` (blank line between paragraphs, document order, skips field codes, note references, and DrawingML pictures).
+  - `xlsx`: parses workbook sheets using `calamine`, formatting each sheet as `=== SheetName ===\n` followed by SheetJS-compatible CSV rows with quote escaping.
+  - `pptx`: parses slides in numeric order (`slide1.xml`, `slide2.xml`, ...) followed by slide notes, paragraphs delimited by newlines.
+  - `epub`: parses `META-INF/container.xml`, locates OPF package file, reads manifest and spine itemrefs to extract chapters in linear reading order, then strips HTML tags.
+  - `rtf`: pure-Rust byte scanner stripping control words, parsing `\'hh` hex escapes and `\uN` unicode escapes, collapsing whitespace, and dropping `{\*...}` ignorable groups.
+  - `gltf` / `glb`: parses GLTF JSON metadata and GLB binary chunks, formatting an inventory of asset info, scenes, nodes, meshes, materials, and animations matching the TS template.
+  - `html` / `xml` / `text` / `code`: HTML strips script/style tags, converts tags to spaces and collapses whitespace without entity decoding (matching TS); XML strips tags with entity decoding; code blocks wrap in markdown fences.
+- **Legacy binary formats & unported inputs**:
+  - Legacy `.doc`, `.xls`, `.ppt`, `.odt`, `.ods` formats return explicit `ExtractError::Unsupported` naming the format and explaining unported `officeparser`.
+  - PDF and image files return explicit `ExtractError::Unsupported` noting they are not yet ported in this slice.
+- **UTF-16 reason clipping**: error message clipping follows JavaScript's UTF-16 code unit semantics (`slice(0, 500)`).
+- **IngestWorker wiring**: `kb-server::state::build_worker` and `build_ingest_worker` instantiate `LocalExtractor::shared()`. Integration test `test_ingest_worker_with_real_local_extractor` verifies end-to-end ingest execution with the real extractor.
