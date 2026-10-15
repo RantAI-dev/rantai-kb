@@ -310,3 +310,39 @@ no budget cap, so the runs are listed with the errors each one fixed:
 | 77 | `cargo test -p kb-server` | exit 0, all suites pass. |
 | 78 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0, zero errors across all workspace targets. |
 | 79 | `cargo test --workspace` | exit 0, every suite passes. |
+
+## R4 slice 3: integration tests for every route, SSE and shutdown
+
+Cargo ledger (continuing numbering from 79):
+
+| # | command | result |
+|---|---|---|
+| 80 | `cargo test -p kb-server --test upload_tests` | exit 101, compile error: the harness helper compared `&str` with `str`, and `FakeBlobStore`'s map is `objects`, not `blobs`. |
+| 81 | same | exit 0, 8 tests pass. |
+| 82 | `cargo test -p kb-server --test document_tests` | exit 101, 1 failure: `FakeDocumentStore::list` ignored the knowledge-base filter, so the route could not be tested. The fake now filters the way `SELECT_DOCS_WITH_KB` does. |
+| 83 | `cargo test -p kb-server --test media_tests` | exit 101, 1 failure: the expected `content-length` was wrong (14 bytes, not 15). |
+| 84 | same | exit 0, 9 tests pass. |
+| 85 | `cargo test -p kb-server --test catalog_tests` | exit 101, 1 failure: the cross-tenant fixture seeded the knowledge base under the wrong tenant, so the route correctly found it. |
+| 86 | same | exit 0, 16 tests pass. |
+| 87 | `cargo test -p kb-server --test events_tests` | exit 0, 9 tests pass. |
+| 88 | `cargo test -p kb-server --test runtime_tests` | exit 101, 2 failures: `serve` only stopped on an OS signal, so a test could not cancel it. `shutdown_signal` now waits on the cancel token as well as SIGINT/SIGTERM, which is also what an embedder of this library needs. |
+| 89 | same | exit 0, 4 tests pass. |
+| 90 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101, 2 findings: an `await_placeholder()` left in the runtime fixture, and a dead helper referencing a removed type. |
+| 91 | same | exit 0, zero errors. |
+| 92 | `cargo test --workspace` | exit 0, every suite passes (see the per-crate counts in the R4 summary). |
+| 93 | `cargo fmt -p kb-server -p kb-ports -p kb-store-pg -p kb-store-surreal -p kb-engine -p kb-inference` | no compile cost; the drift committed as a separate style commit. |
+| 94 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0, zero errors. |
+| 95 | `cargo test --workspace` | exit 0, every suite passes. |
+
+### Deviations from the TypeScript service, on purpose
+- **A restricted key that asks for knowledge bases it does not hold gets `[]`**, where
+  `listDocuments` would fall through its `kbFilter?.length` test and return the whole
+  tenant. Reproducing that would hand a restricted key documents it may not see, so the
+  empty answer is kept.
+- **Every authenticated route requires `kb:read`.** The `Authed` extractor enforces it
+  before the handler, so `GET /v1/jobs/:id` and `GET /v1/knowledge-bases`, which check no
+  scope at all in TypeScript, answer 403 (with the same message) to a write-only key.
+- **`degrades` is an extra field on search results**, present only when a degradable backend
+  actually failed. Everything else about the search response is unchanged.
+- **`limit` is parsed leniently** (`?limit=abc` falls back to 100) instead of producing the
+  500 that `take: NaN` produces in TypeScript.

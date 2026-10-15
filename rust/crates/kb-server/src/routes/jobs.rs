@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use kb_ports::{DocumentId, JobView, RetryJobOutcome};
 use serde::Serialize;
 
@@ -71,11 +71,7 @@ pub async fn retry_job(
                     tracing::warn!(error = %err, "could not reset document status on retry");
                 }
             }
-            Ok((
-                StatusCode::OK,
-                Json(RetryResponse { job_id }),
-            )
-                .into_response())
+            Ok((StatusCode::OK, Json(RetryResponse { job_id })).into_response())
         }
     }
 }

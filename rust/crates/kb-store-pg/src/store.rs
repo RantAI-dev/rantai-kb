@@ -212,6 +212,25 @@ impl DocumentStore for PgDocumentStore {
         }
     }
 
+    async fn find_meta_by_id(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+    ) -> Result<Option<DocumentMeta>, PortError> {
+        let row = sqlx::query(SELECT_BY_ID)
+            .bind(id.as_str())
+            .bind(tenant.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg find_meta_by_id: {e}")))?;
+        match row {
+            Some(row) => row_to_doc_meta(&row)
+                .map(Some)
+                .map_err(|e| PortError::Unavailable(format!("pg row: {e}"))),
+            None => Ok(None),
+        }
+    }
+
     async fn soft_delete(&self, tenant: &TenantId, id: &DocumentId) -> Result<bool, PortError> {
         let res = sqlx::query(
             r#"UPDATE "Document" SET "deletedAt" = NOW()
@@ -476,10 +495,7 @@ impl DocumentStore for PgDocumentStore {
             .await
             .map_err(|e| PortError::Unavailable(format!("pg tx begin: {e}")))?;
 
-        if patch.title.is_some()
-            || patch.categories.is_some()
-            || patch.subcategory.is_some()
-        {
+        if patch.title.is_some() || patch.categories.is_some() || patch.subcategory.is_some() {
             let no_categories: Vec<String> = Vec::new();
             sqlx::query(UPDATE_DOCUMENT_PATCH)
                 .bind(id.as_str())
@@ -509,7 +525,9 @@ impl DocumentStore for PgDocumentStore {
                     .bind(kb_id.0.as_str())
                     .execute(&mut *tx)
                     .await
-                    .map_err(|e| PortError::Unavailable(format!("pg insert document group: {e}")))?;
+                    .map_err(|e| {
+                        PortError::Unavailable(format!("pg insert document group: {e}"))
+                    })?;
             }
         }
 

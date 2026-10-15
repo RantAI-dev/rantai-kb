@@ -262,16 +262,34 @@ impl JobStore for PgJobStore {
 
         match row {
             Some(r) => {
-                let id: String = r.try_get("id").map_err(|e| PortError::Unavailable(format!("pg id: {e}")))?;
-                let status: String = r.try_get("status").map_err(|e| PortError::Unavailable(format!("pg status: {e}")))?;
-                let step: Option<String> = r.try_get("step").map_err(|e| PortError::Unavailable(format!("pg step: {e}")))?;
+                let id: String = r
+                    .try_get("id")
+                    .map_err(|e| PortError::Unavailable(format!("pg id: {e}")))?;
+                let status: String = r
+                    .try_get("status")
+                    .map_err(|e| PortError::Unavailable(format!("pg status: {e}")))?;
+                let step: Option<String> = r
+                    .try_get("step")
+                    .map_err(|e| PortError::Unavailable(format!("pg step: {e}")))?;
                 let progress: i32 = r.try_get("progress").unwrap_or(0);
-                let step_current: Option<i32> = r.try_get("stepCurrent").map_err(|e| PortError::Unavailable(format!("pg stepCurrent: {e}")))?;
-                let step_total: Option<i32> = r.try_get("stepTotal").map_err(|e| PortError::Unavailable(format!("pg stepTotal: {e}")))?;
-                let eta_seconds: Option<i32> = r.try_get("etaSeconds").map_err(|e| PortError::Unavailable(format!("pg etaSeconds: {e}")))?;
-                let attempt: i32 = r.try_get("attempt").map_err(|e| PortError::Unavailable(format!("pg attempt: {e}")))?;
-                let error: Option<String> = r.try_get("error").map_err(|e| PortError::Unavailable(format!("pg error: {e}")))?;
-                let document_id: Option<String> = r.try_get("documentId").map_err(|e| PortError::Unavailable(format!("pg documentId: {e}")))?;
+                let step_current: Option<i32> = r
+                    .try_get("stepCurrent")
+                    .map_err(|e| PortError::Unavailable(format!("pg stepCurrent: {e}")))?;
+                let step_total: Option<i32> = r
+                    .try_get("stepTotal")
+                    .map_err(|e| PortError::Unavailable(format!("pg stepTotal: {e}")))?;
+                let eta_seconds: Option<i32> = r
+                    .try_get("etaSeconds")
+                    .map_err(|e| PortError::Unavailable(format!("pg etaSeconds: {e}")))?;
+                let attempt: i32 = r
+                    .try_get("attempt")
+                    .map_err(|e| PortError::Unavailable(format!("pg attempt: {e}")))?;
+                let error: Option<String> = r
+                    .try_get("error")
+                    .map_err(|e| PortError::Unavailable(format!("pg error: {e}")))?;
+                let document_id: Option<String> = r
+                    .try_get("documentId")
+                    .map_err(|e| PortError::Unavailable(format!("pg documentId: {e}")))?;
 
                 Ok(Some(JobView {
                     id,
@@ -302,12 +320,16 @@ impl JobStore for PgJobStore {
             return Ok(RetryJobOutcome::NotFound);
         };
 
-        let status: String = r.try_get("status").map_err(|e| PortError::Unavailable(format!("pg status: {e}")))?;
+        let status: String = r
+            .try_get("status")
+            .map_err(|e| PortError::Unavailable(format!("pg status: {e}")))?;
         if status != "failed" {
             return Ok(RetryJobOutcome::NotFailed);
         }
 
-        let document_id: Option<String> = r.try_get("documentId").map_err(|e| PortError::Unavailable(format!("pg documentId: {e}")))?;
+        let document_id: Option<String> = r
+            .try_get("documentId")
+            .map_err(|e| PortError::Unavailable(format!("pg documentId: {e}")))?;
 
         // Only the job row is reset here. The document goes back to
         // "processing" as its own best-effort update, exactly as the TypeScript
@@ -325,7 +347,11 @@ impl JobStore for PgJobStore {
         })
     }
 
-    async fn list_reapable(&self, max_age_days: u32, limit: u32) -> Result<Vec<ReapableJob>, PortError> {
+    async fn list_reapable(
+        &self,
+        max_age_days: u32,
+        limit: u32,
+    ) -> Result<Vec<ReapableJob>, PortError> {
         let rows = sqlx::query(SELECT_REAPABLE_JOBS)
             .bind(max_age_days as i32)
             .bind(limit as i64)
@@ -335,8 +361,12 @@ impl JobStore for PgJobStore {
 
         let mut out = Vec::with_capacity(rows.len());
         for row in rows {
-            let id: String = row.try_get("id").map_err(|e| PortError::Unavailable(format!("pg id: {e}")))?;
-            let s3_key: String = row.try_get("s3Key").map_err(|e| PortError::Unavailable(format!("pg s3Key: {e}")))?;
+            let id: String = row
+                .try_get("id")
+                .map_err(|e| PortError::Unavailable(format!("pg id: {e}")))?;
+            let s3_key: String = row
+                .try_get("s3Key")
+                .map_err(|e| PortError::Unavailable(format!("pg s3Key: {e}")))?;
             out.push(ReapableJob { id, s3_key });
         }
         Ok(out)

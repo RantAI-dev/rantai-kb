@@ -18,6 +18,7 @@ mod upload;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
 use axum::http::header::{
     ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -40,7 +41,7 @@ use crate::state::AppState;
 /// Upper bound on a multipart upload body. The file itself is capped at
 /// `KB_MAX_FILE_BYTES` by the upload route; the slack covers the part headers,
 /// the form fields and the multipart framing around a file exactly at the limit.
-pub(crate) fn upload_body_limit() -> usize {
+pub fn upload_body_limit() -> usize {
     (MimeRegistry::kb_max_file_bytes() + 1024 * 1024) as usize
 }
 
@@ -49,14 +50,22 @@ pub(crate) fn upload_body_limit() -> usize {
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/search", post(search))
-        .route("/v1/documents", get(list_documents).post(upload::ingest_document))
+        .route(
+            "/v1/documents",
+            get(list_documents).post(upload::ingest_document),
+        )
         .route(
             "/v1/documents/:id",
-            get(get_document).patch(patch_document).delete(delete_document),
+            get(get_document)
+                .patch(patch_document)
+                .delete(delete_document),
         )
         .route("/v1/documents/:id/raw", get(media::get_document_raw))
         .route("/v1/documents/:id/assets", get(media::get_document_asset))
-        .route("/v1/documents/:id/intelligence", get(media::get_document_intelligence))
+        .route(
+            "/v1/documents/:id/intelligence",
+            get(media::get_document_intelligence),
+        )
         .route("/v1/jobs/:id", get(jobs::get_job))
         .route("/v1/jobs/:id/retry", post(jobs::retry_job))
         .route(
@@ -67,7 +76,10 @@ pub fn router() -> Router<Arc<AppState>> {
             "/v1/knowledge-bases/:id",
             patch(taxonomy::patch_knowledge_base).delete(taxonomy::delete_knowledge_base),
         )
-        .route("/v1/categories", get(taxonomy::list_categories).post(taxonomy::create_category))
+        .route(
+            "/v1/categories",
+            get(taxonomy::list_categories).post(taxonomy::create_category),
+        )
         .route(
             "/v1/categories/:id",
             patch(taxonomy::patch_category).delete(taxonomy::delete_category),
@@ -119,7 +131,10 @@ pub async fn cors(req: Request, next: Next) -> Response {
 /// Fallback for any path the router does not know: authenticate, then 404.
 pub async fn not_found(State(state): State<Arc<AppState>>, mut req: Request) -> Response {
     let (mut parts, _body) = req.into_parts();
-    if Authed::from_request_parts(&mut parts, &state).await.is_err() {
+    if Authed::from_request_parts(&mut parts, &state)
+        .await
+        .is_err()
+    {
         return ApiError::Unauthorized.into_response();
     }
     ApiError::NotFound.into_response()
@@ -179,16 +194,12 @@ async fn formats() -> Json<FormatsResponse> {
 async fn search(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
-    body: Option<Json<SearchRequestDto>>,
+    body: Bytes,
 ) -> Result<Response, ApiError> {
     if !crate::auth::has_scope(&auth, "kb:read") {
         return Err(ApiError::missing_scope("kb:read"));
     }
-    let Some(Json(body)) = body else {
-        return Err(ApiError::BadRequest(
-            "Body must include a 'query' string".to_string(),
-        ));
-    };
+    let body: SearchRequestDto = crate::dto::parse_json(&body);
     // `!body.query || typeof body.query !== "string"` in TypeScript: an absent,
     // non-string or blank query is the same 400.
     let Some(query) = body.query.as_ref().and_then(serde_json::Value::as_str) else {
@@ -708,17 +719,9 @@ pub(crate) async fn find_visible_document(
     auth: &AuthContext,
     id: &str,
 ) -> Result<kb_ports::DocumentMeta, ApiError> {
-    let scope = state
-        .documents
-        .build_scope(&ScopeRequest {
-            tenant: auth.tenant_id.clone(),
-            filter: DocumentFilter::default(),
-        })
-        .await
-        .map_err(ApiError::from)?;
     state
         .documents
-        .find_by_id(&scope, &DocumentId::new_unchecked(id))
+        .find_meta_by_id(&auth.tenant_id, &DocumentId::new_unchecked(id))
         .await
         .map_err(ApiError::from)?
         .ok_or(ApiError::NotFound)

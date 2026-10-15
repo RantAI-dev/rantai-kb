@@ -13,8 +13,7 @@ use serde_json::json;
 
 /// Message returned for any request without a usable key
 /// (`handleRequest`, src/service/api.ts:876).
-pub const UNAUTHORIZED: &str =
-    "Unauthorized — supply a key via Authorization: Bearer or X-Api-Key";
+pub const UNAUTHORIZED: &str = "Unauthorized — supply a key via Authorization: Bearer or X-Api-Key";
 
 /// Message returned when a document or knowledge base is not visible to the
 /// caller's tenant. Deliberately the same text everywhere, so a caller cannot
@@ -102,7 +101,10 @@ impl IntoResponse for ApiError {
             Self::UnsupportedMedia(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg),
             Self::Internal(msg) => {
                 tracing::error!(error = %msg, "request failed");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal error".to_string(),
+                )
             }
         };
         (status, Json(json!({ "error": message }))).into_response()

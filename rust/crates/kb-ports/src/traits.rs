@@ -62,6 +62,18 @@ pub trait DocumentStore: Send + Sync {
         id: &DocumentId,
     ) -> Result<Option<DocumentMeta>, PortError>;
 
+    /// Look up one document by id for a known tenant (and not soft-deleted).
+    ///
+    /// This is the `findFirst({ id, tenantId, deletedAt: null })` the HTTP
+    /// routes run before every read, write or blob access. It is not the
+    /// scoped [`DocumentStore::find_by_id`], because building a scope resolves
+    /// every document id the tenant owns and the route needs exactly one row.
+    async fn find_meta_by_id(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+    ) -> Result<Option<DocumentMeta>, PortError>;
+
     /// Soft delete: sets `deletedAt`. Returns `false` when no live document matched.
     async fn soft_delete(&self, tenant: &TenantId, id: &DocumentId) -> Result<bool, PortError>;
 
@@ -182,10 +194,7 @@ pub trait DocumentStore: Send + Sync {
     ) -> Result<bool, PortError>;
 
     /// List categories for a tenant.
-    async fn list_categories(
-        &self,
-        tenant: &TenantId,
-    ) -> Result<Vec<CategoryRecord>, PortError>;
+    async fn list_categories(&self, tenant: &TenantId) -> Result<Vec<CategoryRecord>, PortError>;
 
     /// Create a category for a tenant.
     async fn create_category(
@@ -203,11 +212,7 @@ pub trait DocumentStore: Send + Sync {
     ) -> Result<Option<CategoryRecord>, PortError>;
 
     /// Delete a category by ID (tenant-scoped).
-    async fn delete_category(
-        &self,
-        tenant: &TenantId,
-        id: &str,
-    ) -> Result<bool, PortError>;
+    async fn delete_category(&self, tenant: &TenantId, id: &str) -> Result<bool, PortError>;
 
     /// Liveness probe for the backing database. `GET /health` reports this
     /// rather than assuming the store is reachable.
@@ -272,10 +277,8 @@ pub trait ChunkStore: Send + Sync {
 
     /// Ordered chunks for one document, for `GET /v1/documents/:id`. Document
     /// visibility is the caller's job: pass the id only after `find_by_id`.
-    async fn ordered_chunks(
-        &self,
-        document_id: &DocumentId,
-    ) -> Result<Vec<StoredChunk>, PortError>;
+    async fn ordered_chunks(&self, document_id: &DocumentId)
+    -> Result<Vec<StoredChunk>, PortError>;
 
     /// Liveness probe for the vector store. `GET /health` reports this rather
     /// than assuming the store is reachable.

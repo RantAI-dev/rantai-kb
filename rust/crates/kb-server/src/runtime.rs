@@ -98,7 +98,7 @@ pub async fn serve(
     tracing::info!(address = %local_addr, "kb-server listening");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(wait_for_signal())
+        .with_graceful_shutdown(shutdown_signal(cancel.clone()))
         .await
         .context("http server")?;
 
@@ -119,15 +119,25 @@ pub async fn serve(
     Ok(())
 }
 
+/// Resolve when the process is asked to stop: SIGINT, SIGTERM, or the
+/// cancellation token being cancelled by an embedder.
+pub async fn shutdown_signal(cancel: CancelToken) {
+    let mut cancelled = cancel.subscribe();
+    tokio::select! {
+        () = wait_for_signal() => {}
+        _ = cancelled.changed() => tracing::info!("shutdown requested"),
+    }
+}
+
 /// Resolve on SIGINT or SIGTERM.
 ///
-/// # Errors
-///
-/// Returns an error if the signal handler cannot be installed.
+/// A signal handler that cannot be installed is logged and turns into a
+/// never-resolving future: the process keeps serving rather than exiting
+/// because it lost the ability to notice a signal.
 pub async fn wait_for_signal() {
     let ctrl_c = async {
-        if let Err(err) = tokio::signal::ctrl_c().await {
-            tracing::warn!(error = %err, "could not listen for SIGINT");
+        if tokio::signal::ctrl_c().await.is_err() {
+            tracing::warn!("could not listen for SIGINT");
             std::future::pending::<()>().await;
         }
     };
@@ -137,8 +147,8 @@ pub async fn wait_for_signal() {
             Ok(mut sig) => {
                 sig.recv().await;
             }
-            Err(err) => {
-                tracing::warn!(error = %err, "could not listen for SIGTERM");
+            Err(_) => {
+                tracing::warn!("could not listen for SIGTERM");
                 std::future::pending::<()>().await;
             }
         }

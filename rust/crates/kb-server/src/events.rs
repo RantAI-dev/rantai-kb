@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::extract::State;
-use futures::StreamExt;
 use axum::response::Response;
+use futures::StreamExt;
 use kb_ports::{PortError, ProgressSink, TenantId};
 use tokio::sync::broadcast;
 
@@ -106,11 +106,9 @@ pub async fn events_stream(
     // `: connected\n\n` goes out before anything else, so a client can tell
     // an open stream from a dead one without waiting for a job.
     let tenant = auth.tenant_id.clone();
-    let connected = futures::stream::iter(
-        vec![Ok::<axum::body::Bytes, std::convert::Infallible>(axum::body::Bytes::from_static(
-            CONNECTED_FRAME,
-        ))],
-    );
+    let connected = futures::stream::iter(vec![Ok::<axum::body::Bytes, std::convert::Infallible>(
+        axum::body::Bytes::from_static(CONNECTED_FRAME),
+    )]);
     let stream = connected.chain(futures::stream::unfold(
         (receiver, ping, tenant),
         move |(mut receiver, mut ping, tenant)| async move {

@@ -27,18 +27,23 @@ use kb_ports::{
     ChunkToStore, ChunkType, CreateCategory, CreateJobInput, CreateKnowledgeBase,
     DocumentDownloadMeta, DocumentId, DocumentIntelligenceData, DocumentMeta, DocumentScope,
     DocumentStore, Embedder, Entity, EntityExtractor, EntityStore, EntityView, ExtractionOptions,
-    ExtractionResult, Extractor, FigureGate, FigureGateCandidate, JobRecord,
-    JobStore, JobView, KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary,
-    NeighbourAnchor, NewDocument, PatchCategory, PatchDocument, PatchKnowledgeBase, PortError,
-    ProgressSink, ReapableJob, Relation, RelationView, RerankCandidate, RerankResult, Reranker,
-    RetryJobOutcome, ScopeRequest, SearchHit, StoredChunk, TenantId, adapter::ScopeToken,
+    ExtractionResult, Extractor, FigureGate, FigureGateCandidate, JobRecord, JobStore, JobView,
+    KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor, NewDocument,
+    PatchCategory, PatchDocument, PatchKnowledgeBase, PortError, ProgressSink, ReapableJob,
+    Relation, RelationView, RerankCandidate, RerankResult, Reranker, RetryJobOutcome, ScopeRequest,
+    SearchHit, StoredChunk, TenantId, adapter::ScopeToken,
 };
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
 /// Metadata as read back from a stored chunk's JSON metadata object.
 fn stored_chunk_metadata(value: &serde_json::Value) -> ChunkMetadata {
-    let get_u32 = |key: &str| value.get(key).and_then(serde_json::Value::as_u64).map(|n| n as u32);
+    let get_u32 = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .map(|n| n as u32)
+    };
     ChunkMetadata {
         section: value
             .get("section")
@@ -169,6 +174,18 @@ impl DocumentStore for FakeDocumentStore {
         Ok(None)
     }
 
+    async fn find_meta_by_id(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+    ) -> Result<Option<DocumentMeta>, PortError> {
+        let map = self.docs.read().unwrap();
+        Ok(map
+            .get(tenant)
+            .and_then(|list| list.iter().find(|d| &d.id == id))
+            .cloned())
+    }
+
     async fn soft_delete(&self, tenant: &TenantId, id: &DocumentId) -> Result<bool, PortError> {
         let mut map = self.docs.write().unwrap();
         let Some(list) = map.get_mut(tenant) else {
@@ -216,11 +233,22 @@ impl DocumentStore for FakeDocumentStore {
         &self,
         tenant: &TenantId,
         limit: u32,
-        _knowledge_base_ids: &[KnowledgeBaseId],
+        knowledge_base_ids: &[KnowledgeBaseId],
     ) -> Result<Vec<DocumentMeta>, PortError> {
         let map = self.docs.read().unwrap();
         let list = map.get(tenant).cloned().unwrap_or_default();
-        Ok(list.into_iter().take(limit as usize).collect())
+        // An empty filter is no filter, matching `SELECT_DOCS_WITH_KB` only
+        // being used when a knowledge base was actually asked for.
+        let filtered: Vec<DocumentMeta> = list
+            .into_iter()
+            .filter(|d| {
+                knowledge_base_ids.is_empty()
+                    || d.knowledge_base_ids
+                        .iter()
+                        .any(|id| knowledge_base_ids.iter().any(|k| k.0 == *id))
+            })
+            .collect();
+        Ok(filtered.into_iter().take(limit as usize).collect())
     }
 
     async fn list_knowledge_bases(
@@ -262,8 +290,13 @@ impl DocumentStore for FakeDocumentStore {
         let mut map = self.docs.write().unwrap();
         for list in map.values_mut() {
             if let Some(doc) = list.iter_mut().find(|d| &d.id == id) {
-                let mut current = doc.metadata.clone().unwrap_or_else(|| serde_json::json!({}));
-                if let (Some(cur_obj), Some(patch_obj)) = (current.as_object_mut(), patch.as_object()) {
+                let mut current = doc
+                    .metadata
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                if let (Some(cur_obj), Some(patch_obj)) =
+                    (current.as_object_mut(), patch.as_object())
+                {
                     for (k, v) in patch_obj {
                         cur_obj.insert(k.clone(), v.clone());
                     }
@@ -372,7 +405,9 @@ impl DocumentStore for FakeDocumentStore {
             return Ok(Some(meta.clone()));
         }
         let docs = self.docs.read().unwrap();
-        let Some(doc) = docs.get(tenant).and_then(|list| list.iter().find(|m| &m.id == id))
+        let Some(doc) = docs
+            .get(tenant)
+            .and_then(|list| list.iter().find(|m| &m.id == id))
         else {
             return Ok(None);
         };
@@ -605,7 +640,10 @@ impl ChunkStore for FakeChunkStore {
         Ok(out)
     }
 
-    async fn ordered_chunks(&self, document_id: &DocumentId) -> Result<Vec<StoredChunk>, PortError> {
+    async fn ordered_chunks(
+        &self,
+        document_id: &DocumentId,
+    ) -> Result<Vec<StoredChunk>, PortError> {
         let stored = self.stored_chunks.read().unwrap();
         let Some(chunks) = stored.get(document_id) else {
             return Ok(Vec::new());
@@ -866,16 +904,13 @@ impl JobStore for FakeJobStore {
             .write()
             .unwrap()
             .push((job_id.to_string(), step.to_string(), progress));
-        self.detailed_progress
-            .write()
-            .unwrap()
-            .push((
-                job_id.to_string(),
-                step.to_string(),
-                progress,
-                step_current,
-                step_total,
-            ));
+        self.detailed_progress.write().unwrap().push((
+            job_id.to_string(),
+            step.to_string(),
+            progress,
+            step_current,
+            step_total,
+        ));
         let mut views = self.job_views.write().unwrap();
         for ((_, jid), view) in views.iter_mut() {
             if jid == job_id {
@@ -1057,8 +1092,13 @@ impl Extractor for FakeExtractor {
         mime_type: &str,
         file_bytes: &[u8],
     ) -> Result<ExtractionResult, PortError> {
-        self.extract_with_options(filename, mime_type, file_bytes, ExtractionOptions::default())
-            .await
+        self.extract_with_options(
+            filename,
+            mime_type,
+            file_bytes,
+            ExtractionOptions::default(),
+        )
+        .await
     }
 
     async fn extract_with_options(
@@ -1087,8 +1127,18 @@ impl Extractor for FakeExtractor {
 #[derive(Clone, Default)]
 pub struct FakeEntityStore {
     #[allow(clippy::type_complexity)]
-    pub upserted_entities:
-        Arc<RwLock<Vec<(DocumentId, String, String, String, f32, Option<serde_json::Value>)>>>,
+    pub upserted_entities: Arc<
+        RwLock<
+            Vec<(
+                DocumentId,
+                String,
+                String,
+                String,
+                f32,
+                Option<serde_json::Value>,
+            )>,
+        >,
+    >,
     pub relations: Arc<RwLock<Vec<(String, String, String, f32, DocumentId, Option<String>)>>>,
     pub intelligences: Arc<RwLock<HashMap<DocumentId, DocumentIntelligenceData>>>,
     pub fail_upsert: Arc<AtomicBool>,
@@ -1106,7 +1156,9 @@ impl EntityStore for FakeEntityStore {
         metadata: Option<&serde_json::Value>,
     ) -> Result<(), PortError> {
         if self.fail_upsert.load(Ordering::Relaxed) {
-            return Err(PortError::Unavailable("forced entity upsert failure".into()));
+            return Err(PortError::Unavailable(
+                "forced entity upsert failure".into(),
+            ));
         }
         self.upserted_entities.write().unwrap().push((
             document_id.clone(),
@@ -1204,7 +1256,6 @@ impl ProgressSink for FakeProgressSink {
         Ok(())
     }
 }
-
 
 /// Fake entity extractor.
 #[derive(Clone, Default)]

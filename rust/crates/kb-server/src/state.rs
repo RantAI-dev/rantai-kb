@@ -107,7 +107,11 @@ impl AppState {
     /// Construct a state from explicit adapters. Used in tests so they don't
     /// have to stand up Postgres/Surreal.
     #[must_use]
-    pub fn from_parts(parts: StateParts, reranker: Arc<dyn kb_ports::Reranker>, settings: EngineSettings) -> Self {
+    pub fn from_parts(
+        parts: StateParts,
+        reranker: Arc<dyn kb_ports::Reranker>,
+        settings: EngineSettings,
+    ) -> Self {
         let inputs = EngineInputs {
             embedder: parts.embedder.clone(),
             chunk_store: parts.chunks.clone(),

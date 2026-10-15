@@ -95,7 +95,9 @@ where
         reclaim_ms: int_var(lookup, "KB_INGEST_RECLAIM_MS", 60_000)
             .unwrap_or(60_000)
             .max(15_000),
-        reap_days: int_var(lookup, "KB_INGEST_REAP_DAYS", 7).unwrap_or(7).max(0) as u32,
+        reap_days: int_var(lookup, "KB_INGEST_REAP_DAYS", 7)
+            .unwrap_or(7)
+            .max(0) as u32,
         reap_ms: int_var(lookup, "KB_INGEST_REAP_MS", 3_600_000)
             .unwrap_or(3_600_000)
             .max(1000),
@@ -352,7 +354,9 @@ where
         }),
         "cohere" => {
             let api_key = api_key.ok_or_else(|| {
-                anyhow::anyhow!("KB_RERANK_API_KEY or COHERE_API_KEY is required for cohere reranker")
+                anyhow::anyhow!(
+                    "KB_RERANK_API_KEY or COHERE_API_KEY is required for cohere reranker"
+                )
             })?;
             Ok(RerankerConfig::Cohere {
                 model: model.unwrap_or_else(|| "rerank-v3.5".into()),
@@ -502,7 +506,10 @@ mod tests {
         assert_eq!(cfg.extract.mineru_base_url, "http://mineru.local:8100");
         assert_eq!(cfg.extract.mineru_api_key, "mineru-key");
         assert_eq!(cfg.extract.mistral_ocr_key, "mistral-key");
-        assert_eq!(cfg.extract.layout_extractor_order, vec!["mistral", "sidecar"]);
+        assert_eq!(
+            cfg.extract.layout_extractor_order,
+            vec!["mistral", "sidecar"]
+        );
         assert_eq!(cfg.extract.ocr_fallback_model, "custom-ocr-model");
 
         match &cfg.reranker {

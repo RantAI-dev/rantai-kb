@@ -293,9 +293,15 @@ JSON format:\n\
     }
 
     /// Execute single chunk extraction against endpoint.
-    async fn extract_chunk(&self, chunk: &str) -> Result<(Vec<RawEntity>, Vec<RawRelation>), PortError> {
+    async fn extract_chunk(
+        &self,
+        chunk: &str,
+    ) -> Result<(Vec<RawEntity>, Vec<RawRelation>), PortError> {
         let (system_prompt, user_prompt) = Self::build_combined_prompt(chunk);
-        let url = format!("{}/chat/completions", self.settings.base_url.trim_end_matches('/'));
+        let url = format!(
+            "{}/chat/completions",
+            self.settings.base_url.trim_end_matches('/')
+        );
 
         let body = json!({
             "model": self.settings.model,
@@ -326,7 +332,9 @@ JSON format:\n\
         if !res.status().is_success() {
             let status = res.status();
             let err_text = res.text().await.unwrap_or_default();
-            return Err(PortError::Unavailable(format!("LLM API error {status}: {err_text}")));
+            return Err(PortError::Unavailable(format!(
+                "LLM API error {status}: {err_text}"
+            )));
         }
 
         let resp_json: Value = res
@@ -482,7 +490,9 @@ impl EntityExtractor for LlmCombinedExtractor {
         document_id: Option<&str>,
         chunk_id: Option<&str>,
     ) -> Result<Vec<Entity>, PortError> {
-        let (entities, _) = self.extract_entities_and_relations(text, document_id, None).await?;
+        let (entities, _) = self
+            .extract_entities_and_relations(text, document_id, None)
+            .await?;
         Ok(entities
             .into_iter()
             .map(|mut e| {
@@ -562,7 +572,9 @@ impl EntityExtractor for LlmCombinedExtractor {
         for rel in raw_relations {
             let src_raw = rel.source.or(rel.source_entity).unwrap_or_default();
             let tgt_raw = rel.target.or(rel.target_entity).unwrap_or_default();
-            let rel_type = rel.relation_type.unwrap_or_else(|| "RELATED_TO".to_string());
+            let rel_type = rel
+                .relation_type
+                .unwrap_or_else(|| "RELATED_TO".to_string());
 
             let src = name_canonical_map
                 .get(&src_raw)

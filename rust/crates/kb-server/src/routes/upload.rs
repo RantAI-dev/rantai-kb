@@ -7,15 +7,13 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{FromRequest, Multipart, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use kb_core::policy::{FigureMode, MimeRegistry};
-use kb_ports::{
-    CreateJobInput, DocumentId, KnowledgeBaseId, NewDocument, document_path,
-};
+use kb_ports::{CreateJobInput, DocumentId, KnowledgeBaseId, NewDocument, document_path};
 use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -99,7 +97,9 @@ pub async fn ingest_document(
         )));
     }
 
-    let title = upload.field_or("title", &title_from_file_name(&upload.file_name)).to_string();
+    let title = upload
+        .field_or("title", &title_from_file_name(&upload.file_name))
+        .to_string();
     let categories = crate::routes::parse_list(upload.field("categories").unwrap_or(""));
     let subcategory = upload
         .field("subcategory")
@@ -117,18 +117,18 @@ pub async fn ingest_document(
     let knowledge_base_ids = requested_knowledge_bases(&auth, upload.field("knowledgeBaseIds"));
 
     let document_id = DocumentId::new_unchecked(Uuid::new_v4().to_string());
-    let s3_key = document_path(
-        Some(&auth.tenant_id.0),
-        &document_id.0,
-        &upload.file_name,
-    );
+    let s3_key = document_path(Some(&auth.tenant_id.0), &document_id.0, &upload.file_name);
     let content_type = upload
         .content_type
         .as_deref()
         .filter(|v| !v.is_empty())
         .unwrap_or("application/octet-stream");
 
-    if let Err(err) = state.blob.upload(&s3_key, upload.bytes.clone(), content_type).await {
+    if let Err(err) = state
+        .blob
+        .upload(&s3_key, upload.bytes.clone(), content_type)
+        .await
+    {
         tracing::error!(error = %err, s3_key, "upload failed");
         return Err(ApiError::BadGateway(
             "Failed to store the uploaded file. Please try again.".to_string(),
@@ -147,10 +147,7 @@ pub async fn ingest_document(
                 subcategory: subcategory.clone(),
                 s3_key: Some(s3_key.clone()),
                 file_size: Some(size as i32),
-                mime_type: upload
-                    .content_type
-                    .clone()
-                    .filter(|v| !v.is_empty()),
+                mime_type: upload.content_type.clone().filter(|v| !v.is_empty()),
                 status: "processing".to_string(),
                 external_ref: external_ref.clone(),
             },
@@ -191,10 +188,7 @@ pub async fn ingest_document(
         job_id,
         status: "processing",
         title,
-        knowledge_base_ids: knowledge_base_ids
-            .iter()
-            .map(|k| k.0.clone())
-            .collect(),
+        knowledge_base_ids: knowledge_base_ids.iter().map(|k| k.0.clone()).collect(),
     };
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
@@ -263,17 +257,20 @@ async fn read_upload(
             saw_file = true;
             upload.file_name = field.file_name().unwrap_or_default().to_string();
             upload.content_type = field.content_type().map(str::to_string);
-            upload.bytes = field.bytes().await.map_err(|err| {
-                if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                    ApiError::PayloadTooLarge(format!(
-                        "The upload is larger than the {}-byte limit.",
-                        MimeRegistry::kb_max_file_bytes()
-                    ))
-                } else {
-                    ApiError::BadRequest(format!("Could not read the uploaded file: {err}"))
-                }
-            })?
-            .to_vec();
+            upload.bytes = field
+                .bytes()
+                .await
+                .map_err(|err| {
+                    if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
+                        ApiError::PayloadTooLarge(format!(
+                            "The upload is larger than the {}-byte limit.",
+                            MimeRegistry::kb_max_file_bytes()
+                        ))
+                    } else {
+                        ApiError::BadRequest(format!("Could not read the uploaded file: {err}"))
+                    }
+                })?
+                .to_vec();
         } else {
             let value = field.text().await.map_err(|err| {
                 ApiError::BadRequest(format!("Could not read form field {name}: {err}"))

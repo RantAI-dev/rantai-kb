@@ -16,7 +16,7 @@ pub fn parse_json<T: DeserializeOwned + Default>(body: &[u8]) -> T {
     serde_json::from_slice(body).unwrap_or_default()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct SearchRequestDto {
     /// Left as raw JSON: the TypeScript route rejects a non-string query with
     /// its own 400, which a typed field would turn into a parser error.

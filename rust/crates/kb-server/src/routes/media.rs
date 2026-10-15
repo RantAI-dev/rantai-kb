@@ -8,12 +8,12 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::header::{CONTENT_DISPOSITION, CONTENT_TYPE};
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use kb_ports::{EntityView, RelationView};
 use serde::{Deserialize, Serialize};
 
@@ -215,8 +215,14 @@ mod tests {
         assert_eq!(asset_content_type("a/b/fig-1.JPG"), "image/jpeg");
         assert_eq!(asset_content_type("a/b/fig-1.webp"), "image/webp");
         assert_eq!(asset_content_type("a/b/fig-1.gif"), "image/gif");
-        assert_eq!(asset_content_type("a/b/fig-1.bin"), "application/octet-stream");
-        assert_eq!(asset_content_type("noextension"), "application/octet-stream");
+        assert_eq!(
+            asset_content_type("a/b/fig-1.bin"),
+            "application/octet-stream"
+        );
+        assert_eq!(
+            asset_content_type("noextension"),
+            "application/octet-stream"
+        );
     }
 
     #[test]

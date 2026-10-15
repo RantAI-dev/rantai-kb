@@ -7,11 +7,11 @@
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 use kb_ports::{
     CategoryRecord, CreateCategory, CreateKnowledgeBase, KnowledgeBaseId, KnowledgeBaseRecord,
     PatchCategory, PatchKnowledgeBase,
@@ -92,11 +92,7 @@ pub async fn create_knowledge_base(
         )
         .await
         .map_err(ApiError::from)?;
-    Ok((
-        StatusCode::CREATED,
-        Json(KnowledgeBaseView::from(created)),
-    )
-        .into_response())
+    Ok((StatusCode::CREATED, Json(KnowledgeBaseView::from(created))).into_response())
 }
 
 /// `PATCH /v1/knowledge-bases/:id`. Absent fields are untouched; an empty body

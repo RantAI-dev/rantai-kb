@@ -386,8 +386,13 @@ impl IngestWorker {
             figures: policy.figures,
         };
 
-        self.progress(job, StepProgress::of(IngestStep::Extracting), started, &flags)
-            .await;
+        self.progress(
+            job,
+            StepProgress::of(IngestStep::Extracting),
+            started,
+            &flags,
+        )
+        .await;
 
         let options = ExtractionOptions {
             figures: policy.figures,
@@ -509,7 +514,9 @@ impl IngestWorker {
         if chunks.is_empty() {
             // The Bun worker reaches the same place: `storeChunks` returns
             // early on an empty batch, and the document is still marked ready.
-            return self.finish_ready(job, document_id, 0, started, &flags).await;
+            return self
+                .finish_ready(job, document_id, 0, started, &flags)
+                .await;
         }
 
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
@@ -654,11 +661,7 @@ impl IngestWorker {
             entity_idx = entity_idx.saturating_add(1);
             self.progress(
                 job,
-                StepProgress::at(
-                    IngestStep::ExtractingEntities,
-                    entity_idx,
-                    total_entities,
-                ),
+                StepProgress::at(IngestStep::ExtractingEntities, entity_idx, total_entities),
                 started,
                 flags,
             )
@@ -723,7 +726,13 @@ impl IngestWorker {
                 let rel_type: String = raw_rel
                     .to_uppercase()
                     .chars()
-                    .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+                    .map(|c| {
+                        if c.is_ascii_alphanumeric() || c == '_' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
                     .collect();
                 let rel_type = rel_type.trim_matches('_');
                 let rel_type = if rel_type.is_empty() {
@@ -827,9 +836,7 @@ impl IngestWorker {
                 .upload(&key, fig.image_bytes.clone(), "image/png")
                 .await
             {
-                tracing::warn!(
-                    "[figure-assets] upload failed for {key}, skipping figure: {e}"
-                );
+                tracing::warn!("[figure-assets] upload failed for {key}, skipping figure: {e}");
                 continue;
             }
 
@@ -940,8 +947,13 @@ impl IngestWorker {
                 tracing::error!(error = %err, "could not mark document failed");
             }
         }
-        self.emit_terminal(job, "failed", job.document_id.as_ref().map(|d| d.0.as_str()), reason)
-            .await;
+        self.emit_terminal(
+            job,
+            "failed",
+            job.document_id.as_ref().map(|d| d.0.as_str()),
+            reason,
+        )
+        .await;
     }
 
     /// Record progress. A failed progress write is logged and dropped: it must
@@ -1022,7 +1034,9 @@ impl IngestWorker {
         let now = Instant::now();
         let prev = state.insert(job_id.to_string(), (now, step.to_string()));
         match prev {
-            Some((at, prev_step)) if prev_step == step && now.duration_since(at) < PROGRESS_EMIT_MIN_GAP => {
+            Some((at, prev_step))
+                if prev_step == step && now.duration_since(at) < PROGRESS_EMIT_MIN_GAP =>
+            {
                 false
             }
             _ => true,
