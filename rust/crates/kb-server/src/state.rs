@@ -5,13 +5,15 @@ use std::sync::Arc;
 use kb_engine::{Engine, EngineInputs, EngineSettings, NoopExpander, QueryExpander};
 use kb_inference::EmbedderSettings;
 use kb_inference::ExpansionSettings;
-use kb_ports::{DocumentStore, Embedder, PortError};
+use kb_ports::{BlobStore, DocumentStore, Embedder, PortError};
 
 use crate::config::{EmbedderConfig, RerankerConfig};
 
 pub struct AppState {
     pub documents: Arc<dyn DocumentStore>,
     pub chunks: Arc<dyn kb_ports::ChunkStore>,
+    /// Object storage. Only the hard-delete path calls it today.
+    pub blob: Arc<dyn BlobStore>,
     pub embedder: Arc<dyn Embedder>,
     pub engine: Engine,
 }
@@ -27,6 +29,9 @@ impl AppState {
         let chunks: Arc<dyn kb_ports::ChunkStore> = Arc::new(
             kb_store_surreal::SurrealChunkStore::new(config.surreal)
                 .map_err(|e| anyhow::anyhow!("surreal: {e}"))?,
+        );
+        let blob: Arc<dyn BlobStore> = Arc::new(
+            kb_store_blob::S3BlobStore::new(config.s3).map_err(|e| anyhow::anyhow!("s3: {e}"))?,
         );
         let embedder: Arc<dyn Embedder> = Arc::new(
             kb_inference::EmbedderImpl::new(embedder_settings_from(config.embedder.clone()))
@@ -53,6 +58,7 @@ impl AppState {
         Ok(Self {
             documents,
             chunks,
+            blob,
             embedder,
             engine,
         })
@@ -64,6 +70,7 @@ impl AppState {
     pub fn from_arcs(
         documents: Arc<dyn DocumentStore>,
         chunks: Arc<dyn kb_ports::ChunkStore>,
+        blob: Arc<dyn BlobStore>,
         embedder: Arc<dyn Embedder>,
         reranker: Arc<dyn kb_ports::Reranker>,
         engine_settings: EngineSettings,
@@ -80,6 +87,7 @@ impl AppState {
         Self {
             documents,
             chunks,
+            blob,
             embedder,
             engine,
         }

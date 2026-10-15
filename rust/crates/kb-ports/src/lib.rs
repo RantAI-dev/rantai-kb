@@ -6,19 +6,23 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+mod blob;
 mod error;
 mod ids;
 mod scope;
 mod traits;
 mod types;
 
+pub use blob::{BlobStore, asset_path, document_path, sanitize_filename};
 pub use error::{EngineError, PortError, RetrievalDegrade};
 pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 pub use scope::{DocumentScope, adapter};
 pub use traits::{
-    ChunkStore, DocumentFilter, DocumentStore, Embedder, NeighbourAnchor, Reranker, ScopeRequest,
+    ChunkStore, DocumentFilter, DocumentStore, Embedder, Extractor, JobStore, NeighbourAnchor,
+    Reranker, ScopeRequest,
 };
 pub use types::{
-    AuthContext, Chunk, ChunkMetadata, ChunkType, DocumentMeta, KnowledgeBaseSummary,
-    RerankCandidate, RerankResult, RerankScore, SearchHit,
+    AuthContext, Chunk, ChunkMetadata, ChunkToStore, ChunkType, DocumentMeta, ExtractedFigure,
+    ExtractionResult, JobRecord, KnowledgeBaseSummary, RerankCandidate, RerankResult, RerankScore,
+    SearchHit,
 };

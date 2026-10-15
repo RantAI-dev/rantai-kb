@@ -2,11 +2,13 @@
 
 use async_trait::async_trait;
 use kb_ports::{
-    ChunkMetadata, ChunkStore, DocumentId, DocumentScope, NeighbourAnchor, PortError, SearchHit,
+    ChunkMetadata, ChunkStore, ChunkToStore, DocumentId, DocumentScope, NeighbourAnchor, PortError,
+    SearchHit,
 };
 
 use crate::bm25::execute_bm25_search;
 use crate::chunks_meta::{execute_chunk_counts, execute_ordered_chunks};
+use crate::chunks_write::execute_store_chunks;
 use crate::client::SurrealChunkStore;
 use crate::figures::execute_figures;
 use crate::neighbours::execute_neighbours;
@@ -64,6 +66,15 @@ impl ChunkStore for SurrealChunkStore {
 
     async fn delete_by_document(&self, document_id: &DocumentId) -> Result<u64, PortError> {
         crate::chunks_meta::execute_delete_by_document(self, document_id).await
+    }
+
+    async fn store_chunks(
+        &self,
+        document_id: &DocumentId,
+        chunks: &[ChunkToStore],
+        embedding_model: Option<&str>,
+    ) -> Result<(), PortError> {
+        execute_store_chunks(self, document_id, chunks, embedding_model).await
     }
 
     async fn chunk_counts(

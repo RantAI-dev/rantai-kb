@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use kb_engine::EngineSettings;
 use kb_inference::ExpansionSettings;
+use kb_store_blob::S3Settings;
 use kb_store_pg::PgSettings;
 use kb_store_surreal::SurrealSettings;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ pub struct Config {
     pub bind_addr: String,
     pub pg: PgSettings,
     pub surreal: SurrealSettings,
+    pub s3: S3Settings,
     pub embedder: EmbedderConfig,
     pub reranker: RerankerConfig,
     pub expansion: ExpansionSettings,
@@ -152,6 +154,18 @@ impl Config {
             request_timeout: Duration::from_secs(10),
         };
 
+        // Object storage. Empty credentials stay empty: the adapter then sends
+        // anonymous requests, which is what the Bun adapter does too.
+        let s3 = S3Settings {
+            endpoint: lookup("S3_ENDPOINT").unwrap_or_else(|| "http://localhost:9000".into()),
+            region: lookup("S3_REGION").unwrap_or_else(|| "us-east-1".into()),
+            bucket: lookup("S3_BUCKET").unwrap_or_else(|| "rantai-kb".into()),
+            access_key_id: lookup("S3_ACCESS_KEY_ID").unwrap_or_default(),
+            secret_access_key: lookup("S3_SECRET_ACCESS_KEY").unwrap_or_default(),
+            force_path_style: lookup("S3_ENABLE_PATH_STYLE").as_deref() != Some("0"),
+            request_timeout: Duration::from_secs(30),
+        };
+
         let embedder = EmbedderConfig {
             base_url: embedding_base_url,
             model: embedding_model,
@@ -179,6 +193,7 @@ impl Config {
             bind_addr,
             pg,
             surreal,
+            s3,
             embedder,
             reranker,
             expansion,
@@ -332,6 +347,12 @@ mod tests {
         map.insert("KB_RERANK_API_KEY", "unused-for-tei");
         map.insert("KB_EMBEDDING_QUERY_PREFIX", "query: ");
         map.insert("KB_EMBEDDING_PASSAGE_PREFIX", "passage: ");
+        map.insert("S3_ENDPOINT", "http://s3.local:9000");
+        map.insert("S3_REGION", "ap-southeast-1");
+        map.insert("S3_BUCKET", "custom-bucket");
+        map.insert("S3_ACCESS_KEY_ID", "custom-key");
+        map.insert("S3_SECRET_ACCESS_KEY", "custom-secret");
+        map.insert("S3_ENABLE_PATH_STYLE", "1");
 
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
@@ -361,6 +382,11 @@ mod tests {
         assert_eq!(cfg.expansion.model, "custom/expander");
         assert_eq!(cfg.embedder.query_prefix, "query: ");
         assert_eq!(cfg.embedder.passage_prefix, "passage: ");
+        assert_eq!(cfg.s3.endpoint, "http://s3.local:9000");
+        assert_eq!(cfg.s3.region, "ap-southeast-1");
+        assert_eq!(cfg.s3.bucket, "custom-bucket");
+        assert_eq!(cfg.s3.access_key_id, "custom-key");
+        assert!(cfg.s3.force_path_style);
         match &cfg.reranker {
             RerankerConfig::Tei { base_url, model } => {
                 assert_eq!(base_url, "http://tei.local:80");
@@ -387,6 +413,24 @@ mod tests {
         assert!(!cfg.engine.expansion_enabled);
         assert_eq!(cfg.engine.expansion_paraphrases, 3);
         assert!(matches!(cfg.reranker, RerankerConfig::Disabled));
+        // Object storage defaults match the Bun adapter.
+        assert_eq!(cfg.s3.endpoint, "http://localhost:9000");
+        assert_eq!(cfg.s3.region, "us-east-1");
+        assert_eq!(cfg.s3.bucket, "rantai-kb");
+        assert_eq!(cfg.s3.access_key_id, "");
+        assert!(cfg.s3.force_path_style);
+    }
+
+    #[test]
+    fn test_path_style_can_be_disabled() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("SURREAL_DB_URL", "http://localhost:8000");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("S3_ENABLE_PATH_STYLE", "0");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert!(!cfg.s3.force_path_style);
     }
 
     #[test]

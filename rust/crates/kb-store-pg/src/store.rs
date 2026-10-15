@@ -14,7 +14,7 @@ use crate::auth::resolve_api_key_query;
 use crate::documents::row_to_doc_meta;
 use crate::queries::{
     MAX_LIMIT, SELECT_ALIVE_BY_IDS, SELECT_BY_ID, SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB,
-    SELECT_KNOWLEDGE_BASES,
+    SELECT_KNOWLEDGE_BASES, SET_DOCUMENT_STATUS, UPDATE_EXTRACTED_CONTENT,
 };
 
 /// Postgres pool settings.
@@ -295,6 +295,37 @@ impl DocumentStore for PgDocumentStore {
             });
         }
         Ok(out)
+    }
+
+    async fn update_extracted_content(
+        &self,
+        id: &DocumentId,
+        content: &str,
+        file_type: Option<&str>,
+        file_size: Option<i32>,
+    ) -> Result<(), PortError> {
+        // The statement is built with only bound parameters, so a document with
+        // no extracted `fileType` clears the column rather than writing NULL
+        // into a nullable-but-meaningful field.
+        sqlx::query(UPDATE_EXTRACTED_CONTENT)
+            .bind(id.as_str())
+            .bind(content)
+            .bind(file_type)
+            .bind(file_size)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg update content: {e}")))?;
+        Ok(())
+    }
+
+    async fn set_status(&self, id: &DocumentId, status: &str) -> Result<(), PortError> {
+        sqlx::query(SET_DOCUMENT_STATUS)
+            .bind(id.as_str())
+            .bind(status)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg set_status: {e}")))?;
+        Ok(())
     }
 
     async fn resolve_api_key(&self, plaintext_key: &str) -> Result<Option<AuthContext>, PortError> {

@@ -11,6 +11,7 @@ members = [
     "crates/kb-inference",
     "crates/kb-store-pg",
     "crates/kb-store-surreal",
+    "crates/kb-store-blob",
     "crates/kb-engine",
     "crates/kb-server",
 ]
@@ -36,6 +37,8 @@ tower = "0.5.2"
 tower-http = { version = "0.6.6", features = ["trace"] }
 sha2 = "0.10.9"
 hex = "0.4.3"
+hmac = "0.12.1"
+chrono = "0.4.41"
 fancy-regex = "0.14.0"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
@@ -60,8 +63,8 @@ print_stdout = "deny"
 print_stderr = "deny"
 
 # The compile-friendliest profile: no debug info for dependencies, minimal opt.
-# This is the difference between "all crates fit in the budget" and "OOM killed
-# at link time" on this 2 GB free-memory machine.
+# This is the difference between "all crates fit in the budget" and "OOM killed"
+# at link time on this 2 GB free-memory machine.
 [profile.dev]
 debug = 0
 incremental = true

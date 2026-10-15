@@ -69,6 +69,23 @@ pub fn surql_f32_array(v: &[f32]) -> String {
     format!("[{}]", parts.join(", "))
 }
 
+/// Render a string as a SurrealQL double-quoted literal.
+///
+/// `serde_json` escaping is a superset of SurrealQL's inside a quoted string,
+/// and it is the only escaping in this module that has been reasoned about
+/// against arbitrary input: a `"` becomes `\"` and a newline becomes `\n`, so
+/// no caller-supplied text can terminate the literal and append a statement.
+#[must_use]
+pub fn surql_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// Render a JSON value as a SurrealQL literal.
+#[must_use]
+pub fn surql_json(value: &serde_json::Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "null".to_string())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {

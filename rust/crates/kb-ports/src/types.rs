@@ -79,6 +79,64 @@ pub struct Chunk {
     pub metadata: ChunkMetadata,
 }
 
+/// A chunk on its way into the vector store.
+///
+/// `metadata` is the object stored verbatim in SurrealDB's `metadata` column,
+/// so it carries the field names the Bun chunker writes (`documentTitle`,
+/// `category`, `section`, `chunkIndex`, `chunkType`, …) rather than the
+/// read-shape of [`ChunkMetadata`]. Keeping it opaque is what lets a Rust
+/// worker write chunks the Bun retrieval path reads back unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkToStore {
+    pub content: String,
+    pub chunk_index: u32,
+    pub embedding: Vec<f32>,
+    pub metadata: serde_json::Value,
+    /// Written to the `contextual_prefix` column when present. SurrealDB
+    /// rejects an explicit NULL for `option<string>`, so the adapter omits the
+    /// assignment instead.
+    pub contextual_prefix: Option<String>,
+}
+
+/// One row of the Postgres `IngestJob` queue, as handed to a worker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobRecord {
+    pub id: String,
+    pub tenant_id: TenantId,
+    /// `externalRef` in the schema: the user who uploaded the file, if known.
+    pub user_id: Option<String>,
+    pub document_id: Option<DocumentId>,
+    pub s3_key: Option<String>,
+    pub filename: String,
+    pub mime_type: Option<String>,
+    pub attempt: i32,
+    /// Job parameters written at enqueue time (title, categories, figure mode…).
+    pub params: Option<serde_json::Value>,
+}
+
+/// Result of running an [`Extractor`](crate::Extractor) over a stored file.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExtractionResult {
+    pub content: String,
+    /// Format of `content` after extraction (`"markdown"`, `"text"`, …).
+    pub file_type: String,
+    /// Figures the layout parser found. Empty for text-only formats.
+    pub figures: Vec<ExtractedFigure>,
+}
+
+/// One figure crop lifted out of a document by a layout extractor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractedFigure {
+    pub kind: String,
+    pub page: u32,
+    /// `[x0, y0, x1, y1]` in page points.
+    pub bbox: [f32; 4],
+    pub caption: Option<String>,
+    /// Crop bytes. Stored as an asset by the caller; kept raw here so the port
+    /// does not force an image encoding choice on every extractor.
+    pub image_bytes: Vec<u8>,
+}
+
 /// A single hit from one retrieval arm. Multiple arms are fused upstream into a
 /// ranked list; this is the raw material that goes in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +176,9 @@ pub struct DocumentMeta {
     pub file_type: Option<String>,
     pub file_size: Option<i32>,
     pub mime_type: Option<String>,
+    /// Object-store key of the stored original file, when the document has one.
+    /// Hard delete removes this object.
+    pub s3_key: Option<String>,
     /// RFC 3339 timestamps, UTC.
     pub created_at: String,
     pub updated_at: String,

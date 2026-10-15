@@ -9,11 +9,13 @@
 
 mod auth;
 mod documents;
+mod jobs;
 mod queries;
 mod store;
 
 pub use auth::hash_api_key;
 pub use documents::row_to_doc_meta;
+pub use jobs::PgJobStore;
 pub use store::{PgDocumentStore, PgSettings};
 
 #[cfg(test)]
@@ -32,6 +34,15 @@ mod tests {
         let h2 = hash_api_key("rkb_demo");
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 64); // SHA-256 hex
+    }
+
+    #[test]
+    fn api_key_and_job_statements_exist() {
+        // Both stores read the same schema; losing a constant silently would
+        // only show up as a runtime 500.
+        assert!(queries::SELECT_API_KEY.contains("\"ApiKey\""));
+        assert!(queries::CLAIM_NEXT_PENDING.contains("\"IngestJob\""));
+        assert!(queries::SET_DOCUMENT_STATUS.contains("\"Document\""));
     }
 
     #[test]

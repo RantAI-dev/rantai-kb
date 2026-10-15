@@ -39,6 +39,16 @@ jobs:
       - name: Unit tests
         run: bun run test
 
+      - name: Scope token isolation check
+        run: |
+          if git grep -n "new_for_adapter" rust/crates/ \
+            ':!rust/crates/kb-ports' \
+            ':!rust/crates/kb-store-pg' \
+            ':!rust/crates/kb-engine/src/fakes.rs'; then
+            echo "ERROR: new_for_adapter called outside adapter/fakes!"
+            exit 1
+          fi
+
   docker:
     name: Docker image builds
     runs-on: ubuntu-latest

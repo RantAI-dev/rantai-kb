@@ -1,15 +1,19 @@
 //! Port definitions (driven traits). The engine and CLI interact with external
 //! systems solely through these interfaces.
+//!
+//! Every external dependency — Postgres, SurrealDB, object storage, embedding,
+//! reranking, text extraction — sits behind a trait here.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use crate::error::PortError;
 use crate::ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 use crate::scope::DocumentScope;
 use crate::types::{
-    AuthContext, ChunkMetadata, DocumentMeta, KnowledgeBaseSummary, RerankCandidate, RerankResult,
-    SearchHit,
+    AuthContext, ChunkMetadata, ChunkToStore, DocumentMeta, ExtractionResult, JobRecord,
+    KnowledgeBaseSummary, RerankCandidate, RerankResult, SearchHit,
 };
 
 /// What the chunk store is allowed to look at. Currently the empty case is
@@ -91,6 +95,24 @@ pub trait DocumentStore: Send + Sync {
     /// Look up the tenant and auth context for a presented API key. Returns `None`
     /// if the key is unknown, revoked, or hashed differently.
     async fn resolve_api_key(&self, plaintext_key: &str) -> Result<Option<AuthContext>, PortError>;
+
+    /// Write the extracted text and file metadata of a document.
+    ///
+    /// Mirrors the `content` / `fileType` / `fileSize` update the ingest worker
+    /// performs after extraction, before chunking.
+    async fn update_extracted_content(
+        &self,
+        id: &DocumentId,
+        content: &str,
+        file_type: Option<&str>,
+        file_size: Option<i32>,
+    ) -> Result<(), PortError>;
+
+    /// Set a document's ingest status (`"ready"`, `"failed"`, `"processing"`).
+    ///
+    /// Failure to update is logged and swallowed by the worker, as in the TS
+    /// adapter, so a missing row does not mask the job's own outcome.
+    async fn set_status(&self, id: &DocumentId, status: &str) -> Result<(), PortError>;
 }
 
 /// Chunk store: vector + BM25 + neighbours + figure co-retrieval over the
@@ -128,6 +150,18 @@ pub trait ChunkStore: Send + Sync {
     /// number removed. Visibility is the caller's job.
     async fn delete_by_document(&self, document_id: &DocumentId) -> Result<u64, PortError>;
 
+    /// Write a batch of chunks for one document.
+    ///
+    /// Record ids are `${document_id}_${i}` by index, so a re-run of the same
+    /// batch replaces rather than duplicates. `embedding_model` is stored only
+    /// when present, because SurrealDB rejects a literal NULL for `option<T>`.
+    async fn store_chunks(
+        &self,
+        document_id: &DocumentId,
+        chunks: &[ChunkToStore],
+        embedding_model: Option<&str>,
+    ) -> Result<(), PortError>;
+
     /// Chunk counts per document, from SurrealDB `document_chunk`. Missing ids
     /// are absent from the result and count as 0 at the call site.
     async fn chunk_counts(
@@ -154,7 +188,63 @@ pub trait ChunkStore: Send + Sync {
     ) -> Result<Vec<SearchHit>, PortError>;
 }
 
-/// Text embedder (dense vectors).
+/// Ingest job queue (Postgres `IngestJob`).
+///
+/// The queue is shared with the Bun workers: a Rust worker and a Bun worker
+/// polling the same table must never take the same row, so `claim_next_pending`
+/// uses `FOR UPDATE SKIP LOCKED` and the column names match the TS adapter.
+#[async_trait]
+pub trait JobStore: Send + Sync {
+    /// Atomically flip the oldest `pending` job to `processing` and return it.
+    /// Returns `None` when there is nothing to do.
+    async fn claim_next_pending(&self) -> Result<Option<JobRecord>, PortError>;
+
+    /// Persist step and overall progress for a claimed job. Best-effort: a
+    /// failure here must not fail the ingest.
+    async fn update_progress(
+        &self,
+        job_id: &str,
+        step: &str,
+        progress: u32,
+        step_current: Option<u32>,
+        step_total: Option<u32>,
+        eta_seconds: Option<i32>,
+    ) -> Result<(), PortError>;
+
+    /// Terminal success: status `success`, document linked, progress 100.
+    async fn finish_success(&self, job_id: &str, document_id: &DocumentId)
+    -> Result<(), PortError>;
+
+    /// Terminal failure: status `failed`, error truncated to 1000 characters.
+    /// The stored file is kept so the job can be replayed without re-upload.
+    async fn finish_failure(&self, job_id: &str, error: &str) -> Result<(), PortError>;
+
+    /// Touch `updatedAt` so the stale reclaim does not eat a live job during a
+    /// long emit-less step.
+    async fn touch(&self, job_id: &str) -> Result<(), PortError>;
+
+    /// Crash recovery. Jobs left `processing` with no update for `stale_after`
+    /// go back to `pending` with the attempt counter incremented, or to `failed`
+    /// once `max_attempts` is reached. Returns how many were reclaimed.
+    async fn reclaim_stale(
+        &self,
+        stale_after: Duration,
+        max_attempts: i32,
+    ) -> Result<u64, PortError>;
+}
+
+/// Turns a stored file into text. Implementations wrap MinerU, a VLM endpoint,
+/// or one of the local parsers; the port only cares about the result shape.
+#[async_trait]
+pub trait Extractor: Send + Sync {
+    /// Extract text (and, when the format has them, figures) from `file_bytes`.
+    async fn extract(
+        &self,
+        filename: &str,
+        mime_type: &str,
+        file_bytes: &[u8],
+    ) -> Result<ExtractionResult, PortError>;
+}
 #[async_trait]
 pub trait Embedder: Send + Sync {
     /// Embed a single query string for retrieval.

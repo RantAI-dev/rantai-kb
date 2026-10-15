@@ -13,6 +13,7 @@ pub fn row_to_doc_meta(row: &sqlx::postgres::PgRow) -> Result<DocumentMeta, sqlx
     let file_type: Option<String> = row.try_get("file_type")?;
     let file_size: Option<i32> = row.try_get("file_size")?;
     let mime_type: Option<String> = row.try_get("mime_type")?;
+    let s3_key: Option<String> = row.try_get("s3_key").ok();
     let created_at: String = row.try_get("created_at")?;
     let updated_at: String = row.try_get("updated_at")?;
     let knowledge_base_ids: Vec<String> = row.try_get("knowledge_base_ids")?;
@@ -27,6 +28,7 @@ pub fn row_to_doc_meta(row: &sqlx::postgres::PgRow) -> Result<DocumentMeta, sqlx
         file_type,
         file_size,
         mime_type,
+        s3_key,
         created_at,
         updated_at,
         knowledge_base_ids,

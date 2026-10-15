@@ -2,11 +2,19 @@
 //!
 //! Every `ChunkStore` search takes `&DocumentScope`. A scope is resolved by a
 //! `DocumentStore` adapter (tenant filter plus soft-delete exclusion) and can
-//! afterwards only shrink through [`DocumentScope::narrowed_to`]. Constructing a
-//! scope from nothing requires an [`adapter::ScopeToken`], and that type is only
-//! compiled when the `scope-adapter` cargo feature is enabled. The feature is
-//! enabled by `kb-store-pg` and by `kb-engine`'s test fakes, not by the server,
-//! so application code cannot mint a scope with a fresh token.
+//! afterwards only shrink through [`DocumentScope::narrowed_to`].
+//!
+//! # Scope Sealing Guarantee
+//!
+//! Constructing a scope requires an [`adapter::ScopeToken`]. Note that because
+//! Cargo feature unification enables `scope-adapter` across all crates in a
+//! workspace compilation unit whenever `kb-store-pg` is linked, Cargo features
+//! alone cannot prevent `kb-server` from seeing `ScopeToken` at compile time.
+//!
+//! What is guaranteed:
+//! 1. `ScopeToken` exists only when the `scope-adapter` feature is enabled on `kb-ports`.
+//! 2. A CI grep check guarantees that `new_for_adapter` is never called outside
+//!    `kb-store-pg` and the engine test fakes (`kb-engine/src/fakes.rs`).
 
 use serde::{Deserialize, Serialize};
 
@@ -23,8 +31,7 @@ pub mod adapter {
     }
 
     impl ScopeToken {
-        /// Create a token. Only adapter crates may enable the feature that
-        /// makes this reachable.
+        /// Create a token. Only adapter crates and test fakes may call this.
         #[must_use]
         pub const fn new_for_adapter() -> Self {
             Self { _private: () }

@@ -10,6 +10,7 @@
 
 mod bm25;
 mod chunks_meta;
+mod chunks_write;
 mod client;
 mod figures;
 mod neighbours;
