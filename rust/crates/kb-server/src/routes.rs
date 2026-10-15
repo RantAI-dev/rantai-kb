@@ -49,15 +49,11 @@ pub struct DeleteResponse {
     pub ok: bool,
     /// Chunks removed from SurrealDB (hard delete only).
     pub chunks_removed: u64,
-    /// Blob key of a hard-deleted document. The blob store adapter is not
-    /// ported yet, so the object is not removed here; the key is reported so
-    /// it can be cleaned up.
-    pub blob_key_pending: Option<String>,
 }
 
 /// `DELETE /v1/documents/:id`. Mirrors TS deleteDocument: needs `kb:write`;
 /// soft delete sets `deletedAt` and leaves chunks and the blob alone; hard
-/// delete (`?hard=true`) removes the chunks, then the row.
+/// delete (`?hard=true`) removes the chunks, then the stored object, then the row.
 async fn delete_document(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -69,6 +65,25 @@ async fn delete_document(
     }
     let doc_id = DocumentId::new_unchecked(id);
     let hard = q.hard.as_deref() == Some("true");
+
+    // Resolve the document inside the caller's tenant scope before touching
+    // anything. The Bun route 404s on the tenant-filtered lookup, so a hard
+    // delete must not reach the chunk store first and wipe another tenant's
+    // chunks on its way to the same 404.
+    let scope = state
+        .documents
+        .build_scope(&ScopeRequest {
+            tenant: auth.tenant_id.clone(),
+            filter: DocumentFilter::default(),
+        })
+        .await
+        .map_err(ApiError::from)?;
+    let doc = state
+        .documents
+        .find_by_id(&scope, &doc_id)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
 
     if !hard {
         let deleted = state
@@ -82,12 +97,13 @@ async fn delete_document(
         return Ok(Json(DeleteResponse {
             ok: true,
             chunks_removed: 0,
-            blob_key_pending: None,
         }));
     }
 
-    // Same order as TS: chunks first, then the row. A chunk-delete failure is
-    // logged and does not stop the row delete, as in TS.
+    // Chunks first, then the stored object, then the row. A chunk-delete or
+    // blob-delete failure is logged and does not stop the row delete: the row
+    // is what makes the document invisible, and leaving it behind would keep a
+    // document the user deleted in their list.
     let chunks_removed = match state.chunks.delete_by_document(&doc_id).await {
         Ok(n) => n,
         Err(err) => {
@@ -95,16 +111,23 @@ async fn delete_document(
             0
         }
     };
-    let blob_key = state
+    if let Some(s3_key) = doc.s3_key.as_deref() {
+        if let Err(err) = state.blob.delete(s3_key).await {
+            tracing::warn!(error = %err, s3_key, "blob delete failed during hard delete");
+        }
+    }
+
+    let removed = state
         .documents
         .hard_delete(&auth.tenant_id, &doc_id)
         .await
-        .map_err(ApiError::from)?
-        .ok_or(ApiError::NotFound)?;
+        .map_err(ApiError::from)?;
+    if removed.is_none() {
+        return Err(ApiError::NotFound);
+    }
     Ok(Json(DeleteResponse {
         ok: true,
         chunks_removed,
-        blob_key_pending: blob_key,
     }))
 }
 

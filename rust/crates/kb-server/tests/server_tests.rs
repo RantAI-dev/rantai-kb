@@ -6,16 +6,22 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use kb_engine::EngineSettings;
 use kb_engine::fakes::{
-    FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeReranker, make_fake_hit,
+    FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeReranker, make_fake_hit,
 };
-use kb_ports::{DocumentId, DocumentMeta, TenantId};
+use kb_ports::{ChunkToStore, DocumentId, DocumentMeta, TenantId};
 use kb_server::dto::SearchResponseDto;
 use kb_server::state::AppState;
 use tower::ServiceExt;
 
-fn setup_test_app() -> (axum::Router, FakeDocumentStore, FakeChunkStore) {
+fn setup_test_app() -> (
+    axum::Router,
+    FakeDocumentStore,
+    FakeChunkStore,
+    FakeBlobStore,
+) {
     let doc_store = FakeDocumentStore::default();
     let chunk_store = FakeChunkStore::default();
+    let blob_store = FakeBlobStore::default();
     let embedder = FakeEmbedder::default();
     let reranker = FakeReranker::default();
 
@@ -34,18 +40,19 @@ fn setup_test_app() -> (axum::Router, FakeDocumentStore, FakeChunkStore) {
     let state = AppState::from_arcs(
         Arc::new(doc_store.clone()),
         Arc::new(chunk_store.clone()),
+        Arc::new(blob_store.clone()),
         Arc::new(embedder),
         Arc::new(reranker),
         settings,
     );
 
     let app = kb_server::build_router(state);
-    (app, doc_store, chunk_store)
+    (app, doc_store, chunk_store, blob_store)
 }
 
 #[tokio::test]
 async fn test_missing_key_returns_401() {
-    let (app, _, _) = setup_test_app();
+    let (app, _, _, _) = setup_test_app();
 
     let request = Request::builder()
         .uri("/v1/search")
@@ -60,7 +67,7 @@ async fn test_missing_key_returns_401() {
 
 #[tokio::test]
 async fn test_key_without_kb_read_returns_403() {
-    let (app, doc_store, _) = setup_test_app();
+    let (app, doc_store, _, _) = setup_test_app();
     doc_store.insert_api_key_with_scopes(
         "write-only-key",
         TenantId("tenant-1".into()),
@@ -82,7 +89,7 @@ async fn test_key_without_kb_read_returns_403() {
 
 #[tokio::test]
 async fn test_search_happy_path_fields() {
-    let (app, doc_store, chunk_store) = setup_test_app();
+    let (app, doc_store, chunk_store, _) = setup_test_app();
     let tenant = TenantId("tenant-1".into());
     doc_store.insert_api_key("valid-key", tenant.clone());
 
@@ -99,6 +106,7 @@ async fn test_search_happy_path_fields() {
             file_type: None,
             file_size: None,
             mime_type: None,
+            s3_key: None,
             created_at: "2026-01-01T00:00:00.000Z".into(),
             updated_at: "2026-01-01T00:00:00.000Z".into(),
             knowledge_base_ids: vec![],
@@ -143,7 +151,7 @@ async fn test_search_happy_path_fields() {
 
 #[tokio::test]
 async fn test_tenant_b_key_searching_fakes_with_tenant_a_docs_gets_zero_results() {
-    let (app, doc_store, chunk_store) = setup_test_app();
+    let (app, doc_store, chunk_store, _) = setup_test_app();
 
     // Tenant A owns doc-a
     let tenant_a = TenantId("tenant-a".into());
@@ -160,6 +168,7 @@ async fn test_tenant_b_key_searching_fakes_with_tenant_a_docs_gets_zero_results(
             file_type: None,
             file_size: None,
             mime_type: None,
+            s3_key: None,
             created_at: "2026-01-01T00:00:00.000Z".into(),
             updated_at: "2026-01-01T00:00:00.000Z".into(),
             knowledge_base_ids: vec![],
@@ -234,6 +243,7 @@ fn delete_test_doc(id: &str) -> DocumentMeta {
         file_type: None,
         file_size: None,
         mime_type: None,
+        s3_key: None,
         created_at: "2026-01-01T00:00:00Z".into(),
         updated_at: "2026-01-01T00:00:00Z".into(),
         knowledge_base_ids: vec![],
@@ -253,7 +263,7 @@ async fn send_delete(app: axum::Router, uri: &str, key: &str) -> StatusCode {
 
 #[tokio::test]
 async fn test_delete_without_kb_write_returns_403() {
-    let (app, doc_store, _) = setup_test_app();
+    let (app, doc_store, _, _) = setup_test_app();
     doc_store.insert_api_key_with_scopes(
         "read-only-key",
         TenantId("tenant-1".into()),
@@ -274,7 +284,7 @@ async fn test_delete_without_kb_write_returns_403() {
 
 #[tokio::test]
 async fn test_soft_delete_hides_document_from_reads() {
-    let (app, doc_store, _) = setup_test_app();
+    let (app, doc_store, _, _) = setup_test_app();
     doc_store.insert_api_key_with_scopes(
         "writer-key",
         TenantId("tenant-1".into()),
@@ -302,7 +312,7 @@ async fn test_soft_delete_hides_document_from_reads() {
 
 #[tokio::test]
 async fn test_delete_other_tenant_document_is_not_found() {
-    let (app, doc_store, _) = setup_test_app();
+    let (app, doc_store, _, _) = setup_test_app();
     doc_store.insert_api_key_with_scopes(
         "tenant-2-key",
         TenantId("tenant-2".into()),
@@ -323,7 +333,7 @@ async fn test_delete_other_tenant_document_is_not_found() {
 
 #[tokio::test]
 async fn test_hard_delete_removes_document() {
-    let (app, doc_store, _) = setup_test_app();
+    let (app, doc_store, _, _) = setup_test_app();
     doc_store.insert_api_key_with_scopes(
         "hard-key",
         TenantId("tenant-1".into()),
@@ -337,4 +347,82 @@ async fn test_hard_delete_removes_document() {
         StatusCode::OK
     );
     assert!(doc_store.docs.read().unwrap()[&TenantId("tenant-1".into())].is_empty());
+}
+
+#[tokio::test]
+async fn test_hard_delete_cross_tenant_returns_404_and_leaves_chunks_unchanged() {
+    let (app, doc_store, chunk_store, _) = setup_test_app();
+
+    // Tenant A owns document doc-tenant-a
+    let tenant_a = TenantId("tenant-a".into());
+    let doc_id = DocumentId("doc-tenant-a".into());
+    let mut doc = delete_test_doc("doc-tenant-a");
+    doc.s3_key = Some("documents/tenant-a/doc-tenant-a/sample.pdf".into());
+    doc_store.insert_doc(tenant_a.clone(), doc);
+
+    // Tenant A document has 2 chunks stored
+    let fake_chunks = vec![
+        ChunkToStore {
+            content: "chunk 1 content".into(),
+            chunk_index: 0,
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            metadata: serde_json::json!({"chunkIndex": 0, "documentTitle": "A"}),
+            contextual_prefix: None,
+        },
+        ChunkToStore {
+            content: "chunk 2 content".into(),
+            chunk_index: 1,
+            embedding: vec![0.1, 0.2, 0.3, 0.4],
+            metadata: serde_json::json!({"chunkIndex": 1, "documentTitle": "A"}),
+            contextual_prefix: None,
+        },
+    ];
+    chunk_store
+        .stored_chunks
+        .write()
+        .unwrap()
+        .insert(doc_id.clone(), fake_chunks);
+
+    // Verify initial chunk count for doc_id is 2
+    let counts_before = chunk_store
+        .stored_chunks
+        .read()
+        .unwrap()
+        .get(&doc_id)
+        .map(|c| c.len())
+        .unwrap_or(0);
+    assert_eq!(counts_before, 2);
+
+    // Tenant B authenticates with a valid kb:write key
+    let tenant_b = TenantId("tenant-b".into());
+    doc_store.insert_api_key_with_scopes(
+        "tenant-b-write-key",
+        tenant_b,
+        vec!["kb:read".into(), "kb:write".into()],
+        vec![],
+    );
+
+    // Tenant B attempts hard delete on tenant A's document
+    let status = send_delete(
+        app,
+        "/v1/documents/doc-tenant-a?hard=true",
+        "tenant-b-write-key",
+    )
+    .await;
+
+    // Assert: must return 404 NOT FOUND
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Assert: Tenant A's document row still exists
+    assert_eq!(doc_store.docs.read().unwrap()[&tenant_a].len(), 1);
+
+    // Assert through fake ChunkStore: Tenant A's chunks are untouched (still 2)
+    let counts_after = chunk_store
+        .stored_chunks
+        .read()
+        .unwrap()
+        .get(&doc_id)
+        .map(|c| c.len())
+        .unwrap_or(0);
+    assert_eq!(counts_after, 2);
 }
