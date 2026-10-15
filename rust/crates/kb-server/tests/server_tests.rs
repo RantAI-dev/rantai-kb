@@ -1,5 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+// Shared helpers only: this file keeps its own harness because it also builds an
+// ingest worker over fakes.
+#[allow(dead_code)]
+mod harness;
+
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -14,6 +19,8 @@ use kb_server::dto::SearchResponseDto;
 use kb_server::events::EventBus;
 use kb_server::state::{AppState, StateParts};
 use tower::ServiceExt;
+
+use harness::{assert_error, json_body};
 
 /// The whole port set behind a test app, so a test can assert on the fakes
 /// behind the router.
@@ -195,6 +202,58 @@ async fn test_search_happy_path_fields() {
     assert_eq!(body.sources[0].document_title, "Happy Path Document");
     assert!(body.context.contains("[1] Happy Path Document"));
     assert!(body.context.contains("Happy path content line"));
+}
+
+#[tokio::test]
+async fn test_search_with_an_empty_knowledge_base_list_answers_with_the_note() {
+    let harness = Harness::new();
+    let tenant = TenantId("tenant-1".into());
+    harness.documents.insert_api_key("valid-key", tenant);
+
+    let request = Request::builder()
+        .uri("/v1/search")
+        .method("POST")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer valid-key")
+        .body(Body::from(
+            r#"{"query": "anything", "knowledgeBaseIds": []}"#,
+        ))
+        .unwrap();
+
+    let response = harness.app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["chunks"], serde_json::json!([]));
+    assert_eq!(body["context"], "");
+    assert_eq!(
+        body["note"],
+        "API key is not bound to any of the requested knowledge bases"
+    );
+}
+
+#[tokio::test]
+async fn test_search_without_a_query_is_a_400_with_the_bun_text() {
+    let harness = Harness::new();
+    harness
+        .documents
+        .insert_api_key("valid-key", TenantId("tenant-1".into()));
+
+    for body in [r#"{}"#, r#"{"query": 5}"#, r#"not json"#] {
+        let request = Request::builder()
+            .uri("/v1/search")
+            .method("POST")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer valid-key")
+            .body(Body::from(body))
+            .unwrap();
+        let response = harness.app.clone().oneshot(request).await.unwrap();
+        assert_error(
+            response,
+            StatusCode::BAD_REQUEST,
+            "Body must include a 'query' string",
+        )
+        .await;
+    }
 }
 
 #[tokio::test]

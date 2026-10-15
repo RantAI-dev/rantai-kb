@@ -272,20 +272,17 @@ async fn search(
 
 /// Narrow a caller-supplied knowledge-base filter to what the key may see.
 ///
-/// `None` means "the whole tenant": either the key is unrestricted and asked for
-/// nothing, or it is unrestricted and the caller named no bases. An empty
-/// result is a real answer (a restricted key asked for bases it does not have)
-/// and is deliberately not collapsed into `None`, because that would widen the
-/// key back to the whole tenant.
+/// `None` means the caller named no bases and the key is unrestricted, which
+/// the routes read as "no filter". An explicit empty list stays empty: in
+/// TypeScript that is a truthy value of length zero, so a search answers with
+/// the "not bound to any of the requested knowledge bases" note rather than
+/// searching everything.
 pub(crate) fn restrict_kbs(
     auth: &AuthContext,
     requested: Option<&[String]>,
 ) -> Option<Vec<String>> {
     if auth.knowledge_base_ids.is_empty() {
-        return match requested {
-            Some(v) if !v.is_empty() => Some(v.to_vec()),
-            _ => None,
-        };
+        return requested.map(<[String]>::to_vec);
     }
     let allowed: HashSet<&str> = auth
         .knowledge_base_ids

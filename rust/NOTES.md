@@ -365,3 +365,19 @@ Configuration covered by `config::tests`: `KB_WORKER_ENABLED`, `KB_INGEST_CONCUR
 Worker concurrency: `KB_INGEST_CONCURRENCY` is applied as jobs claimed per tick, which the worker
 runs one after another. With the default of 1 this is identical to the TypeScript worker; above 1
 the Rust process claims a wider batch per poll but still indexes one document at a time.
+
+## R4 slice 5: search parity for the explicit-empty knowledge-base list
+
+| # | command | result |
+|---|---|---|
+| 101 | `cargo test -p kb-server` | exit 101, 2 compile errors in `server_tests.rs`: the shared helpers were imported without the module declaration landing in the same edit. |
+| 102 | `cargo test -p kb-server` | exit 0, all suites pass, 12 in `server_tests`. |
+| 103 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0, zero errors. |
+| 104 | `cargo test --workspace` | exit 0, every suite passes. |
+
+`restrict_kbs` now returns an explicit empty list as `Some([])` instead of
+collapsing it to "no filter". In TypeScript `[]` is truthy and has length zero,
+so `POST /v1/search` with `knowledgeBaseIds: []` answers with the note
+"API key is not bound to any of the requested knowledge bases" even for a
+full-access key; the list route is unaffected because an absent parameter still
+parses to "no filter".
