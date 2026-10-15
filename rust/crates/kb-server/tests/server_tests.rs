@@ -426,3 +426,67 @@ async fn test_hard_delete_cross_tenant_returns_404_and_leaves_chunks_unchanged()
         .unwrap_or(0);
     assert_eq!(counts_after, 2);
 }
+
+#[tokio::test]
+async fn test_ingest_worker_with_real_local_extractor() {
+    use kb_engine::fakes::FakeJobStore;
+    use kb_engine::{IngestSettings, IngestWorker};
+    use kb_ports::{BlobStore, JobRecord};
+
+    let doc_store = FakeDocumentStore::default();
+    let chunk_store = FakeChunkStore::default();
+    let blob_store = FakeBlobStore::default();
+    let embedder = FakeEmbedder::default();
+    let jobs = FakeJobStore::default();
+
+    let tenant = TenantId("tenant-1".into());
+    let doc_id = DocumentId("doc-extract-1".into());
+    let mut doc = delete_test_doc("doc-extract-1");
+    doc.s3_key = Some("uploads/doc-extract-1/notes.txt".into());
+    doc_store.insert_doc(tenant.clone(), doc);
+
+    blob_store
+        .upload(
+            "uploads/doc-extract-1/notes.txt",
+            b"Hello world from real extractor test".to_vec(),
+            "text/plain",
+        )
+        .await
+        .unwrap();
+
+    let job = JobRecord {
+        id: "job-1".into(),
+        tenant_id: tenant,
+        user_id: None,
+        document_id: Some(doc_id.clone()),
+        s3_key: Some("uploads/doc-extract-1/notes.txt".into()),
+        filename: "notes.txt".into(),
+        mime_type: Some("text/plain".into()),
+        attempt: 1,
+        params: None,
+    };
+    jobs.push(job);
+
+    let extractor = kb_extract::LocalExtractor::shared();
+    let worker = IngestWorker::new(
+        Arc::new(jobs.clone()),
+        Arc::new(doc_store.clone()),
+        Arc::new(chunk_store.clone()),
+        Arc::new(blob_store),
+        extractor,
+        Arc::new(embedder),
+        IngestSettings::default(),
+    );
+
+    assert!(worker.run_once().await.unwrap());
+
+    let finished = jobs.finished.read().unwrap();
+    assert_eq!(finished.len(), 1);
+    assert!(finished[0].success);
+
+    // Chunks were created and stored
+    let stored = chunk_store.stored_chunks.read().unwrap();
+    let chunks = stored.get(&doc_id).expect("stored chunks for doc");
+    assert!(!chunks.is_empty());
+    assert!(chunks[0].content.contains("Hello world from real extractor test"));
+}

@@ -92,6 +92,65 @@ impl AppState {
             engine,
         }
     }
+
+    /// Assemble the production [`IngestWorker`](kb_engine::IngestWorker) using
+    /// production adapters: Postgres job queue, Surreal chunk store, S3 blob
+    /// store, and the real local extractor (`kb-extract`).
+    pub async fn build_worker(
+        config: &crate::Config,
+        settings: kb_engine::IngestSettings,
+    ) -> anyhow::Result<kb_engine::IngestWorker> {
+        let documents = Arc::new(
+            kb_store_pg::PgDocumentStore::new(config.pg.clone())
+                .await
+                .map_err(|e| anyhow::anyhow!("pg documents: {e}"))?,
+        );
+        let jobs = Arc::new(
+            kb_store_pg::PgJobStore::connect(&config.pg)
+                .await
+                .map_err(|e| anyhow::anyhow!("pg jobs: {e}"))?,
+        );
+        let chunks = Arc::new(
+            kb_store_surreal::SurrealChunkStore::new(config.surreal.clone())
+                .map_err(|e| anyhow::anyhow!("surreal: {e}"))?,
+        );
+        let blobs = Arc::new(
+            kb_store_blob::S3BlobStore::new(config.s3.clone())
+                .map_err(|e| anyhow::anyhow!("s3: {e}"))?,
+        );
+        let embedder = Arc::new(
+            kb_inference::EmbedderImpl::new(embedder_settings_from(config.embedder.clone()))
+                .map_err(|e| anyhow::anyhow!("embedder: {e}"))?,
+        );
+        let extractor = kb_extract::LocalExtractor::shared();
+        Ok(kb_engine::IngestWorker::new(
+            jobs, documents, chunks, blobs, extractor, embedder, settings,
+        ))
+    }
+
+    /// Build an [`IngestWorker`](kb_engine::IngestWorker) reusing this state's
+    /// already-initialized stores and the real local extractor (`kb-extract`).
+    pub async fn build_ingest_worker(
+        &self,
+        config: &crate::Config,
+        settings: kb_engine::IngestSettings,
+    ) -> anyhow::Result<kb_engine::IngestWorker> {
+        let jobs = Arc::new(
+            kb_store_pg::PgJobStore::connect(&config.pg)
+                .await
+                .map_err(|e| anyhow::anyhow!("pg jobs: {e}"))?,
+        );
+        let extractor = kb_extract::LocalExtractor::shared();
+        Ok(kb_engine::IngestWorker::new(
+            jobs,
+            self.documents.clone(),
+            self.chunks.clone(),
+            self.blob.clone(),
+            extractor,
+            self.embedder.clone(),
+            settings,
+        ))
+    }
 }
 
 fn embedder_settings_from(c: EmbedderConfig) -> EmbedderSettings {

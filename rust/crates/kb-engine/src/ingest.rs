@@ -314,6 +314,13 @@ impl IngestWorker {
             .extract(&job.filename, mime, &bytes)
             .await
             .map_err(|e| e.to_string())?;
+        // A parser that could not read the file reports the reason and leaves
+        // `content` empty (`extract.ts:192`). Indexing that would put an empty
+        // document in the KB, so the job fails with the parser's own message —
+        // retrying with different settings beats a poisoned document.
+        if let Some(reason) = &extraction.error {
+            return Err(reason.clone());
+        }
 
         let params = job.params.clone().unwrap_or_else(|| json!({}));
         let title = job_title(&params, &job.filename);

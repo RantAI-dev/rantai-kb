@@ -606,7 +606,7 @@ impl Extractor for FakeExtractor {
         Ok(ExtractionResult {
             content: self.content.read().unwrap().clone(),
             file_type: self.file_type.read().unwrap().clone(),
-            figures: Vec::new(),
+            ..ExtractionResult::default()
         })
     }
 }

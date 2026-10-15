@@ -261,6 +261,55 @@ async fn extractor_failure_marks_the_job_failed() {
     assert!(extractor.calls.load(std::sync::atomic::Ordering::Relaxed));
 }
 
+/// An extractor that reports a parse failure the way the local parsers do:
+/// empty content plus a reason (`src/lib/ingest/extract.ts:192`).
+struct UnreadableExtractor {
+    reason: String,
+}
+
+#[async_trait::async_trait]
+impl Extractor for UnreadableExtractor {
+    async fn extract(
+        &self,
+        _filename: &str,
+        _mime_type: &str,
+        _file_bytes: &[u8],
+    ) -> Result<ExtractionResult, PortError> {
+        Ok(ExtractionResult::failed("markdown", self.reason.clone()))
+    }
+}
+
+#[tokio::test]
+async fn an_unreadable_document_fails_the_job_instead_of_indexing_empty_text() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"x".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let reason = "Text extraction failed for \"report.pdf\": GLB file too small";
+    let worker = worker_with(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        Arc::new(UnreadableExtractor {
+            reason: reason.to_string(),
+        }),
+        Arc::new(FakeEmbedder::default()),
+    );
+    jobs.push(job());
+
+    assert!(worker.run_once().await.unwrap());
+
+    let finished = jobs.finished.read().unwrap();
+    assert_eq!(finished.len(), 1);
+    assert!(!finished[0].success);
+    assert_eq!(finished[0].detail, reason);
+    assert_eq!(chunks.stored_chunks.read().unwrap().len(), 0);
+    assert_eq!(document_status_of(&documents), "failed");
+}
+
 #[tokio::test]
 async fn a_short_embedding_batch_fails_instead_of_indexing_half_a_document() {
     let (jobs, documents, chunks, blobs) = parts();
