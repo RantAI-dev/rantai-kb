@@ -130,7 +130,13 @@ impl S3BlobStore {
             return headers;
         }
 
-        let mut signed_headers: Vec<(&str, &str)> = vec![("host", target.host.as_str())];
+        let now = Utc::now();
+        let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+        let mut signed_headers: Vec<(&str, &str)> = vec![
+            ("host", target.host.as_str()),
+            ("x-amz-date", amz_date.as_str()),
+        ];
         if let Some(ct) = content_type.filter(|c| !c.is_empty()) {
             if let Ok(v) = HeaderValue::from_bytes(ct.as_bytes()) {
                 headers.insert(reqwest::header::CONTENT_TYPE, v);
@@ -139,7 +145,7 @@ impl S3BlobStore {
         }
         signed_headers.push(("x-amz-content-sha256", payload_hash));
 
-        let (amz_date, auth) = sign_v4(
+        let (_, auth) = sign_v4(
             method,
             &target.canonical_uri,
             "",
@@ -149,7 +155,7 @@ impl S3BlobStore {
             &self.settings.secret_access_key,
             &self.settings.region,
             "s3",
-            Utc::now(),
+            now,
         );
         for (name, value) in [
             ("x-amz-date", amz_date.as_str()),
@@ -445,6 +451,28 @@ mod tests {
         assert_eq!(date, "20231114T221320Z");
         assert!(auth.contains("Credential=kbadmin/20231114/us-east-1/s3/aws4_request"));
         assert!(auth.contains("SignedHeaders=host"));
+    }
+
+    #[test]
+    fn signed_headers_include_amz_date_and_content_sha256() {
+        let store = S3BlobStore::new(S3Settings {
+            endpoint: "http://localhost:9000".into(),
+            region: "us-east-1".into(),
+            bucket: "test-bucket".into(),
+            access_key_id: "test-key".into(),
+            secret_access_key: "test-secret".into(),
+            force_path_style: true,
+            request_timeout: Duration::from_secs(5),
+        })
+        .unwrap();
+        let target = store.target("test.txt");
+        let headers = store.signed("PUT", &target, Some("text/plain"), EMPTY_PAYLOAD_HASH);
+        assert!(headers.contains_key("x-amz-date"));
+        assert!(headers.contains_key("x-amz-content-sha256"));
+        let auth = headers.get("authorization").unwrap().to_str().unwrap();
+        assert!(auth.contains("SignedHeaders="));
+        assert!(auth.contains("x-amz-date"));
+        assert!(auth.contains("x-amz-content-sha256"));
     }
 
     #[test]
