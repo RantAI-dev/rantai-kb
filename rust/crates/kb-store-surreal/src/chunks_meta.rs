@@ -3,7 +3,7 @@
 //! Chunks live in SurrealDB (`document_chunk`), not Postgres. Mirrors
 //! `getDocumentChunkCounts` and the chunk listing in `src/lib/rag/vector-store.ts`.
 
-use kb_ports::{ChunkMetadata, DocumentId, PortError};
+use kb_ports::{ChunkMetadata, DocumentId, PortError, StoredChunk};
 use serde_json::Value;
 
 use crate::client::{SurrealChunkStore, row_meta, row_to_chunk};
@@ -37,11 +37,11 @@ pub async fn execute_chunk_counts(
     Ok(out)
 }
 
-/// Ordered chunks for one document: `(chunk_index, content, metadata)`.
+/// Ordered chunks for one document, in `chunk_index` order.
 pub async fn execute_ordered_chunks(
     store: &SurrealChunkStore,
     document_id: &DocumentId,
-) -> Result<Vec<(u32, String, ChunkMetadata)>, PortError> {
+) -> Result<Vec<StoredChunk>, PortError> {
     validate_document_id(&document_id.0)?;
     let sql = format!(
         "SELECT id, document_id, content, chunk_index, metadata, contextual_prefix \
@@ -60,7 +60,19 @@ pub async fn execute_ordered_chunks(
         let index = u32::try_from(chunk.chunk_index)
             .map_err(|_| PortError::Malformed("surreal ordered_chunks: negative index".into()))?;
         let meta = row_meta(chunk.metadata.as_ref());
-        out.push((index, chunk.content, meta));
+        let chunk_type = chunk
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get("chunkType"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        out.push(StoredChunk {
+            id: chunk.id.clone(),
+            chunk_index: index,
+            content: chunk.content.clone(),
+            chunk_type,
+            metadata: meta,
+        });
     }
     Ok(out)
 }

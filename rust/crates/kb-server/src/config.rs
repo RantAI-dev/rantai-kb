@@ -3,9 +3,9 @@
 use std::time::Duration;
 
 use anyhow::{Result, bail};
-use kb_engine::EngineSettings;
+use kb_engine::{EngineSettings, IngestSettings};
 use kb_extract::ExtractConfig;
-use kb_inference::ExpansionSettings;
+use kb_inference::{ExpansionSettings, ExtractorSettings};
 use kb_store_blob::S3Settings;
 use kb_store_pg::PgSettings;
 use kb_store_surreal::SurrealSettings;
@@ -22,7 +22,84 @@ pub struct Config {
     pub expansion: ExpansionSettings,
     pub engine: EngineSettings,
     pub extract: ExtractConfig,
+    /// LLM entity/relation extraction settings (`ENTITY_EXTRACTION_*`).
+    pub entity: ExtractorSettings,
+    /// In-process ingest worker: whether it runs, and how it is tuned.
+    pub worker: WorkerConfig,
+    /// Reported by `GET /health` (`KB_VERSION`).
+    pub version: String,
     pub request_timeout: Duration,
+}
+
+/// Ingest worker wiring and tunables, ported from `src/lib/ingest/worker.ts`.
+///
+/// The `Math.max` floors there are part of the contract, not cosmetics: they
+/// stop a mistyped `0` from turning the worker into a busy loop or from
+/// reclaiming jobs that are merely slow.
+#[derive(Clone, Debug)]
+pub struct WorkerConfig {
+    /// `KB_WORKER_ENABLED=false` serves the API without running the worker.
+    pub enabled: bool,
+    /// Jobs in flight at once (`KB_INGEST_CONCURRENCY`, floor 1).
+    pub concurrency: usize,
+    /// Claim poll interval (`KB_INGEST_POLL_MS`, floor 500).
+    pub poll_ms: u64,
+    /// "processing" staleness cutoff (`KB_INGEST_STALE_MS`, floor 60_000).
+    pub stale_ms: u64,
+    /// Attempts before a stranded job fails (`KB_INGEST_MAX_ATTEMPTS`, floor 1).
+    pub max_attempts: i32,
+    /// Stale-reclaim sweep interval (`KB_INGEST_RECLAIM_MS`, floor 15_000).
+    pub reclaim_ms: u64,
+    /// Age before a failed job's stored file is reaped (`KB_INGEST_REAP_DAYS`).
+    pub reap_days: u32,
+    /// Reaper sweep interval (`KB_INGEST_REAP_MS`).
+    pub reap_ms: u64,
+}
+
+impl WorkerConfig {
+    /// Engine settings for the worker these values describe.
+    #[must_use]
+    pub fn ingest_settings(&self) -> IngestSettings {
+        IngestSettings {
+            claims_per_tick: self.concurrency,
+            poll_interval: Duration::from_millis(self.poll_ms),
+            stale_after: Duration::from_millis(self.stale_ms),
+            max_attempts: self.max_attempts,
+            reclaim_interval: Duration::from_millis(self.reclaim_ms),
+            ..IngestSettings::default()
+        }
+    }
+}
+
+fn read_worker<F>(lookup: &F) -> WorkerConfig
+where
+    F: Fn(&str) -> Option<String>,
+{
+    WorkerConfig {
+        enabled: lookup("KB_WORKER_ENABLED").as_deref() != Some("false"),
+        // `Math.max(floor, parseInt(value, 10))` in the TypeScript worker: a
+        // missing or unparsable value takes the documented default, and a
+        // value below the floor is raised to it.
+        concurrency: int_var(lookup, "KB_INGEST_CONCURRENCY", 1)
+            .unwrap_or(1)
+            .max(1) as usize,
+        poll_ms: int_var(lookup, "KB_INGEST_POLL_MS", 3000)
+            .unwrap_or(3000)
+            .max(500),
+        stale_ms: int_var(lookup, "KB_INGEST_STALE_MS", 300_000)
+            .unwrap_or(300_000)
+            .max(60_000),
+        max_attempts: int_var(lookup, "KB_INGEST_MAX_ATTEMPTS", 3)
+            .unwrap_or(3)
+            .max(1),
+        reclaim_ms: int_var(lookup, "KB_INGEST_RECLAIM_MS", 60_000)
+            .unwrap_or(60_000)
+            .max(15_000),
+        reap_days: int_var(lookup, "KB_INGEST_REAP_DAYS", 7).unwrap_or(7).max(0) as u32,
+        reap_ms: int_var(lookup, "KB_INGEST_REAP_MS", 3_600_000)
+            .unwrap_or(3_600_000)
+            .max(1000),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -193,6 +270,12 @@ impl Config {
 
         let extract = ExtractConfig::from_lookup(&lookup);
 
+        let entity = ExtractorSettings::from_lookup(&lookup);
+        let worker = read_worker(&lookup);
+        let version = lookup("KB_VERSION")
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| crate::state::DEFAULT_VERSION.to_string());
+
         Ok(Config {
             bind_addr,
             pg,
@@ -203,6 +286,9 @@ impl Config {
             expansion,
             engine,
             extract,
+            entity,
+            worker,
+            version,
             request_timeout: Duration::from_secs(30),
         })
     }

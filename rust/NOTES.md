@@ -286,3 +286,27 @@ Decisions taken in this slice:
   step change) so the SSE stream gets the same frames the Bun worker emits.
 - `IntelligenceStats` is computed in the HTTP layer, not the port: the TypeScript handler
   derives it from the rows it already has.
+
+## R4 slice 2: every remaining route, CORS, the process model
+
+Cargo ledger (continuing numbering from 63). This slice had no new dependencies and
+no budget cap, so the runs are listed with the errors each one fixed:
+
+| # | command | result |
+|---|---|---|
+| 64 | `cargo clippy -p kb-server --all-targets --keep-going --message-format=short` | exit 101. Wrong `axum::extract::middleware` path, leftover exports, `EngineError` or-pattern binding `msg` in one arm only, an `expect` where the deny lint forbids one. |
+| 65 | same | exit 101, 19 errors: `SearchRequestDto.query` is now raw JSON (the route owns the 400), `FromRequest` not imported for `Multipart`, `ProgressSink` not implemented for `Arc<EventBus>`. |
+| 66 | same | exit 101, 5 errors: `Multipart::from_request` needs state, `Bytes` vs `Vec<u8>`, `Engine::retrieve` takes `Option<u32>`. |
+| 67 | same | exit 101, 1 error: `Default for EventBus` returned `Arc<Self>`; a tokio interval also needs `reset()` so the first ping is not immediate. |
+| 68 | same | exit 101, 1 error: `Default` impl removed, interval `reset()` added. |
+| 69 | same | exit 101, 1 error: `StreamExt` not in scope for `chain`. |
+| 70 | same | exit 101, 1 error: the SSE `unfold` closure captured the tenant by move and the `async move` block moved it out of an `FnMut`; the tenant now travels in the stream state. |
+| 71 | same | exit 0, lib clean. |
+| 72 | same | exit 101, 4 errors: envelope structs returned by `taxonomy` were private. |
+| 73 | same | exit 101, 1 error: `Maintenance` fields are set by the composition root. |
+| 74 | same | exit 101, 1 error: one test still referenced the old `doc_store` binding. |
+| 75 | same | exit 0, zero errors. |
+| 76 | `cargo test -p kb-server` | exit 101, 1 failure: `extensions_are_matched_case_insensitively` asserted `archive.tar.gz` was accepted. The route is right and the test was wrong — only the final extension counts and `.gz` is not on the list. |
+| 77 | `cargo test -p kb-server` | exit 0, all suites pass. |
+| 78 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0, zero errors across all workspace targets. |
+| 79 | `cargo test --workspace` | exit 0, every suite passes. |

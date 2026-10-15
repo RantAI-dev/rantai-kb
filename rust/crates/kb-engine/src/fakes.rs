@@ -31,7 +31,7 @@ use kb_ports::{
     JobStore, JobView, KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary,
     NeighbourAnchor, NewDocument, PatchCategory, PatchDocument, PatchKnowledgeBase, PortError,
     ProgressSink, ReapableJob, Relation, RelationView, RerankCandidate, RerankResult, Reranker,
-    RetryJobOutcome, ScopeRequest, SearchHit, TenantId, adapter::ScopeToken,
+    RetryJobOutcome, ScopeRequest, SearchHit, StoredChunk, TenantId, adapter::ScopeToken,
 };
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -605,25 +605,32 @@ impl ChunkStore for FakeChunkStore {
         Ok(out)
     }
 
-    async fn ordered_chunks(
-        &self,
-        document_id: &DocumentId,
-    ) -> Result<Vec<(u32, String, ChunkMetadata)>, PortError> {
+    async fn ordered_chunks(&self, document_id: &DocumentId) -> Result<Vec<StoredChunk>, PortError> {
         let stored = self.stored_chunks.read().unwrap();
         let Some(chunks) = stored.get(document_id) else {
             return Ok(Vec::new());
         };
         // `ChunkToStore.metadata` is the SurrealDB metadata object verbatim, so
         // the read shape is derived from it the same way the Surreal adapter
-        // derives `ChunkMetadata`.
-        let mut out: Vec<(u32, String, ChunkMetadata)> = chunks
+        // derives it, and the record id follows the store's own naming.
+        let mut out: Vec<StoredChunk> = chunks
             .iter()
             .map(|c| {
                 let meta = stored_chunk_metadata(&c.metadata);
-                (meta.chunk_index.unwrap_or(0), c.content.clone(), meta)
+                StoredChunk {
+                    id: format!("{document_id}_{}", meta.chunk_index.unwrap_or(0)),
+                    chunk_index: meta.chunk_index.unwrap_or(0),
+                    content: c.content.clone(),
+                    chunk_type: c
+                        .metadata
+                        .get("chunkType")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    metadata: meta,
+                }
             })
             .collect();
-        out.sort_by_key(|(idx, _, _)| *idx);
+        out.sort_by_key(|c| c.chunk_index);
         Ok(out)
     }
 

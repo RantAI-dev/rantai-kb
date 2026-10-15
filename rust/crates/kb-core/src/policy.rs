@@ -3,12 +3,26 @@
 
 use std::path::Path;
 
-/// Figure handling mode.
+/// Figure handling mode. The wire/storage form is the same three strings the
+/// TypeScript `FigureMode` union uses, because the value travels in an ingest
+/// job's `params`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FigureMode {
     Auto,
     Force,
     Skip,
+}
+
+impl FigureMode {
+    /// Wire form: `"auto"`, `"force"` or `"skip"`.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Force => "force",
+            Self::Skip => "skip",
+        }
+    }
 }
 
 /// Per-file-type policy. The single decision table for what the pipeline does

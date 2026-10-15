@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use kb_ports::{
     ChunkMetadata, ChunkStore, ChunkToStore, DocumentId, DocumentScope, NeighbourAnchor, PortError,
-    SearchHit,
+    SearchHit, StoredChunk,
 };
 
 use crate::bm25::execute_bm25_search;
@@ -16,6 +16,12 @@ use crate::vector::execute_vector_search;
 
 #[async_trait]
 impl ChunkStore for SurrealChunkStore {
+    async fn health_check(&self) -> Result<(), PortError> {
+        // `RETURN true` is the cheapest statement SurrealDB answers without
+        // touching a table, which is what a liveness probe wants.
+        self.query("RETURN true;").await.map(|_| ())
+    }
+
     async fn vector_search(
         &self,
         scope: &DocumentScope,
@@ -87,7 +93,7 @@ impl ChunkStore for SurrealChunkStore {
     async fn ordered_chunks(
         &self,
         document_id: &DocumentId,
-    ) -> Result<Vec<(u32, String, ChunkMetadata)>, PortError> {
+    ) -> Result<Vec<StoredChunk>, PortError> {
         execute_ordered_chunks(self, document_id).await
     }
 }

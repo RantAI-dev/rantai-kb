@@ -1,15 +1,34 @@
-//! HTTP routes: `/health`, `/v1/health`, `/v1/formats`,
-//! `/v1/search`, `/v1/documents`, `/v1/documents/:id`,
-//! `/v1/knowledge-bases`.
+//! HTTP routes.
+//!
+//! The route table, the CORS behaviour, and the read path live here; the write
+//! paths are split out per area (`upload`, `media`, `jobs`, `taxonomy`) so no
+//! module has to hold the whole contract.
+//!
+//! Two behaviours are shared by every route and are therefore expressed once:
+//! * `OPTIONS` is answered with the exact CORS header set before authentication,
+//!   and every response carries `access-control-allow-origin: *`.
+//! * Anything unmatched authenticates first and then 404s, so an unknown path
+//!   cannot be used to probe which tenants exist.
+
+mod jobs;
+mod media;
+mod taxonomy;
+mod upload;
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
-use axum::routing::{get, post};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, Query, Request, State};
+use axum::http::header::{
+    ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+    ACCESS_CONTROL_MAX_AGE, HeaderValue,
+};
+use axum::http::{HeaderMap, Method, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
+use kb_core::policy::MimeRegistry;
 use kb_ports::{AuthContext, DocumentFilter, DocumentId, KnowledgeBaseId, ScopeRequest};
 use serde::{Deserialize, Serialize};
 
@@ -18,19 +37,47 @@ use crate::dto::{SearchRequestDto, SearchResponseDto};
 use crate::error::ApiError;
 use crate::state::AppState;
 
+/// Upper bound on a multipart upload body. The file itself is capped at
+/// `KB_MAX_FILE_BYTES` by the upload route; the slack covers the part headers,
+/// the form fields and the multipart framing around a file exactly at the limit.
+pub(crate) fn upload_body_limit() -> usize {
+    (MimeRegistry::kb_max_file_bytes() + 1024 * 1024) as usize
+}
+
 /// Top-level router. Authenticated routes go here.
+#[must_use]
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/search", post(search))
-        .route("/v1/documents", get(list_documents))
+        .route("/v1/documents", get(list_documents).post(upload::ingest_document))
         .route(
             "/v1/documents/:id",
-            get(get_document).delete(delete_document),
+            get(get_document).patch(patch_document).delete(delete_document),
         )
-        .route("/v1/knowledge-bases", get(list_knowledge_bases))
+        .route("/v1/documents/:id/raw", get(media::get_document_raw))
+        .route("/v1/documents/:id/assets", get(media::get_document_asset))
+        .route("/v1/documents/:id/intelligence", get(media::get_document_intelligence))
+        .route("/v1/jobs/:id", get(jobs::get_job))
+        .route("/v1/jobs/:id/retry", post(jobs::retry_job))
+        .route(
+            "/v1/knowledge-bases",
+            get(list_knowledge_bases).post(taxonomy::create_knowledge_base),
+        )
+        .route(
+            "/v1/knowledge-bases/:id",
+            patch(taxonomy::patch_knowledge_base).delete(taxonomy::delete_knowledge_base),
+        )
+        .route("/v1/categories", get(taxonomy::list_categories).post(taxonomy::create_category))
+        .route(
+            "/v1/categories/:id",
+            patch(taxonomy::patch_category).delete(taxonomy::delete_category),
+        )
+        .route("/v1/events", get(crate::events::events_stream))
+        .layer(DefaultBodyLimit::max(upload_body_limit()))
 }
 
 /// Unauthenticated router (health + formats).
+#[must_use]
 pub fn health_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/health", get(health))
@@ -38,100 +85,47 @@ pub fn health_router() -> Router<Arc<AppState>> {
         .route("/v1/formats", get(formats))
 }
 
-#[derive(Debug, Deserialize)]
-pub struct DeleteQuery {
-    #[serde(default)]
-    pub hard: Option<String>,
+/// CORS headers, verbatim from `CORS_HEADERS` in `src/service/api.ts`.
+fn cors_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    headers.insert(
+        ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET,POST,PATCH,DELETE,OPTIONS"),
+    );
+    headers.insert(
+        ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("authorization,content-type,x-api-key"),
+    );
+    headers.insert(ACCESS_CONTROL_MAX_AGE, HeaderValue::from_static("86400"));
+    headers
 }
 
-#[derive(Debug, Serialize)]
-pub struct DeleteResponse {
-    pub ok: bool,
-    /// Chunks removed from SurrealDB (hard delete only).
-    pub chunks_removed: u64,
+/// Answer preflights before authentication and stamp the allow-origin header on
+/// every response, which is what `handleRequest` does through its `json()` and
+/// stream helpers.
+pub async fn cors(req: Request, next: Next) -> Response {
+    if req.method() == Method::OPTIONS {
+        return (StatusCode::NO_CONTENT, cors_headers()).into_response();
+    }
+    let mut res = next.run(req).await;
+    if !res.headers().contains_key(ACCESS_CONTROL_ALLOW_ORIGIN) {
+        res.headers_mut()
+            .insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    }
+    res
 }
 
-/// `DELETE /v1/documents/:id`. Mirrors TS deleteDocument: needs `kb:write`;
-/// soft delete sets `deletedAt` and leaves chunks and the blob alone; hard
-/// delete (`?hard=true`) removes the chunks, then the stored object, then the row.
-async fn delete_document(
-    State(state): State<Arc<AppState>>,
-    Authed(auth): Authed,
-    Path(id): Path<String>,
-    Query(q): Query<DeleteQuery>,
-) -> Result<Json<DeleteResponse>, ApiError> {
-    if !crate::auth::has_scope(&auth, "kb:write") {
-        return Err(ApiError::Forbidden("kb:write".to_string()));
+/// Fallback for any path the router does not know: authenticate, then 404.
+pub async fn not_found(State(state): State<Arc<AppState>>, mut req: Request) -> Response {
+    let (mut parts, _body) = req.into_parts();
+    if Authed::from_request_parts(&mut parts, &state).await.is_err() {
+        return ApiError::Unauthorized.into_response();
     }
-    let doc_id = DocumentId::new_unchecked(id);
-    let hard = q.hard.as_deref() == Some("true");
-
-    // Resolve the document inside the caller's tenant scope before touching
-    // anything. The Bun route 404s on the tenant-filtered lookup, so a hard
-    // delete must not reach the chunk store first and wipe another tenant's
-    // chunks on its way to the same 404.
-    let scope = state
-        .documents
-        .build_scope(&ScopeRequest {
-            tenant: auth.tenant_id.clone(),
-            filter: DocumentFilter::default(),
-        })
-        .await
-        .map_err(ApiError::from)?;
-    let doc = state
-        .documents
-        .find_by_id(&scope, &doc_id)
-        .await
-        .map_err(ApiError::from)?
-        .ok_or(ApiError::NotFound)?;
-
-    if !hard {
-        let deleted = state
-            .documents
-            .soft_delete(&auth.tenant_id, &doc_id)
-            .await
-            .map_err(ApiError::from)?;
-        if !deleted {
-            return Err(ApiError::NotFound);
-        }
-        return Ok(Json(DeleteResponse {
-            ok: true,
-            chunks_removed: 0,
-        }));
-    }
-
-    // Chunks first, then the stored object, then the row. A chunk-delete or
-    // blob-delete failure is logged and does not stop the row delete: the row
-    // is what makes the document invisible, and leaving it behind would keep a
-    // document the user deleted in their list.
-    let chunks_removed = match state.chunks.delete_by_document(&doc_id).await {
-        Ok(n) => n,
-        Err(err) => {
-            tracing::warn!(error = %err, "chunk delete failed during hard delete");
-            0
-        }
-    };
-    if let Some(s3_key) = doc.s3_key.as_deref() {
-        if let Err(err) = state.blob.delete(s3_key).await {
-            tracing::warn!(error = %err, s3_key, "blob delete failed during hard delete");
-        }
-    }
-
-    let removed = state
-        .documents
-        .hard_delete(&auth.tenant_id, &doc_id)
-        .await
-        .map_err(ApiError::from)?;
-    if removed.is_none() {
-        return Err(ApiError::NotFound);
-    }
-    Ok(Json(DeleteResponse {
-        ok: true,
-        chunks_removed,
-    }))
+    ApiError::NotFound.into_response()
 }
 
-// ─── Health ──────────────────────────────────────────────────────────
+// ─── Health ──────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
@@ -146,66 +140,82 @@ pub struct HealthChecks {
     pub vectors: bool,
 }
 
-#[axum::debug_handler]
-async fn health(State(_state): State<Arc<AppState>>) -> impl IntoResponse {
-    let checks = HealthChecks {
-        postgres: true,
-        vectors: true,
+async fn health(State(state): State<Arc<AppState>>) -> Response {
+    // Each dependency is probed independently and reported as a boolean: a
+    // liveness endpoint that fails the whole request tells an operator nothing
+    // about which side is down.
+    let postgres = state.documents.health_check().await.is_ok();
+    let vectors = state.chunks.health_check().await.is_ok();
+    let ok = postgres && vectors;
+    let body = HealthResponse {
+        ok,
+        checks: HealthChecks { postgres, vectors },
+        version: state.version.clone(),
     };
-    (
-        StatusCode::OK,
-        Json(HealthResponse {
-            ok: true,
-            checks,
-            version: env!("CARGO_PKG_VERSION").into(),
-        }),
-    )
+    let status = if ok {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (status, Json(body)).into_response()
 }
 
 #[derive(Debug, Serialize)]
-struct FormatsResponse {
-    extensions: Vec<&'static str>,
-    max_file_bytes: u32,
+pub struct FormatsResponse {
+    extensions: &'static [&'static str],
+    #[serde(rename = "maxFileBytes")]
+    max_file_bytes: u64,
 }
 
-async fn formats() -> impl IntoResponse {
-    let extensions: &[&str] = &[
-        ".pdf", ".docx", ".txt", ".md", ".html", ".htm", ".png", ".jpg", ".jpeg", ".webp", ".gif",
-        ".csv", ".tsv", ".xlsx", ".xls", ".json", ".xml", ".rtf",
-    ];
+async fn formats() -> Json<FormatsResponse> {
     Json(FormatsResponse {
-        extensions: extensions.to_vec(),
-        max_file_bytes: 50 * 1024 * 1024,
+        extensions: MimeRegistry::kb_accepted_extensions(),
+        max_file_bytes: MimeRegistry::kb_max_file_bytes(),
     })
 }
 
-// ─── Search ──────────────────────────────────────────────────────────
+// ─── Search ──────────────────────────────────────────────────────────────────
 
 async fn search(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
-    Json(body): Json<SearchRequestDto>,
-) -> Result<Json<SearchResponseDto>, ApiError> {
-    let query = body.query.trim();
-    if query.is_empty() {
-        return Ok(Json(SearchResponseDto {
-            chunks: Vec::new(),
-            sources: Vec::new(),
-            context: String::new(),
-            degrades: Vec::new(),
-        }));
+    body: Option<Json<SearchRequestDto>>,
+) -> Result<Response, ApiError> {
+    if !crate::auth::has_scope(&auth, "kb:read") {
+        return Err(ApiError::missing_scope("kb:read"));
     }
-
-    // Resolve API-key KB restriction against the requested KB filter.
+    let Some(Json(body)) = body else {
+        return Err(ApiError::BadRequest(
+            "Body must include a 'query' string".to_string(),
+        ));
+    };
+    // `!body.query || typeof body.query !== "string"` in TypeScript: an absent,
+    // non-string or blank query is the same 400.
+    let Some(query) = body.query.as_ref().and_then(serde_json::Value::as_str) else {
+        return Err(ApiError::BadRequest(
+            "Body must include a 'query' string".to_string(),
+        ));
+    };
+    let query = query.trim().to_string();
+    if query.is_empty() {
+        return Err(ApiError::BadRequest(
+            "Body must include a 'query' string".to_string(),
+        ));
+    }
     let requested_kbs = restrict_kbs(&auth, body.knowledge_base_ids.as_deref());
+    let max_chunks = body.max_chunks.unwrap_or(8).clamp(1, 50);
+
+    // A key bound to specific knowledge bases that asks for none of them gets
+    // an explicit note rather than an empty result: "no results" and "you may
+    // not see these" are different answers for a client.
     if let Some(ref r) = requested_kbs {
         if r.is_empty() {
-            return Ok(Json(SearchResponseDto {
-                chunks: Vec::new(),
-                sources: Vec::new(),
-                context: String::new(),
-                degrades: Vec::new(),
-            }));
+            return Ok(Json(serde_json::json!({
+                "chunks": [],
+                "context": "",
+                "note": "API key is not bound to any of the requested knowledge bases",
+            }))
+            .into_response());
         }
     }
 
@@ -217,18 +227,17 @@ async fn search(
             .collect(),
         category: body.category.clone(),
     };
-    let scope_request = ScopeRequest {
-        tenant: auth.tenant_id.clone(),
-        filter,
-    };
     let mut scope = state
         .documents
-        .build_scope(&scope_request)
+        .build_scope(&ScopeRequest {
+            tenant: auth.tenant_id.clone(),
+            filter,
+        })
         .await
         .map_err(ApiError::from)?;
 
-    // Narrow to specific documents if requested. `narrowed_to` can only keep
-    // ids already visible in the scope, so the request cannot widen it.
+    // Narrowing to specific documents can only keep ids already visible in the
+    // scope, so the request cannot widen it.
     if let Some(doc_ids) = body.document_ids.as_ref() {
         let requested: Vec<DocumentId> = doc_ids
             .iter()
@@ -238,35 +247,40 @@ async fn search(
     }
 
     if scope.document_ids().is_empty() {
-        return Ok(Json(SearchResponseDto {
-            chunks: Vec::new(),
-            sources: Vec::new(),
-            context: String::new(),
-            degrades: Vec::new(),
-        }));
+        return Ok(Json(SearchResponseDto::empty()).into_response());
     }
 
-    // `body.hybrid` is accepted and ignored for backwards compatibility
+    // `body.hybrid` is accepted and ignored for backwards compatibility.
     let outcome = state
         .engine
-        .retrieve(query, &scope, body.max_chunks)
+        .retrieve(&query, &scope, Some(max_chunks))
         .await
         .map_err(ApiError::from)?;
-
-    Ok(Json(SearchResponseDto::from(outcome)))
+    Ok(Json(SearchResponseDto::from(outcome)).into_response())
 }
 
-fn restrict_kbs(auth: &AuthContext, requested: Option<&[String]>) -> Option<Vec<String>> {
+/// Narrow a caller-supplied knowledge-base filter to what the key may see.
+///
+/// `None` means "the whole tenant": either the key is unrestricted and asked for
+/// nothing, or it is unrestricted and the caller named no bases. An empty
+/// result is a real answer (a restricted key asked for bases it does not have)
+/// and is deliberately not collapsed into `None`, because that would widen the
+/// key back to the whole tenant.
+pub(crate) fn restrict_kbs(
+    auth: &AuthContext,
+    requested: Option<&[String]>,
+) -> Option<Vec<String>> {
     if auth.knowledge_base_ids.is_empty() {
-        return requested.map(|v| v.to_vec());
+        return match requested {
+            Some(v) if !v.is_empty() => Some(v.to_vec()),
+            _ => None,
+        };
     }
     let allowed: HashSet<&str> = auth
         .knowledge_base_ids
         .iter()
         .map(|k| k.0.as_str())
         .collect();
-    // Matches TS restrictKnowledgeBases: no or empty request means "all of the
-    // key's knowledge bases"; otherwise the request is intersected with the key.
     let filtered: Vec<String> = requested
         .filter(|v| !v.is_empty())
         .map(|v| v.to_vec())
@@ -282,29 +296,38 @@ fn restrict_kbs(auth: &AuthContext, requested: Option<&[String]>) -> Option<Vec<
     Some(filtered)
 }
 
-// ─── Documents ────────────────────────────────────────────────────────
+// ─── Documents ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct ListDocumentsQuery {
-    pub limit: Option<u32>,
+    /// Kept as a string so an unparsable value degrades to the default instead
+    /// of rejecting the request with a body the API never produces.
+    pub limit: Option<String>,
     /// Bun/TS name (camelCase), used by existing clients.
     #[serde(alias = "knowledge_base_ids", rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
+pub struct DocumentListResponse {
+    pub documents: Vec<DocumentSummary>,
+}
+
+/// `GET /v1/documents` row, field for field as `listDocuments` selects it.
+#[derive(Debug, Serialize)]
 pub struct DocumentSummary {
     pub id: String,
     pub title: String,
     pub categories: Vec<String>,
     pub subcategory: Option<String>,
-    pub status: String,
-    pub chunk_count: u32,
+    #[serde(rename = "fileType")]
     pub file_type: Option<String>,
+    #[serde(rename = "fileSize")]
     pub file_size: Option<i32>,
-    pub mime_type: Option<String>,
+    pub status: String,
+    #[serde(rename = "createdAt")]
     pub created_at: String,
-    pub updated_at: String,
+    #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Vec<String>,
 }
 
@@ -312,72 +335,62 @@ async fn list_documents(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
     Query(q): Query<ListDocumentsQuery>,
-) -> Result<Json<Vec<DocumentSummary>>, ApiError> {
-    let limit = q.limit.unwrap_or(100).clamp(1, 500);
+) -> Result<Json<DocumentListResponse>, ApiError> {
+    if !crate::auth::has_scope(&auth, "kb:read") {
+        return Err(ApiError::missing_scope("kb:read"));
+    }
+    let limit = q
+        .limit
+        .as_deref()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(100)
+        .clamp(1, 500);
     let raw_kbs: Vec<String> = q
         .knowledge_base_ids
         .as_deref()
-        .map(parse_csv)
+        .map(parse_list)
         .unwrap_or_default();
-    let kb_ids: Vec<KnowledgeBaseId> = raw_kbs
-        .iter()
-        .map(|k| KnowledgeBaseId::new_unchecked(k.clone()))
-        .collect();
-    // An empty parameter parses to no ids, which is "absent" (TS parseList -> undefined).
+    // An empty parameter parses to no ids, which is "absent".
     let requested = (!raw_kbs.is_empty()).then_some(raw_kbs.as_slice());
-    let allowed = restrict_kbs(&auth, requested);
-    let kb_filter: Vec<KnowledgeBaseId> = match allowed {
-        Some(v) if v.is_empty() => {
-            return Ok(Json(Vec::new()));
+    let kb_filter: Vec<KnowledgeBaseId> = match restrict_kbs(&auth, requested) {
+        Some(v) => {
+            if v.is_empty() {
+                // A restricted key asked for bases it does not hold. Answering
+                // with the whole tenant (what an empty filter means) would
+                // hand it documents it may not see.
+                return Ok(Json(DocumentListResponse {
+                    documents: Vec::new(),
+                }));
+            }
+            v.into_iter().map(KnowledgeBaseId::new_unchecked).collect()
         }
-        Some(v) => v.into_iter().map(KnowledgeBaseId::new_unchecked).collect(),
-        None => kb_ids,
+        None => Vec::new(),
     };
     let docs = state
         .documents
         .list(&auth.tenant_id, limit, &kb_filter)
         .await
         .map_err(ApiError::from)?;
-    let ids: Vec<DocumentId> = docs.iter().map(|d| d.id.clone()).collect();
-    let counts = chunk_counts_for(&state, &ids).await?;
-    let out: Vec<DocumentSummary> = docs
+    let documents = docs
         .into_iter()
         .map(|d| DocumentSummary {
-            chunk_count: counts.get(&d.id.0).copied().unwrap_or(0),
             id: d.id.0,
             title: d.title,
             categories: d.categories,
             subcategory: d.subcategory,
-            status: d.status,
             file_type: d.file_type,
             file_size: d.file_size,
-            mime_type: d.mime_type,
+            status: d.status,
             created_at: d.created_at,
-            updated_at: d.updated_at,
             knowledge_base_ids: d.knowledge_base_ids,
         })
         .collect();
-    Ok(Json(out))
-}
-
-/// Chunk counts keyed by document id, read from SurrealDB. Missing ids are absent.
-async fn chunk_counts_for(
-    state: &AppState,
-    ids: &[DocumentId],
-) -> Result<std::collections::HashMap<String, u32>, ApiError> {
-    if ids.is_empty() {
-        return Ok(std::collections::HashMap::new());
-    }
-    let rows = state
-        .chunks
-        .chunk_counts(ids)
-        .await
-        .map_err(ApiError::from)?;
-    Ok(rows.into_iter().map(|(id, n)| (id.0, n)).collect())
+    Ok(Json(DocumentListResponse { documents }))
 }
 
 #[derive(Debug, Serialize)]
 pub struct FigureView {
+    #[serde(rename = "assetKey")]
     pub asset_key: String,
     pub page: u32,
     pub caption: Option<String>,
@@ -387,6 +400,7 @@ pub struct FigureView {
 /// Figures from `Document.metadata.figures`, same rules as TS readDocumentFigures:
 /// non-object entries are skipped, `assetKey` must be a non-empty string,
 /// `page` defaults to 0, `kind` comes from `type` and defaults to "figure".
+#[must_use]
 pub fn read_document_figures(metadata: Option<&serde_json::Value>) -> Vec<FigureView> {
     let Some(figures) = metadata
         .and_then(|m| m.get("figures"))
@@ -426,38 +440,274 @@ pub fn read_document_figures(metadata: Option<&serde_json::Value>) -> Vec<Figure
 }
 
 #[derive(Debug, Serialize)]
+pub struct DocumentDetailResponse {
+    pub document: DocumentDetail,
+    pub chunks: Vec<DocumentChunkView>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DocumentDetail {
     pub id: String,
     pub title: String,
     pub categories: Vec<String>,
     pub subcategory: Option<String>,
-    pub status: String,
+    #[serde(rename = "fileType")]
     pub file_type: Option<String>,
+    #[serde(rename = "fileSize")]
     pub file_size: Option<i32>,
+    #[serde(rename = "mimeType")]
     pub mime_type: Option<String>,
+    pub status: String,
+    #[serde(rename = "createdAt")]
     pub created_at: String,
+    #[serde(rename = "updatedAt")]
     pub updated_at: String,
+    #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Vec<String>,
+    #[serde(rename = "chunkCount")]
     pub chunk_count: u32,
     pub figures: Vec<FigureView>,
-    pub chunks: Vec<DocumentChunkView>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct DocumentChunkView {
+    pub id: String,
+    #[serde(rename = "chunkIndex")]
     pub chunk_index: u32,
     pub content: String,
+    #[serde(rename = "chunkType")]
+    pub chunk_type: Option<String>,
     pub section: Option<String>,
     pub page: Option<u32>,
-    pub asset_key: Option<String>,
 }
 
 async fn get_document(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
     Path(id): Path<String>,
-) -> Result<Json<DocumentDetail>, ApiError> {
-    let doc_id = DocumentId::new_unchecked(id);
+) -> Result<Json<DocumentDetailResponse>, ApiError> {
+    if !crate::auth::has_scope(&auth, "kb:read") {
+        return Err(ApiError::missing_scope("kb:read"));
+    }
+    let meta = find_visible_document(&state, &auth, &id).await?;
+    let chunks = state
+        .chunks
+        .ordered_chunks(&meta.id)
+        .await
+        .map_err(ApiError::from)?;
+    let chunk_views: Vec<DocumentChunkView> = chunks
+        .iter()
+        .map(|c| DocumentChunkView {
+            id: c.id.clone(),
+            chunk_index: c.chunk_index,
+            content: c.content.clone(),
+            chunk_type: c.chunk_type.clone(),
+            section: c.metadata.section.clone(),
+            page: c.metadata.page,
+        })
+        .collect();
+    let chunk_count = chunk_views.len() as u32;
+    Ok(Json(DocumentDetailResponse {
+        document: DocumentDetail {
+            id: meta.id.0,
+            title: meta.title,
+            categories: meta.categories,
+            subcategory: meta.subcategory,
+            file_type: meta.file_type,
+            file_size: meta.file_size,
+            mime_type: meta.mime_type,
+            status: meta.status,
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
+            knowledge_base_ids: meta.knowledge_base_ids,
+            chunk_count,
+            figures: read_document_figures(meta.metadata.as_ref()),
+        },
+        chunks: chunk_views,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatchDocumentBody {
+    pub title: Option<String>,
+    pub categories: Option<Vec<String>>,
+    /// `Some(None)` clears the column; absent leaves it alone.
+    pub subcategory: Option<Option<String>>,
+    #[serde(rename = "knowledgeBaseIds")]
+    pub knowledge_base_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PatchedDocumentResponse {
+    pub document: PatchedDocument,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PatchedDocument {
+    pub id: String,
+    pub title: String,
+    pub categories: Vec<String>,
+    pub subcategory: Option<String>,
+    #[serde(rename = "fileType")]
+    pub file_type: Option<String>,
+    #[serde(rename = "fileSize")]
+    pub file_size: Option<i32>,
+    #[serde(rename = "mimeType")]
+    pub mime_type: Option<String>,
+    pub status: String,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: String,
+    #[serde(rename = "knowledgeBaseIds")]
+    pub knowledge_base_ids: Vec<String>,
+}
+
+async fn patch_document(
+    State(state): State<Arc<AppState>>,
+    Authed(auth): Authed,
+    Path(id): Path<String>,
+    body: Option<Json<PatchDocumentBody>>,
+) -> Result<Json<PatchedDocumentResponse>, ApiError> {
+    if !crate::auth::has_scope(&auth, "kb:write") {
+        return Err(ApiError::missing_scope("kb:write"));
+    }
+    let doc_id = DocumentId::new_unchecked(id.clone());
+    // Existence check inside the tenant before anything is written, so another
+    // tenant's id 404s with nothing changed.
+    find_visible_document(&state, &auth, &id).await?;
+    let Json(body) = body.unwrap_or(Json(PatchDocumentBody {
+        title: None,
+        categories: None,
+        subcategory: None,
+        knowledge_base_ids: None,
+    }));
+
+    let knowledge_base_ids = match body.knowledge_base_ids {
+        None => None,
+        Some(requested) => {
+            // Narrow to what the key may bind AND what this tenant owns: a
+            // caller-supplied id for another tenant's knowledge base is dropped
+            // rather than creating a cross-tenant link.
+            let restricted = restrict_kbs(&auth, Some(&requested)).unwrap_or_default();
+            let owned = state
+                .documents
+                .filter_owned_kb_ids(
+                    &auth.tenant_id,
+                    &restricted
+                        .iter()
+                        .map(|k| KnowledgeBaseId::new_unchecked(k.clone()))
+                        .collect::<Vec<_>>(),
+                )
+                .await
+                .map_err(ApiError::from)?;
+            Some(owned)
+        }
+    };
+
+    let patch = kb_ports::PatchDocument {
+        title: body.title,
+        categories: body.categories,
+        subcategory: body.subcategory,
+        knowledge_base_ids,
+    };
+    let updated = state
+        .documents
+        .patch_document(&auth.tenant_id, &doc_id, &patch)
+        .await
+        .map_err(ApiError::from)?
+        .ok_or(ApiError::NotFound)?;
+
+    Ok(Json(PatchedDocumentResponse {
+        document: PatchedDocument {
+            id: updated.id.0,
+            title: updated.title,
+            categories: updated.categories,
+            subcategory: updated.subcategory,
+            file_type: updated.file_type,
+            file_size: updated.file_size,
+            mime_type: updated.mime_type,
+            status: updated.status,
+            created_at: updated.created_at,
+            updated_at: updated.updated_at,
+            knowledge_base_ids: updated.knowledge_base_ids,
+        },
+    }))
+}
+
+/// `DELETE /v1/documents/:id`. Mirrors TS deleteDocument: needs `kb:write`;
+/// soft delete sets `deletedAt` and leaves chunks and the blob alone; hard
+/// delete (`?hard=true`) removes the chunks, then the stored object, then the row.
+async fn delete_document(
+    State(state): State<Arc<AppState>>,
+    Authed(auth): Authed,
+    Path(id): Path<String>,
+    Query(q): Query<DeleteQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !crate::auth::has_scope(&auth, "kb:write") {
+        return Err(ApiError::missing_scope("kb:write"));
+    }
+    let doc_id = DocumentId::new_unchecked(id.clone());
+    let hard = q.hard.as_deref() == Some("true");
+
+    // Resolve the document inside the caller's tenant before touching anything.
+    // The Bun route 404s on the tenant-filtered lookup, so a hard delete must
+    // not reach the chunk store first and wipe another tenant's chunks on its
+    // way to the same 404.
+    let doc = find_visible_document(&state, &auth, &id).await?;
+
+    if !hard {
+        let deleted = state
+            .documents
+            .soft_delete(&auth.tenant_id, &doc_id)
+            .await
+            .map_err(ApiError::from)?;
+        if !deleted {
+            return Err(ApiError::NotFound);
+        }
+        return Ok(Json(serde_json::json!({ "ok": true })));
+    }
+
+    // Chunks first, then the stored object, then the row. A chunk-delete or
+    // blob-delete failure is logged and does not stop the row delete: the row
+    // is what makes the document invisible, and leaving it behind would keep a
+    // document the user deleted in their list.
+    if let Err(err) = state.chunks.delete_by_document(&doc.id).await {
+        tracing::warn!(error = %err, "chunk delete failed during hard delete");
+    }
+    if let Some(s3_key) = doc.s3_key.as_deref() {
+        if let Err(err) = state.blob.delete(s3_key).await {
+            tracing::warn!(error = %err, s3_key, "blob delete failed during hard delete");
+        }
+    }
+
+    let removed = state
+        .documents
+        .hard_delete(&auth.tenant_id, &doc_id)
+        .await
+        .map_err(ApiError::from)?;
+    if removed.is_none() {
+        return Err(ApiError::NotFound);
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteQuery {
+    #[serde(default)]
+    pub hard: Option<String>,
+}
+
+/// Resolve a document id inside the caller's tenant, or 404.
+///
+/// Every document-addressed route goes through this one helper: the id is
+/// caller-supplied and SurrealDB has no tenant of its own, so nothing that keys
+/// on an id may run before the tenant check.
+pub(crate) async fn find_visible_document(
+    state: &AppState,
+    auth: &AuthContext,
+    id: &str,
+) -> Result<kb_ports::DocumentMeta, ApiError> {
     let scope = state
         .documents
         .build_scope(&ScopeRequest {
@@ -466,49 +716,21 @@ async fn get_document(
         })
         .await
         .map_err(ApiError::from)?;
-    let Some(meta) = state
+    state
         .documents
-        .find_by_id(&scope, &doc_id)
+        .find_by_id(&scope, &DocumentId::new_unchecked(id))
         .await
         .map_err(ApiError::from)?
-    else {
-        return Err(ApiError::NotFound);
-    };
-    let chunks = state
-        .chunks
-        .ordered_chunks(&doc_id)
-        .await
-        .map_err(ApiError::from)?;
-    let chunk_views: Vec<DocumentChunkView> = chunks
-        .into_iter()
-        .map(|(idx, content, meta)| DocumentChunkView {
-            chunk_index: idx,
-            content,
-            section: meta.section,
-            page: meta.page,
-            asset_key: meta.asset_key,
-        })
-        .collect();
-    let chunk_count = chunk_views.len() as u32;
-    Ok(Json(DocumentDetail {
-        id: meta.id.0,
-        title: meta.title,
-        categories: meta.categories,
-        subcategory: meta.subcategory,
-        status: meta.status,
-        file_type: meta.file_type,
-        file_size: meta.file_size,
-        mime_type: meta.mime_type,
-        created_at: meta.created_at,
-        updated_at: meta.updated_at,
-        knowledge_base_ids: meta.knowledge_base_ids,
-        chunk_count,
-        figures: read_document_figures(meta.metadata.as_ref()),
-        chunks: chunk_views,
-    }))
+        .ok_or(ApiError::NotFound)
 }
 
-// ─── Knowledge bases ──────────────────────────────────────────────────
+// ─── Knowledge bases ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct KbListResponse {
+    #[serde(rename = "knowledgeBases")]
+    pub knowledge_bases: Vec<KbSummary>,
+}
 
 #[derive(Debug, Serialize)]
 pub struct KbSummary {
@@ -516,13 +738,14 @@ pub struct KbSummary {
     pub name: String,
     pub description: Option<String>,
     pub color: Option<String>,
+    #[serde(rename = "documentCount")]
     pub document_count: u32,
 }
 
 async fn list_knowledge_bases(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
-) -> Result<Json<Vec<KbSummary>>, ApiError> {
+) -> Result<Json<KbListResponse>, ApiError> {
     let rows = state
         .documents
         .list_knowledge_bases(&auth.tenant_id)
@@ -533,7 +756,7 @@ async fn list_knowledge_bases(
         .iter()
         .map(|k| k.0.as_str())
         .collect();
-    let out: Vec<KbSummary> = rows
+    let knowledge_bases = rows
         .into_iter()
         .filter(|k| allowed.is_empty() || allowed.contains(k.id.0.as_str()))
         .map(|k| KbSummary {
@@ -544,19 +767,33 @@ async fn list_knowledge_bases(
             document_count: k.document_count,
         })
         .collect();
-    Ok(Json(out))
+    Ok(Json(KbListResponse { knowledge_bases }))
 }
 
-fn parse_csv(s: &str) -> Vec<String> {
-    s.split(',')
-        .map(|p| p.trim().to_string())
+/// `parseList` from `src/service/api.ts`: a JSON array when the value parses as
+/// one, otherwise comma-separated with surrounding whitespace trimmed.
+#[must_use]
+pub fn parse_list(value: &str) -> Vec<String> {
+    if value.is_empty() {
+        return Vec::new();
+    }
+    if let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(value) {
+        return items
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect();
+    }
+    value
+        .split(',')
+        .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()
 }
 
 #[cfg(test)]
-mod figure_tests {
-    use super::read_document_figures;
+mod tests {
+    use super::{parse_list, read_document_figures};
     use serde_json::json;
 
     #[test]
@@ -585,5 +822,17 @@ mod figure_tests {
         assert_eq!(figs[1].page, 0);
         assert_eq!(figs[1].caption, None);
         assert_eq!(figs[1].kind, "figure");
+    }
+
+    #[test]
+    fn parse_list_reads_json_arrays_and_csv() {
+        assert!(parse_list("").is_empty());
+        assert_eq!(parse_list(r#"["a","b"]"#), vec!["a", "b"]);
+        // Non-strings are dropped, as the TypeScript filter does.
+        assert_eq!(parse_list(r#"["a",1,null]"#), vec!["a"]);
+        // A JSON value that is not an array falls through to CSV.
+        assert_eq!(parse_list(r#"{"a":1}"#), vec![r#"{"a":1}"#]);
+        assert_eq!(parse_list("a, b ,,c"), vec!["a", "b", "c"]);
+        assert_eq!(parse_list("a"), vec!["a"]);
     }
 }

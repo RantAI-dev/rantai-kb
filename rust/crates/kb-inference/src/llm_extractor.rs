@@ -33,35 +33,40 @@ pub struct ExtractorSettings {
 }
 
 impl ExtractorSettings {
-    /// Read settings from environment variables matching TypeScript names.
+    /// Read settings from the process environment.
     #[must_use]
     pub fn from_env() -> Self {
-        let model = std::env::var("ENTITY_EXTRACTION_LLM_MODEL")
-            .ok()
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    /// Read settings through a lookup function, so the composition root is the
+    /// only place that touches the environment.
+    #[must_use]
+    pub fn from_lookup<F>(lookup: F) -> Self
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let model = lookup("ENTITY_EXTRACTION_LLM_MODEL")
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_string());
 
-        let base_url = std::env::var("ENTITY_EXTRACTION_LLM_BASE_URL")
-            .ok()
+        let base_url = lookup("ENTITY_EXTRACTION_LLM_BASE_URL")
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
             .trim_end_matches('/')
             .to_string();
 
-        let api_key = std::env::var("ENTITY_EXTRACTION_LLM_API_KEY")
-            .ok()
+        let api_key = lookup("ENTITY_EXTRACTION_LLM_API_KEY")
             .filter(|s| !s.trim().is_empty())
-            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+            .or_else(|| lookup("OPENROUTER_API_KEY"))
             .unwrap_or_default();
 
-        let concurrency = std::env::var("ENTITY_EXTRACTION_CONCURRENCY")
-            .ok()
+        let concurrency = lookup("ENTITY_EXTRACTION_CONCURRENCY")
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_CONCURRENCY);
 
-        let timeout_ms = std::env::var("ENTITY_EXTRACTION_TIMEOUT_MS")
-            .ok()
+        let timeout_ms = lookup("ENTITY_EXTRACTION_TIMEOUT_MS")
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_TIMEOUT_MS);

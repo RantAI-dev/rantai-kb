@@ -24,7 +24,23 @@ use crate::queries::{
     UPDATE_METADATA,
 };
 
-/// Read one `KnowledgeBase` row, as returned by the statements that alias their
+/// Open a connection pool from settings. A free function rather than a
+/// constructor on `sqlx::Pool`, so one process can share a single pool between
+/// the document store and the job store.
+///
+/// # Errors
+///
+/// Fails when the pool cannot be opened, naming the driver error.
+pub async fn connect_pool(settings: &PgSettings) -> Result<PgPool, PortError> {
+    PgPoolOptions::new()
+        .max_connections(settings.max_connections)
+        .acquire_timeout(settings.acquire_timeout)
+        .connect(&settings.database_url)
+        .await
+        .map_err(|e| PortError::Unavailable(format!("pg connect: {e}")))
+}
+
+/// Postgres-backed document store./// Read one `KnowledgeBase` row, as returned by the statements that alias their
 /// timestamps to snake_case names.
 fn kb_record(row: &PgRow) -> Result<KnowledgeBaseRecord, PortError> {
     Ok(KnowledgeBaseRecord {
@@ -98,13 +114,7 @@ impl PgDocumentStore {
 
     /// Construct a store from settings reference, connecting to Postgres.
     pub async fn connect(settings: &PgSettings) -> Result<Self, PortError> {
-        let pool = PgPoolOptions::new()
-            .max_connections(settings.max_connections)
-            .acquire_timeout(settings.acquire_timeout)
-            .connect(&settings.database_url)
-            .await
-            .map_err(|e| PortError::Unavailable(format!("pg connect: {e}")))?;
-        Ok(Self { pool })
+        Ok(Self::from_pool(connect_pool(settings).await?))
     }
 
     /// Exposed for tests that need to query the test DB directly.
@@ -385,6 +395,14 @@ impl DocumentStore for PgDocumentStore {
 
     async fn resolve_api_key(&self, plaintext_key: &str) -> Result<Option<AuthContext>, PortError> {
         resolve_api_key_query(&self.pool, plaintext_key).await
+    }
+
+    async fn health_check(&self) -> Result<(), PortError> {
+        sqlx::query("SELECT 1")
+            .fetch_one(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|e| PortError::Unavailable(format!("pg health check: {e}")))
     }
 
     async fn create_document(

@@ -17,7 +17,7 @@ use crate::types::{
     ExtractionOptions, ExtractionResult, FigureGateCandidate, JobRecord, JobView,
     KnowledgeBaseRecord, KnowledgeBaseSummary, NewDocument, PatchCategory, PatchDocument,
     PatchKnowledgeBase, ReapableJob, Relation, RerankCandidate, RerankResult, RetryJobOutcome,
-    SearchHit,
+    SearchHit, StoredChunk,
 };
 
 /// What the chunk store is allowed to look at. Currently the empty case is
@@ -208,6 +208,12 @@ pub trait DocumentStore: Send + Sync {
         tenant: &TenantId,
         id: &str,
     ) -> Result<bool, PortError>;
+
+    /// Liveness probe for the backing database. `GET /health` reports this
+    /// rather than assuming the store is reachable.
+    async fn health_check(&self) -> Result<(), PortError> {
+        Ok(())
+    }
 }
 
 /// Chunk store: vector + BM25 + neighbours + figure co-retrieval over the
@@ -269,7 +275,13 @@ pub trait ChunkStore: Send + Sync {
     async fn ordered_chunks(
         &self,
         document_id: &DocumentId,
-    ) -> Result<Vec<(u32, String, ChunkMetadata)>, PortError>;
+    ) -> Result<Vec<StoredChunk>, PortError>;
+
+    /// Liveness probe for the vector store. `GET /health` reports this rather
+    /// than assuming the store is reachable.
+    async fn health_check(&self) -> Result<(), PortError> {
+        Ok(())
+    }
 
     /// Co-retrieve figures belonging to retrieved documents whose anchor or caption matches.
     async fn figures(

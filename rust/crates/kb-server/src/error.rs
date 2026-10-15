@@ -1,85 +1,110 @@
 //! API error types and their HTTP mappings.
+//!
+//! Every body is `{"error": "<message>"}` and every message is the string the
+//! TypeScript service returns, because clients of this API are written against
+//! it. Anything the routes do not recognise is an `Internal` "Internal error",
+//! which is also what `handleRequest`'s catch-all produces there.
 
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use kb_ports::{EngineError, PortError};
-use serde_json::{Value, json};
+use serde_json::json;
+
+/// Message returned for any request without a usable key
+/// (`handleRequest`, src/service/api.ts:876).
+pub const UNAUTHORIZED: &str =
+    "Unauthorized — supply a key via Authorization: Bearer or X-Api-Key";
+
+/// Message returned when a document or knowledge base is not visible to the
+/// caller's tenant. Deliberately the same text everywhere, so a caller cannot
+/// tell "wrong key" from "wrong document" and probe for valid ids.
+pub const NOT_FOUND: &str = "Not found";
+
+/// Message returned when a job exists but is not in `failed` state.
+pub const NOT_FAILED: &str = "Only a failed job can be retried";
 
 #[derive(Debug)]
 pub enum ApiError {
+    /// 401. No key, or a key that does not resolve to a tenant.
     Unauthorized,
-    Forbidden(String),
+    /// 403. The key authenticated but lacks the scope the route needs.
+    Forbidden(&'static str),
+    /// 404. Nothing visible to this tenant matches.
     NotFound,
+    /// 400. The request itself is malformed or missing a required field.
     BadRequest(String),
-    Unavailable(String),
-    Malformed(String),
+    /// 404. The document exists but has no stored original.
+    NoStoredFile,
+    /// 409. The resource is in a state this route cannot act on.
+    Conflict(&'static str),
+    /// 413. The upload is larger than the accepted limit.
+    PayloadTooLarge(String),
+    /// 415. The file extension is not on the accepted list.
+    UnsupportedMedia(String),
+    /// 502. A backing store the service depends on failed.
+    BadGateway(String),
+    /// 500. Any failure the service did not anticipate. Logged, never echoed.
     Internal(String),
+}
+
+impl ApiError {
+    /// The scope a caller must hold for a route, rendered the way
+    /// `hasScope` failures read in TypeScript.
+    #[must_use]
+    pub fn missing_scope(scope: &'static str) -> Self {
+        Self::Forbidden(scope)
+    }
 }
 
 impl From<EngineError> for ApiError {
     fn from(e: EngineError) -> Self {
         match e {
             EngineError::Unauthorized => Self::Unauthorized,
-            EngineError::Forbidden(scope) => Self::Forbidden(scope.to_string()),
+            EngineError::Forbidden(scope) => Self::Forbidden(match scope {
+                "kb:read" => "kb:read",
+                _ => "kb:write",
+            }),
             EngineError::NotFound(_) => Self::NotFound,
-            EngineError::RetrievalFailed(msg) => Self::Unavailable(msg),
-            EngineError::ScopeViolation(_) => Self::Forbidden("kb:scope".to_string()),
+            // A retrieval failure is logged and reported as the generic
+            // internal error the TypeScript catch-all produces.
+            EngineError::RetrievalFailed(msg) => Self::Internal(msg),
+            EngineError::ScopeViolation(tenant) => Self::Internal(tenant.0),
         }
     }
 }
 
 impl From<PortError> for ApiError {
     fn from(e: PortError) -> Self {
-        match e {
-            PortError::Invalid(msg) => Self::BadRequest(msg),
-            PortError::Unavailable(msg) => Self::Unavailable(msg),
-            PortError::Malformed(msg) => Self::Malformed(msg),
-            PortError::Storage(msg) => Self::Unavailable(msg),
-            PortError::InvalidArgument(msg) => Self::BadRequest(msg),
-            PortError::Timeout => Self::Unavailable("operation timed out".to_string()),
-        }
+        // Store failures are never echoed to the caller: the TypeScript
+        // service answers 500 "Internal error" for anything its try/catch sees.
+        Self::Internal(e.to_string())
     }
-}
-
-fn render_error(status: StatusCode, error: &str, detail: Option<&str>) -> Response {
-    let mut body = json!({ "error": error });
-    if let Some(d) = detail {
-        if let Value::Object(ref mut map) = body {
-            map.insert("detail".into(), Value::String(d.into()));
-        }
-    }
-    (status, Json(body)).into_response()
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        match self {
-            Self::Unauthorized => {
-                render_error(StatusCode::UNAUTHORIZED, "invalid or missing api key", None)
-            }
-            Self::Forbidden(scope) => render_error(
+        let (status, message) = match self {
+            Self::Unauthorized => (StatusCode::UNAUTHORIZED, UNAUTHORIZED.to_string()),
+            Self::Forbidden(scope) => (
                 StatusCode::FORBIDDEN,
-                "insufficient permissions",
-                Some(&format!("missing scope: {scope}")),
+                format!("API key lacks scope {scope}"),
             ),
-            Self::NotFound => render_error(StatusCode::NOT_FOUND, "not found", None),
-            Self::BadRequest(msg) => {
-                render_error(StatusCode::BAD_REQUEST, "bad request", Some(&msg))
+            Self::NotFound => (StatusCode::NOT_FOUND, NOT_FOUND.to_string()),
+            Self::NoStoredFile => (
+                StatusCode::NOT_FOUND,
+                "Document has no stored file".to_string(),
+            ),
+            Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg),
+            Self::Conflict(msg) => (StatusCode::CONFLICT, msg.to_string()),
+            Self::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg),
+            Self::BadGateway(msg) => (StatusCode::BAD_GATEWAY, msg),
+            Self::UnsupportedMedia(msg) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg),
+            Self::Internal(msg) => {
+                tracing::error!(error = %msg, "request failed");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string())
             }
-            Self::Unavailable(msg) => render_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "service unavailable",
-                Some(&msg),
-            ),
-            Self::Malformed(msg) => {
-                render_error(StatusCode::BAD_REQUEST, "malformed request", Some(&msg))
-            }
-            Self::Internal(msg) => render_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal server error",
-                Some(&msg),
-            ),
-        }
+        };
+        (status, Json(json!({ "error": message }))).into_response()
     }
 }

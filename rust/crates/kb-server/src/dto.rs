@@ -5,11 +5,23 @@
 use kb_core::SourceEntry;
 use kb_engine::RetrievalOutcome;
 use kb_ports::SearchHit;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+/// Parse a request body the way the TypeScript routes do: `request.json()`
+/// wrapped in `.catch(() => ({}))`, so a malformed body becomes an empty object
+/// and the route answers with its own field-level error instead of a parser
+/// message the service never produces.
+pub fn parse_json<T: DeserializeOwned + Default>(body: &[u8]) -> T {
+    serde_json::from_slice(body).unwrap_or_default()
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SearchRequestDto {
-    pub query: String,
+    /// Left as raw JSON: the TypeScript route rejects a non-string query with
+    /// its own 400, which a typed field would turn into a parser error.
+    #[serde(default)]
+    pub query: Option<serde_json::Value>,
     #[serde(rename = "maxChunks", default)]
     pub max_chunks: Option<u32>,
     #[serde(rename = "knowledgeBaseIds", default)]
@@ -66,6 +78,20 @@ pub struct ChunkDto {
     pub contextual_prefix: Option<String>,
     pub score: f32,
     pub rank: u32,
+}
+
+impl SearchResponseDto {
+    /// The "nothing matched" shape, shared by the empty-scope and empty-result
+    /// paths so all three answer with the same keys.
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            chunks: Vec::new(),
+            sources: Vec::new(),
+            context: String::new(),
+            degrades: Vec::new(),
+        }
+    }
 }
 
 impl From<RetrievalOutcome> for SearchResponseDto {

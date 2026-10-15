@@ -1,14 +1,10 @@
-//! `kb-server` binary: reads env, wires adapters, serves HTTP.
+//! `kb-server` binary: reads env, wires adapters, serves HTTP and (unless
+//! `KB_WORKER_ENABLED=false`) runs the ingest worker in the same process.
 
-use kb_server::{Config, build, init_tracing};
+use kb_server::{Config, init_tracing, run};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
-    let config = Config::from_env()?;
-    let (app, addr) = build(config).await?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "kb-server listening");
-    axum::serve(listener, app).await?;
-    Ok(())
+    run(Config::from_env()?).await
 }

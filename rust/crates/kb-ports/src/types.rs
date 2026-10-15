@@ -388,6 +388,19 @@ pub struct PatchDocument {
     pub knowledge_base_ids: Option<Vec<KnowledgeBaseId>>,
 }
 
+/// One stored chunk as the document-detail route returns it: the SurrealDB
+/// record id, the position in the document, and the read-shape metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredChunk {
+    /// SurrealDB record id, rendered as a string (the Bun client does the same).
+    pub id: String,
+    pub chunk_index: u32,
+    pub content: String,
+    /// `metadata.chunkType`, absent when the chunk carries none.
+    pub chunk_type: Option<String>,
+    pub metadata: ChunkMetadata,
+}
+
 /// Minimal document metadata needed to stream raw bytes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocumentDownloadMeta {

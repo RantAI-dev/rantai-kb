@@ -1,34 +1,69 @@
 //! `AppState`: the whole graph of adapters + the engine, behind `Arc`s.
+//!
+//! This is the composition root's only shared value: handlers receive it
+//! through axum's `State` extractor and never build an adapter themselves.
 
 use std::sync::Arc;
 
 use kb_engine::{Engine, EngineInputs, EngineSettings, NoopExpander, QueryExpander};
 use kb_inference::EmbedderSettings;
 use kb_inference::ExpansionSettings;
-use kb_ports::{BlobStore, DocumentStore, Embedder, PortError};
+use kb_ports::{BlobStore, DocumentStore, Embedder, EntityStore, JobStore, PortError};
 
 use crate::config::{EmbedderConfig, RerankerConfig};
+use crate::events::EventBus;
+
+/// Version string reported by `GET /health` (`KB_VERSION`, defaulting to
+/// "dev" exactly as the TypeScript service does).
+pub const DEFAULT_VERSION: &str = "dev";
 
 pub struct AppState {
     pub documents: Arc<dyn DocumentStore>,
     pub chunks: Arc<dyn kb_ports::ChunkStore>,
-    /// Object storage. Only the hard-delete path calls it today.
+    /// Entity and relation graph in SurrealDB, read by the intelligence route.
+    pub entities: Arc<dyn EntityStore>,
+    /// Object storage: the upload route writes, the raw/asset routes read, the
+    /// hard-delete and reaper paths remove.
     pub blob: Arc<dyn BlobStore>,
     pub embedder: Arc<dyn Embedder>,
+    /// Ingest queue, written by the upload route and read by the job routes.
+    pub jobs: Arc<dyn JobStore>,
+    /// In-process fan-out between the ingest worker and `GET /v1/events`.
+    pub events: Arc<EventBus>,
     pub engine: Engine,
+    pub version: String,
+}
+
+/// Adapters a caller supplies. Grouped so tests can build a state from fakes
+/// without naming every constructor argument.
+pub struct StateParts {
+    pub documents: Arc<dyn DocumentStore>,
+    pub chunks: Arc<dyn kb_ports::ChunkStore>,
+    pub entities: Arc<dyn EntityStore>,
+    pub blob: Arc<dyn BlobStore>,
+    pub embedder: Arc<dyn Embedder>,
+    pub jobs: Arc<dyn JobStore>,
+    pub events: Arc<EventBus>,
+    pub version: String,
 }
 
 impl AppState {
-    /// Build state from a typed config.
+    /// Build state from a typed config, connecting every adapter once so the
+    /// process shares a single Postgres pool.
     pub async fn from_config(config: crate::Config) -> anyhow::Result<Self> {
-        let documents: Arc<dyn DocumentStore> = Arc::new(
-            kb_store_pg::PgDocumentStore::new(config.pg)
-                .await
-                .map_err(|e| anyhow::anyhow!("pg: {e}"))?,
-        );
+        let pool = kb_store_pg::connect_pool(&config.pg)
+            .await
+            .map_err(|e| anyhow::anyhow!("pg: {e}"))?;
+        let documents: Arc<dyn DocumentStore> =
+            Arc::new(kb_store_pg::PgDocumentStore::from_pool(pool.clone()));
+        let jobs: Arc<dyn JobStore> = Arc::new(kb_store_pg::PgJobStore::from_pool(pool));
         let chunks: Arc<dyn kb_ports::ChunkStore> = Arc::new(
-            kb_store_surreal::SurrealChunkStore::new(config.surreal)
+            kb_store_surreal::SurrealChunkStore::new(config.surreal.clone())
                 .map_err(|e| anyhow::anyhow!("surreal: {e}"))?,
+        );
+        let entities: Arc<dyn EntityStore> = Arc::new(
+            kb_store_surreal::SurrealChunkStore::new(config.surreal.clone())
+                .map_err(|e| anyhow::anyhow!("surreal entities: {e}"))?,
         );
         let blob: Arc<dyn BlobStore> = Arc::new(
             kb_store_blob::S3BlobStore::new(config.s3).map_err(|e| anyhow::anyhow!("s3: {e}"))?,
@@ -59,103 +94,71 @@ impl AppState {
         Ok(Self {
             documents,
             chunks,
+            entities,
             blob,
             embedder,
+            jobs,
+            events: EventBus::new(),
             engine,
+            version: config.version,
         })
     }
 
-    /// Construct a state directly from arcs. Used in tests so we don't have to
-    /// stand up Postgres/Surreal.
+    /// Construct a state from explicit adapters. Used in tests so they don't
+    /// have to stand up Postgres/Surreal.
     #[must_use]
-    pub fn from_arcs(
-        documents: Arc<dyn DocumentStore>,
-        chunks: Arc<dyn kb_ports::ChunkStore>,
-        blob: Arc<dyn BlobStore>,
-        embedder: Arc<dyn Embedder>,
-        reranker: Arc<dyn kb_ports::Reranker>,
-        engine_settings: EngineSettings,
-    ) -> Self {
-        let expander: Arc<dyn QueryExpander> = Arc::new(NoopExpander);
+    pub fn from_parts(parts: StateParts, reranker: Arc<dyn kb_ports::Reranker>, settings: EngineSettings) -> Self {
         let inputs = EngineInputs {
-            embedder: embedder.clone(),
-            chunk_store: chunks.clone(),
+            embedder: parts.embedder.clone(),
+            chunk_store: parts.chunks.clone(),
             reranker,
-            document_store: documents.clone(),
-            query_expander: expander,
+            document_store: parts.documents.clone(),
+            query_expander: Arc::new(NoopExpander),
             figure_gate: None,
         };
-        let engine = Engine::new(engine_settings, inputs);
+        let engine = Engine::new(settings, inputs);
         Self {
-            documents,
-            chunks,
-            blob,
-            embedder,
+            documents: parts.documents,
+            chunks: parts.chunks,
+            entities: parts.entities,
+            blob: parts.blob,
+            embedder: parts.embedder,
+            jobs: parts.jobs,
+            events: parts.events,
             engine,
+            version: parts.version,
         }
     }
 
-    /// Assemble the production [`IngestWorker`](kb_engine::IngestWorker) using
-    /// production adapters: Postgres job queue, Surreal chunk store, S3 blob
-    /// store, and the real production extractor (`kb-extract`).
-    pub async fn build_worker(
-        config: &crate::Config,
-        settings: kb_engine::IngestSettings,
-    ) -> anyhow::Result<kb_engine::IngestWorker> {
-        let documents = Arc::new(
-            kb_store_pg::PgDocumentStore::new(config.pg.clone())
-                .await
-                .map_err(|e| anyhow::anyhow!("pg documents: {e}"))?,
-        );
-        let jobs = Arc::new(
-            kb_store_pg::PgJobStore::connect(&config.pg)
-                .await
-                .map_err(|e| anyhow::anyhow!("pg jobs: {e}"))?,
-        );
-        let chunks = Arc::new(
-            kb_store_surreal::SurrealChunkStore::new(config.surreal.clone())
-                .map_err(|e| anyhow::anyhow!("surreal: {e}"))?,
-        );
-        let blobs = Arc::new(
-            kb_store_blob::S3BlobStore::new(config.s3.clone())
-                .map_err(|e| anyhow::anyhow!("s3: {e}"))?,
-        );
-        let embedder = Arc::new(
-            kb_inference::EmbedderImpl::new(embedder_settings_from(config.embedder.clone()))
-                .map_err(|e| anyhow::anyhow!("embedder: {e}"))?,
-        );
-        let extractor = kb_extract::build_production_extractor(&config.extract)
-            .map_err(|e| anyhow::anyhow!("extractor: {e}"))?
-            .shared();
-        Ok(kb_engine::IngestWorker::new(
-            jobs, documents, chunks, blobs, extractor, embedder, settings,
-        ))
-    }
-
-    /// Build an [`IngestWorker`](kb_engine::IngestWorker) reusing this state's
-    /// already-initialized stores and the real production extractor (`kb-extract`).
-    pub async fn build_ingest_worker(
+    /// Assemble a production [`IngestWorker`](kb_engine::IngestWorker) from the
+    /// same pool and stores this state already holds, so the HTTP process and
+    /// its worker share one database connection and one event bus.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the entity extractor or extractor chain cannot be built.
+    pub fn build_worker(
         &self,
         config: &crate::Config,
         settings: kb_engine::IngestSettings,
     ) -> anyhow::Result<kb_engine::IngestWorker> {
-        let jobs = Arc::new(
-            kb_store_pg::PgJobStore::connect(&config.pg)
-                .await
-                .map_err(|e| anyhow::anyhow!("pg jobs: {e}"))?,
-        );
         let extractor = kb_extract::build_production_extractor(&config.extract)
             .map_err(|e| anyhow::anyhow!("extractor: {e}"))?
             .shared();
+        let entity_extractor = kb_inference::LlmCombinedExtractor::new(config.entity.clone())
+            .map_err(|e| anyhow::anyhow!("entity extractor: {e}"))?;
         Ok(kb_engine::IngestWorker::new(
-            jobs,
+            self.jobs.clone(),
             self.documents.clone(),
             self.chunks.clone(),
             self.blob.clone(),
             extractor,
             self.embedder.clone(),
             settings,
-        ))
+        )
+        .with_entity_store(self.entities.clone())
+        .with_entity_extractor(Arc::new(entity_extractor))
+        .with_progress_sink(Arc::clone(&self.events) as Arc<dyn kb_ports::ProgressSink>))
     }
 }
 

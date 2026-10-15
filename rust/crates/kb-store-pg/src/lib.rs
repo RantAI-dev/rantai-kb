@@ -16,7 +16,7 @@ mod store;
 pub use auth::hash_api_key;
 pub use documents::row_to_doc_meta;
 pub use jobs::PgJobStore;
-pub use store::{PgDocumentStore, PgSettings};
+pub use store::{PgDocumentStore, PgSettings, connect_pool};
 
 #[cfg(test)]
 mod tests {

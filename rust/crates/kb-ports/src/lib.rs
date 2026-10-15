@@ -30,5 +30,5 @@ pub use types::{
     FigureGateCandidate, JobRecord, JobView, KnowledgeBaseRecord,
     KnowledgeBaseSummary, NewDocument, PageBlock, PageBlockKind, PageText, PatchCategory,
     PatchDocument, PatchKnowledgeBase, ReapableJob, Relation, RelationView, RerankCandidate,
-    RerankResult, RerankScore, RetryJobOutcome, SearchHit,
+    RerankResult, RerankScore, RetryJobOutcome, SearchHit, StoredChunk,
 };

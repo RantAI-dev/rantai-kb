@@ -15,7 +15,6 @@ use kb_ports::{
 };
 use sqlx::PgPool;
 use sqlx::Row;
-use sqlx::postgres::PgPoolOptions;
 
 use crate::queries::{
     CLAIM_NEXT_PENDING, CLEAR_JOB_S3_KEY, FAIL_JOB_STALLED, FINISH_JOB_FAILURE, FINISH_JOB_SUCCESS,
@@ -48,13 +47,7 @@ impl PgJobStore {
     ///
     /// Fails when the pool cannot be opened, naming the driver error.
     pub async fn connect(settings: &PgSettings) -> Result<Self, PortError> {
-        let pool = PgPoolOptions::new()
-            .max_connections(settings.max_connections)
-            .acquire_timeout(settings.acquire_timeout)
-            .connect(&settings.database_url)
-            .await
-            .map_err(|e| PortError::Unavailable(format!("pg job store connect: {e}")))?;
-        Ok(Self { pool })
+        Ok(Self::from_pool(crate::store::connect_pool(settings).await?))
     }
 }
 

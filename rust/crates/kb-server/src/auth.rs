@@ -34,7 +34,7 @@ impl FromRequestParts<Arc<AppState>> for Authed {
             .ok_or(ApiError::Unauthorized)?;
 
         if !has_scope(&auth, "kb:read") {
-            return Err(ApiError::Forbidden("kb:read".to_string()));
+            return Err(ApiError::missing_scope("kb:read"));
         }
 
         Ok(Self(auth))
