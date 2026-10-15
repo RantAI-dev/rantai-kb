@@ -381,3 +381,40 @@ so `POST /v1/search` with `knowledgeBaseIds: []` answers with the note
 "API key is not bound to any of the requested knowledge bases" even for a
 full-access key; the list route is unaffected because an absent parameter still
 parses to "no filter".
+
+## R4 slice 6: Bearer scheme case-insensitivity
+
+| # | command | result |
+|---|---|---|
+| 105 | `cargo test -p kb-server --test server_tests` | exit 0, 13 tests pass. |
+| 106 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0, zero errors. |
+| 107 | `cargo test --workspace` | exit 0. 363 tests across the workspace (kb-core 92, kb-engine 32, kb-extract 86 + 10 integration, kb-inference 20, kb-ports 3, kb-server 15 unit + 60 integration, kb-store-blob 6, kb-store-pg 9, kb-store-surreal 16). |
+
+## Route table (Rust `feat/rust-port`)
+
+| Method | Path | TypeScript handler | Rust handler | Statuses |
+|---|---|---|---|---|
+| OPTIONS | any | api.ts:851 | routes.rs:119 `cors` | 204 + CORS_HEADERS |
+| GET | /health, /v1/health | api.ts:854 | routes.rs:158 | 200 / 503 |
+| GET | /v1/formats | api.ts:871 | routes.rs:185 | 200 |
+| POST | /v1/search | api.ts:109 | routes.rs:194 | 200 / 400 / 403 |
+| POST | /v1/documents | api.ts:39 | routes/upload.rs:73 | 202 / 400 / 403 / 413 / 415 / 502 / 500 |
+| GET | /v1/documents | api.ts:160 | routes.rs:342 | 200 / 403 |
+| GET | /v1/documents/:id | api.ts:265 | routes.rs:492 | 200 / 403 / 404 |
+| PATCH | /v1/documents/:id | api.ts:302 | routes.rs:574 | 200 / 403 / 404 |
+| DELETE | /v1/documents/:id | api.ts:475 | routes.rs:649 | 200 / 403 / 404 |
+| GET | /v1/documents/:id/raw | api.ts:378 | routes/media.rs:25 | 200 / 403 / 404 / 502 |
+| GET | /v1/documents/:id/assets | api.ts:422 | routes/media.rs:68 | 200 / 403 / 404 |
+| GET | /v1/documents/:id/intelligence | api.ts:546 | routes/media.rs:158 | 200 / 403 / 404 |
+| GET | /v1/jobs/:id | api.ts:636 | routes/jobs.rs:19 | 200 / 404 |
+| POST | /v1/jobs/:id/retry | api.ts:659 | routes/jobs.rs:42 | 200 / 403 / 404 / 409 |
+| GET | /v1/knowledge-bases | api.ts:701 | routes.rs:762 | 200 |
+| POST | /v1/knowledge-bases | api.ts:691 | routes/taxonomy.rs:70 | 201 / 400 / 403 |
+| PATCH | /v1/knowledge-bases/:id | api.ts:721 | routes/taxonomy.rs:100 | 200 / 403 / 404 |
+| DELETE | /v1/knowledge-bases/:id | api.ts:728 | routes/taxonomy.rs:133 | 200 / 403 / 404 |
+| GET | /v1/categories | api.ts:772 | routes/taxonomy.rs:189 | 200 / 403 |
+| POST | /v1/categories | api.ts:761 | routes/taxonomy.rs:208 | 201 / 400 / 403 |
+| PATCH | /v1/categories/:id | api.ts:781 | routes/taxonomy.rs:248 | 200 / 403 / 404 |
+| DELETE | /v1/categories/:id | api.ts:788 | routes/taxonomy.rs:278 | 200 / 403 / 404 |
+| GET | /v1/events | api.ts:805 | events.rs:95 | 200 / 401 |
+| any | unknown path | api.ts:919 | routes.rs:132 | 401 / 404 |
