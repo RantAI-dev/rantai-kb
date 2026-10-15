@@ -12,13 +12,14 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use kb_core::chunk::{ChunkMetadata, SmartChunkingOptions, smart_chunk_document};
+use kb_core::chunk::{Chunk, ChunkMetadata, SmartChunkingOptions, smart_chunk_document};
+use kb_core::policy::{parse_figure_mode, resolve_ingest_policy};
 use kb_core::{
     IngestStep, ProgressFlags, StepProgress, compute_eta_seconds, compute_overall_progress,
 };
 use kb_ports::{
     BlobStore, ChunkStore, ChunkToStore, DocumentId, DocumentStore, Embedder, Extractor, JobRecord,
-    JobStore, PortError,
+    ExtractionOptions, JobStore, PortError,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
@@ -309,9 +310,19 @@ impl IngestWorker {
             .mime_type
             .as_deref()
             .unwrap_or("application/octet-stream");
+        let params = job.params.clone().unwrap_or_else(|| json!({}));
+        let figure_mode = parse_figure_mode(
+            params.get("figureMode").and_then(Value::as_str),
+            params.get("forceOCR").and_then(Value::as_bool),
+        );
+        let policy = resolve_ingest_policy(&job.filename, figure_mode);
+        let options = ExtractionOptions {
+            figures: policy.figures,
+            force_layout: policy.force_layout,
+        };
         let extraction = self
             .extractor
-            .extract(&job.filename, mime, &bytes)
+            .extract_with_options(&job.filename, mime, &bytes, options)
             .await
             .map_err(|e| e.to_string())?;
         // A parser that could not read the file reports the reason and leaves
@@ -322,7 +333,6 @@ impl IngestWorker {
             return Err(reason.clone());
         }
 
-        let params = job.params.clone().unwrap_or_else(|| json!({}));
         let title = job_title(&params, &job.filename);
         // NUL bytes survive some extractors and break Postgres text columns.
         let content: String = extraction.content.chars().filter(|c| *c != '\0').collect();
@@ -340,13 +350,31 @@ impl IngestWorker {
 
         self.progress(job, StepProgress::of(IngestStep::Chunking), started)
             .await;
-        let chunks = smart_chunk_document(
+        let mut chunks = smart_chunk_document(
             &content,
             &title,
             category_of(&params),
             subcategory_of(&params).as_deref(),
             self.settings.chunking,
         );
+
+        if let Some(map) = &extraction.page_map {
+            let page_blocks: Vec<kb_core::page_map::PageBlock> = map
+                .iter()
+                .map(|p| kb_core::page_map::PageBlock {
+                    page: p.page,
+                    text: p.text.clone(),
+                })
+                .collect();
+            let annotated = kb_core::page_map::assign_chunk_pages(chunks, &page_blocks);
+            chunks = annotated
+                .into_iter()
+                .map(|a| Chunk {
+                    content: a.content,
+                    metadata: a.metadata,
+                })
+                .collect();
+        }
 
         if chunks.is_empty() {
             // The Bun worker reaches the same place: `storeChunks` returns
@@ -544,6 +572,9 @@ fn storage_metadata(meta: &ChunkMetadata) -> Value {
     if let Some(prefix) = &meta.contextual_prefix {
         map.insert("contextualPrefix".to_string(), json!(prefix));
     }
+    if let Some(page) = meta.page {
+        map.insert("page".to_string(), json!(page));
+    }
     Value::Object(map)
 }
 
@@ -561,6 +592,7 @@ mod tests {
             chunk_index: 4,
             contextual_prefix: None,
             chunk_type: Some("text".to_string()),
+            page: None,
         }
     }
 
@@ -596,6 +628,14 @@ mod tests {
         assert_eq!(stored["chunkType"], json!("text"));
         assert!(stored.get("contextualPrefix").is_none());
         assert!(stored.get("page").is_none());
+    }
+
+    #[test]
+    fn stored_metadata_includes_page_when_present() {
+        let mut m = meta();
+        m.page = Some(7);
+        let stored = storage_metadata(&m);
+        assert_eq!(stored["page"], json!(7));
     }
 
     #[test]

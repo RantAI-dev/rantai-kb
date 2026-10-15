@@ -95,7 +95,7 @@ impl AppState {
 
     /// Assemble the production [`IngestWorker`](kb_engine::IngestWorker) using
     /// production adapters: Postgres job queue, Surreal chunk store, S3 blob
-    /// store, and the real local extractor (`kb-extract`).
+    /// store, and the real production extractor (`kb-extract`).
     pub async fn build_worker(
         config: &crate::Config,
         settings: kb_engine::IngestSettings,
@@ -122,14 +122,16 @@ impl AppState {
             kb_inference::EmbedderImpl::new(embedder_settings_from(config.embedder.clone()))
                 .map_err(|e| anyhow::anyhow!("embedder: {e}"))?,
         );
-        let extractor = kb_extract::LocalExtractor::shared();
+        let extractor = kb_extract::build_production_extractor(&config.extract)
+            .map_err(|e| anyhow::anyhow!("extractor: {e}"))?
+            .shared();
         Ok(kb_engine::IngestWorker::new(
             jobs, documents, chunks, blobs, extractor, embedder, settings,
         ))
     }
 
     /// Build an [`IngestWorker`](kb_engine::IngestWorker) reusing this state's
-    /// already-initialized stores and the real local extractor (`kb-extract`).
+    /// already-initialized stores and the real production extractor (`kb-extract`).
     pub async fn build_ingest_worker(
         &self,
         config: &crate::Config,
@@ -140,7 +142,9 @@ impl AppState {
                 .await
                 .map_err(|e| anyhow::anyhow!("pg jobs: {e}"))?,
         );
-        let extractor = kb_extract::LocalExtractor::shared();
+        let extractor = kb_extract::build_production_extractor(&config.extract)
+            .map_err(|e| anyhow::anyhow!("extractor: {e}"))?
+            .shared();
         Ok(kb_engine::IngestWorker::new(
             jobs,
             self.documents.clone(),

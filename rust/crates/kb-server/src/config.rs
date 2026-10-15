@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use kb_engine::EngineSettings;
+use kb_extract::ExtractConfig;
 use kb_inference::ExpansionSettings;
 use kb_store_blob::S3Settings;
 use kb_store_pg::PgSettings;
@@ -20,6 +21,7 @@ pub struct Config {
     pub reranker: RerankerConfig,
     pub expansion: ExpansionSettings,
     pub engine: EngineSettings,
+    pub extract: ExtractConfig,
     pub request_timeout: Duration,
 }
 
@@ -189,6 +191,8 @@ impl Config {
             timeout: Duration::from_secs(8),
         };
 
+        let extract = ExtractConfig::from_lookup(&lookup);
+
         Ok(Config {
             bind_addr,
             pg,
@@ -198,6 +202,7 @@ impl Config {
             reranker,
             expansion,
             engine,
+            extract,
             request_timeout: Duration::from_secs(30),
         })
     }
@@ -259,15 +264,25 @@ where
             base_url: base_url.unwrap_or_else(|| "http://localhost:8200".into()),
             model: model.unwrap_or_else(|| "nvidia/llama-nemotron-rerank-1b-v2".into()),
         }),
-        "cohere" => Ok(RerankerConfig::Cohere {
-            model: model.unwrap_or_else(|| "rerank-v4.0-pro".into()),
-            api_key: api_key.unwrap_or_default(),
-            endpoint: base_url,
-        }),
-        _ => Ok(RerankerConfig::Llm {
-            model: model.unwrap_or_else(|| "openai/gpt-4.1-nano".into()),
-            api_key: lookup("OPENROUTER_API_KEY").unwrap_or_default(),
-        }),
+        "cohere" => {
+            let api_key = api_key.ok_or_else(|| {
+                anyhow::anyhow!("KB_RERANK_API_KEY or COHERE_API_KEY is required for cohere reranker")
+            })?;
+            Ok(RerankerConfig::Cohere {
+                model: model.unwrap_or_else(|| "rerank-v3.5".into()),
+                api_key,
+                endpoint: base_url,
+            })
+        }
+        _ => {
+            let api_key = api_key
+                .or_else(|| lookup("OPENROUTER_API_KEY").filter(|s| !s.trim().is_empty()))
+                .unwrap_or_default();
+            Ok(RerankerConfig::Llm {
+                model: model.unwrap_or_else(|| "openai/gpt-4.1-nano".into()),
+                api_key,
+            })
+        }
     }
 }
 
@@ -353,6 +368,14 @@ mod tests {
         map.insert("S3_ACCESS_KEY_ID", "custom-key");
         map.insert("S3_SECRET_ACCESS_KEY", "custom-secret");
         map.insert("S3_ENABLE_PATH_STYLE", "1");
+        map.insert("KB_EXTRACT_PRIMARY", "mineru");
+        map.insert("KB_EXTRACT_FALLBACK", "unpdf");
+        map.insert("KB_EXTRACT_SMART_FALLBACK", "openai/gpt-4.1-nano");
+        map.insert("KB_EXTRACT_MINERU_BASE_URL", "http://mineru.local:8100");
+        map.insert("KB_MINERU_API_KEY", "mineru-key");
+        map.insert("KB_MISTRAL_OCR_KEY", "mistral-key");
+        map.insert("KB_LAYOUT_EXTRACTOR_ORDER", "mistral,sidecar");
+        map.insert("OCR_FALLBACK_MODEL", "custom-ocr-model");
 
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
@@ -387,6 +410,15 @@ mod tests {
         assert_eq!(cfg.s3.bucket, "custom-bucket");
         assert_eq!(cfg.s3.access_key_id, "custom-key");
         assert!(cfg.s3.force_path_style);
+        assert_eq!(cfg.extract.primary, "mineru");
+        assert_eq!(cfg.extract.fallback, "unpdf");
+        assert_eq!(cfg.extract.smart_fallback, "openai/gpt-4.1-nano");
+        assert_eq!(cfg.extract.mineru_base_url, "http://mineru.local:8100");
+        assert_eq!(cfg.extract.mineru_api_key, "mineru-key");
+        assert_eq!(cfg.extract.mistral_ocr_key, "mistral-key");
+        assert_eq!(cfg.extract.layout_extractor_order, vec!["mistral", "sidecar"]);
+        assert_eq!(cfg.extract.ocr_fallback_model, "custom-ocr-model");
+
         match &cfg.reranker {
             RerankerConfig::Tei { base_url, model } => {
                 assert_eq!(base_url, "http://tei.local:80");
