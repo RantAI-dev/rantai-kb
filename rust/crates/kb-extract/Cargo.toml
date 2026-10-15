@@ -1,0 +1,25 @@
+[package]
+name = "kb-extract"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kb-ports = { path = "../kb-ports" }
+kb-core = { path = "../kb-core" }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+zip = { workspace = true }
+quick-xml = { workspace = true }
+calamine = { workspace = true }
+
+[dev-dependencies]
+kb-ports = { path = "../kb-ports" }

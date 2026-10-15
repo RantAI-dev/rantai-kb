@@ -115,13 +115,89 @@ pub struct JobRecord {
 }
 
 /// Result of running an [`Extractor`](crate::Extractor) over a stored file.
+///
+/// Mirrors the TypeScript `ExtractionResult` (`src/lib/ingest/extract.ts:26`),
+/// including its failure shape: a parser that cannot read the file returns a
+/// result carrying `error` rather than empty content, and the caller aborts the
+/// ingest. The layout-only fields are empty for every local parser; they exist
+/// so the shape does not change when a layout extractor lands.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ExtractionResult {
+    /// Extracted text; empty when `error` is set.
     pub content: String,
-    /// Format of `content` after extraction (`"markdown"`, `"text"`, …).
+    /// Format of `content` after extraction (`"markdown"`, `"pdf"`, `"image"`),
+    /// matching the TypeScript union.
     pub file_type: String,
+    /// Whether an OCR or layout extractor produced the text.
+    pub used_ocr: bool,
     /// Figures the layout parser found. Empty for text-only formats.
     pub figures: Vec<ExtractedFigure>,
+    /// Per-page reading-order blocks, with figures inline at their own
+    /// position, so a figure can be anchored to the text chunk it belongs to
+    /// instead of to whatever caption matched.
+    pub pages_blocks: Option<Vec<Vec<PageBlock>>>,
+    /// `(page, text)` pairs in document order, so each chunk can carry the
+    /// page it came from.
+    pub page_map: Option<Vec<PageText>>,
+    /// Set when extraction failed; the caller must abort rather than index the
+    /// empty content.
+    pub error: Option<String>,
+}
+
+impl ExtractionResult {
+    /// Plain text with no figures and no page information — what every local
+    /// parser returns.
+    #[must_use]
+    pub fn text(content: impl Into<String>, file_type: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            file_type: file_type.into(),
+            ..Self::default()
+        }
+    }
+
+    /// The TypeScript failure shape (`extract.ts:192`): no content, plus the
+    /// reason. A value rather than only an error type so the reason survives to
+    /// whoever reads the result.
+    #[must_use]
+    pub fn failed(file_type: impl Into<String>, error: impl Into<String>) -> Self {
+        Self {
+            file_type: file_type.into(),
+            error: Some(error.into()),
+            ..Self::default()
+        }
+    }
+}
+
+/// One entry of a layout parser's page map (an element of the TypeScript
+/// `pageMap` array).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PageText {
+    /// Zero-based page index.
+    pub page: u32,
+    pub text: String,
+}
+
+/// One block of a page in reading order (the TypeScript `PageBlocks`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PageBlock {
+    pub kind: PageBlockKind,
+    /// Set when `kind` is [`PageBlockKind::Figure`]; matches the figure's id.
+    pub id: Option<String>,
+    /// Set for text and caption blocks.
+    pub text: Option<String>,
+}
+
+/// Which kind of block a [`PageBlock`] is.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PageBlockKind {
+    /// Body text.
+    Text,
+    /// A figure's caption.
+    Caption,
+    /// A figure, inline at the position it sits at in the page's reading order.
+    Figure,
 }
 
 /// One figure crop lifted out of a document by a layout extractor.

@@ -16,13 +16,15 @@ mod types;
 pub use blob::{BlobStore, asset_path, document_path, sanitize_filename};
 pub use error::{EngineError, PortError, RetrievalDegrade};
 pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
-pub use scope::{DocumentScope, adapter};
+pub use scope::DocumentScope;
+#[cfg(feature = "scope-adapter")]
+pub use scope::adapter;
 pub use traits::{
     ChunkStore, DocumentFilter, DocumentStore, Embedder, Extractor, JobStore, NeighbourAnchor,
     Reranker, ScopeRequest,
 };
 pub use types::{
     AuthContext, Chunk, ChunkMetadata, ChunkToStore, ChunkType, DocumentMeta, ExtractedFigure,
-    ExtractionResult, JobRecord, KnowledgeBaseSummary, RerankCandidate, RerankResult, RerankScore,
-    SearchHit,
+    ExtractionResult, JobRecord, KnowledgeBaseSummary, PageBlock, PageBlockKind, PageText,
+    RerankCandidate, RerankResult, RerankScore, SearchHit,
 };
