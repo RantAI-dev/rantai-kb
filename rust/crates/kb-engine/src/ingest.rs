@@ -5,21 +5,26 @@
 //! the worker is crash-safe and interchangeable with the Bun worker: both poll
 //! the same table and `FOR UPDATE SKIP LOCKED` hands each row to one of them.
 //!
-//! Everything the pipeline does not have a port for yet — entity extraction,
-//! figure assets, page maps — is skipped, so a document indexed by this worker
-//! carries text chunks only. Those steps are additive and land in a later slice.
+//! Entity extraction, figure assets, and page maps are fully integrated
+//! mirroring `src/lib/ingest/index-document.ts`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use kb_core::chunk::{Chunk, ChunkMetadata, SmartChunkingOptions, smart_chunk_document};
+use kb_core::figure_assets::{
+    LayoutBlockRef, build_page_text, context_for_page, derive_label, figure_kind_word,
+    normalize_figure_type, resolve_figure_anchors,
+};
 use kb_core::policy::{parse_figure_mode, resolve_ingest_policy};
 use kb_core::{
     IngestStep, ProgressFlags, StepProgress, compute_eta_seconds, compute_overall_progress,
 };
 use kb_ports::{
-    BlobStore, ChunkStore, ChunkToStore, DocumentId, DocumentStore, Embedder, Extractor, JobRecord,
-    ExtractionOptions, JobStore, PortError,
+    BlobStore, ChunkStore, ChunkToStore, DocumentId, DocumentStore, Embedder, EntityExtractor,
+    EntityStore, ExtractedFigure, ExtractionOptions, Extractor, JobRecord, JobStore, PortError,
+    asset_path,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
@@ -136,11 +141,13 @@ pub struct IngestWorker {
     blobs: Arc<dyn BlobStore>,
     extractor: Arc<dyn Extractor>,
     embedder: Arc<dyn Embedder>,
+    entities: Option<Arc<dyn EntityStore>>,
+    entity_extractor: Option<Arc<dyn EntityExtractor>>,
     settings: IngestSettings,
 }
 
 impl IngestWorker {
-    /// Assemble a worker from its ports.
+    /// Assemble a worker from its primary ports.
     #[must_use]
     pub fn new(
         jobs: Arc<dyn JobStore>,
@@ -158,8 +165,36 @@ impl IngestWorker {
             blobs,
             extractor,
             embedder,
+            entities: None,
+            entity_extractor: None,
             settings,
         }
+    }
+
+    /// Equip the worker with entity storage and extraction ports.
+    #[must_use]
+    pub fn with_entities(
+        mut self,
+        entities: Arc<dyn EntityStore>,
+        extractor: Arc<dyn EntityExtractor>,
+    ) -> Self {
+        self.entities = Some(entities);
+        self.entity_extractor = Some(extractor);
+        self
+    }
+
+    /// Equip the worker with an entity store.
+    #[must_use]
+    pub fn with_entity_store(mut self, entities: Arc<dyn EntityStore>) -> Self {
+        self.entities = Some(entities);
+        self
+    }
+
+    /// Equip the worker with an entity extractor.
+    #[must_use]
+    pub fn with_entity_extractor(mut self, extractor: Arc<dyn EntityExtractor>) -> Self {
+        self.entity_extractor = Some(extractor);
+        self
     }
 
     /// Poll until cancelled, sweeping for stranded jobs on `reclaim_interval`.
@@ -303,9 +338,6 @@ impl IngestWorker {
             .await
             .map_err(|e| format!("blob download failed: {e}"))?;
 
-        self.progress(job, StepProgress::of(IngestStep::Extracting), started)
-            .await;
-
         let mime = job
             .mime_type
             .as_deref()
@@ -315,16 +347,40 @@ impl IngestWorker {
             params.get("figureMode").and_then(Value::as_str),
             params.get("forceOCR").and_then(Value::as_bool),
         );
+        let doc_type = params
+            .get("documentType")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let use_combined = params
+            .get("useCombined")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+
         let policy = resolve_ingest_policy(&job.filename, figure_mode);
+
+        let entity_extraction_enabled = std::env::var("KB_ENTITY_EXTRACTION_ENABLED")
+            .map(|v| v != "false" && v != "0")
+            .unwrap_or(true);
+
+        let flags = ProgressFlags {
+            entities: policy.entities && entity_extraction_enabled,
+            figures: policy.figures,
+        };
+
+        self.progress(job, StepProgress::of(IngestStep::Extracting), started, &flags)
+            .await;
+
         let options = ExtractionOptions {
             figures: policy.figures,
             force_layout: policy.force_layout,
+            document_type: doc_type,
         };
         let extraction = self
             .extractor
             .extract_with_options(&job.filename, mime, &bytes, options)
             .await
             .map_err(|e| e.to_string())?;
+
         // A parser that could not read the file reports the reason and leaves
         // `content` empty (`extract.ts:192`). Indexing that would put an empty
         // document in the KB, so the job fails with the parser's own message —
@@ -348,7 +404,7 @@ impl IngestWorker {
             .await
             .map_err(|e| format!("document update failed: {e}"))?;
 
-        self.progress(job, StepProgress::of(IngestStep::Chunking), started)
+        self.progress(job, StepProgress::of(IngestStep::Chunking), started, &flags)
             .await;
         let mut chunks = smart_chunk_document(
             &content,
@@ -358,28 +414,83 @@ impl IngestWorker {
             self.settings.chunking,
         );
 
+        // Entity / relation extraction (non-fatal, mirrors index-document.ts:58-185)
+        if policy.entities {
+            if !entity_extraction_enabled {
+                tracing::info!(
+                    "[Knowledge] entity extraction disabled (KB_ENTITY_EXTRACTION_ENABLED=false)"
+                );
+            } else {
+                self.progress(
+                    job,
+                    StepProgress::of(IngestStep::ExtractingEntities),
+                    started,
+                    &flags,
+                )
+                .await;
+                self.extract_and_store_entities(
+                    job,
+                    document_id,
+                    &content,
+                    use_combined,
+                    started,
+                    &flags,
+                )
+                .await;
+            }
+        }
+
+        // Page map assignment: tag text chunks with their source page from the layout parser
         if let Some(map) = &extraction.page_map {
-            let page_blocks: Vec<kb_core::page_map::PageBlock> = map
-                .iter()
-                .map(|p| kb_core::page_map::PageBlock {
-                    page: p.page,
-                    text: p.text.clone(),
-                })
-                .collect();
-            let annotated = kb_core::page_map::assign_chunk_pages(chunks, &page_blocks);
-            chunks = annotated
-                .into_iter()
-                .map(|a| Chunk {
-                    content: a.content,
-                    metadata: a.metadata,
-                })
-                .collect();
+            if !map.is_empty() {
+                let page_blocks: Vec<kb_core::page_map::PageBlock> = map
+                    .iter()
+                    .map(|p| kb_core::page_map::PageBlock {
+                        page: p.page,
+                        text: p.text.clone(),
+                    })
+                    .collect();
+                let annotated = kb_core::page_map::assign_chunk_pages(chunks, &page_blocks);
+                chunks = annotated
+                    .into_iter()
+                    .map(|a| Chunk {
+                        content: a.content,
+                        metadata: a.metadata,
+                    })
+                    .collect();
+            }
+        }
+
+        // Figure asset layer (multimodal RAG): upload crops + append searchable figure chunks
+        if !extraction.figures.is_empty() {
+            self.progress(
+                job,
+                StepProgress::at(
+                    IngestStep::ProcessingFigures,
+                    0,
+                    extraction.figures.len() as u32,
+                ),
+                started,
+                &flags,
+            )
+            .await;
+            self.process_figures(
+                job.tenant_id.as_str(),
+                document_id,
+                &title,
+                category_of(&params),
+                subcategory_of(&params).as_deref(),
+                &extraction.figures,
+                &mut chunks,
+                extraction.pages_blocks.as_deref(),
+            )
+            .await;
         }
 
         if chunks.is_empty() {
             // The Bun worker reaches the same place: `storeChunks` returns
             // early on an empty batch, and the document is still marked ready.
-            return self.finish_ready(document_id, 0).await;
+            return self.finish_ready(job, document_id, 0, started, &flags).await;
         }
 
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
@@ -391,6 +502,7 @@ impl IngestWorker {
             job,
             StepProgress::at(IngestStep::Embedding, 0, total),
             started,
+            &flags,
         )
         .await;
         let embeddings = self
@@ -410,8 +522,17 @@ impl IngestWorker {
 
         self.progress(
             job,
+            StepProgress::at(IngestStep::Embedding, total, total),
+            started,
+            &flags,
+        )
+        .await;
+
+        self.progress(
+            job,
             StepProgress::at(IngestStep::Storing, 0, total),
             started,
+            &flags,
         )
         .await;
         let to_store: Vec<ChunkToStore> = chunks
@@ -441,20 +562,348 @@ impl IngestWorker {
             .await
             .map_err(|e| format!("storing chunks failed: {e}"))?;
 
-        self.finish_ready(document_id, to_store.len()).await
+        self.finish_ready(job, document_id, to_store.len(), started, &flags)
+            .await
     }
 
-    /// Flip the document to `ready`. A document with no chunks is still ready:
-    /// the file is readable, there is simply nothing for RAG to match yet.
+    /// Extract entities and relations, upserting them to SurrealDB.
+    /// Non-fatal on failure: logs warning and continues.
+    async fn extract_and_store_entities(
+        &self,
+        job: &JobRecord,
+        document_id: &DocumentId,
+        content: &str,
+        use_combined: bool,
+        started: Instant,
+        flags: &ProgressFlags,
+    ) {
+        let (entities, relations) = if let Some(extractor) = &self.entity_extractor {
+            if use_combined {
+                match extractor
+                    .extract_entities_and_relations(
+                        content,
+                        Some(&document_id.0),
+                        job.user_id.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        tracing::warn!("Entity/Relation extraction failed (non-fatal): {e}");
+                        return;
+                    }
+                }
+            } else {
+                match extractor
+                    .extract_entities(content, Some(&document_id.0), None)
+                    .await
+                {
+                    Ok(ents) => (ents, Vec::new()),
+                    Err(e) => {
+                        tracing::warn!("Entity extraction failed (non-fatal): {e}");
+                        return;
+                    }
+                }
+            }
+        } else {
+            // Pattern fallback
+            let pat_extractor = kb_core::intelligence::PatternEntityExtractor::default();
+            let entities = pat_extractor.extract(content, Some(&document_id.0), None);
+            let relations = if use_combined {
+                let pat_rel_extractor = kb_core::intelligence::PatternRelationExtractor::default();
+                pat_rel_extractor.extract(
+                    content,
+                    &entities,
+                    Some(&document_id.0),
+                    job.user_id.as_deref(),
+                )
+            } else {
+                Vec::new()
+            };
+            (entities, relations)
+        };
+
+        let Some(store) = &self.entities else {
+            return;
+        };
+
+        let total_entities = entities.len() as u32;
+        let mut entity_idx: u32 = 0;
+        let mut entity_id_map: HashMap<String, String> = HashMap::new();
+
+        for entity in &entities {
+            entity_idx = entity_idx.saturating_add(1);
+            self.progress(
+                job,
+                StepProgress::at(
+                    IngestStep::ExtractingEntities,
+                    entity_idx,
+                    total_entities,
+                ),
+                started,
+                flags,
+            )
+            .await;
+
+            let sanitized_name: String = entity
+                .name
+                .to_lowercase()
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect();
+            let entity_id = format!("entity:{document_id}_{sanitized_name}");
+
+            if let Err(e) = store
+                .upsert_entity(
+                    document_id,
+                    &sanitized_name,
+                    &entity.name,
+                    &entity.entity_type,
+                    entity.confidence,
+                    entity.metadata.as_ref(),
+                )
+                .await
+            {
+                tracing::warn!("[kb-ingest] Failed to upsert entity {entity_id}: {e}");
+            }
+
+            entity_id_map.insert(entity.name.to_lowercase(), entity_id);
+        }
+
+        if !relations.is_empty() {
+            let mut stored_count = 0;
+            let mut skipped_count = 0;
+            for relation in &relations {
+                let source_name = relation
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("source_entity"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_lowercase();
+                let target_name = relation
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("target_entity"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_lowercase();
+                let source_id = entity_id_map.get(&source_name);
+                let target_id = entity_id_map.get(&target_name);
+
+                let (Some(source_id), Some(target_id)) = (source_id, target_id) else {
+                    skipped_count += 1;
+                    continue;
+                };
+
+                let raw_rel = if relation.relation_type.trim().is_empty() {
+                    "RELATED_TO"
+                } else {
+                    relation.relation_type.as_str()
+                };
+                let rel_type: String = raw_rel
+                    .to_uppercase()
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+                    .collect();
+                let rel_type = rel_type.trim_matches('_');
+                let rel_type = if rel_type.is_empty() {
+                    "RELATED_TO"
+                } else {
+                    rel_type
+                };
+
+                let context = relation
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.get("context"))
+                    .and_then(Value::as_str);
+
+                if let Err(e) = store
+                    .relate_entities(
+                        source_id,
+                        rel_type,
+                        target_id,
+                        relation.confidence,
+                        document_id,
+                        context,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        "[kb-ingest] Failed to create relation {source_id} ->{rel_type}-> {target_id}: {e}"
+                    );
+                } else {
+                    stored_count += 1;
+                }
+            }
+            tracing::info!(
+                "[kb-ingest] Relations: {stored_count} stored, {skipped_count} skipped (no matching entity), {} total",
+                relations.len()
+            );
+        }
+    }
+
+    /// Process figure crops: upload images to BlobStore, compute captions and anchors,
+    /// and build searchable figure chunks. Non-fatal: logs warning and continues.
+    #[allow(clippy::too_many_arguments)]
+    async fn process_figures(
+        &self,
+        tenant_id: &str,
+        document_id: &DocumentId,
+        document_title: &str,
+        category: &str,
+        subcategory: Option<&str>,
+        figures: &[ExtractedFigure],
+        chunks: &mut Vec<Chunk>,
+        pages_blocks: Option<&[Vec<kb_ports::PageBlock>]>,
+    ) {
+        let page_text_tuples: Vec<(Option<u32>, &str)> = chunks
+            .iter()
+            .map(|c| (c.metadata.page, c.content.as_str()))
+            .collect();
+        let page_text = build_page_text(&page_text_tuples);
+
+        // Convert pages_blocks to LayoutBlockRef if present
+        let core_pages_blocks: Option<Vec<Vec<LayoutBlockRef<'_>>>> = pages_blocks.map(|pbs| {
+            pbs.iter()
+                .map(|page| {
+                    page.iter()
+                        .map(|b| LayoutBlockRef {
+                            kind: match b.kind {
+                                kb_ports::PageBlockKind::Text => "text",
+                                kb_ports::PageBlockKind::Caption => "caption",
+                                kb_ports::PageBlockKind::Figure => "figure",
+                            },
+                            id: b.id.as_deref(),
+                            text: b.text.as_deref(),
+                        })
+                        .collect()
+                })
+                .collect()
+        });
+
+        let text_chunk_tuples: Vec<(u32, &str)> = chunks
+            .iter()
+            .filter(|c| c.metadata.chunk_type.as_deref() != Some("figure"))
+            .map(|c| (c.metadata.chunk_index, c.content.as_str()))
+            .collect();
+
+        let anchors = if let Some(pbs) = &core_pages_blocks {
+            resolve_figure_anchors(pbs, &text_chunk_tuples)
+        } else {
+            HashMap::new()
+        };
+
+        let mut fig_chunks = Vec::new();
+        let mut assets = Vec::new();
+
+        for (i, fig) in figures.iter().enumerate() {
+            let n = i + 1;
+            let filename = format!("fig-p{}-{n}.png", fig.page);
+            let key = asset_path(Some(tenant_id), &document_id.0, &filename);
+
+            if let Err(e) = self
+                .blobs
+                .upload(&key, fig.image_bytes.clone(), "image/png")
+                .await
+            {
+                tracing::warn!(
+                    "[figure-assets] upload failed for {key}, skipping figure: {e}"
+                );
+                continue;
+            }
+
+            let context = context_for_page(&page_text, fig.page);
+            let kind_word = figure_kind_word(&fig.kind);
+            let derived = derive_label(&context);
+            let caption = if let Some(cap) = fig
+                .caption
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+            {
+                cap.to_string()
+            } else {
+                let page_label = fig.page + 1;
+                if let Some(der) = derived {
+                    format!("{kind_word} halaman {page_label}: {der}")
+                } else {
+                    format!("{kind_word} halaman {page_label}")
+                }
+            };
+
+            assets.push(json!({
+                "assetKey": key,
+                "page": fig.page,
+                "caption": caption,
+                "bbox": fig.bbox,
+                "type": normalize_figure_type(&fig.kind),
+            }));
+
+            let context_snippet = if !context.is_empty() {
+                let snippet: String = context.chars().take(500).collect();
+                format!(" — Konteks: {snippet}")
+            } else {
+                String::new()
+            };
+
+            let anchor_chunk_index = fig.id.as_deref().and_then(|id| anchors.get(id).copied());
+
+            fig_chunks.push(Chunk {
+                content: format!("[{kind_word}] {caption}{context_snippet}"),
+                metadata: ChunkMetadata {
+                    document_title: document_title.to_string(),
+                    category: category.to_string(),
+                    subcategory: subcategory.map(str::to_string),
+                    section: Some(caption),
+                    chunk_index: 0, // will be reassigned below
+                    chunk_type: Some("figure".to_string()),
+                    page: Some(fig.page),
+                    asset_key: Some(key),
+                    anchor_chunk_index,
+                    contextual_prefix: None,
+                },
+            });
+        }
+
+        if !fig_chunks.is_empty() {
+            chunks.extend(fig_chunks);
+            for (idx, c) in chunks.iter_mut().enumerate() {
+                c.metadata.chunk_index = idx as u32;
+            }
+        }
+
+        if !assets.is_empty() {
+            let patch = json!({ "figures": assets });
+            if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
+                tracing::warn!("[kb-ingest] Failed to update document metadata with figures: {e}");
+            }
+            tracing::info!(
+                "[kb-ingest] Figures: {} stored for document {}",
+                assets.len(),
+                document_id.0
+            );
+        }
+    }
+
+    /// Flip the document to `ready`, emit `done` progress, and return chunk count.
     async fn finish_ready(
         &self,
+        job: &JobRecord,
         document_id: &DocumentId,
         chunks: usize,
+        started: Instant,
+        flags: &ProgressFlags,
     ) -> Result<(usize, DocumentId), String> {
         self.documents
             .set_status(document_id, "ready")
             .await
             .map_err(|e| format!("marking document ready failed: {e}"))?;
+
+        self.progress(job, StepProgress::of(IngestStep::Done), started, flags)
+            .await;
+
         Ok((chunks, document_id.clone()))
     }
 
@@ -472,12 +921,14 @@ impl IngestWorker {
 
     /// Record progress. A failed progress write is logged and dropped: it must
     /// not abort an ingest that is otherwise fine.
-    async fn progress(&self, job: &JobRecord, step: StepProgress, started: Instant) {
-        let flags = ProgressFlags {
-            entities: false,
-            figures: false,
-        };
-        let overall = compute_overall_progress(step, flags);
+    async fn progress(
+        &self,
+        job: &JobRecord,
+        step: StepProgress,
+        started: Instant,
+        flags: &ProgressFlags,
+    ) {
+        let overall = compute_overall_progress(step, *flags);
         let eta = compute_eta_seconds(overall, Some(started), Instant::now());
         if let Err(err) = self
             .jobs
@@ -575,6 +1026,12 @@ fn storage_metadata(meta: &ChunkMetadata) -> Value {
     if let Some(page) = meta.page {
         map.insert("page".to_string(), json!(page));
     }
+    if let Some(asset_key) = &meta.asset_key {
+        map.insert("assetKey".to_string(), json!(asset_key));
+    }
+    if let Some(anchor) = meta.anchor_chunk_index {
+        map.insert("anchorChunkIndex".to_string(), json!(anchor));
+    }
     Value::Object(map)
 }
 
@@ -593,6 +1050,8 @@ mod tests {
             contextual_prefix: None,
             chunk_type: Some("text".to_string()),
             page: None,
+            asset_key: None,
+            anchor_chunk_index: None,
         }
     }
 
@@ -628,14 +1087,20 @@ mod tests {
         assert_eq!(stored["chunkType"], json!("text"));
         assert!(stored.get("contextualPrefix").is_none());
         assert!(stored.get("page").is_none());
+        assert!(stored.get("assetKey").is_none());
+        assert!(stored.get("anchorChunkIndex").is_none());
     }
 
     #[test]
-    fn stored_metadata_includes_page_when_present() {
+    fn stored_metadata_includes_page_and_figures_when_present() {
         let mut m = meta();
         m.page = Some(7);
+        m.asset_key = Some("docs/asset.png".to_string());
+        m.anchor_chunk_index = Some(2);
         let stored = storage_metadata(&m);
         assert_eq!(stored["page"], json!(7));
+        assert_eq!(stored["assetKey"], json!("docs/asset.png"));
+        assert_eq!(stored["anchorChunkIndex"], json!(2));
     }
 
     #[test]

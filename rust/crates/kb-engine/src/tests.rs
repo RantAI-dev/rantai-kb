@@ -470,4 +470,55 @@ mod pipeline_tests {
         );
         assert!(outcome.chunks.iter().all(|h| h.chunk.id.0 != "c_b"));
     }
+
+    #[tokio::test]
+    async fn retrieval_applies_figure_gate_veto() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(
+            TenantId::new_unchecked("t1"),
+            vec![DocumentId::new_unchecked("d1")],
+        );
+
+        let hit = make_fake_hit("c1", "d1", "Title", "Text passage", 0, 0.9);
+        chunk_store.vector_hits.write().unwrap().push(hit);
+
+        let mut fig1 = make_fake_hit("fig_1", "d1", "Title", "[Gambar] Figure 1", 1, 0.8);
+        fig1.chunk.chunk_type = ChunkType::Figure;
+        fig1.chunk.metadata.asset_key = Some("assets/fig1.png".to_string());
+
+        let mut fig2 = make_fake_hit("fig_2", "d1", "Title", "[Gambar] Figure 2", 2, 0.7);
+        fig2.chunk.chunk_type = ChunkType::Figure;
+        fig2.chunk.metadata.asset_key = Some("assets/fig2.png".to_string());
+
+        chunk_store.figure_hits.write().unwrap().push(fig1);
+        chunk_store.figure_hits.write().unwrap().push(fig2);
+
+        let gate = Arc::new(crate::fakes::FakeFigureGate::default());
+        *gate.kept_ids.write().unwrap() = vec!["fig_1".to_string()];
+
+        let mut opts = RetrievalOptions::default();
+        opts.figure_limit = 2;
+        opts.figure_gate = Some(gate);
+
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+        )
+        .await
+        .unwrap();
+
+        let fig_ids: Vec<&str> = outcome
+            .chunks
+            .iter()
+            .filter(|c| c.chunk.chunk_type == ChunkType::Figure)
+            .map(|c| c.chunk.id.0.as_str())
+            .collect();
+        assert_eq!(fig_ids, vec!["fig_1"]);
+    }
 }

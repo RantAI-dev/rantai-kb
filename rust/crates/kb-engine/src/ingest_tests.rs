@@ -2,19 +2,21 @@
 //! database; the Postgres `FOR UPDATE SKIP LOCKED` claim is verified against a
 //! live database in a later phase.
 
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use kb_ports::{
-    BlobStore, DocumentId, DocumentMeta, Embedder, ExtractionResult, Extractor, JobRecord, PortError,
-    TenantId, document_path,
+    BlobStore, DocumentId, DocumentMeta, Embedder, Entity, ExtractedFigure, ExtractionResult,
+    Extractor, JobRecord, PageBlock, PageBlockKind, PageText, PortError, Relation, TenantId,
+    document_path,
 };
 
 use super::*;
 use crate::fakes::{
-    FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeExtractor, FakeJobStore,
+    FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityExtractor,
+    FakeEntityStore, FakeExtractor, FakeJobStore,
 };
 use crate::ingest::HEARTBEAT_INTERVAL;
 
@@ -549,4 +551,247 @@ impl Embedder for ShortEmbedder {
     fn dimension(&self) -> u32 {
         2
     }
+}
+
+
+#[tokio::test]
+async fn test_ingest_worker_end_to_end_full_pipeline() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"pdf-bytes".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+
+    let page_map = vec![
+        PageText {
+            page: 0,
+            text: "Section one explains the quarter in detail. Here is the first part.".to_string(),
+        },
+        PageText {
+            page: 1,
+            text: "Section two follows with the breakdown by region and by product line.".to_string(),
+        },
+    ];
+
+    let pages_blocks = vec![vec![
+        PageBlock {
+            kind: PageBlockKind::Text,
+            id: None,
+            text: Some("Section one explains the quarter in detail with all financial figures.".to_string()),
+        },
+        PageBlock {
+            kind: PageBlockKind::Figure,
+            id: Some("fig_1".to_string()),
+            text: None,
+        },
+    ]];
+
+    let figures = vec![ExtractedFigure {
+        kind: "chart".to_string(),
+        page: 0,
+        bbox: [10.0, 20.0, 100.0, 200.0],
+        caption: Some("Revenue Growth Chart".to_string()),
+        image_bytes: b"png-bytes".to_vec(),
+        id: Some("fig_1".to_string()),
+    }];
+
+    let extract_result = ExtractionResult {
+        content: "Section one explains the quarter in detail with all financial figures.
+
+Section two follows with the breakdown by region and by product line.
+
+Alice works at Acme Corp.".to_string(),
+        file_type: "markdown".to_string(),
+        used_ocr: false,
+        figures,
+        pages_blocks: Some(pages_blocks),
+        page_map: Some(page_map),
+        error: None,
+    };
+
+    let fake_extractor = Arc::new(FakeExtractor::returning_result(extract_result));
+
+    let entity_store = Arc::new(FakeEntityStore::default());
+    let entity_extractor = Arc::new(FakeEntityExtractor::default());
+    *entity_extractor.entities.write().unwrap() = vec![
+        Entity {
+            name: "Alice".to_string(),
+            entity_type: "PERSON".to_string(),
+            confidence: 0.95,
+            document_id: None,
+            chunk_id: None,
+            metadata: None,
+        },
+        Entity {
+            name: "Acme Corp".to_string(),
+            entity_type: "ORGANIZATION".to_string(),
+            confidence: 0.98,
+            document_id: None,
+            chunk_id: None,
+            metadata: None,
+        },
+    ];
+    *entity_extractor.relations.write().unwrap() = vec![Relation {
+        relation_type: "WORKS_AT".to_string(),
+        confidence: 0.9,
+        source_entity: "Alice".to_string(),
+        target_entity: "Acme Corp".to_string(),
+        context: Some("Alice works at Acme Corp.".to_string()),
+        metadata: Some(serde_json::json!({
+            "source_entity": "Alice",
+            "target_entity": "Acme Corp",
+            "context": "Alice works at Acme Corp."
+        })),
+    }];
+
+    let worker = IngestWorker::new(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        fake_extractor,
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings {
+            embedding_model: Some("bge-m3".to_string()),
+            ..IngestSettings::default()
+        },
+    )
+    .with_entity_store(entity_store.clone())
+    .with_entity_extractor(entity_extractor.clone());
+
+    let mut j = job();
+    j.params = Some(serde_json::json!({
+        "title": "Quarterly report",
+        "categories": ["finance"],
+        "subcategory": "q3",
+        "useCombined": true,
+    }));
+    jobs.push(j);
+
+    let ran = worker.run_once().await.unwrap();
+    assert!(ran);
+
+    // 1. Check document ready
+    assert_eq!(document_status_of(&documents), "ready");
+
+    // 2. Check stored chunks: text chunks + figure chunk
+    let stored = chunks.stored_chunks.read().unwrap();
+    let doc_chunks = stored.get(&DocumentId::new_unchecked(DOC)).unwrap();
+    assert!(doc_chunks.len() >= 2);
+
+    let fig_chunk = doc_chunks.iter().find(|c| {
+        c.metadata.get("chunkType").and_then(|v| v.as_str()) == Some("figure")
+    }).expect("figure chunk should be stored");
+    assert_eq!(
+        fig_chunk.metadata.get("assetKey").and_then(|v| v.as_str()),
+        Some("documents/tenant-1/doc_1/assets/fig-p0-1.png")
+    );
+    assert_eq!(
+        fig_chunk.metadata.get("anchorChunkIndex").and_then(|v| v.as_u64()),
+        Some(0)
+    );
+
+    // Verify chunkIndex monotonically reindexed across set
+    for (i, c) in doc_chunks.iter().enumerate() {
+        assert_eq!(c.chunk_index, i as u32);
+        assert_eq!(c.metadata.get("chunkIndex").and_then(|v| v.as_u64()), Some(i as u64));
+    }
+
+    // 3. Check document metadata figures updated
+    let doc_meta = documents.docs.read().unwrap()[&tenant()][0].metadata.clone().unwrap();
+    let figs = doc_meta.get("figures").and_then(|v| v.as_array()).unwrap();
+    assert_eq!(figs.len(), 1);
+    assert_eq!(figs[0]["assetKey"], "documents/tenant-1/doc_1/assets/fig-p0-1.png");
+    assert_eq!(figs[0]["type"], "chart");
+
+    // 4. Check entity upserts and relations
+    let upserts = entity_store.upserted_entities.read().unwrap();
+    assert_eq!(upserts.len(), 2);
+    assert!(upserts.iter().any(|(_, san, name, typ, ..)| san == "alice" && name == "Alice" && typ == "PERSON"));
+    assert!(upserts.iter().any(|(_, san, name, typ, ..)| san == "acme_corp" && name == "Acme Corp" && typ == "ORGANIZATION"));
+
+    let rels = entity_store.relations.read().unwrap();
+    assert_eq!(rels.len(), 1);
+    assert_eq!(rels[0].0, "entity:doc_1_alice");
+    assert_eq!(rels[0].1, "WORKS_AT");
+    assert_eq!(rels[0].2, "entity:doc_1_acme_corp");
+
+    // 5. Check progress step sequence
+    let progress = jobs.progress.read().unwrap();
+    let steps: Vec<&str> = progress.iter().map(|(_, step, _)| step.as_str()).collect();
+    assert!(steps.contains(&"extracting"));
+    assert!(steps.contains(&"chunking"));
+    assert!(steps.contains(&"extracting_entities"));
+    assert!(steps.contains(&"processing_figures"));
+    assert!(steps.contains(&"embedding"));
+    assert!(steps.contains(&"storing"));
+    assert!(steps.contains(&"done"));
+
+    // Check job finished success
+    let finished = jobs.finished.read().unwrap();
+    assert_eq!(finished.len(), 1);
+    assert!(finished[0].success);
+}
+
+#[tokio::test]
+async fn test_ingest_worker_entity_extractor_failure_is_non_fatal() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"pdf-bytes".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+
+    let fake_extractor = Arc::new(FakeExtractor::returning("Some text here", "text"));
+    let entity_extractor = Arc::new(FakeEntityExtractor::default());
+    entity_extractor.fail.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let worker = IngestWorker::new(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        fake_extractor,
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings::default(),
+    )
+    .with_entity_extractor(entity_extractor);
+
+    jobs.push(job());
+    let outcome = worker.run_job(job()).await;
+    assert!(matches!(outcome, JobOutcome::Ready { .. }));
+    assert_eq!(document_status_of(&documents), "ready");
+}
+
+#[tokio::test]
+async fn test_ingest_worker_embed_failure_marks_job_and_document_failed() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"pdf-bytes".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+
+    let fake_extractor = Arc::new(FakeExtractor::returning("Some text here", "text"));
+    let embedder = Arc::new(FakeEmbedder::default());
+    embedder.fail.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let worker = IngestWorker::new(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        fake_extractor,
+        embedder,
+        IngestSettings::default(),
+    );
+
+    jobs.push(job());
+    let outcome = worker.run_job(job()).await;
+    assert!(matches!(outcome, JobOutcome::Failed { .. }));
+    assert_eq!(document_status_of(&documents), "failed");
+    let finished = jobs.finished.read().unwrap();
+    assert!(!finished[0].success);
+    assert!(finished[0].detail.contains("embedding failed"));
 }

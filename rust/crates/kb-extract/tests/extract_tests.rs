@@ -317,3 +317,42 @@ async fn test_smart_router_decision() {
         .unwrap();
     assert_eq!(res2.content, "Fallback OCR output");
 }
+
+#[tokio::test]
+async fn test_scanned_pdf_chain_failure_single_error_prefix() {
+    let Ok(_pdfium) = get_pdfium() else {
+        eprintln!("Skipping pdfium test: libpdfium not loaded");
+        return;
+    };
+
+    // Chain with no extractors and no fallback OCR
+    let chain = LayoutExtractorChain::new(vec![], None);
+
+    let res = kb_extract::extract_document(
+        "scanned.pdf",
+        "application/pdf",
+        MINIMAL_BLANK_PDF,
+        ExtractionOptions {
+            force_layout: true,
+            figures: false,
+            document_type: None,
+        },
+        &chain,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let err = res.error.expect("extraction must report error");
+    assert!(err.starts_with("OCR failed for \"scanned.pdf\":"));
+    // Verify there is no duplicate prefix
+    assert_eq!(
+        err.matches("OCR failed for").count(),
+        1,
+        "error message should contain exactly one 'OCR failed for' prefix: {err}"
+    );
+    assert_eq!(
+        err,
+        "OCR failed for \"scanned.pdf\": all layout extractors failed and no fallback OCR configured"
+    );
+}

@@ -45,7 +45,7 @@ impl Extractor for SmartRouterExtractor {
     ) -> Result<ExtractionResult, PortError> {
         let text_layer_res = self
             .text_layer
-            .extract_with_options(filename, mime_type, file_bytes, options)
+            .extract_with_options(filename, mime_type, file_bytes, options.clone())
             .await;
 
         let tl_err_msg = match text_layer_res {

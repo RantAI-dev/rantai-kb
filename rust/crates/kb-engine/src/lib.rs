@@ -19,7 +19,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use kb_ports::{
-    ChunkStore, DocumentScope, DocumentStore, Embedder, EngineError, PortError, Reranker,
+    ChunkStore, DocumentScope, DocumentStore, Embedder, EngineError, FigureGate, PortError,
+    Reranker,
 };
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -44,9 +45,9 @@ pub struct EngineSettings {
     pub rerank_final_k: u32,
     /// Default chunk cap when the request has none (`KB_DEFAULT_MAX_CHUNKS`).
     pub max_chunks: u32,
-    /// Vector-only hits below this similarity are dropped.
+    /// Minimum similarity score for vector-only hits (`KB_MIN_SIMILARITY`).
     pub min_similarity: f32,
-    /// Adjacent chunks pulled around each hit (`KB_NEIGHBOR_WINDOW`).
+    /// Chunks on either side of an anchor (`KB_NEIGHBOUR_WINDOW`).
     pub neighbour_window: u32,
     /// Figures kept per answer (`KB_FIGURE_MAX_PER_ANSWER`).
     pub figure_limit: u32,
@@ -57,6 +58,22 @@ pub struct EngineSettings {
     /// BM25 arm on/off (`KB_HYBRID_BM25_ENABLED`). When off the engine runs
     /// the vector arm alone and does not record a degrade.
     pub hybrid_bm25_enabled: bool,
+}
+
+impl Default for EngineSettings {
+    fn default() -> Self {
+        Self {
+            candidate_pool_size: 20,
+            rerank_final_k: 5,
+            max_chunks: 8,
+            min_similarity: 0.30,
+            neighbour_window: 1,
+            figure_limit: 3,
+            expansion_enabled: false,
+            expansion_paraphrases: 3,
+            hybrid_bm25_enabled: true,
+        }
+    }
 }
 
 /// Query expander port. The engine calls it only when expansion is enabled.
@@ -83,6 +100,7 @@ pub struct EngineInputs {
     pub reranker: Arc<dyn Reranker>,
     pub document_store: Arc<dyn DocumentStore>,
     pub query_expander: Arc<dyn QueryExpander>,
+    pub figure_gate: Option<Arc<dyn FigureGate>>,
 }
 
 /// Engine handle — cheap to clone (all state behind `Arc`s).
@@ -113,6 +131,7 @@ impl Engine {
             reranker,
             document_store,
             query_expander: Arc::new(NoopExpander),
+            figure_gate: None,
         };
         Self::new(settings, inputs)
     }
@@ -149,6 +168,7 @@ impl Engine {
             expansion_enabled: self.settings.expansion_enabled,
             expansion_paraphrases: self.settings.expansion_paraphrases,
             hybrid_bm25_enabled: self.settings.hybrid_bm25_enabled,
+            figure_gate: self.inputs.figure_gate.clone(),
         };
 
         execute_pipeline(

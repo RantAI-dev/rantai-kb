@@ -39,7 +39,7 @@ impl Extractor for HybridExtractor {
     ) -> Result<ExtractionResult, PortError> {
         let (structural_res, text_layer_res) = tokio::join!(
             self.structural
-                .extract_with_options(filename, mime_type, file_bytes, options),
+                .extract_with_options(filename, mime_type, file_bytes, options.clone()),
             self.text_layer
                 .extract_with_options(filename, mime_type, file_bytes, options),
         );

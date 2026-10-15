@@ -173,6 +173,7 @@ impl MistralOcrExtractor {
                             bbox,
                             caption,
                             image_bytes,
+                            id: Some(format!("p{}-{}", p.index, img.id)),
                         });
                     }
                 }

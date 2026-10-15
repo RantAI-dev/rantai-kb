@@ -42,7 +42,7 @@ impl LayoutExtractorChain {
     ) -> Result<ExtractionResult, ExtractError> {
         for (name, extractor) in &self.extractors {
             match extractor
-                .extract_with_options(filename, "application/pdf", pdf_bytes, options)
+                .extract_with_options(filename, "application/pdf", pdf_bytes, options.clone())
                 .await
             {
                 Ok(res) if !res.content.trim().is_empty() => {

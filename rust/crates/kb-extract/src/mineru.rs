@@ -131,6 +131,7 @@ impl MineruExtractor {
                         bbox: f.bbox,
                         caption: f.caption,
                         image_bytes,
+                        id: None,
                     })
                 })
                 .collect()

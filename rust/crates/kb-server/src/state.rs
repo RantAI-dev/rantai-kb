@@ -53,6 +53,7 @@ impl AppState {
             reranker,
             document_store: documents.clone(),
             query_expander: expander,
+            figure_gate: None,
         };
         let engine = Engine::new(config.engine, inputs);
         Ok(Self {
@@ -82,6 +83,7 @@ impl AppState {
             reranker,
             document_store: documents.clone(),
             query_expander: expander,
+            figure_gate: None,
         };
         let engine = Engine::new(engine_settings, inputs);
         Self {

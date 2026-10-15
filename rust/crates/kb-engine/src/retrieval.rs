@@ -2,6 +2,7 @@
 //! neighbour weave, figure co-retrieval, and context building.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::sync::Arc;
 
 use kb_core::{
@@ -9,14 +10,15 @@ use kb_core::{
     weave_neighbours_with,
 };
 use kb_ports::{
-    ChunkStore, DocumentId, DocumentScope, DocumentStore, Embedder, EngineError, NeighbourAnchor,
-    RerankCandidate, Reranker, RetrievalDegrade, SearchHit, TenantId,
+    ChunkStore, DocumentId, DocumentScope, DocumentStore, Embedder, EngineError, FigureGate,
+    FigureGateCandidate, NeighbourAnchor, RerankCandidate, Reranker, RetrievalDegrade, SearchHit,
+    TenantId,
 };
 
 use crate::QueryExpander;
 
 /// Parameters for one retrieval execution.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RetrievalOptions {
     pub max_chunks: u32,
     pub min_similarity: f32,
@@ -30,6 +32,25 @@ pub struct RetrievalOptions {
     pub expansion_paraphrases: u32,
     /// Run the BM25 arm.
     pub hybrid_bm25_enabled: bool,
+    /// Optional figure gate veto.
+    pub figure_gate: Option<Arc<dyn FigureGate>>,
+}
+
+impl fmt::Debug for RetrievalOptions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RetrievalOptions")
+            .field("max_chunks", &self.max_chunks)
+            .field("min_similarity", &self.min_similarity)
+            .field("candidate_pool_size", &self.candidate_pool_size)
+            .field("rerank_final_k", &self.rerank_final_k)
+            .field("neighbour_window", &self.neighbour_window)
+            .field("figure_limit", &self.figure_limit)
+            .field("expansion_enabled", &self.expansion_enabled)
+            .field("expansion_paraphrases", &self.expansion_paraphrases)
+            .field("hybrid_bm25_enabled", &self.hybrid_bm25_enabled)
+            .field("figure_gate", &self.figure_gate.as_ref().map(|_| "<FigureGate>"))
+            .finish()
+    }
 }
 
 impl Default for RetrievalOptions {
@@ -44,6 +65,7 @@ impl Default for RetrievalOptions {
             expansion_enabled: false,
             expansion_paraphrases: 3,
             hybrid_bm25_enabled: true,
+            figure_gate: None,
         }
     }
 }
@@ -138,14 +160,15 @@ pub async fn execute_pipeline(
         // Own the vectors first: the search futures borrow them, so they must
         // outlive the futures.
         let mut query_vectors: Vec<Vec<f32>> = Vec::with_capacity(vectors.len());
-        for v in vectors {
-            query_vectors.push(v.map_err(|e| format!("embed query: {e}"))?);
+        for res in vectors {
+            let vec = res.map_err(|e| format!("vector embed: {e}"))?;
+            query_vectors.push(vec);
         }
-        let searches: Vec<_> = query_vectors
+        let searches = query_vectors
             .iter()
-            .map(|v| chunk_store.vector_search(scope, v, pool_size))
-            .collect();
+            .map(|vec| chunk_store.vector_search(scope, vec, pool_size));
         let lists = futures::future::join_all(searches).await;
+
         let mut union: HashMap<String, SearchHit> = HashMap::new();
         for list in lists {
             let list = list.map_err(|e| format!("vector search: {e}"))?;
@@ -358,6 +381,27 @@ pub async fn execute_pipeline(
             .await
         {
             Ok(mut figures) => {
+                if let Some(gate) = &opts.figure_gate {
+                    if !figures.is_empty() {
+                        let candidates: Vec<FigureGateCandidate> = figures
+                            .iter()
+                            .map(|f| FigureGateCandidate {
+                                id: f.chunk.id.0.clone(),
+                                asset_key: f.chunk.metadata.asset_key.clone().unwrap_or_default(),
+                                caption: f.chunk.content.clone(),
+                            })
+                            .collect();
+                        match gate.gate_figures(query, &candidates).await {
+                            Ok(kept_ids) => {
+                                let kept_set: HashSet<String> = kept_ids.into_iter().collect();
+                                figures.retain(|f| kept_set.contains(&f.chunk.id.0));
+                            }
+                            Err(e) => {
+                                tracing::warn!("figure gate failed (non-fatal): {e}");
+                            }
+                        }
+                    }
+                }
                 enrich_titles(doc_store, scope.tenant(), &mut figures).await;
                 reranked_hits.extend(figures);
             }

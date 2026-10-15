@@ -13,9 +13,10 @@ use std::sync::{
 use async_trait::async_trait;
 use kb_ports::{
     AuthContext, BlobStore, Chunk, ChunkId, ChunkMetadata, ChunkStore, ChunkToStore, ChunkType,
-    DocumentId, DocumentMeta, DocumentScope, DocumentStore, Embedder, ExtractionResult, Extractor,
+    DocumentId, DocumentMeta, DocumentScope, DocumentStore, Embedder, Entity, EntityExtractor,
+    EntityStore, ExtractionOptions, ExtractionResult, Extractor, FigureGate, FigureGateCandidate,
     JobRecord, JobStore, KnowledgeBaseId, KnowledgeBaseSummary, NeighbourAnchor, PortError,
-    RerankCandidate, RerankResult, Reranker, ScopeRequest, SearchHit, TenantId,
+    Relation, RerankCandidate, RerankResult, Reranker, ScopeRequest, SearchHit, TenantId,
     adapter::ScopeToken,
 };
 use std::time::Duration;
@@ -212,6 +213,29 @@ impl DocumentStore for FakeDocumentStore {
                     doc.file_size = Some(v);
                 }
                 doc.updated_at = "2026-01-01T00:00:00Z".to_string();
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    async fn update_metadata(
+        &self,
+        id: &DocumentId,
+        patch: &serde_json::Value,
+    ) -> Result<(), PortError> {
+        let mut map = self.docs.write().unwrap();
+        for list in map.values_mut() {
+            if let Some(doc) = list.iter_mut().find(|d| &d.id == id) {
+                let mut current = doc.metadata.clone().unwrap_or_else(|| serde_json::json!({}));
+                if let (Some(cur_obj), Some(patch_obj)) = (current.as_object_mut(), patch.as_object()) {
+                    for (k, v) in patch_obj {
+                        cur_obj.insert(k.clone(), v.clone());
+                    }
+                } else {
+                    current = patch.clone();
+                }
+                doc.metadata = Some(current);
                 return Ok(());
             }
         }
@@ -495,6 +519,8 @@ pub struct FakeJobStore {
     pending: Arc<RwLock<std::collections::VecDeque<JobRecord>>>,
     /// `(job_id, step, progress)` in call order.
     pub progress: Arc<RwLock<Vec<(String, String, u32)>>>,
+    /// Detailed step updates with sub-counters.
+    pub detailed_progress: Arc<RwLock<Vec<(String, String, u32, Option<u32>, Option<u32>)>>>,
     pub finished: Arc<RwLock<Vec<FinishedJob>>>,
     pub reclaimed: Arc<RwLock<u64>>,
     /// Job ids passed to `touch`, in call order: the heartbeat's trail.
@@ -523,14 +549,24 @@ impl JobStore for FakeJobStore {
         job_id: &str,
         step: &str,
         progress: u32,
-        _step_current: Option<u32>,
-        _step_total: Option<u32>,
+        step_current: Option<u32>,
+        step_total: Option<u32>,
         _eta_seconds: Option<i32>,
     ) -> Result<(), PortError> {
         self.progress
             .write()
             .unwrap()
             .push((job_id.to_string(), step.to_string(), progress));
+        self.detailed_progress
+            .write()
+            .unwrap()
+            .push((
+                job_id.to_string(),
+                step.to_string(),
+                progress,
+                step_current,
+                step_total,
+            ));
         Ok(())
     }
 
@@ -573,6 +609,7 @@ impl JobStore for FakeJobStore {
 /// Extractor that returns fixed text, or fails on demand.
 #[derive(Clone, Default)]
 pub struct FakeExtractor {
+    pub result: Arc<RwLock<Option<ExtractionResult>>>,
     pub content: Arc<RwLock<String>>,
     pub file_type: Arc<RwLock<String>>,
     pub fail: Arc<AtomicBool>,
@@ -583,8 +620,20 @@ impl FakeExtractor {
     /// Build an extractor that returns `content` as `file_type`.
     pub fn returning(content: &str, file_type: &str) -> Self {
         Self {
+            result: Arc::new(RwLock::new(None)),
             content: Arc::new(RwLock::new(content.to_string())),
             file_type: Arc::new(RwLock::new(file_type.to_string())),
+            fail: Arc::new(AtomicBool::new(false)),
+            calls: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Build an extractor that returns a custom `ExtractionResult`.
+    pub fn returning_result(result: ExtractionResult) -> Self {
+        Self {
+            content: Arc::new(RwLock::new(result.content.clone())),
+            file_type: Arc::new(RwLock::new(result.file_type.clone())),
+            result: Arc::new(RwLock::new(Some(result))),
             fail: Arc::new(AtomicBool::new(false)),
             calls: Arc::new(AtomicBool::new(false)),
         }
@@ -595,18 +644,152 @@ impl FakeExtractor {
 impl Extractor for FakeExtractor {
     async fn extract(
         &self,
+        filename: &str,
+        mime_type: &str,
+        file_bytes: &[u8],
+    ) -> Result<ExtractionResult, PortError> {
+        self.extract_with_options(filename, mime_type, file_bytes, ExtractionOptions::default())
+            .await
+    }
+
+    async fn extract_with_options(
+        &self,
         _filename: &str,
         _mime_type: &str,
         _file_bytes: &[u8],
+        _options: ExtractionOptions,
     ) -> Result<ExtractionResult, PortError> {
         self.calls.store(true, Ordering::Relaxed);
         if self.fail.load(Ordering::Relaxed) {
             return Err(PortError::Unavailable("forced extract failure".to_string()));
+        }
+        if let Some(res) = self.result.read().unwrap().as_ref() {
+            return Ok(res.clone());
         }
         Ok(ExtractionResult {
             content: self.content.read().unwrap().clone(),
             file_type: self.file_type.read().unwrap().clone(),
             ..ExtractionResult::default()
         })
+    }
+}
+
+/// Fake in-memory entity store.
+#[derive(Clone, Default)]
+pub struct FakeEntityStore {
+    #[allow(clippy::type_complexity)]
+    pub upserted_entities:
+        Arc<RwLock<Vec<(DocumentId, String, String, String, f32, Option<serde_json::Value>)>>>,
+    pub relations: Arc<RwLock<Vec<(String, String, String, f32, DocumentId, Option<String>)>>>,
+    pub fail_upsert: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl EntityStore for FakeEntityStore {
+    async fn upsert_entity(
+        &self,
+        document_id: &DocumentId,
+        sanitized_name: &str,
+        name: &str,
+        entity_type: &str,
+        confidence: f32,
+        metadata: Option<&serde_json::Value>,
+    ) -> Result<(), PortError> {
+        if self.fail_upsert.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable("forced entity upsert failure".into()));
+        }
+        self.upserted_entities.write().unwrap().push((
+            document_id.clone(),
+            sanitized_name.to_string(),
+            name.to_string(),
+            entity_type.to_string(),
+            confidence,
+            metadata.cloned(),
+        ));
+        Ok(())
+    }
+
+    async fn relate_entities(
+        &self,
+        source_id: &str,
+        rel_type: &str,
+        target_id: &str,
+        confidence: f32,
+        document_id: &DocumentId,
+        context: Option<&str>,
+    ) -> Result<(), PortError> {
+        self.relations.write().unwrap().push((
+            source_id.to_string(),
+            rel_type.to_string(),
+            target_id.to_string(),
+            confidence,
+            document_id.clone(),
+            context.map(|s| s.to_string()),
+        ));
+        Ok(())
+    }
+}
+
+/// Fake entity extractor.
+#[derive(Clone, Default)]
+pub struct FakeEntityExtractor {
+    pub entities: Arc<RwLock<Vec<Entity>>>,
+    pub relations: Arc<RwLock<Vec<Relation>>>,
+    pub fail: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl EntityExtractor for FakeEntityExtractor {
+    async fn extract_entities(
+        &self,
+        _text: &str,
+        _document_id: Option<&str>,
+        _chunk_id: Option<&str>,
+    ) -> Result<Vec<Entity>, PortError> {
+        if self.fail.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable("forced extractor failure".into()));
+        }
+        Ok(self.entities.read().unwrap().clone())
+    }
+
+    async fn extract_entities_and_relations(
+        &self,
+        _text: &str,
+        _document_id: Option<&str>,
+        _user_id: Option<&str>,
+    ) -> Result<(Vec<Entity>, Vec<Relation>), PortError> {
+        if self.fail.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable("forced extractor failure".into()));
+        }
+        Ok((
+            self.entities.read().unwrap().clone(),
+            self.relations.read().unwrap().clone(),
+        ))
+    }
+}
+
+/// Fake figure gate veto implementation.
+#[derive(Clone, Default)]
+pub struct FakeFigureGate {
+    pub kept_ids: Arc<RwLock<Vec<String>>>,
+    pub fail: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl FigureGate for FakeFigureGate {
+    async fn gate_figures(
+        &self,
+        _query: &str,
+        candidates: &[FigureGateCandidate],
+    ) -> Result<Vec<String>, PortError> {
+        if self.fail.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable("forced figure gate failure".into()));
+        }
+        let kept = self.kept_ids.read().unwrap().clone();
+        if kept.is_empty() {
+            Ok(candidates.iter().map(|c| c.id.clone()).collect())
+        } else {
+            Ok(kept)
+        }
     }
 }

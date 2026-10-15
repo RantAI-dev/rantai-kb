@@ -312,6 +312,7 @@ impl MineruApiExtractor {
                         bbox,
                         caption,
                         image_bytes,
+                        id: None,
                     });
                 }
             }

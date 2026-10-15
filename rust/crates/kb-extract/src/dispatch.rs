@@ -124,13 +124,18 @@ pub async fn extract_document(
             if is_scanned {
                 match chain.extract_scanned_pdf(filename, bytes, options).await {
                     Ok(res) => Ok(res),
-                    Err(err) => Ok(ExtractionResult::failed(
-                        "pdf",
-                        format!(
-                            "OCR failed for \"{filename}\": {}",
-                            clip_reason(&err.to_string())
-                        ),
-                    )),
+                    Err(err) => {
+                        let reason = clip_reason(&err.to_string());
+                        let prefix = format!("OCR failed for \"{filename}\": ");
+                        let error_msg = if let Some(stripped) = reason.strip_prefix(&prefix) {
+                            format!("{prefix}{stripped}")
+                        } else if reason.starts_with(&format!("OCR failed for \"{filename}\":")) {
+                            reason
+                        } else {
+                            format!("{prefix}{reason}")
+                        };
+                        Ok(ExtractionResult::failed("pdf", error_msg))
+                    }
                 }
             } else {
                 match extract_pdf_text_layer(pdfium, bytes) {
