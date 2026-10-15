@@ -209,19 +209,19 @@ while other work runs. The port is organised around that:
 `kb-core`, plus `kb-inference`, `kb-store-pg`, `kb-store-surreal`), then serial
 `kb-engine` and `kb-server` for `/health`, `POST /v1/search`,
 `GET /v1/documents`, `GET /v1/documents/:id`, `GET /v1/knowledge-bases`,
-`GET /v1/formats`.
+`GET /v1/formats`. *(Completed)*
 
 **R2 — verify against live data.** Run the Rust read path beside the Bun service
 on the same stores and compare responses. First point at which the SurrealDB
-HTTP client is proven against a real instance.
+HTTP client is proven against a real instance. *(Completed)*
 
 **R3 — ingest.** Worker loop (job claiming is done in Postgres, so Rust workers
 can run beside Bun API replicas), extractor clients, local parsers, figures,
 embedding and storing. Local parsers (docx, pptx, epub, rtf) are the largest
-piece.
+piece. *(Completed)*
 
 **R4 — remaining routes and cutover.** Writes, SSE, CLI scripts, multi-arch
-image, retire Bun.
+image, retire Bun. *(Completed — all routes, SSE, CLI parity subcommands, multi-arch Docker image, end-to-end smoke test, bidirectional mixed fleet validation, CI jobs added, and cutover runbook in `docs/rust-cutover.md`; retiring Bun is prepared in the runbook for the owner's decision).*
 
 Known traps: the sentence splitter uses lookbehind, which the `regex` crate
 lacks; JS counts chunk sizes in UTF-16 units; the router thresholds were tuned

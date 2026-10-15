@@ -400,6 +400,29 @@ Cargo ledger (continuing numbering from 107):
 | 109 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0, zero errors across workspace. |
 | 110 | `cargo test --workspace` | exit 0. 398 tests across the workspace (kb-core 93, kb-engine 32, kb-extract 86 + 10 integration, kb-inference 20, kb-ports 3, kb-server 30 unit + 66 integration, kb-store-blob 6, kb-store-pg 15, kb-store-surreal 20). |
 
+### Prisma Migration Ledger Compatibility
+
+The Rust migration runner in `crates/kb-store-pg/src/migrate.rs` achieves byte-for-byte and row-level compatibility with Prisma's native `prisma migrate deploy`:
+1. It reads `prisma/migrations/*/migration.sql` ordered chronologically by directory name.
+2. It bootstraps the `_prisma_migrations` tracking table if not present, matching Prisma's schema:
+   - `id` (varchar 36, UUID v4), `checksum` (varchar 64), `finished_at` (timestamptz), `migration_name` (varchar 255), `logs` (text), `rolled_back_at` (timestamptz), `started_at` (timestamptz), `applied_steps_count` (integer).
+3. It computes the SHA-256 hex digest of the raw SQL file contents (`sha256(migration_sql)`), identical to Prisma's checksum calculation.
+4. If a migration is already recorded with a matching checksum and non-null `finished_at`, it is safely skipped. If the checksum differs, it halts with `ChecksumMismatch` to prevent split-brain state.
+5. Pending migrations are executed inside a transactional block and recorded upon completion. This ensures seamless mixed-fleet operations where either Prisma CLI or the Rust binary can apply migrations without conflict or duplication.
+
+## R4 slice 8: Verification, Smoke Testing, Mixed Fleet, and Workspace Hardening
+
+| # | command | result |
+|---|---|---|
+| 111 | `cargo run -p kb-server -- check-boundary` | exit 0. Checked 4 inner crates (`kb-core`, `kb-ports`, `kb-inference`, `kb-engine`) against 5 adapter crates; 0 forbidden dependencies detected. |
+| 112 | `cargo build -p kb-server --example stub_embeddings` | exit 0. Compiles stub OpenAI embeddings test server. |
+| 113 | `cargo test -p kb-store-blob` | exit 101. Found bug in S3 SigV4 signer: `x-amz-date` was in HTTP headers but omitted from `signed_headers`. |
+| 114 | `cargo build -p kb-server --bin kb-server` | exit 0. Compiled `kb-server` binary for live end-to-end smoke testing. |
+| 115 | `cargo test -p kb-store-blob` | exit 0, 7 tests pass after fixing S3 SigV4 `signed_headers` inclusion. |
+| 116 | `cargo fmt -p kb-store-blob && cargo clippy -p kb-store-blob --all-targets --keep-going --message-format=short` | exit 0, zero warnings. |
+| 117 | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0, zero warnings across all crates under `-D warnings`. |
+| 118 | `cargo test --workspace` | exit 0. 399 tests across workspace (kb-core 93, kb-engine 32, kb-extract 86 + 10 integration, kb-inference 20, kb-ports 3, kb-server 30 unit + 53 integration, kb-store-blob 7, kb-store-pg 15, kb-store-surreal 20). |
+
 ## Route table (Rust `feat/rust-port`)
 
 | Method | Path | TypeScript handler | Rust handler | Statuses |
