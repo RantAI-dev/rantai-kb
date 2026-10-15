@@ -116,3 +116,24 @@ Live verification (Rust and Bun, same stores, scratch documents):
 
 Response shape difference: Rust returns extra fields chunks_removed and blob_key_pending; Bun returns {ok:true}. Additive.
 Error text differences (cosmetic, already noted): Rust "not found"/"insufficient permissions" vs TS "Not found"/"API key lacks scope kb:write".
+
+## R3 slice 1: job claiming, chunk writes, worker loop
+
+Cargo ledger for this slice (one process at a time, budget 8):
+
+| # | command | result |
+|---|---|---|
+| 22 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101. Errors: `kb_core::progress` private (6 unresolved imports), `tick` match arm returned `JobOutcome`, `jobs.rs` `map_or` could not unify `Result<JobRecord, _>` with `Ok(None)`. Warnings only elsewhere. |
+| 23 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101, 5 errors left: three `BlobStore::upload` calls missing `.await` in the new worker tests, two `ChunkToStore.metadata` literals typed `ChunkMetadata` instead of `serde_json::Value`. |
+| 24 | `cargo test --workspace` | did not compile: `harness()` was not `async` but awaited `blobs.upload`. |
+| 25 | `cargo test --workspace` | compiled; 3 failures — the three tests that called `run_once()` without queueing a job, so the fake claim returned `None`. |
+| 26 | `cargo test --workspace --no-fail-fast` | 5 failures. `sign_v4_matches_aws_get_vanilla_vector` caught a real bug: `hmac_sha256_raw` was called `(data, key)` instead of `(key, data)`, so the derived signing key was wrong. Two test-authoring errors: a raw-string literal had lost its backslashes, and the harness never inserted the fixture document. |
+| 27 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0, zero errors. Remaining warnings are `missing_docs`/`pedantic`, the same class the earlier phases accepted. |
+| 28 | `cargo test --workspace --no-fail-fast` | all suites pass: kb-core 76, kb-engine 25, kb-inference 16, kb-ports 3, kb-store-blob 6, kb-store-pg 9, kb-store-surreal 14, kb-server 9. |
+
+SigV4 is now pinned to the AWS `get-vanilla` test vector, so a signing regression fails
+a unit test rather than a live S3 call.
+
+Not wired to a binary yet: there is no `Extractor` adapter in this slice, so a worker
+process would have nothing to extract with. `IngestWorker` is the composition seam and
+takes every port as a constructor argument.

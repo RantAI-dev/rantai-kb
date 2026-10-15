@@ -969,6 +969,7 @@ dependencies = [
  "kb-engine",
  "kb-inference",
  "kb-ports",
+ "kb-store-blob",
  "kb-store-pg",
  "kb-store-surreal",
  "serde",
@@ -980,6 +981,19 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "kb-store-blob"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "hex",
+ "hmac",
+ "kb-ports",
+ "reqwest",
+ "sha2",
 ]
 
 [[package]]
