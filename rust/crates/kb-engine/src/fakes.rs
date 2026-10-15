@@ -174,9 +174,28 @@ impl DocumentStore for FakeDocumentStore {
         }
         let map = self.docs.read().unwrap();
         let list = map.get(&req.tenant).cloned().unwrap_or_default();
-        let doc_ids = list.into_iter().map(|d| d.id).collect();
+        let filtered: Vec<DocumentId> = list
+            .into_iter()
+            .filter(|d| {
+                if !req.filter.knowledge_base_ids.is_empty()
+                    && !d
+                        .knowledge_base_ids
+                        .iter()
+                        .any(|kb| req.filter.knowledge_base_ids.iter().any(|k| k.0 == *kb))
+                {
+                    return false;
+                }
+                if let Some(cat) = &req.filter.category {
+                    if !d.categories.contains(cat) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .map(|d| d.id)
+            .collect();
         let token = ScopeToken::new_for_adapter();
-        Ok(DocumentScope::new(&token, req.tenant.clone(), doc_ids))
+        Ok(DocumentScope::new(&token, req.tenant.clone(), filtered))
     }
 
     async fn find_by_id(

@@ -10,7 +10,7 @@ mod pipeline_tests {
         make_fake_scope,
     };
     use crate::retrieval::{RetrievalOptions, execute_pipeline};
-    use kb_ports::{ChunkType, DocumentId, DocumentMeta, EngineError, RetrievalDegrade, TenantId};
+    use kb_ports::{ChunkType, DocumentFilter, DocumentId, DocumentMeta, DocumentStore, EngineError, KnowledgeBaseId, RetrievalDegrade, ScopeRequest, TenantId};
 
     fn setup() -> (
         Arc<FakeDocumentStore>,
@@ -570,5 +570,213 @@ mod pipeline_tests {
             .map(|c| c.chunk.id.0.as_str())
             .collect();
         assert_eq!(fig_ids, vec!["fig_1"]);
+    }
+
+    fn setup_two_kb_docs(doc_store: &FakeDocumentStore, tenant: &TenantId) {
+        doc_store.insert_doc(
+            tenant.clone(),
+            DocumentMeta {
+                id: DocumentId("doc_a".into()),
+                title: "Doc in KB A".into(),
+                categories: vec!["cat_a".into()],
+                subcategory: None,
+                status: "READY".into(),
+                chunk_count: 1,
+                file_type: None,
+                file_size: None,
+                mime_type: None,
+                s3_key: None,
+                created_at: "".into(),
+                updated_at: "".into(),
+                knowledge_base_ids: vec!["kb_a".into()],
+                metadata: None,
+            },
+        );
+        doc_store.insert_doc(
+            tenant.clone(),
+            DocumentMeta {
+                id: DocumentId("doc_b".into()),
+                title: "Doc in KB B".into(),
+                categories: vec!["cat_b".into()],
+                subcategory: None,
+                status: "READY".into(),
+                chunk_count: 1,
+                file_type: None,
+                file_size: None,
+                mime_type: None,
+                s3_key: None,
+                created_at: "".into(),
+                updated_at: "".into(),
+                knowledge_base_ids: vec!["kb_b".into()],
+                metadata: None,
+            },
+        );
+    }
+
+    #[tokio::test]
+    async fn test_bm25_scope_isolation_kb_restriction() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let tenant = TenantId("t1".into());
+        setup_two_kb_docs(&doc_store, &tenant);
+
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "chunk_a", "doc_a", "Doc in KB A", "BM25 match for A", 0, 1.0,
+        ));
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "chunk_b", "doc_b", "Doc in KB B", "BM25 match for B", 1, 0.9,
+        ));
+
+        let scope_kb_a = doc_store
+            .build_scope(&ScopeRequest {
+                tenant: tenant.clone(),
+                filter: DocumentFilter {
+                    knowledge_base_ids: vec![KnowledgeBaseId("kb_a".into())],
+                    category: None,
+                },
+            })
+            .await
+            .unwrap();
+
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope_kb_a,
+            "query",
+            &RetrievalOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!outcome.chunks.is_empty());
+        assert!(outcome.chunks.iter().all(|h| h.chunk.document_id.0 == "doc_a"));
+        assert!(outcome.chunks.iter().all(|h| h.chunk.document_id.0 != "doc_b"));
+    }
+
+    #[tokio::test]
+    async fn test_bm25_scope_isolation_category_restriction() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let tenant = TenantId("t1".into());
+        setup_two_kb_docs(&doc_store, &tenant);
+
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "chunk_a", "doc_a", "Doc in KB A", "BM25 match for A", 0, 1.0,
+        ));
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "chunk_b", "doc_b", "Doc in KB B", "BM25 match for B", 1, 0.9,
+        ));
+
+        let scope_cat_a = doc_store
+            .build_scope(&ScopeRequest {
+                tenant: tenant.clone(),
+                filter: DocumentFilter {
+                    knowledge_base_ids: vec![],
+                    category: Some("cat_a".into()),
+                },
+            })
+            .await
+            .unwrap();
+
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope_cat_a,
+            "query",
+            &RetrievalOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!outcome.chunks.is_empty());
+        assert!(outcome.chunks.iter().all(|h| h.chunk.document_id.0 == "doc_a"));
+        assert!(outcome.chunks.iter().all(|h| h.chunk.document_id.0 != "doc_b"));
+    }
+
+    #[tokio::test]
+    async fn test_bm25_scope_isolation_document_ids_restriction() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let tenant = TenantId("t1".into());
+        setup_two_kb_docs(&doc_store, &tenant);
+
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "chunk_a", "doc_a", "Doc in KB A", "BM25 match for A", 0, 1.0,
+        ));
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "chunk_b", "doc_b", "Doc in KB B", "BM25 match for B", 1, 0.9,
+        ));
+
+        let full_scope = doc_store
+            .build_scope(&ScopeRequest {
+                tenant: tenant.clone(),
+                filter: DocumentFilter::default(),
+            })
+            .await
+            .unwrap();
+        let scope_doc_a = full_scope.narrowed_to(&[DocumentId("doc_a".into())]);
+
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope_doc_a,
+            "query",
+            &RetrievalOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        assert!(!outcome.chunks.is_empty());
+        assert!(outcome.chunks.iter().all(|h| h.chunk.document_id.0 == "doc_a"));
+        assert!(outcome.chunks.iter().all(|h| h.chunk.document_id.0 != "doc_b"));
+    }
+
+    #[tokio::test]
+    async fn test_bm25_scope_unrestricted_returns_both() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let tenant = TenantId("t1".into());
+        setup_two_kb_docs(&doc_store, &tenant);
+
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "chunk_a", "doc_a", "Doc in KB A", "BM25 match for A", 0, 1.0,
+        ));
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "chunk_b", "doc_b", "Doc in KB B", "BM25 match for B", 1, 0.9,
+        ));
+
+        let full_scope = doc_store
+            .build_scope(&ScopeRequest {
+                tenant: tenant.clone(),
+                filter: DocumentFilter::default(),
+            })
+            .await
+            .unwrap();
+
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &full_scope,
+            "query",
+            &RetrievalOptions::default(),
+        )
+        .await
+        .unwrap();
+
+        let found_docs: std::collections::HashSet<String> = outcome
+            .chunks
+            .iter()
+            .map(|h| h.chunk.document_id.0.clone())
+            .collect();
+        assert!(found_docs.contains("doc_a"));
+        assert!(found_docs.contains("doc_b"));
     }
 }

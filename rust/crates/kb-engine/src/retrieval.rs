@@ -200,9 +200,10 @@ pub async fn execute_pipeline(
         Ok::<Vec<SearchHit>, String>(merged)
     };
 
-    // 3. BM25 arm: global in SurrealDB, filtered against alive tenant documents in Postgres.
+    // 3. BM25 arm: global in SurrealDB, filtered against alive tenant documents in Postgres,
+    //    and scoped to visible document IDs when narrowed.
     let bm25_future = async {
-        if !opts.hybrid_bm25_enabled {
+        if !opts.hybrid_bm25_enabled || scope.document_ids().is_empty() {
             return Ok(Vec::new());
         }
         let raw_hits = chunk_store
@@ -212,10 +213,16 @@ pub async fn execute_pipeline(
         if raw_hits.is_empty() {
             return Ok(Vec::new());
         }
+        let scope_doc_ids: HashSet<&DocumentId> = scope.document_ids().iter().collect();
+        let mut seen = HashSet::new();
         let doc_ids: Vec<DocumentId> = raw_hits
             .iter()
             .map(|h| h.chunk.document_id.clone())
+            .filter(|id| scope_doc_ids.contains(id) && seen.insert(id.clone()))
             .collect();
+        if doc_ids.is_empty() {
+            return Ok(Vec::new());
+        }
         let alive_metas = doc_store
             .find_alive_meta_by_ids(scope.tenant(), &doc_ids)
             .await
@@ -225,6 +232,9 @@ pub async fn execute_pipeline(
 
         let mut filtered = Vec::new();
         for mut hit in raw_hits {
+            if !scope_doc_ids.contains(&hit.chunk.document_id) {
+                continue;
+            }
             if let Some(doc) = meta_map.get(&hit.chunk.document_id) {
                 hit.similarity = 0.0;
                 hit.chunk.document_title = doc.title.clone();
