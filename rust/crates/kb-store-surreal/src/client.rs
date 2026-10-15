@@ -217,3 +217,36 @@ pub fn build_hit(row: ChunkRow, rank: u32, score: f32) -> SearchHit {
         rank,
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn extract_rows_reads_the_first_statement_of_a_multi_statement_envelope() {
+        // The count-then-delete write sends both statements in one request.
+        // Reading statement 1 instead would report the number of rows the
+        // DELETE removed rather than the number that were there to remove.
+        let envelope = vec![
+            json!({"status": "OK", "result": [{"n": 7}], "time": "1ms"}),
+            json!({"status": "OK", "result": 7, "time": "1ms"}),
+        ];
+        let rows = SurrealChunkStore::extract_rows(&envelope);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("n").and_then(Value::as_u64), Some(7));
+    }
+
+    #[test]
+    fn extract_rows_is_empty_when_there_is_no_statement() {
+        assert!(SurrealChunkStore::extract_rows(&[]).is_empty());
+        assert!(SurrealChunkStore::extract_rows(&[json!({"status": "OK"})]).is_empty());
+    }
+
+    #[test]
+    fn extract_rows_accepts_a_bare_row_array() {
+        let rows = SurrealChunkStore::extract_rows(&[json!([{"n": 1}])]);
+        assert_eq!(rows.len(), 1);
+    }
+}

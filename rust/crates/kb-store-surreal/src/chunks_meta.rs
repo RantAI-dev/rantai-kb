@@ -65,24 +65,28 @@ pub async fn execute_ordered_chunks(
     Ok(out)
 }
 
-/// Delete every `document_chunk` row for one document. The count is taken in
-/// the same request so the number reported is the number removed.
+/// Delete every `document_chunk` row for one document in a single `/sql` request.
+///
+/// The count and the DELETE travel together, so the number reported is the
+/// number removed even if another writer touches the table in between.
+/// `extract_rows` reads statement 0's result, which is the `SELECT count()`;
+/// the DELETE follows it. A non-OK status on either statement is raised by
+/// `SurrealChunkStore::query` before this runs.
 pub async fn execute_delete_by_document(
     store: &SurrealChunkStore,
     document_id: &DocumentId,
 ) -> Result<u64, PortError> {
     validate_document_id(&document_id.0)?;
     let ids_sql = surql_id_list(std::slice::from_ref(&document_id.0))?;
-    let count_sql = format!(
-        "SELECT count() AS n FROM document_chunk WHERE document_id IN {ids_sql} GROUP ALL;"
+    let sql = format!(
+        "SELECT count() AS n FROM document_chunk WHERE document_id IN {ids_sql} GROUP ALL; \
+         DELETE document_chunk WHERE document_id IN {ids_sql};"
     );
-    let delete_sql = format!("DELETE document_chunk WHERE document_id IN {ids_sql};");
-    let before = store.query(&count_sql).await?;
-    let n = SurrealChunkStore::extract_rows(&before)
+    let envelope = store.query(&sql).await?;
+    let n = SurrealChunkStore::extract_rows(&envelope)
         .first()
         .and_then(|r| r.get("n"))
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    store.query(&delete_sql).await?;
     Ok(n)
 }
