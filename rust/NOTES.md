@@ -205,3 +205,57 @@ Cargo ledger (continuing numbering from 41):
 - **ODT and ODS parsers**: Added pure-Rust parsers for OpenDocument Text (`.odt`) via `content.xml` `text:p`/`text:h` and OpenDocument Spreadsheet (`.ods`) via `content.xml` `table:table-row` to CSV.
 - **Investigation of legacy binary formats**: Inspected `officeparser` v6 (`node_modules/officeparser`). Confirmed that `officeparser` v6 only supports ZIP-based XML formats (`.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`, `.pages`, etc.) and explicitly rejects legacy binary `.doc`, `.xls`, and `.ppt` with error code `EXTENSION_UNSUPPORTED`. Rejecting legacy binary formats with `ExtractError::Unsupported` in Rust maintains full parity with TypeScript.
 - **Production worker wiring**: `kb-server::state::build_worker` and `build_ingest_worker` wire `build_production_extractor(&config.extract)` as the active `Extractor` implementation.
+
+## R3 slice 4: Full IngestWorker & Retrieval Parity (Runner, Policy, Chunker, Entities/Relations, Figures, Embeddings, Figure Gate, Error Prefix)
+
+Cargo ledger (continuing numbering from 49):
+
+| # | command | result |
+|---|---|---|
+| 50 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101. Corrupted edits and missing fields across kb-extract, kb-inference, kb-store-surreal, kb-engine. |
+| 51 | `cargo check -p kb-engine` | exit 0. Engine and core compiled cleanly. |
+| 52 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101. Single test error in kb-extract (missing `document_type` field in `ExtractionOptions` fixture). |
+| 53 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0. Zero errors across all workspace targets. |
+| 54 | `cargo test --workspace` | exit 0. All 331 tests pass across all workspace crates (kb-chunker: 76, kb-core: 54, kb-engine: 32, kb-extract: 86 unit + 10 integration, kb-inference: 20, kb-ports: 3, kb-server: 9 unit + 10 integration, kb-store-blob: 6, kb-store-pg: 9, kb-store-surreal: 16). |
+| 55 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0. Zero errors across all workspace targets. |
+
+### Architecture and Parity Details
+- **IngestWorker line-by-line parity** (`kb-engine/src/ingest.rs`):
+  - Checks tenant ("job has no tenant"), missing documentId/s3Key with identical error text.
+  - S3 blob download failure error text identical to TypeScript.
+  - Parameter parsing: `figureMode`, `forceOCR`, `documentType`, `title`, `categories`, `subcategory`, `useCombined` default true.
+  - Policy resolution: `resolve_ingest_policy` matching `src/lib/ingest/policy.ts`.
+  - Title fallback to filename without extension.
+  - NUL character stripping (` ` removed) matching TypeScript ingest pipeline.
+  - Pre-indexing document update (`content`, `fileType`, `fileSize`) before chunking and embedding.
+  - Progress reporting sequence matching TS exactly: `extracting` -> `chunking` -> `extracting_entities` (0/N and step_current/step_total) -> `processing_figures` -> `embedding` (0/N, N/N) -> `storing` -> `ready` status -> `done` step -> job success.
+  - Non-fatal error handling for entities and figures: errors logged and pipeline proceeds to completion.
+  - Document and job marked `failed` with matching error message on fatal errors.
+- **Smart chunking parity** (`kb-core`):
+  - IngestWorker invokes `smart_chunk_document` with `{max_chunk_size: 800, overlap_size: 200, preserve_code_blocks: true, respect_heading_boundaries: true}`.
+  - Validated chunk metadata fields: `title`, `category`, `subcategory`, `chunk_index`, `page`.
+- **Entities & Relations** (`kb-core/src/intelligence/`, `kb-inference/src/llm_extractor.rs`, `kb-store-surreal/src/entities.rs`):
+  - Pure-Rust pattern extractors for universal (emails, URLs, phones, dates), financial (currencies, percentages), and technical (API endpoints, functions, env vars, error codes) with deduplication and pattern relation extractors.
+  - LLM combined extractor and entity extractor with verbatim TypeScript prompts, JSON fence stripping, thinking tag stripping, stack-based truncated JSON repair, and OpenRouter client settings.
+  - SurrealDB storage: `UPSERT entity:<documentId>_<sanitizedName>` with sanitized record IDs and parameter-bound values; `RELATE source->RELTYPE->target` with relation type sanitization (`.toUpperCase().replace(/[^A-Z0-9_]/g, "_").replace(/^_+|_+$/g, "") || "RELATED_TO"`).
+  - Respects `KB_ENTITY_EXTRACTION_ENABLED=false` and `policy.entities`.
+- **Page map assignment** (`kb-core/src/page_map.rs`):
+  - Invokes `assign_chunk_pages` to tag chunks with their 1-based page numbers whenever a page map is produced during extraction.
+- **Figure assets processing** (`kb-core/src/figure_assets.rs`):
+  - Uploads figure crops to `BlobStore` under `documents/{tenantId}/{documentId}/assets/fig-p{page}-{index}.png`.
+  - Figure chunks created with caption fallback from neighbouring text blocks and `pages_blocks` reading-order anchoring.
+  - Monotonic `chunk_index` reindexing across combined text and figure chunks.
+  - Document metadata `figures` patch persisted via `DocumentStore::update_metadata`.
+- **Embedding & Storage parity** (`kb-engine/src/ingest.rs`):
+  - Embedding input formatted as `${title}
+
+${chunk.content}`.
+  - Records `embedding_model` and metadata on chunks (`chunkType`, `assetKey`, `anchorChunkIndex`).
+  - Delete-then-store idempotency pattern matching TS `storeChunks`.
+- **Figure gate veto parity** (`kb-core/src/figure_gate.rs`, `kb-inference/src/vlm_gate.rs`, `kb-engine/src/retrieval.rs`):
+  - Pure figure gate config and verdict parsing ported from `src/lib/rag/figure-gate.ts`.
+  - VLM figure gate evaluator using OpenAI-compatible vision completion endpoint with strict prompt.
+  - Wire into `retrieval.rs` to filter candidate figures up to `top_n` and `max_keep`.
+- **Single OCR error prefix bug fix** (`kb-extract/src/chain.rs`, `kb-extract/src/dispatch.rs`):
+  - Fixed double prefix bug on scanned-PDF fallback failure; prevents `OCR failed for "x": OCR failed for "x": ...`.
+  - Verified by integration test `test_scanned_pdf_chain_failure_single_error_prefix`.
