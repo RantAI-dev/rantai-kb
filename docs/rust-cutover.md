@@ -116,3 +116,18 @@ In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.d
   - Query parameters like `limit=abc` fall back gracefully to default `100` rather than causing an unhandled 500 error (`take: NaN` in Prisma).
 - **Additive Delete Response**:
   - `DELETE /v1/documents/:id` in Rust returns additive fields (`chunks_removed` and `blob_key_pending`) in addition to `{ "ok": true }`.
+
+### 5. Deliberate Differences: BM25 Scope Isolation & Access-Control Leak Fix
+- **TypeScript Reference Bug**: In `src/lib/rag/retriever.ts` (~lines 160–195), the BM25 arm queries the entire `document_chunk` table unscoped in SurrealDB and resolves candidates through `DocumentStore.findAliveMetaByIds(docIds)`. Because `findAliveMetaByIds` only checks tenant ownership and non-deleted status, the BM25 arm completely ignores `knowledgeBaseIds` (including API key restrictions via `restrictKnowledgeBases`), `category`, and `documentIds` filters. When a query is narrowed to Knowledge Base A, BM25 can leak chunks from Knowledge Base B or other categories of the same tenant.
+- **Rust Implementation (Deliberate Divergence)**: In `rust/crates/kb-engine/src/retrieval.rs`, the BM25 arm keeps a candidate hit only if its parent document is visible to the tenant AND present within the resolved `scope.document_ids()`. When a search is narrowed by knowledge base, category, or document IDs, out-of-scope BM25 hits are safely dropped.
+- **Parity Preservation**: Unnarrowed searches retain 100% exact parity with TypeScript, verified across the 33-case search parity matrix (`rust/scripts/search-parity.sh`), which explicitly tests and reports the leak divergence on restricted queries while asserting exact match on all other cases.
+
+---
+
+## 6. Shared Known Issues
+
+### Duplicate Chunks Across Retrieval Arms
+- **Behavior**: When both the vector search arm and the BM25 search arm match the exact same chunk, the chunk can appear twice in the returned `chunks` array (once with its cosine vector similarity score and once with `similarity: 0.0` from the BM25 arm).
+- **Root Cause**: In TypeScript (`src/lib/rag/retriever.ts`), vector chunks and BM25 chunks arrive as separate SurrealDB `RecordId` object instances. JavaScript `Map.has()` and `scores.get()` in the reciprocal rank fusion (RRF) logic perform object reference identity equality (`===`) rather than ID value equality. Consequently, cross-arm deduplication does not merge the two hits.
+- **Rust Parity Alignment**: Rust intentionally mirrors this behavior in `kb-engine::retrieval` to preserve search result parity with TypeScript.
+- **Next Step**: A deduplication pass by normalized chunk ID (`chunk.id.0` / `RecordId.toString()`) should be implemented simultaneously in both Bun and Rust runtimes in a future release.

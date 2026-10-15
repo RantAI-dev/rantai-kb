@@ -146,10 +146,18 @@ echo "=== 5. Setting up Knowledge Base & Documents ==="
 KB_RESP=$(curl -s -X POST \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"name": "Parity KB", "description": "KB for search parity verification"}' \
+  -d '{"name": "Parity KB A", "description": "Primary KB for search parity verification"}' \
   "http://127.0.0.1:${RUST_PORT}/v1/knowledge-bases")
 KB_ID=$(echo "$KB_RESP" | jq -r '.id // .knowledgeBase.id')
-echo "Created Knowledge Base: $KB_ID"
+echo "Created Knowledge Base A: $KB_ID"
+
+KB_B_RESP=$(curl -s -X POST \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Parity KB B", "description": "Secondary KB for leakage divergence verification"}' \
+  "http://127.0.0.1:${RUST_PORT}/v1/knowledge-bases")
+KB_B_ID=$(echo "$KB_B_RESP" | jq -r '.id // .knowledgeBase.id')
+echo "Created Knowledge Base B: $KB_B_ID"
 
 # Doc 1: CSV inventory
 CSV_FILE="$TMP_DIR/items.csv"
@@ -185,6 +193,13 @@ cat << 'EOF' > "$ARCHIVE_FILE"
 
 Delta records document legacy mainframe records from ancient repository.
 No active overlap with modern Alpha or Beta production clusters.
+EOF
+
+# Doc 5: Secret document in KB B with unique term for leak testing
+LEAK_FILE="$TMP_DIR/omega-leak.txt"
+cat << 'EOF' > "$LEAK_FILE"
+OmegaLeakToken unique secret record strictly contained in Knowledge Base B.
+This content has category leaktest and must never be exposed to KB A or guides queries.
 EOF
 
 upload_doc() {
@@ -232,12 +247,14 @@ DOC1_ID=$(upload_doc "$CSV_FILE" "Inventory CSV" "text/csv" "inventory" "")
 DOC2_ID=$(upload_doc "$MD_FILE" "Alpha Guide" "text/markdown" "guides" "$KB_ID")
 DOC3_ID=$(upload_doc "$TXT_FILE" "Beta Notes" "text/plain" "notes" "$KB_ID")
 DOC4_ID=$(upload_doc "$ARCHIVE_FILE" "Delta Archive" "text/markdown" "archive" "")
+DOC5_ID=$(upload_doc "$LEAK_FILE" "Omega Leak Doc" "text/plain" "leaktest" "$KB_B_ID")
 
-echo "Ingested all 4 documents successfully."
+echo "Ingested all 5 documents successfully."
 echo "DOC1 (csv): $DOC1_ID"
-echo "DOC2 (md, in KB): $DOC2_ID"
-echo "DOC3 (txt, in KB): $DOC3_ID"
+echo "DOC2 (md, in KB A): $DOC2_ID"
+echo "DOC3 (txt, in KB A): $DOC3_ID"
 echo "DOC4 (archive): $DOC4_ID"
+echo "DOC5 (leak test, in KB B): $DOC5_ID"
 
 echo "=== 6. Running Search Parity Matrix ==="
 
@@ -274,20 +291,30 @@ declare -a TEST_CASES=(
   "{\"query\": \"Beta 99\", \"documentIds\": [\"$DOC1_ID\"], \"format\": \"context\"}"
   "{\"query\": \"Beta 99\", \"documentIds\": [\"$DOC4_ID\"]}"
 
-  # knowledgeBaseIds filtering
-  "{\"query\": \"Beta 99\", \"knowledgeBaseIds\": [\"$KB_ID\"]}"
-  "{\"query\": \"Alpha Count\", \"knowledgeBaseIds\": [\"$KB_ID\"]}"
-  "{\"query\": \"Delta archive\", \"knowledgeBaseIds\": [\"$KB_ID\"]}"
+  # knowledgeBaseIds filtering (in-scope matches)
+  "{\"query\": \"failover operations\", \"knowledgeBaseIds\": [\"$KB_ID\"]}"
+  "{\"query\": \"Alpha Guide\", \"knowledgeBaseIds\": [\"$KB_ID\"]}"
 
-  # category filtering
+  # category filtering (in-scope matches)
   '{"query": "Alpha Count", "category": "inventory"}'
-  '{"query": "Beta 99", "category": "guides"}'
-  '{"query": "Beta 99", "category": "notes"}'
-  '{"query": "Beta 99", "category": "archive"}'
-  '{"query": "Beta 99", "category": "nonexistent"}'
+  '{"query": "gateway cluster", "category": "guides"}'
+  '{"query": "runbook notes", "category": "notes"}'
+  '{"query": "Delta mainframe", "category": "archive"}'
+  '{"query": "nonexistent term qwerty12345", "category": "nonexistent"}'
+
+  # Leak term searched unrestricted or within KB B (both Bun and Rust match)
+  '{"query": "OmegaLeakToken"}'
+  "{\"query\": \"OmegaLeakToken\", \"knowledgeBaseIds\": [\"$KB_B_ID\"]}"
 )
 
-TOTAL_CASES=${#TEST_CASES[@]}
+# Leak cases with expected divergence (Rust drops out-of-scope BM25 hits; Bun leaks them)
+declare -a DIVERGENCE_CASES=(
+  "{\"query\": \"OmegaLeakToken\", \"knowledgeBaseIds\": [\"$KB_ID\"]}"
+  "{\"query\": \"OmegaLeakToken\", \"category\": \"guides\"}"
+  "{\"query\": \"OmegaLeakToken\", \"knowledgeBaseIds\": [\"$KB_ID\"], \"category\": \"guides\"}"
+)
+
+TOTAL_CASES=$((${#TEST_CASES[@]} + ${#DIVERGENCE_CASES[@]}))
 PASSED_CASES=0
 FAILED_CASES=0
 
@@ -336,8 +363,39 @@ for idx in "${!TEST_CASES[@]}"; do
 done
 
 echo ""
+echo "=== 7. Running Expected Divergence Cases (Access-Control Leak Matrix) ==="
+for div_idx in "${!DIVERGENCE_CASES[@]}"; do
+  BODY="${DIVERGENCE_CASES[$div_idx]}"
+  case_num=$((${#TEST_CASES[@]} + div_idx + 1))
+  echo "--- Test $case_num/$TOTAL_CASES (Expected Divergence): $BODY ---"
+
+  BUN_RESP=$(curl -s -X POST \
+    -H "Authorization: Bearer $API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$BODY" \
+    "http://127.0.0.1:${BUN_PORT}/v1/search")
+
+  RUST_RESP=$(curl -s -X POST \
+    -H "Authorization: Bearer $API_KEY" \
+    -H "Content-Type: application/json" \
+    -d "$BODY" \
+    "http://127.0.0.1:${RUST_PORT}/v1/search")
+
+  RUST_LEAK_COUNT=$(echo "$RUST_RESP" | jq -r '(.chunks // []) | map(select(.documentId == "'"$DOC5_ID"'" or (.content | test("OmegaLeakToken")))) | length')
+  BUN_LEAK_COUNT=$(echo "$BUN_RESP" | jq -r '(.chunks // []) | map(select(.documentId == "'"$DOC5_ID"'" or (.content | test("OmegaLeakToken")))) | length')
+
+  if [ "$RUST_LEAK_COUNT" -eq 0 ]; then
+    echo "✓ Expected divergence verified: Rust returned 0 KB-B chunks (secure); Bun returned $BUN_LEAK_COUNT leaked chunks."
+    PASSED_CASES=$((PASSED_CASES + 1))
+  else
+    echo "✗ SECURITY REGRESSION: Rust leaked $RUST_LEAK_COUNT KB-B chunks!"
+    FAILED_CASES=$((FAILED_CASES + 1))
+  fi
+done
+
+echo ""
 echo "=========================================="
-echo "Search Parity Results: $PASSED_CASES / $TOTAL_CASES passed, $FAILED_CASES failed"
+echo "Search Parity Results: $PASSED_CASES / $TOTAL_CASES passed, $FAILED_CASES failed (${#DIVERGENCE_CASES[@]} expected divergences verified)"
 echo "=========================================="
 
 if [ "$FAILED_CASES" -gt 0 ]; then

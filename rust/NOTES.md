@@ -483,3 +483,33 @@ Cargo ledger (continuing numbering from 118):
 | DELETE | /v1/categories/:id | api.ts:788 | routes/taxonomy.rs:278 | 200 / 403 / 404 |
 | GET | /v1/events | api.ts:805 | events.rs:95 | 200 / 401 |
 | any | unknown path | api.ts:919 | routes.rs:132 | 401 / 404 |
+
+## R4 slice 10: BM25 Scope Isolation & Access-Control Leak Fix (Deliberate TS Divergence)
+
+Cargo ledger (continuing numbering from 128):
+
+| # | command | result |
+|---|---|---|
+| 129 | `cargo test -p kb-engine` | exit 101. Trait `DocumentStore` required in scope for `build_scope` in tests. |
+| 130 | `cargo test -p kb-engine` | exit 0. 36 tests pass (4 new tests added for KB, category, documentIds isolation, and unrestricted parity). |
+| 131 | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0. Zero warnings across workspace under `-D warnings`. |
+| 132 | `cargo build -p kb-server --bin kb-server` | exit 0. Compiled `kb-server` binary. |
+| 133 | `bash rust/scripts/search-parity.sh` | exit 0. 33 / 33 passed, 0 failed (30 exact matches, 3 expected leak divergences verified). |
+| 134 | `bash rust/scripts/smoke.sh` | exit 0. Live end-to-end smoke test passed. |
+| 135 | `cargo test --workspace` | exit 0. 404 tests across workspace (kb-core 93, kb-engine 36, kb-extract 86 + 10 integration, kb-inference 20, kb-ports 3, kb-server 30 unit + 74 integration, kb-store-blob 7, kb-store-pg 15, kb-store-surreal 21). |
+
+### BM25 Scope Isolation Details & TS Divergence
+- **Root Cause in TypeScript**:
+  - In `src/lib/rag/retriever.ts` (~lines 160–195), the BM25 arm queries SurrealDB globally and resolves hits through `DocumentStore.findAliveMetaByIds`. The retriever's own comment acknowledges that the BM25 arm applies neither category nor group/KB filters. Because `findAliveMetaByIds` only filters by `tenantId` and `deletedAt IS NULL`, BM25 hits from other knowledge bases or categories belonging to the same tenant leak into search results when a search is narrowed by `knowledgeBaseIds` (including API key restrictions via `restrictKnowledgeBases`), `category`, or `documentIds`.
+- **Rust Implementation (Deliberate Divergence)**:
+  - In `rust/crates/kb-engine/src/retrieval.rs` (BM25 arm lines 205–245), candidate hits from `bm25_search_global` are verified against both `find_alive_meta_by_ids(scope.tenant(), ...)` AND `scope.document_ids()`.
+  - When a search is narrowed, any BM25 candidate whose parent document is not in `scope.document_ids()` is dropped.
+  - When a search is unnarrowed, `scope.document_ids()` contains all alive documents of the tenant, so BM25 hits are fully preserved in exact parity with TypeScript.
+  - In `kb-engine/src/fakes.rs`, `FakeDocumentStore::build_scope` was updated to accurately filter documents by `knowledge_base_ids` and `category` matching `PgDocumentStore::build_scope`.
+- **Test Suite**:
+  - Added unit tests in `kb-engine::tests::pipeline_tests`:
+    - `test_bm25_scope_isolation_kb_restriction`
+    - `test_bm25_scope_isolation_category_restriction`
+    - `test_bm25_scope_isolation_document_ids_restriction`
+    - `test_bm25_scope_unrestricted_returns_both`
+  - Updated `rust/scripts/search-parity.sh` with a second knowledge base (KB B) and document containing `OmegaLeakToken`. Tested 30 exact parity cases plus 3 expected divergence cases (`knowledgeBaseIds`, `category`, and combined), confirming Rust returns 0 leaked chunks while Bun leaks the out-of-scope document.

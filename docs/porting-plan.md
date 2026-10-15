@@ -231,7 +231,11 @@ local OCR pipeline and the unused conversation-memory table are dropped.
 ## Open decisions
 
 1. **Fix the hybrid-search leak in TypeScript.** Independent of both tracks and
-   not assigned to anyone yet.
+   not assigned to anyone yet. Note: The Rust port has already fixed this
+   divergence in `kb-engine::retrieval` by enforcing `scope.document_ids()`
+   filtering on BM25 hits; the corresponding TypeScript fix in Bun (`src/lib/rag/retriever.ts`)
+   is still needed so that Bun does not leak out-of-scope chunks across knowledge
+   bases or categories.
 2. **Figures in moco-kf** (Python phase 3): approve the design change or stop
    after phase 2.
 3. **Rust target.** MOCO-KB is already a Rust, axum and SurrealDB knowledge
