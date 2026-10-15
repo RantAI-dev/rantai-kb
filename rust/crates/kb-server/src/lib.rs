@@ -3,6 +3,8 @@
 //! `KB_WORKER_ENABLED=false` — runs the ingest worker in the same process.
 
 pub mod auth;
+pub mod boundary;
+pub mod cli;
 pub mod config;
 pub mod dto;
 pub mod error;
@@ -11,6 +13,8 @@ pub mod routes;
 pub mod runtime;
 pub mod state;
 
+pub use boundary::{ADAPTER_CRATES, INNER_CRATES};
+pub use cli::{CliError, dispatch};
 pub use config::{Config, WorkerConfig};
 pub use dto::{ChunkDto, SearchRequestDto, SearchResponseDto, SourceDto};
 pub use events::EventBus;

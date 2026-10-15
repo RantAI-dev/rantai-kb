@@ -390,6 +390,16 @@ parses to "no filter".
 | 106 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0, zero errors. |
 | 107 | `cargo test --workspace` | exit 0. 363 tests across the workspace (kb-core 92, kb-engine 32, kb-extract 86 + 10 integration, kb-inference 20, kb-ports 3, kb-server 15 unit + 60 integration, kb-store-blob 6, kb-store-pg 9, kb-store-surreal 16). |
 
+## R4 slice 7: CLI parity subcommands, boundary check, Prisma migrations, and vector schema
+
+Cargo ledger (continuing numbering from 107):
+
+| # | command | result |
+|---|---|---|
+| 108 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101. Inherited uncommitted code had `events.rs` immutable ping calling `reset()` and `tests.rs` mutating non-mut `opts`. |
+| 109 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0, zero errors across workspace. |
+| 110 | `cargo test --workspace` | exit 0. 398 tests across the workspace (kb-core 93, kb-engine 32, kb-extract 86 + 10 integration, kb-inference 20, kb-ports 3, kb-server 30 unit + 66 integration, kb-store-blob 6, kb-store-pg 15, kb-store-surreal 20). |
+
 ## Route table (Rust `feat/rust-port`)
 
 | Method | Path | TypeScript handler | Rust handler | Statuses |

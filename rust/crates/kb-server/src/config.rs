@@ -142,6 +142,82 @@ pub enum RerankerConfig {
 }
 
 impl Config {
+    /// A required variable, or an error that names the one that is missing.
+    pub fn required_var<F>(lookup: &F, name: &str) -> Result<String>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        match lookup(name) {
+            Some(val) if !val.trim().is_empty() => Ok(val),
+            _ => bail!("missing required environment variable: {name}"),
+        }
+    }
+
+    /// Postgres settings from the environment.
+    ///
+    /// Read separately from [`Config::from_lookup`] because the CLI needs a
+    /// database without an inference provider: `create-api-key` and `migrate`
+    /// never embed anything, and forcing `OPENROUTER_API_KEY` on an operator's
+    /// migration shell would be a barrier with no upside.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `DATABASE_URL` is unset or blank.
+    pub fn pg_from_lookup<F>(lookup: F) -> Result<PgSettings>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        Ok(PgSettings {
+            database_url: Self::required_var(&lookup, "DATABASE_URL")?,
+            max_connections: 10,
+            connect_timeout: Duration::from_secs(5),
+            acquire_timeout: Duration::from_secs(5),
+        })
+    }
+
+    /// SurrealDB settings from the environment, for both `serve` and
+    /// `apply-schema`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `SURREAL_DB_URL` is unset or blank.
+    pub fn surreal_from_lookup<F>(lookup: F) -> Result<SurrealSettings>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let url = Self::required_var(&lookup, "SURREAL_DB_URL")?;
+        let username = lookup("SURREAL_DB_USER").filter(|s| !s.trim().is_empty());
+        let password = lookup("SURREAL_DB_PASS").filter(|s| !s.trim().is_empty());
+        let namespace = lookup("SURREAL_DB_NAMESPACE").unwrap_or_else(|| "rantai".into());
+        let database = lookup("SURREAL_DB_DATABASE").unwrap_or_else(|| "knowledge".into());
+        Ok(SurrealSettings {
+            url,
+            namespace,
+            database,
+            username,
+            password,
+            request_timeout: Duration::from_secs(10),
+        })
+    }
+
+    /// Embedding width (`KB_EMBEDDING_DIM`, 4096 by default).
+    ///
+    /// Read on its own by `apply-schema`: the vector index has to be defined
+    /// with the width the service will store, and that has to be knowable
+    /// before anything connects to an inference provider.
+    pub fn embedding_dim<F>(lookup: &F) -> u32
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        // `Number(process.env.KB_EMBEDDING_DIM || 4096)` accepts a padded
+        // value, so trim before parsing: a value like "8\n" from an env file
+        // must not silently fall back to 4096 and mismatch the vector index.
+        lookup("KB_EMBEDDING_DIM")
+            .map(|v| v.trim().to_string())
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4096)
+    }
+
     /// Read configuration from process environment variables.
     pub fn from_env() -> Result<Self> {
         Self::from_lookup(|k| std::env::var(k).ok())
@@ -152,20 +228,8 @@ impl Config {
     where
         F: Fn(&str) -> Option<String>,
     {
-        let database_url = match lookup("DATABASE_URL") {
-            Some(val) if !val.trim().is_empty() => val,
-            _ => bail!("missing required environment variable: DATABASE_URL"),
-        };
-
-        let surreal_url = match lookup("SURREAL_DB_URL") {
-            Some(val) if !val.trim().is_empty() => val,
-            _ => bail!("missing required environment variable: SURREAL_DB_URL"),
-        };
-
-        let surreal_user = lookup("SURREAL_DB_USER").filter(|s| !s.trim().is_empty());
-        let surreal_pass = lookup("SURREAL_DB_PASS").filter(|s| !s.trim().is_empty());
-        let surreal_ns = lookup("SURREAL_DB_NAMESPACE").unwrap_or_else(|| "rantai".into());
-        let surreal_db = lookup("SURREAL_DB_DATABASE").unwrap_or_else(|| "knowledge".into());
+        let database_url = Self::required_var(&lookup, "DATABASE_URL")?;
+        let surreal = Self::surreal_from_lookup(&lookup)?;
 
         let embedding_api_key = lookup("KB_EMBEDDING_API_KEY")
             .filter(|s| !s.trim().is_empty())
@@ -181,9 +245,7 @@ impl Config {
             .unwrap_or_else(|| "https://openrouter.ai/api/v1/embeddings".into());
         let embedding_model =
             lookup("KB_EMBEDDING_MODEL").unwrap_or_else(|| "qwen/qwen3-embedding-8b".into());
-        let embedding_dim: u32 = lookup("KB_EMBEDDING_DIM")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(4096);
+        let embedding_dim = Self::embedding_dim(&lookup);
 
         let port: u16 = lookup("PORT").and_then(|v| v.parse().ok()).unwrap_or(8080);
         let bind_addr = format!("0.0.0.0:{port}");
@@ -224,15 +286,6 @@ impl Config {
             max_connections: 10,
             connect_timeout: Duration::from_secs(5),
             acquire_timeout: Duration::from_secs(5),
-        };
-
-        let surreal = SurrealSettings {
-            url: surreal_url,
-            namespace: surreal_ns,
-            database: surreal_db,
-            username: surreal_user,
-            password: surreal_pass,
-            request_timeout: Duration::from_secs(10),
         };
 
         // Object storage. Empty credentials stay empty: the adapter then sends
