@@ -87,10 +87,13 @@ Status after the follow-up pass (user: shape may differ if functionality is the 
 
 ## Dependencies
 
-New dependencies added in R3 slice 2 (pure Rust only):
-- `zip` (8.6.0, deflate only): in-memory zip archive extraction for OpenXML (docx/pptx), epub containers, and test fixture generation.
-- `quick-xml` (0.41.0): streaming event-based XML parsing for docx document bodies, pptx slide text, epub OPF manifests, and generic xml text stripping.
+Dependencies added across slices:
+- `zip` (8.6.0, deflate only): in-memory zip archive extraction for OpenXML (docx/pptx), epub containers, odt/ods containers, and test fixture generation.
+- `quick-xml` (0.41.0): streaming event-based XML parsing for docx document bodies, pptx slide text, epub OPF manifests, generic xml text stripping, and odt/ods content.xml parsing.
 - `calamine` (0.36.1): pure-Rust spreadsheet parser reading xlsx/xlsm/xlsb sheets into CSV text, matching SheetJS behavior.
+- `pdfium-render` (0.9.4, `thread_safe` + `image_latest`): Dynamic binding to libpdfium for PDF text-layer extraction, page count, document splitting, and rendering PDF pages to image bitmaps.
+- `image` (0.25, `png` + `jpeg`): Pure-Rust raster image decoding and encoding for PDFium bitmap-to-PNG conversion used in vision OCR data URLs.
+- `base64` (0.22.1): Standard Base64 encoding for data URLs sent to OpenRouter / OpenAI vision APIs.
 
 ## R4 slice: document DELETE (soft and hard)
 
@@ -164,7 +167,7 @@ Cargo ledger (continuing numbering from 31):
 - **Pure-Rust parsers**:
   - `docx`: parses `word/document.xml` using `quick-xml`, matching `mammoth.extractRawText` (blank line between paragraphs, document order, skips field codes, note references, and DrawingML pictures).
   - `xlsx`: parses workbook sheets using `calamine`, formatting each sheet as `=== SheetName ===\n` followed by SheetJS-compatible CSV rows with quote escaping.
-  - `pptx`: parses slides in numeric order (`slide1.xml`, `slide2.xml`, ...) followed by slide notes, paragraphs delimited by newlines.
+  - `pptx`: parses slides in numeric order (`slide1.xml`, `slide2.xml`, ...) followed by slide notes, paragraphs delimited by newlines).
   - `epub`: parses `META-INF/container.xml`, locates OPF package file, reads manifest and spine itemrefs to extract chapters in linear reading order, then strips HTML tags.
   - `rtf`: pure-Rust byte scanner stripping control words, parsing `\'hh` hex escapes and `\uN` unicode escapes, collapsing whitespace, and dropping `{\*...}` ignorable groups.
   - `gltf` / `glb`: parses GLTF JSON metadata and GLB binary chunks, formatting an inventory of asset info, scenes, nodes, meshes, materials, and animations matching the TS template.
@@ -174,3 +177,31 @@ Cargo ledger (continuing numbering from 31):
   - PDF and image files return explicit `ExtractError::Unsupported` noting they are not yet ported in this slice.
 - **UTF-16 reason clipping**: error message clipping follows JavaScript's UTF-16 code unit semantics (`slice(0, 500)`).
 - **IngestWorker wiring**: `kb-server::state::build_worker` and `build_ingest_worker` instantiate `LocalExtractor::shared()`. Integration test `test_ingest_worker_with_real_local_extractor` verifies end-to-end ingest execution with the real extractor.
+
+## R3 slice 3: PDF text layer, scanned detection, smart router, layout extractor chain, vision OCR, ODT/ODS parity
+
+Cargo ledger (continuing numbering from 41):
+
+| # | command | result |
+|---|---|---|
+| 42 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101. 5 errors in `kb-server` config (PgSettings/SurrealSettings/S3Settings missing fields, EngineSettings vector_knn field mismatch, expansion api_key type) and unwrap_err T: Debug in `kb-extract` `builder.rs`. |
+| 43 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101. Trailing backslash in `builder.rs:129`, raw string hash lint in `openrouter_vision.rs`. |
+| 44 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 101. `clippy::panic` lint in `builder.rs` test module, unused imports in `extract_tests.rs`. |
+| 45 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0, zero errors. Clean clippy across workspace. |
+| 46 | `cargo test --workspace` | exit 101. 1 failure in `kb-extract` `hybrid_merge::tests::substitutes_prose_while_keeping_table` (anchor words typo location in test). |
+| 47 | `cargo test --workspace` | exit 101. 1 failure in `kb-extract` `extract_tests::test_smart_router_decision` (`is_unpdf_sufficient` 300 chars/page default threshold vs 10 chars fixture). |
+| 48 | `cargo test --workspace` | exit 0. All 304 tests pass across all workspace crates (kb-chunker: 76, kb-core: 38, kb-engine: 28, kb-extract: 86 unit + 9 integration, kb-inference: 16, kb-ports: 3, kb-server: 9 unit + 10 integration, kb-store-blob: 6, kb-store-pg: 9, kb-store-surreal: 14). |
+| 49 | `cargo clippy --workspace --all-targets --keep-going --message-format=short` | exit 0. Zero errors across workspace. |
+
+### Architecture and Parity Details
+- **PDF text layer via PDFium**: Dynamically loaded `libpdfium` replaces `unpdf`. Paths are resolved via `PDFIUM_DYNAMIC_LIB_PATH` or auto-located in `rust/.vendor/pdfium/lib/libpdfium.so` and system paths. Script `rust/scripts/fetch-pdfium.sh` automatically downloads prebuilt binaries for linux-x64 and arm64.
+- **Output difference & Smart Router Re-validation Trap**: PDFium extracts text glyphs directly from PDF operators, which differs subtly from Mozilla's `pdf.js` (used by `unpdf` in Bun) in whitespace collapse, hyphens, and ligatures. As anticipated in `docs/porting-plan.md`, the smart router thresholds (`min_chars_per_page = 300`, `max_columnar_lines = 5`, `max_currency_matches = 10`) need re-validation against the 40-doc benchmark suite once end-to-end evaluation runs.
+- **Scanned-PDF detection**: `is_pdf_scanned` ports `src/lib/ocr/pdf-converter.ts` threshold (`non-whitespace characters < 100 * pages`).
+- **Smart router**: `SmartRouterExtractor` uses `kb_core::signals::is_unpdf_sufficient` to evaluate text-layer quality, falling through to the configured layout chain or vision model on scans or tables. Infinite recursion (`smart -> smart`) is rejected.
+- **Layout extractor chain**: `LayoutExtractorChain` tries on-prem MinerU sidecar (`KB_EXTRACT_MINERU_BASE_URL`), hosted MinerU API (`KB_MINERU_API_KEY`), and Mistral OCR (`KB_MISTRAL_OCR_KEY`) in the order specified by `KB_LAYOUT_EXTRACTOR_ORDER` (default `sidecar,mineru-api,mistral`), falling back to vision OCR if all layout extractors fail.
+- **Dropped legacy Ollama OCR pipeline**: Dropped the legacy Ollama OCR provider (`src/lib/ocr` ollama-provider) in favor of the OpenRouter / OpenAI-compatible vision provider (`src/lib/ocr/providers/openrouter-provider.ts`).
+- **Vision OCR & image inputs**: Scanned PDF fallback and standalone image files (`png`, `jpg`, `jpeg`, `gif`, `webp`, `heic`) are processed via `OpenRouterVisionProvider` using `google/gemini-2.5-flash` (or `OCR_FALLBACK_MODEL`). Image extractions are formatted as `[Image: {filename}]\n\n{text}` exactly matching `src/lib/ingest/extract.ts`.
+- **Hybrid prose merge**: `HybridExtractor` and `merge_structural_with_text_layer` preserve MinerU/Mistral structural elements (markdown/HTML tables, headings, LaTeX formulas, code fences) while anchoring and substituting high-fidelity text-layer prose.
+- **ODT and ODS parsers**: Added pure-Rust parsers for OpenDocument Text (`.odt`) via `content.xml` `text:p`/`text:h` and OpenDocument Spreadsheet (`.ods`) via `content.xml` `table:table-row` to CSV.
+- **Investigation of legacy binary formats**: Inspected `officeparser` v6 (`node_modules/officeparser`). Confirmed that `officeparser` v6 only supports ZIP-based XML formats (`.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`, `.pages`, etc.) and explicitly rejects legacy binary `.doc`, `.xls`, and `.ppt` with error code `EXTENSION_UNSUPPORTED`. Rejecting legacy binary formats with `ExtractError::Unsupported` in Rust maintains full parity with TypeScript.
+- **Production worker wiring**: `kb-server::state::build_worker` and `build_ingest_worker` wire `build_production_extractor(&config.extract)` as the active `Extractor` implementation.
