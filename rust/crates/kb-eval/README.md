@@ -65,6 +65,7 @@ kb-server eval … --gain exponential
 | `--out` | output directory (default `eval-out`) |
 | `--skip-ingest` | reuse `<out>/ingest-map.json` instead of uploading |
 | `--label` | run label written into every output (default `run`) |
+| `--allow-failures` | exit 0 even with failed queries or corpus files |
 | `--timeout` / `--poll-ms` | per-job ingest timeout and job poll interval |
 
 ## What it does
@@ -86,7 +87,7 @@ kb-server eval … --gain exponential
 
 | file | what it is |
 |---|---|
-| `metrics.json` | every metric with its 95% CI, the counters, latency, label, timestamp, git commit and dataset name |
+| `metrics.json` | every metric with its 95% CI, the counters, latency, label, timestamp, harness commit, server version, nDCG gain and dataset name |
 | `report.md` | the same numbers as a table, for a human |
 | `run.trec` | document-level TREC run (`qid Q0 docno rank score tag`) |
 | `run.page.trec` | page-level TREC run |
@@ -114,9 +115,19 @@ reproduces the same ordering.
   is left out of that level's mean (as BEIR does) instead of being counted as a
   zero. The `n` column in `report.md` is the evaluable count; `n_queries` in
   `metrics.json` is how many queries were asked.
-* A query whose search **fails** is counted in `n_failed` and excluded from the
-  means. A failed search is a failure, not a query that found nothing: it never
-  becomes a zero.
+* A query whose search **fails** is counted in `n_failed` and scored as a **zero**
+  at every level where it was evaluable — the same rule as a query that found
+  nothing. The earlier rule excluded it, which quietly rewarded a backend for
+  timing out on exactly the hard queries: drop them and the mean over the rest
+  goes up.
+* The **answered-only** mean (today's old behaviour) is reported next to it, in
+  `metrics.json` under `document.answered` / `page.answered` and as a clearly
+  secondary table in `report.md`. It is the diagnostic that separates "worse"
+  from "down"; it is never the number to publish.
+* `kb-server eval` **exits non-zero** when `n_failed > 0` or
+  `n_ingest_failed > 0`. The outputs are written first either way, and
+  `--allow-failures` turns the exit back to 0 for a CI job that wants both the
+  numbers and the failure.
 * A query answered with `degrades` (a retrieval arm was down) or with a server
   `note` is still scored, but `n_degraded`, `n_noted` and the labels themselves
   are published next to the metrics so a degraded number is never mistaken for a

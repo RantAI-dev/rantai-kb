@@ -95,6 +95,22 @@ pub struct QueryMetrics {
     pub precision: f64,
 }
 
+impl QueryMetrics {
+    /// The score of a query the server could not answer.
+    ///
+    /// Zero on every metric, at every level where the query was evaluable. It
+    /// is what a failed query costs the headline means: excluding it instead
+    /// would hand a backend that times out on exactly the hard queries a *better*
+    /// score than one that answers them badly.
+    pub const ZERO: Self = Self {
+        ndcg: 0.0,
+        recall: 0.0,
+        mrr: 0.0,
+        hit1: 0.0,
+        precision: 0.0,
+    };
+}
+
 /// Collapse a ranked sequence of keys to unique keys, keeping first occurrence.
 ///
 /// A chunk store returns many chunks per document; the document-level ranking is
@@ -300,7 +316,25 @@ pub fn bootstrap_ci(values: &[f64], resamples: usize, seed: u64) -> Aggregate {
     }
 }
 
+/// One metric aggregated over a set of per-query values, with its interval.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Means {
+    pub ndcg: Aggregate,
+    pub recall: Aggregate,
+    pub mrr: Aggregate,
+    pub hit1: Aggregate,
+    pub precision: Aggregate,
+    /// Queries behind this mean — the evaluable count, not the asked count.
+    pub n_queries: usize,
+}
+
 /// One metric aggregated over the evaluable queries at a level.
+///
+/// The five headline fields are **strict**: every evaluable query is in them,
+/// including the ones the server failed to answer (which enter as
+/// [`QueryMetrics::ZERO`]). `answered` is the same arithmetic over answered
+/// queries only and is published as a secondary diagnostic, because that is the
+/// number that separates "the backend is worse" from "the backend is down".
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct LevelReport {
     pub ndcg: Aggregate,
@@ -309,22 +343,41 @@ pub struct LevelReport {
     pub hit1: Aggregate,
     pub precision: Aggregate,
     pub n_queries: usize,
+    /// Secondary: answered queries only.
+    pub answered: Means,
 }
 
-/// Aggregate per-query metrics into level means with confidence intervals.
-#[must_use]
-pub fn aggregate_level(per_query: &[QueryMetrics]) -> LevelReport {
+fn means(per_query: &[QueryMetrics]) -> Means {
     let col = |f: fn(&QueryMetrics) -> f64| -> Aggregate {
         let values: Vec<f64> = per_query.iter().map(f).collect();
         bootstrap_ci(&values, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED)
     };
-    LevelReport {
+    Means {
         ndcg: col(|m| m.ndcg),
         recall: col(|m| m.recall),
         mrr: col(|m| m.mrr),
         hit1: col(|m| m.hit1),
         precision: col(|m| m.precision),
         n_queries: per_query.len(),
+    }
+}
+
+/// Aggregate per-query metrics into level means with confidence intervals.
+///
+/// `strict` is the headline population (evaluable queries, failed ones included
+/// as zeros); `answered` is the secondary one (evaluable queries the server
+/// actually answered).
+#[must_use]
+pub fn aggregate_level(strict: &[QueryMetrics], answered: &[QueryMetrics]) -> LevelReport {
+    let head = means(strict);
+    LevelReport {
+        ndcg: head.ndcg,
+        recall: head.recall,
+        mrr: head.mrr,
+        hit1: head.hit1,
+        precision: head.precision,
+        n_queries: head.n_queries,
+        answered: means(answered),
     }
 }
 
@@ -445,7 +498,7 @@ mod tests {
             assert_eq!(value, 0.0, "{name} was {value}");
             assert!(value.is_sign_positive(), "{name} was {value:?}");
         }
-        let level = aggregate_level(&[m]);
+        let level = aggregate_level(&[m], &[m]);
         assert!(level.ndcg.mean.is_sign_positive());
         assert!(level.ndcg.ci_low.is_sign_positive());
         assert!(level.ndcg.ci_high.is_sign_positive());
@@ -639,9 +692,51 @@ mod tests {
     fn aggregate_level_keeps_only_evaluable_queries() {
         let q1 = evaluate_query(&keys(&["a"]), &gold(&[("a", 1)]), 10, Gain::Linear).unwrap();
         let q2 = evaluate_query(&keys(&["x"]), &gold(&[("a", 1)]), 10, Gain::Linear).unwrap();
-        let level = aggregate_level(&[q1, q2]);
+        let level = aggregate_level(&[q1, q2], &[q1, q2]);
         assert_eq!(level.n_queries, 2);
         assert!(close(level.ndcg.mean, 0.5));
         assert!(close(level.mrr.mean, 0.5));
+        assert_eq!(level.answered.n_queries, 2);
+        assert!(close(level.answered.ndcg.mean, 0.5));
+    }
+
+    #[test]
+    fn a_failed_query_is_zero_in_the_headline_and_absent_from_the_secondary() {
+        // The regression this pins: a backend that fails the hard queries used
+        // to drop them, which raised its score. Strict means must not.
+        let q1 = evaluate_query(&keys(&["a"]), &gold(&[("a", 1)]), 10, Gain::Linear).unwrap();
+        let level = aggregate_level(&[q1, QueryMetrics::ZERO], &[q1]);
+        assert_eq!(level.n_queries, 2, "the failure is in the headline count");
+        assert!(
+            close(level.ndcg.mean, 0.5),
+            "strict nDCG {}",
+            level.ndcg.mean
+        );
+        assert!(close(level.recall.mean, 0.5));
+        assert!(close(level.mrr.mean, 0.5));
+        assert!(close(level.hit1.mean, 0.5));
+        assert!(
+            close(level.precision.mean, 0.05),
+            "P@10 of one hit in two queries"
+        );
+
+        assert_eq!(level.answered.n_queries, 1);
+        assert!(close(level.answered.ndcg.mean, 1.0));
+        assert!(close(level.answered.mrr.mean, 1.0));
+    }
+
+    #[test]
+    fn the_zero_score_is_plus_zero() {
+        let z = QueryMetrics::ZERO;
+        for (name, value) in [
+            ("ndcg", z.ndcg),
+            ("recall", z.recall),
+            ("mrr", z.mrr),
+            ("hit1", z.hit1),
+            ("precision", z.precision),
+        ] {
+            assert_eq!(value, 0.0, "{name}");
+            assert!(value.is_sign_positive(), "{name} was {value:?}");
+        }
     }
 }

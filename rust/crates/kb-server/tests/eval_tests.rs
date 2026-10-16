@@ -90,10 +90,12 @@ fn write_dataset(dir: &std::path::Path) {
         ),
     )
     .unwrap();
-    // q1 is graded on doc alpha and its first page; q2 on doc beta.
+    // q1 is graded on doc alpha and its first page; q2 on doc beta. q3 is
+    // graded too: the server answers it with a 400, so it must be scored as a
+    // zero in the strict means rather than quietly dropped.
     std::fs::write(
         qrels.join("test.tsv"),
-        "query-id\tcorpus-id\tscore\nq1\talpha\t2\nq1\talpha#p1\t2\nq2\tbeta\t2\n",
+        "query-id\tcorpus-id\tscore\nq1\talpha\t2\nq1\talpha#p1\t2\nq2\tbeta\t2\nq3\talpha\t2\n",
     )
     .unwrap();
 }
@@ -180,9 +182,16 @@ async fn runner_measures_a_live_server_end_to_end() {
     assert_eq!(report.metrics.n_failed, 1);
     assert_eq!(report.metrics.n_documents, 2);
     assert_eq!(report.metrics.n_ingest_failed, 0);
-    // The failure is excluded from the means: two evaluable document queries,
-    // and only the two that were answered.
-    assert_eq!(report.metrics.document.n_queries, 2);
+    // Strict means: q1, q2 and the failed q3 are all evaluable at the document
+    // level, so all three are in — the failure as a zero.
+    assert_eq!(report.metrics.document.n_queries, 3);
+    assert_eq!(report.metrics.document.answered.n_queries, 2);
+    assert!(
+        report.metrics.document.ndcg.mean < report.metrics.document.answered.ndcg.mean,
+        "a failed query must lower the strict mean, not raise it: {:?} vs {:?}",
+        report.metrics.document.ndcg,
+        report.metrics.document.answered.ndcg
+    );
     // The fake vector search returns alpha first for both queries; q1 finds its
     // gold at rank 1, q2 at rank 2.
     assert!(
@@ -191,7 +200,9 @@ async fn runner_measures_a_live_server_end_to_end() {
         report.metrics.document
     );
     // The page-level arm only has q1, which is a perfect hit on its first page.
+    // q3 has no page judgement, so its failure is not a page zero either.
     assert_eq!(report.metrics.page.n_queries, 1);
+    assert_eq!(report.metrics.page.answered.n_queries, 1);
     assert!(report.metrics.page.ndcg.mean > 0.99);
     // Latency is measured over the two answered queries.
     assert_eq!(report.metrics.latency_ms.n, 2);
@@ -202,6 +213,8 @@ async fn runner_measures_a_live_server_end_to_end() {
     assert!(metrics.contains("\"n_failed\": 1"), "{metrics}");
     let md = std::fs::read_to_string(out_dir.join("report.md")).unwrap();
     assert!(md.contains("1 of 3 queries failed"), "{md}");
+    assert!(md.contains("Answered only (secondary)"), "{md}");
+    assert!(md.contains("| document (answered only) | 2 |"), "{md}");
 
     let run = std::fs::read_to_string(out_dir.join("run.trec")).unwrap();
     assert!(run.contains("q1 Q0 alpha 1 1.000000 e2e"), "{run}");

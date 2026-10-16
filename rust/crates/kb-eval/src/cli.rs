@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use crate::dataset::parse_qrels;
 use crate::metrics::Gain;
-use crate::report::{parse_trec, score_offline};
+use crate::report::{MetricsFile, parse_trec, score_offline};
 use crate::runner::{RunnerConfig, run as run_harness};
 
 /// A usage mistake (`Usage`) versus the operation failing (`Failed`).
@@ -71,6 +71,8 @@ RUN FLAGS
     --label LABEL       run label written into the outputs (default run)
     --timeout SECS      per-job ingest timeout (default 900)
     --poll-ms MS        job poll interval (default 500)
+    --allow-failures    exit 0 even when queries or corpus files failed
+                        (the outputs are written either way)
 
 OUTPUTS (in --out)
     metrics.json  every metric with a 95% bootstrap CI, plus latency
@@ -104,14 +106,37 @@ async fn eval(args: &[String]) -> Result<(), EvalError> {
     config.job_timeout = Duration::from_secs(parse_uint_u64(args, "--timeout", 900)?);
     config.poll_interval = Duration::from_millis(parse_uint_u64(args, "--poll-ms", 500)?);
 
+    let allow_failures = has_flag(args, "--allow-failures");
     let report = run_harness(config).await?;
     let m = &report.metrics;
     println!(
-        "eval {}: {} queries ({} failed) — document nDCG@{} {:.3}, page nDCG@{} {:.3}",
-        m.label, m.n_queries, m.n_failed, m.k, m.document.ndcg.mean, m.k, m.page.ndcg.mean
+        "eval {}: {} queries ({} failed, gain {}) — document nDCG@{} {:.3}, page nDCG@{} {:.3}",
+        m.label, m.n_queries, m.n_failed, m.gain, m.k, m.document.ndcg.mean, m.k, m.page.ndcg.mean
+    );
+    // The strict means are printed next to the answered-only ones so nobody has
+    // to open the file to see whether a failure was folded in.
+    println!(
+        "answered-only (secondary): document nDCG@{} {:.3} over {} queries",
+        m.k, m.document.answered.ndcg.mean, m.document.answered.n_queries
     );
     println!("wrote metrics.json, report.md, run.trec, run.page.trec");
-    Ok(())
+    gate_on_failures(m, allow_failures)
+}
+
+/// Fail the command when the run was not clean, unless the caller opted out.
+///
+/// The outputs are written before this is called, so a failing run still leaves
+/// evidence behind: `--allow-failures` is for a CI job that wants the numbers
+/// *and* the non-zero exit, not for suppressing a failure quietly.
+fn gate_on_failures(m: &MetricsFile, allow_failures: bool) -> Result<(), EvalError> {
+    if allow_failures || (m.n_failed == 0 && m.n_ingest_failed == 0) {
+        return Ok(());
+    }
+    Err(EvalError::Failed(format!(
+        "{} quer(y|ies) and {} corpus file(s) failed; pass --allow-failures to exit 0 anyway \
+         (metrics.json and report.md were written)",
+        m.n_failed, m.n_ingest_failed
+    )))
 }
 
 fn score(args: &[String]) -> Result<(), EvalError> {
@@ -229,6 +254,50 @@ mod tests {
             parse_gain(&args(&["--gain", "quadratic"])),
             Err(EvalError::Usage(_))
         ));
+    }
+
+    fn metrics(n_failed: usize, n_ingest_failed: usize) -> MetricsFile {
+        MetricsFile {
+            label: "run".to_string(),
+            dataset: "tiny".to_string(),
+            timestamp: "2026-10-16T00:00:00Z".to_string(),
+            harness_commit: "abc1234".to_string(),
+            gain: "linear".to_string(),
+            k: 10,
+            max_chunks: 50,
+            n_queries: 12,
+            n_failed,
+            n_degraded: 0,
+            n_noted: 0,
+            n_documents: 6,
+            n_ingest_failed,
+            degrades: Vec::new(),
+            document: crate::metrics::aggregate_level(&[], &[]),
+            page: crate::metrics::aggregate_level(&[], &[]),
+            latency_ms: crate::metrics::latency_report(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn a_run_with_failures_exits_non_zero_unless_allowed() {
+        assert!(gate_on_failures(&metrics(0, 0), false).is_ok());
+        // One query the server could not answer is enough.
+        assert!(matches!(
+            gate_on_failures(&metrics(1, 0), false),
+            Err(EvalError::Failed(_))
+        ));
+        // So is one corpus file that never ingested.
+        assert!(matches!(
+            gate_on_failures(&metrics(0, 1), false),
+            Err(EvalError::Failed(_))
+        ));
+        // The opt-out keeps the exit at zero, and says what it saw.
+        assert!(gate_on_failures(&metrics(3, 2), true).is_ok());
+        let err = gate_on_failures(&metrics(3, 2), false)
+            .expect_err("a failed run must not exit zero")
+            .to_string();
+        assert!(err.contains("--allow-failures"), "{err}");
+        assert!(err.contains("3 quer"), "{err}");
     }
 
     #[tokio::test]

@@ -16,7 +16,8 @@ use serde_json::json;
 
 use crate::dataset::{Dataset, DatasetError, Qrel, gold_for_documents, gold_for_pages, page_key};
 use crate::metrics::{
-    Gain, LatencyReport, QueryMetrics, evaluate_query, latency_report, unique_first_occurrence,
+    Gain, LatencyReport, QueryMetrics, evaluate_query, has_positive_gold, latency_report,
+    unique_first_occurrence,
 };
 use crate::report::{ReportParts, RunReport, TrecRanking, build_report, write_outputs};
 
@@ -105,14 +106,24 @@ struct Answered<'a> {
 /// The per-query accounting of a run, kept separate from the HTTP loop so the
 /// scoring rules can be tested without a server.
 ///
-/// The rule that matters most: [`Self::record_failure`] counts a query and
-/// stops. A query the server could not answer is never scored as a ranking of
-/// nothing, because that would turn an outage into a quality regression.
+/// Two populations are kept side by side at each level, and the difference
+/// between them is the point:
+///
+/// * `document` / `page` — the **strict** headline. Every evaluable query is
+///   here, including the ones that failed, which enter as
+///   [`QueryMetrics::ZERO`].
+/// * `document_answered` / `page_answered` — the **secondary** diagnostic over
+///   answered queries only, which is what tells "worse" apart from "down".
+///
+/// A failed query never enters the run files: a missing query in a TREC run means
+/// "not run", which is not the same measurement as "ran and found nothing".
 #[derive(Debug, Default)]
 struct Scoreboard {
     gain: Gain,
     document: Vec<QueryMetrics>,
     page: Vec<QueryMetrics>,
+    document_answered: Vec<QueryMetrics>,
+    page_answered: Vec<QueryMetrics>,
     document_run: Vec<TrecRanking>,
     page_run: Vec<TrecRanking>,
     latencies: Vec<f64>,
@@ -144,6 +155,7 @@ impl Scoreboard {
             self.gain,
         ) {
             self.document.push(m);
+            self.document_answered.push(m);
         }
         if let Some(m) = evaluate_query(
             answer.page_keys,
@@ -152,6 +164,7 @@ impl Scoreboard {
             self.gain,
         ) {
             self.page.push(m);
+            self.page_answered.push(m);
         }
         // The run files carry every answered query, including one that found
         // nothing: an empty ranking is a measurement, a missing query is not.
@@ -165,10 +178,23 @@ impl Scoreboard {
         });
     }
 
-    /// Record a query that could not be answered: counted, never scored.
-    fn record_failure(&mut self) {
+    /// Record a query the server could not answer.
+    ///
+    /// Counted, and scored as a zero at every level where it was evaluable. The
+    /// earlier rule — exclude it — was a quiet way to reward a backend for
+    /// timing out on exactly the queries that would have exposed it: drop the
+    /// hard ones and the mean over the rest goes up.
+    ///
+    /// It stays out of the run files and out of the answered-only means.
+    fn record_failure(&mut self, qrels: &[Qrel]) {
         self.n_queries += 1;
         self.n_failed += 1;
+        if has_positive_gold(&gold_for_documents(qrels)) {
+            self.document.push(QueryMetrics::ZERO);
+        }
+        if has_positive_gold(&gold_for_pages(qrels)) {
+            self.page.push(QueryMetrics::ZERO);
+        }
     }
 }
 
@@ -207,7 +233,7 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
         let answer = match search {
             Ok(answer) => answer,
             Err(err) => {
-                board.record_failure();
+                board.record_failure(&dataset.qrels_for(&query.id));
                 eprintln!("query {} failed: {err}", query.id);
                 continue;
             }
@@ -246,6 +272,8 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
         degrades: board.degrades.into_iter().collect(),
         document: board.document,
         page: board.page,
+        document_answered: board.document_answered,
+        page_answered: board.page_answered,
         latency,
         document_run: board.document_run,
         page_run: board.page_run,
@@ -474,6 +502,7 @@ fn save_ingest_map(path: &Path, map: &HashMap<String, String>) -> Result<(), Run
 mod tests {
     use super::*;
     use crate::dataset::{base_doc_key, page_of};
+    use crate::metrics::aggregate_level;
 
     #[test]
     fn endpoint_handles_a_trailing_slash() {
@@ -559,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_query_is_counted_and_never_scored() {
+    fn a_failed_query_is_counted_and_scored_as_a_zero() {
         let mut board = Scoreboard::default();
         // q1 is answered and its gold is found at rank 1.
         board.record_answer(
@@ -574,13 +603,24 @@ mod tests {
                 note: None,
             },
         );
-        // q2 could not be answered. It must not enter the means at all.
-        board.record_failure();
+        // q2 could not be answered. It has gold at the document level, so it is
+        // a zero there rather than an absence.
+        board.record_failure(&[qrel("q2", "alpha", 2)]);
 
         assert_eq!(board.n_queries, 2);
         assert_eq!(board.n_failed, 1);
-        assert_eq!(board.document.len(), 1, "one scored query, not two");
+        assert_eq!(
+            board.document.len(),
+            2,
+            "the failure is scored, not skipped"
+        );
         assert!((board.document[0].ndcg - 1.0).abs() < 1e-9);
+        assert!((board.document[1].ndcg - 0.0).abs() < 1e-9);
+        // No page judgement for either query, so the page level stays empty.
+        assert!(board.page.is_empty());
+        // The answered-only population has only q1.
+        assert_eq!(board.document_answered.len(), 1);
+        assert!((board.document_answered[0].ndcg - 1.0).abs() < 1e-9);
         // The run files carry q1 only: a missing query is not an empty ranking.
         assert_eq!(board.document_run.len(), 1);
         assert_eq!(board.document_run[0].query_id, "q1");
@@ -609,6 +649,57 @@ mod tests {
         assert!((board.document[0].ndcg - 0.0).abs() < 1e-9);
         assert_eq!(board.document_run.len(), 1);
         assert!(board.document_run[0].docnos.is_empty());
+    }
+
+    #[test]
+    fn a_failed_query_lowers_the_strict_mean_and_not_the_answered_one() {
+        // Three evaluable document queries; the server answered two, both
+        // perfectly, and failed the third.
+        let mut board = Scoreboard::default();
+        for id in ["q1", "q2"] {
+            board.record_answer(
+                10,
+                Answered {
+                    id,
+                    qrels: &[qrel(id, "alpha", 2)],
+                    doc_keys: &["alpha".to_string()],
+                    page_keys: &[],
+                    latency_ms: 4.0,
+                    degrades: &[],
+                    note: None,
+                },
+            );
+        }
+        board.record_failure(&[qrel("q3", "alpha", 2)]);
+
+        let strict = aggregate_level(&board.document, &board.document_answered);
+        assert_eq!(strict.n_queries, 3);
+        assert!(
+            (strict.ndcg.mean - 2.0 / 3.0).abs() < 1e-9,
+            "strict {:?}",
+            strict.ndcg
+        );
+        assert_eq!(strict.answered.n_queries, 2);
+        assert!((strict.answered.ndcg.mean - 1.0).abs() < 1e-9);
+        // A backend that fails the hard queries scores lower here, never higher.
+        assert!(strict.ndcg.mean < strict.answered.ndcg.mean);
+    }
+
+    #[test]
+    fn a_failed_query_with_no_page_gold_is_not_a_page_zero() {
+        let mut board = Scoreboard::default();
+        board.record_failure(&[qrel("q1", "alpha", 2)]);
+        assert_eq!(board.page.len(), 0);
+        assert_eq!(board.page_answered.len(), 0);
+        assert_eq!(board.document.len(), 1);
+
+        let mut page_only = Scoreboard::default();
+        page_only.record_failure(&[qrel("q1", "alpha#p3", 3)]);
+        // Page gold is judged, document gold collapses onto alpha, so both
+        // levels are evaluable and both take the zero.
+        assert_eq!(page_only.page.len(), 1);
+        assert_eq!(page_only.document.len(), 1);
+        assert_eq!(page_only.page_answered.len(), 0);
     }
 
     #[test]

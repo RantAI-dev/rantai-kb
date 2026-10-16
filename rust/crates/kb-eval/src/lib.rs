@@ -25,7 +25,8 @@ pub mod runner;
 pub use cli::{EvalError, run};
 pub use dataset::{Dataset, DatasetError};
 pub use metrics::{
-    Aggregate, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, Gain, LatencyReport, LevelReport, QueryMetrics,
+    Aggregate, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, Gain, LatencyReport, LevelReport, Means,
+    QueryMetrics,
 };
 pub use report::{MetricsFile, RunReport};
 pub use runner::{RunError, RunnerConfig};

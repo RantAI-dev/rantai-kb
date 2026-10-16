@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::dataset::{Qrel, gold_for_documents, gold_for_pages};
 use crate::metrics::{
-    Gain, Gold, LatencyReport, LevelReport, QueryMetrics, aggregate_level, evaluate_query,
+    Gain, Gold, LatencyReport, LevelReport, Means, QueryMetrics, aggregate_level, evaluate_query,
     unique_first_occurrence,
 };
 
@@ -90,8 +90,12 @@ pub struct ReportParts<'a> {
     pub n_documents: usize,
     pub n_ingest_failed: usize,
     pub degrades: Vec<String>,
+    /// Strict: every evaluable query, failures included as zeros.
     pub document: Vec<QueryMetrics>,
     pub page: Vec<QueryMetrics>,
+    /// Secondary: answered queries only.
+    pub document_answered: Vec<QueryMetrics>,
+    pub page_answered: Vec<QueryMetrics>,
     pub latency: LatencyReport,
     pub document_run: Vec<TrecRanking>,
     pub page_run: Vec<TrecRanking>,
@@ -115,8 +119,8 @@ pub fn build_report(parts: ReportParts<'_>) -> RunReport {
         n_documents: parts.n_documents,
         n_ingest_failed: parts.n_ingest_failed,
         degrades: parts.degrades,
-        document: aggregate_level(&parts.document),
-        page: aggregate_level(&parts.page),
+        document: aggregate_level(&parts.document, &parts.document_answered),
+        page: aggregate_level(&parts.page, &parts.page_answered),
         latency_ms: parts.latency,
     };
     RunReport {
@@ -191,20 +195,42 @@ pub fn render_markdown(m: &MetricsFile) -> String {
         ));
     }
     out.push('\n');
+    out.push_str(
+        "Strict means: every evaluable query is in them, and a query the server failed\n\
+         to answer is scored as a zero at every level where it was evaluable.\n\n",
+    );
     out.push_str("| level | n | nDCG@k | Recall@k | MRR@k | Hit@1 | P@k |\n");
     out.push_str("|---|---|---|---|---|---|---|\n");
     out.push_str(&level_row("document", &m.document));
     out.push_str(&level_row("page", &m.page));
     out.push('\n');
+    out.push_str("### Answered only (secondary)\n\n");
+    out.push_str(
+        "Failed queries are left out of this table. It separates \"the backend is worse\"\n\
+         from \"the backend is down\"; it is never the number to publish, because a\n\
+         backend that fails exactly the hard queries scores higher here.\n\n",
+    );
+    out.push_str("| level | n | nDCG@k | Recall@k | MRR@k | Hit@1 | P@k |\n");
+    out.push_str("|---|---|---|---|---|---|---|\n");
+    out.push_str(&answered_row("document", &m.document.answered));
+    out.push_str(&answered_row("page", &m.page.answered));
+    out.push('\n');
     out.push_str(&format!(
-        "Latency over {} successful queries (ms): mean {:.1}, p50 {:.1}, p95 {:.1}, p99 {:.1}\n",
+        "Latency over {} answered queries (ms): mean {:.1}, p50 {:.1}, p95 {:.1}, p99 {:.1}\n",
         m.latency_ms.n, m.latency_ms.mean, m.latency_ms.p50, m.latency_ms.p95, m.latency_ms.p99,
     ));
     if m.n_failed > 0 {
         out.push_str(&format!(
-            "\n> {} of {} queries failed and are excluded from the means above: a failed\n\
-             > search is a failure, not a query that found nothing.\n",
+            "\n> {} of {} queries failed. Each one is a zero in the strict table above and\n\
+             > is missing from the answered-only table.\n",
             m.n_failed, m.n_queries
+        ));
+    }
+    if m.n_ingest_failed > 0 {
+        out.push_str(&format!(
+            "\n> {} corpus file(s) never reached `success`, so every query about them\n\
+             > is scored as a miss.\n",
+            m.n_ingest_failed
         ));
     }
     out.push_str(
@@ -212,6 +238,23 @@ pub fn render_markdown(m: &MetricsFile) -> String {
          document, or no judged page, is left out rather than scored as zero.\n",
     );
     out
+}
+
+fn answered_row(name: &str, means: &Means) -> String {
+    format!(
+        "| {} (answered only) | {} | {} | {} | {} | {} | {} |\n",
+        name,
+        means.n_queries,
+        fmt_agg(means.ndcg.mean, means.ndcg.ci_low, means.ndcg.ci_high),
+        fmt_agg(means.recall.mean, means.recall.ci_low, means.recall.ci_high),
+        fmt_agg(means.mrr.mean, means.mrr.ci_low, means.mrr.ci_high),
+        fmt_agg(means.hit1.mean, means.hit1.ci_low, means.hit1.ci_high),
+        fmt_agg(
+            means.precision.mean,
+            means.precision.ci_low,
+            means.precision.ci_high
+        ),
+    )
 }
 
 fn level_row(name: &str, level: &LevelReport) -> String {
@@ -334,6 +377,8 @@ pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize, gain: G
     }
     let mut doc_metrics = Vec::new();
     let mut page_metrics = Vec::new();
+    let mut doc_answered = Vec::new();
+    let mut page_answered = Vec::new();
     let mut n_queries = 0;
     for ranking in rankings {
         let Some(query_qrels) = per_query.get(ranking.query_id.as_str()) else {
@@ -346,6 +391,7 @@ pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize, gain: G
         let doc_ranked = unique_first_occurrence(ranking.docnos.iter().cloned());
         if let Some(m) = evaluate_query(&doc_ranked, &doc_gold, k, gain) {
             doc_metrics.push(m);
+            doc_answered.push(m);
         }
         // A run file of document-level keys carries no pages, so the page arm
         // is empty here; scoring `run.page.trec` is what fills it.
@@ -355,6 +401,7 @@ pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize, gain: G
             .collect();
         if let Some(m) = evaluate_query(&page_ranked, &page_gold, k, gain) {
             page_metrics.push(m);
+            page_answered.push(m);
         }
     }
     let metrics = MetricsFile {
@@ -372,8 +419,8 @@ pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize, gain: G
         n_documents: documents.len(),
         n_ingest_failed: 0,
         degrades: Vec::new(),
-        document: aggregate_level(&doc_metrics),
-        page: aggregate_level(&page_metrics),
+        document: aggregate_level(&doc_metrics, &doc_answered),
+        page: aggregate_level(&page_metrics, &page_answered),
         latency_ms: LatencyReport {
             mean: 0.0,
             p50: 0.0,
@@ -461,8 +508,10 @@ mod tests {
             n_documents: 6,
             n_ingest_failed: 1,
             degrades: vec!["vector arm unavailable".to_string()],
-            document: vec![scored],
+            document: vec![scored, QueryMetrics::ZERO],
             page: Vec::new(),
+            document_answered: vec![scored],
+            page_answered: Vec::new(),
             latency: LatencyReport {
                 mean: 1.0,
                 p50: 1.0,
@@ -476,9 +525,13 @@ mod tests {
             }],
             page_run: Vec::new(),
         });
-        // Five queries were attempted; one of them was evaluable.
+        // Five queries were attempted; one answered query and one failure were
+        // evaluable at the document level, so the strict mean is over two.
         assert_eq!(report.metrics.n_queries, 5);
-        assert_eq!(report.metrics.document.n_queries, 1);
+        assert_eq!(report.metrics.document.n_queries, 2);
+        assert_eq!(report.metrics.document.answered.n_queries, 1);
+        assert!((report.metrics.document.ndcg.mean - 0.5).abs() < 1e-9);
+        assert!((report.metrics.document.answered.ndcg.mean - 1.0).abs() < 1e-9);
         assert_eq!(report.metrics.n_failed, 2);
 
         let markdown = render_markdown(&report.metrics);
@@ -489,6 +542,18 @@ mod tests {
         assert!(markdown.contains("vector arm unavailable"), "{markdown}");
         assert!(markdown.contains("corpus files that failed to ingest: 1"));
         assert!(markdown.contains("2 of 5 queries failed"), "{markdown}");
+        assert!(
+            markdown.contains("Strict means: every evaluable query is in them"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("| document (answered only) | 1 | 1.000"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("1 corpus file(s) never reached `success`"),
+            "{markdown}"
+        );
 
         let json = serde_json::to_string(&report.metrics).expect("json");
         assert!(json.contains("\"n_failed\":2"), "{json}");
