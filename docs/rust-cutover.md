@@ -122,6 +122,13 @@ In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.d
 - **Rust Implementation (Deliberate Divergence)**: In `rust/crates/kb-engine/src/retrieval.rs`, the BM25 arm keeps a candidate hit only if its parent document is visible to the tenant AND present within the resolved `scope.document_ids()`. When a search is narrowed by knowledge base, category, or document IDs, out-of-scope BM25 hits are safely dropped.
 - **Parity Preservation**: Unnarrowed searches retain 100% exact parity with TypeScript, verified across the 33-case search parity matrix (`rust/scripts/search-parity.sh`), which explicitly tests and reports the leak divergence on restricted queries while asserting exact match on all other cases.
 
+- **Leak matrix evidence**: `kb-server eval leak` (`rust/crates/kb-eval`) probes
+  every retrieval arm × scope type (tenant, knowledge base, category,
+  `documentIds`) from outside, each probe paired with a positive control, and
+  exits non-zero on any cross-scope hit. Baseline in `docs/eval-baseline.md`:
+  0 hits over 240 probes, with the `documentIds` branch (vector-only in both
+  runtimes) and the figure arm reported UNTESTED rather than passing.
+
 ---
 
 ## 6. Shared Known Issues
