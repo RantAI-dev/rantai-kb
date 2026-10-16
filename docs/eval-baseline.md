@@ -363,11 +363,236 @@ Measured on this 6-core box against the same warm TEI container:
   it can be measured at all.
 * **Page level is not measured**: MIRACL has no page-level judgements.
 
-## 5. What to run next
+## 5. Latency baseline (SurrealDB, before Qdrant)
+
+Plan step L.1: instrument, load-test, and **record today's SurrealDB numbers
+once, so the gain can be shown**. No tuning work goes into SurrealDB, and none
+went in. What follows is a measurement of the system as it stood at commit
+`a5b1e4f`, plus the two queries that explain where the time goes.
+
+### The instrument
+
+Every stage of `/v1/search` is measured on the server
+(`stats.stageTimingsMs`, additive to the Bun `HybridSearchStats` fields, which
+keep their names and now carry real numbers instead of zeros), read back by
+`kb-eval` into `metrics.json`/`report.md`, and load-tested by
+`kb-server bench search`.
+
+Two rules make the numbers add up, and both matter when reading the table:
+
+* **The top-level stages partition the request.** They run one after another,
+  so they sum to no more than `total` (asserted by an in-process test).
+* **`detail.*` overlaps and is never summed.** `detail.queryEmbed` and
+  `detail.vectorArm` both happen *inside* `arms`; they are read, not added to
+  it.
+
+### Setup
+
+| | |
+|---|---|
+| dataset | `miracl-id-50`, 50 dev queries, 154 qrels |
+| corpus | 1,485 documents, **1,479 ingested** (6 failed), **1,687 chunks** in SurrealDB |
+| embedder | `Qwen/Qwen3-Embedding-0.6B`, dim **1024**, local TEI on CPU, query prefix set |
+| reranker | **off** (`KB_RERANK_ENABLED=false`); `rerank` reads 0.1 ms because it never runs |
+| hardware | 6 cores (Intel Xeon E5-2680 v4 @ 2.40 GHz), **11 GB RAM, no GPU**, `free -g` available ≈ 5 GB with the stack up |
+| store | Postgres 16 + SurrealDB v2 (`memory`) + rustfs, all in `kb-smoke-*` containers |
+
+### Per-stage latency — 50 queries, cold query-embedding cache (`--max-chunks 50`)
+
+| stage | mean | p50 | p95 | p99 |
+|---|---:|---:|---:|---:|
+| `scopeBuild` | 11.9 | 10.5 | 18.6 | 20.9 |
+| `expand` | 0.0 | 0.0 | 0.0 | 0.0 |
+| `arms` | 2243.7 | 2213.2 | 2526.9 | 2730.0 |
+| `enrich` | 2.8 | 2.5 | 4.7 | 9.3 |
+| `fusion` | 0.0 | 0.0 | 0.0 | 0.0 |
+| `rerank` | 0.1 | 0.1 | 0.2 | 0.4 |
+| `neighbours` | 64.9 | 62.9 | 81.1 | 89.8 |
+| `figures` | 55.8 | 54.1 | 66.6 | 70.1 |
+| `context` | 0.2 | 0.2 | 0.3 | 0.4 |
+| `serialise` | 3.9 | 3.6 | 7.0 | 7.7 |
+| **`total`** | **2383.4** | **2359.1** | **2659.9** | **2875.4** |
+| `detail.engineTotal` | 2367.4 | 2344.6 | 2645.4 | 2855.1 |
+| `detail.queryEmbed` | 651.8 | 639.3 | 934.4 | 1137.9 |
+| `detail.vectorArm` | 1591.5 | 1590.2 | 1670.3 | 1685.6 |
+| `detail.keywordArm` | 0.0 | 0.0 | 0.0 | 0.0 |
+| `detail.entityArm` | 0.0 | 0.0 | 0.0 | 0.0 |
+| `detail.scopeCheck` | 0.0 | 0.0 | 0.0 | 0.0 |
+
+Client-measured, same run: mean 2388.7, **p50 2363.6, p95 2664.1, p99 2880.2**
+— 4 ms above the server's own total at p50, which is the HTTP round trip and
+the client's JSON parse. There is nothing hidden in the gap.
+
+**Warm cache** (`eval-out/lat-base-50-stages`, 42 of 50 queries served from the
+query cache): `total` p50 **1751.1**, p95 2763.9; `detail.queryEmbed` p50 drops
+from 639 ms to **0.1 ms**. The cache is a 256-entry LRU
+(`kb-inference/src/query_cache.rs`), so it only helps a repeat of the same
+question — worth 640 ms when it hits, worth nothing when it does not.
+
+### Load test — `kb-server bench search`, 50 queries cycled, `--max-chunks 50`, 30 s per level, 5 warm-up requests discarded
+
+| concurrency | requests | errors | **degraded** | req/s | p50 ms | p95 ms | p99 ms | max ms |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 18 | 0 | 0 | 0.57 | 1734.7 | 1849.3 | 1849.3 | 1849.3 |
+| 8 | 44 | 0 | 0 | 1.19 | 5185.5 | 11051.0 | 12148.7 | 12148.7 |
+| 32 | 99 | 0 | **78** | 2.74 | 10059.8 | 13647.9 | 17137.7 | 17137.7 |
+
+Server-side stage p95 at each level:
+
+| stage | c1 | c8 | c32 |
+|---|---:|---:|---:|
+| `arms` | 1662.0 | 10903.6 | 12492.8 |
+| `detail.vectorArm` | 1660.9 | 4816.9 | 9445.4 |
+| `detail.queryEmbed` | 0.1 | 8089.6 | 0.1 |
+| `neighbours` | 92.0 | 999.9 | 2474.0 |
+| `figures` | 66.2 | 570.4 | 2070.5 |
+| `scopeBuild` | 14.0 | 42.9 | 205.4 |
+| `total` | 1839.1 | 11051.0 | 13647.9 |
+
+Read the c32 row carefully. **78 of 99 answers came back HTTP 200 with
+`degrades: ["vector_arm_failed"]` and zero chunks** — a verified result, not a
+busy server: the server log (this round logs the arm's error when it degrades)
+shows
+
+```
+WARN kb_engine::retrieval: vector arm failed error=vector embed: backend
+unavailable: execute: error sending request for url
+(http://127.0.0.1:18081/v1/embeddings) bm25_hits=0
+```
+
+The **local CPU embedding server** is what gives up, not SurrealDB, and the
+keyword arm has nothing to fall back on (§4: `@@` matches almost nothing), so
+those searches returned nothing. Throughput 2.74 req/s is therefore not a
+capacity number — 2.74 req/s × 21 % that actually answered is the real one. A
+client that ignores `degrades` sees an empty result and calls it "no matches".
+
+### Which stage dominates: the vector arm, by a factor of 2.4
+
+At concurrency 1, `arms` is 95 % of the request and `detail.vectorArm` is
+**1590 ms of the 2359 ms total (67 %)**. The query embed is second (639 ms,
+27 %) and it is the one stage a cache or a smaller model can fix. Everything
+else — scope build, neighbours, figures, serialisation, fusion — is 139 ms
+together (6 %).
+
+### Why the vector arm costs 1.6 s for 1,687 chunks: a raw SurrealQL measurement
+
+The adapter's query (`kb-store-surreal/src/queries.rs:6`) computes cosine for
+every chunk whose `document_id` is in an `IN [...]` list and never asks for a
+kNN search, so the HNSW index at `schema.rs:46` is unused. Replaying that exact
+query shape against the same container, with the same 1024-dim vector, varying
+only the size of the `IN` list (min of 3 runs each, real document ids from
+Postgres):
+
+| ids in the `IN` list | wall (min) | wall (median) |
+|---:|---:|---:|
+| 1 | 59.3 ms | 60.9 ms |
+| 100 | 123.7 ms | 126.8 ms |
+| 500 | 419.8 ms | 422.9 ms |
+| 1000 | 934.6 ms | 954.9 ms |
+| **1485** | **1491.0 ms** | **1566.0 ms** |
+| 1485 ids that match **nothing** (parse-only control) | 79.6 ms | 85.7 ms |
+
+**≈0.95 ms per chunk in scope, linear**, and the control shows the `IN` list
+itself is only ~20 ms of it — it is the cosine scan, not the query text. At
+1,687 chunks that is the 1.59 s the API reports, to within 7 %.
+
+The same engine, the same corpus, asking for a kNN search instead:
+
+| query | wall |
+|---|---:|
+| `SELECT * FROM document_chunk LIMIT 20` (payload + serialisation baseline) | 71.2 ms |
+| `SELECT * … WHERE embedding <\|20, 40\|> $v ORDER BY embedding` | **109.9 ms** |
+| the same, plus `AND document_id IN [1485 ids]` as a post-filter | 870.4 ms |
+| what the adapter sends today | 1491.0 ms |
+
+So the HNSW index works; the adapter does not use it, and the scope filter —
+1,485 literals — has to be applied to every candidate. **Not adopted**: step
+L.1 says no tuning work goes into SurrealDB. It is recorded because it is the
+size of the prize the Qdrant adapter is being built against: the target is a
+filtered top-50 in < 20 ms at 1M chunks, and today the equivalent costs 1.6 s
+at 1.7k chunks.
+
+### Cost scaling with corpus size, without a second ingest
+
+The `IN`-list sweep above *is* the scaling curve, measured on the real corpus by
+narrowing the scope instead of ingesting a second one: 1 id 59 ms → 1485 ids
+1491 ms, linear in the chunks in scope. A second corpus was not ingested for
+this reason, and because a `miracl-id-200` run at 17 docs/min is ≈2.9 h.
+
+### Quality of this run, for the record
+
+`document nDCG@10 0.714`, `Recall@10 0.884`, `Hit@1 0.580` over the same 50
+queries — close to §4 row 1 (0.724 / 0.899 / 0.580) on 3 more missing
+documents. **This is not a new quality row**; the corpus differs from §4's and
+the section exists for latency. It is recorded so nobody mistakes a latency
+change for a quality change, or the reverse.
+
+### What this section does NOT prove
+
+* **One store, one box.** 6 cores, 11 GB, no GPU. TEI on CPU is 640 ms per
+  query embed and saturates at ~3 req/s, which is why the c8 and c32 numbers
+  are about the embedding server as much as about the store.
+* **No reranker.** The plan's `< 300 ms with rerank` target is not measured
+  here; `KB_RERANK_ENABLED=false`. §3's reranker cost (~21 s/query on this
+  CPU) makes it unmeasurable at this candidate count on this box.
+* **Concurrency 32 is a degraded server**, as the table above says. The
+  honest capacity statement for this box is the c1 and c8 rows.
+* **`miracl-id-200` (2,933 docs) was not run.** The scaling sweep above covers
+  the same question — cost versus chunks in scope — in two minutes instead of
+  three hours, and with real embeddings rather than the dim-8 stub.
+
+### Reproduce
+
+```sh
+# 0. the stack, with real embeddings (dim 1024, local TEI, zero spend)
+KB_STACK_EMBEDDINGS=tei rust/scripts/stack-up.sh
+source /tmp/kb-stack/stack.env
+KEY=$("$KB_SERVER_BIN" create-api-key lat-base lat-key --scopes kb:read,kb:write \
+      | grep -oE 'rkb_[A-Za-z0-9_-]+' | head -1)
+
+# 1. ingest the corpus (≈87 min at ~17 docs/min) and run the 50 queries
+"$KB_SERVER_BIN" eval --base-url "$KB_STACK_BASE_URL" --api-key "$KEY" \
+  --dataset rust/crates/kb-eval/datasets/miracl-id-50 \
+  --out eval-out/lat-base-50 --label surrealdab-baseline-pretimings
+
+# 2. restart kb-server only (containers untouched, so the corpus survives)
+#    and re-run the queries: cold query-embedding cache, per-stage table
+mkdir -p eval-out/lat-base-50-cold && cp eval-out/lat-base-50/ingest-map.json \
+  eval-out/lat-base-50-cold/
+#    (kill the kb-smoke-server tmux session, start it again with the same stack.env)
+"$KB_SERVER_BIN" eval --base-url "$KB_STACK_BASE_URL" --api-key "$KEY" \
+  --dataset rust/crates/kb-eval/datasets/miracl-id-50 --skip-ingest \
+  --out eval-out/lat-base-50-cold --label surrealdb-pretimings-cold
+
+# 3. the load test
+"$KB_SERVER_BIN" bench search --base-url "$KB_STACK_BASE_URL" --api-key "$KEY" \
+  --queries rust/crates/kb-eval/datasets/miracl-id-50/queries.jsonl \
+  --concurrency 1,8,32 --duration 30s --warmup 5 --max-chunks 50 \
+  --out eval-out/bench-surreal-50 --label surrealdb-1485-docs
+
+# 4. corpus size, and the SurrealQL sweep behind the scaling table
+docker exec kb-smoke-pg psql -U kb -d rantai_kb -t -A \
+  -c 'select "id" from "Document" where "deletedAt" is null;' > /tmp/doc-ids.txt
+curl -s -u root:root -H 'Accept: application/json' -H 'surreal-ns: rantai' \
+  -H 'surreal-db: knowledge' \
+  --data 'SELECT count() AS chunks FROM document_chunk GROUP ALL' \
+  http://127.0.0.1:18000/sql
+#    (see the table above for the exact query text; it is VECTOR_SEARCH_QUERY
+#     with a 1024-float vector and an N-element IN list, replayed by hand)
+
+rust/scripts/stack-down.sh
+```
+
+Artifacts: `eval-out/lat-base-50-cold/{metrics.json,report.md,run.trec}`,
+`eval-out/lat-base-50-stages/`, `eval-out/bench-surreal-50/{bench.json,bench.md}`.
+
+## 6. What to run next
 
 | Target (plan) | Today | Gap |
 |---|---|---|
 | right page ranked first, ≥ 87% over ≥ 200 labelled questions | no labelled set exists | build `eval/id-internal/`, then measure |
 | ViDoRe v3 pipeline leaderboard, top 3 | MIRACL-id-50 measured with real embeddings (§4), ViDoRe not run | drop a ViDoRe v3 subset into `kb-eval` and run it with a real model profile |
 | cross-tenant hits over the red-team matrix: 0 | **0 over 240 probes**, 1 arm partial, 1 arm untested | close the figure arm with a layout extractor |
-| `/v1/search` p95 warm, local profile < 300 ms | 354 ms with an 8-dim stub, 6 documents | re-measure with real embeddings on a real corpus |
+| `/v1/search` p95 warm, local profile < 300 ms | **2660 ms** cold / **2764 ms** warm, per stage, 1,485 documents (§5) | the vector arm is 67 % of it at 0.95 ms per chunk in scope; build `kb-store-qdrant` |
+| `/v1/search` p95 without rerank < 80 ms | **1849 ms** p95 at concurrency 1, same corpus (§5) | same |
+| vector store p95, filtered top-50 | 1491 ms for 1,687 chunks (§5) | HNSW on the same engine answers in 110 ms; Qdrant must beat that, not SurrealDB |
