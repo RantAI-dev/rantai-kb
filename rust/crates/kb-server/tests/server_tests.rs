@@ -275,10 +275,24 @@ async fn search_body(harness: &Harness, query: &str) -> serde_json::Value {
         .unwrap();
     let response = harness.app.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .map(ToString::to_string);
     let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
         .await
         .unwrap();
-    serde_json::from_slice(&bytes).unwrap()
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    // The response is spliced into bytes by hand rather than serialised by the
+    // framework, so its content type is worth an assertion of its own: a
+    // client that sees text/plain will not parse it.
+    assert_eq!(
+        content_type.as_deref(),
+        Some("application/json; charset=utf-8"),
+        "search answers with JSON"
+    );
+    value
 }
 
 /// Every stage the pipeline runs is named in the response, and what they add up
