@@ -197,6 +197,9 @@ impl Config {
             username,
             password,
             request_timeout: Duration::from_secs(10),
+            // The vector index is defined at this width, and the client cannot
+            // read it back, so the RetrievalIndex capabilities need it here.
+            embedding_dims: Self::embedding_dim(&lookup),
         })
     }
 

@@ -270,7 +270,7 @@ impl RetrievalIndex for InMemoryIndex {
 
     fn capabilities(&self) -> IndexCapabilities {
         IndexCapabilities {
-            dense_dims: self.dims,
+            dense_dims: Some(self.dims),
             sparse: Some(KeywordSemantics::AnyTerm),
             // There is no server: fusion happens in process, exactly as Qdrant
             // does it before sending a prefetch.

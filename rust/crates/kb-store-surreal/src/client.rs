@@ -37,6 +37,13 @@ pub struct SurrealSettings {
     pub username: Option<String>,
     pub password: Option<String>,
     pub request_timeout: Duration,
+    /// Width of the vectors this connection stores.
+    ///
+    /// SurrealDB fixes it at `DEFINE INDEX … DIMENSION` time and never hands it
+    /// back, so the client has to be told. The `RetrievalIndex` port reports it
+    /// as a capability, and a caller that skips a dense test because the width is
+    /// unknown is silently testing less than it looks like it is.
+    pub embedding_dims: u32,
 }
 
 /// Low-level HTTP client for SurrealDB.

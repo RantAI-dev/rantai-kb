@@ -379,6 +379,11 @@ fn dense_query_for(id: &str) -> Vec<f32> {
 const CANDY_QUERY: &str = "Siapakah yang menulis Candy Candy?";
 const CANDY_GOLD: &str = "doc-a1_0";
 
+/// The single keyword term the fusion property uses. Only `doc-a1_2` contains
+/// it, and it is deliberately *not* `candy`: our tokenizer keeps `Candi` and
+/// `Candy` apart, which is exactly what SurrealDB's English stemmer did not.
+const FUSION_KEYWORD: &str = "candi";
+
 // ------------------------------------------------------------- properties
 
 /// Property 1: no method ever returns a unit outside the scope.
@@ -427,7 +432,7 @@ async fn scope_containment(index: &impl RetrievalIndex) -> Outcome {
     for (scope_name, scope) in all_scopes() {
         for (query_name, query) in &query_shapes {
             // A shape the adapter cannot run is not a containment failure.
-            if *query_name == "dense-only" && caps.dense_dims == 0 {
+            if *query_name == "dense-only" && caps.dense_dims.is_none() {
                 continue;
             }
             if *query_name == "sparse-only" && caps.sparse.is_none() {
@@ -602,7 +607,7 @@ async fn keyword_or_semantics(index: &impl RetrievalIndex) -> Outcome {
 /// plan's target is "under 1 point of recall lost".
 async fn dense_top_k(index: &impl RetrievalIndex) -> Outcome {
     let caps = index.capabilities();
-    if caps.dense_dims == 0 {
+    if caps.dense_dims.is_none() {
         return Outcome::Skipped("adapter has no dense arm".to_string());
     }
     index.upsert(fixture_units()).await.ok();
@@ -843,7 +848,7 @@ async fn deterministic_order(index: &impl RetrievalIndex) -> Outcome {
         k: 10,
         fusion: Fusion::default(),
     }];
-    if caps.dense_dims > 0 {
+    if caps.dense_dims.is_some() {
         queries.push(HybridQuery {
             dense: Some(dense_query.clone()),
             sparse: Some(sparse_query),
@@ -883,20 +888,33 @@ async fn deterministic_order(index: &impl RetrievalIndex) -> Outcome {
 /// insertion order decide, which handed rank 1 to the vector arm every time.
 async fn fusion_merges_arms(index: &impl RetrievalIndex) -> Outcome {
     let caps = index.capabilities();
-    if caps.dense_dims == 0 || caps.sparse.is_none() {
+    if caps.dense_dims.is_none() || caps.sparse.is_none() {
         return Outcome::Skipped("needs both a dense and a keyword arm".to_string());
     }
     index.upsert(fixture_units()).await.ok();
     let scope = scope_tenant_a();
 
-    // doc-a1_0 is the gold for the candy question *and* carries a dense vector,
-    // so craft a dense query that lands on doc-a1_1 instead: a unit the
-    // keyword arm also ranks first.
+    // Two arms that disagree at rank 0, which is the shape of the old bug.
+    //
+    // The dense arm's best hit is doc-a1_0 (the query is its own vector); the
+    // keyword arm's best hit is doc-a1_2, the only unit containing `candi`.
+    // Under the old engine both scored 1/61 and insertion order handed rank 1 to
+    // whichever arm was absorbed first — so a noisy dense arm owned position 1
+    // and Hit@1 was pinned at 0.
+    //
+    // The keyword query is a **single term on purpose**. With several terms, an
+    // AND-semantics adapter returns nothing, the arms never overlap and the
+    // merge cannot be observed at all. Whether multi-term questions match is
+    // property 2's job; this property is about merging, and it has to be
+    // testable on every adapter.
     let query = HybridQuery {
-        dense: Some(dense_query_for("doc-a1_0")),
-        sparse: Some(KeywordQuery::from_text(CANDY_QUERY)),
-        per_arm_k: 10,
-        k: 10,
+        dense: Some(dense_query_for(CANDY_GOLD)),
+        sparse: Some(KeywordQuery::from_text(FUSION_KEYWORD)),
+        // Wide enough that the dense arm returns the whole scope, so "found by
+        // both arms" does not depend on how the arms' candidate windows happen
+        // to overlap.
+        per_arm_k: 50,
+        k: 50,
         fusion: Fusion::Rrf { k: 60 },
     };
     let rows = match index.search(&query, &scope).await {
@@ -926,10 +944,25 @@ async fn fusion_merges_arms(index: &impl RetrievalIndex) -> Outcome {
         .filter(|c| c.scores.dense.is_some() && c.scores.sparse.is_some())
         .collect();
     if both.is_empty() {
-        return Outcome::Failed(
-            "no candidate was found by both arms, so the merge cannot be observed".to_string(),
-        );
+        let arms: Vec<(&str, bool, bool)> = rows
+            .iter()
+            .take(8)
+            .map(|c| {
+                (
+                    c.unit_id.as_str(),
+                    c.scores.dense.is_some(),
+                    c.scores.sparse.is_some(),
+                )
+            })
+            .collect();
+        return Outcome::Failed(format!(
+            "no candidate was found by both arms, so the merge cannot be observed; \
+             the first rows had arms {arms:?}"
+        ));
     }
+
+    // The unit both arms found must be ranked above each arm's own best, which
+    // is the exact situation the old tie-break got wrong.
     let top_both = both
         .iter()
         .max_by(|a, b| {
@@ -939,33 +972,42 @@ async fn fusion_merges_arms(index: &impl RetrievalIndex) -> Outcome {
                 .unwrap_or(std::cmp::Ordering::Equal)
         })
         .copied();
-    if let Some(top) = top_both {
-        if top.scores.dense.is_none() || top.scores.sparse.is_none() {
-            return Outcome::Failed("a merged candidate lost one of its arm scores".to_string());
-        }
-        if top.ranks.dense.is_none() || top.ranks.sparse.is_none() {
-            return Outcome::Failed("a merged candidate lost one of its arm ranks".to_string());
-        }
+    let top = match top_both {
+        Some(top) => top,
+        None => return Outcome::Failed("no both-arms candidate to compare".to_string()),
+    };
+    if top.ranks.dense.is_none() || top.ranks.sparse.is_none() {
+        return Outcome::Failed(
+            "a merged candidate lost one of its arm ranks, so the fusion cannot be audited"
+                .to_string(),
+        );
+    }
+    let expected_rrf = 1.0 / (61.0 + top.ranks.dense.unwrap_or(0) as f32)
+        + 1.0 / (61.0 + top.ranks.sparse.unwrap_or(0) as f32);
+    if (top.scores.fused - expected_rrf).abs() > 1e-4 {
+        return Outcome::Failed(format!(
+            "the merged candidate fused to {}, not the RRF sum {} + {} = {expected_rrf}",
+            top.scores.fused,
+            top.ranks.dense.unwrap_or(0),
+            top.ranks.sparse.unwrap_or(0)
+        ));
     }
 
-    // A candidate one arm found at rank 0 must not outrank a candidate both
-    // arms found at the same ranks: two arms agreeing is evidence.
-    let single_best = rows
-        .iter()
-        .filter(|c| {
-            (c.scores.dense.is_some()) ^ (c.scores.sparse.is_some())
-                && (c.ranks.dense == Some(0) || c.ranks.sparse == Some(0))
-        })
-        .map(|c| c.scores.fused)
-        .fold(f32::NEG_INFINITY, f32::max);
-    if single_best.is_finite()
-        && let Some(top) = top_both
-        && single_best > top.scores.fused
-    {
-        return Outcome::Failed(format!(
-            "a single-arm rank-0 hit fused to {single_best}, above the both-arms candidate at {}",
-            top.scores.fused
-        ));
+    for row in &rows {
+        let single = (row.scores.dense.is_some()) ^ (row.scores.sparse.is_some());
+        if !single {
+            continue;
+        }
+        if row.scores.fused > top.scores.fused {
+            return Outcome::Failed(format!(
+                "{} was found by one arm only yet fused to {}, above the both-arms candidate at \
+                 {}. Two arms agreeing is evidence; the old engine let whichever arm was \
+                 absorbed first win.",
+                row.unit_id.as_str(),
+                row.scores.fused,
+                top.scores.fused
+            ));
+        }
     }
     Outcome::Pass
 }

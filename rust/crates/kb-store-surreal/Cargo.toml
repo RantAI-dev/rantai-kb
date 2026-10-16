@@ -9,6 +9,14 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+# The RetrievalIndex contract suite against a live SurrealDB. Off by default so
+# `cargo test --workspace` needs no containers; the test also skips itself unless
+# KB_SURREAL_CONTRACT=1, so turning the feature on without a running stack does
+# not produce a confusing failure.
+integration = ["kb-ports/contract"]
+
 [dependencies]
 kb-ports = { path = "../kb-ports" }
 serde = { workspace = true }

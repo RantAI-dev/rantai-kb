@@ -200,8 +200,15 @@ pub enum KeywordSemantics {
 /// run and by the contract suite to decide which tests apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexCapabilities {
-    /// Dimension of the dense vectors, or 0 when the arm is absent.
-    pub dense_dims: u32,
+    /// Width of the dense vectors, or `None` when there is no dense arm.
+    ///
+    /// `None` means "no dense arm". A backend that *has* the arm but cannot read
+    /// its own width back — SurrealDB fixes the dimension at `DEFINE INDEX`
+    /// time and the client never sees it — reports the width it was configured
+    /// with. Collapsing the two cases into one number would make an adapter skip
+    /// tests it can actually run, which is how a contract suite quietly stops
+    /// testing things.
+    pub dense_dims: Option<u32>,
     /// Keyword arm and its matching semantics. `None` = no keyword arm.
     pub sparse: Option<KeywordSemantics>,
     /// The backend fuses and ranks internally (Qdrant's prefetch + RRF), so the
@@ -221,7 +228,7 @@ impl IndexCapabilities {
     #[must_use]
     pub const fn dense_only(dims: u32) -> Self {
         Self {
-            dense_dims: dims,
+            dense_dims: Some(dims),
             sparse: None,
             server_side_fusion: false,
             multivector: false,
@@ -233,7 +240,7 @@ impl IndexCapabilities {
     #[must_use]
     pub const fn hybrid(dims: u32, approximate_dense: bool) -> Self {
         Self {
-            dense_dims: dims,
+            dense_dims: Some(dims),
             sparse: Some(KeywordSemantics::AnyTerm),
             server_side_fusion: true,
             multivector: false,
@@ -388,7 +395,7 @@ mod tests {
     #[test]
     fn dense_only_capabilities_report_no_keyword_arm() {
         let caps = IndexCapabilities::dense_only(1024);
-        assert_eq!(caps.dense_dims, 1024);
+        assert_eq!(caps.dense_dims, Some(1024));
         assert_eq!(caps.sparse, None);
         assert!(!caps.server_side_fusion);
     }
