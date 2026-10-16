@@ -307,7 +307,7 @@ async fn search(
             None
         };
         let total_results = chunk_dtos.len();
-        let mut stats = StageTimingsDto {
+        let stats = StageTimingsDto {
             scope_build: scope_build_ms,
             arms: query_embed_ms + vector_arm_ms,
             detail: StageDetailDto {
@@ -319,7 +319,6 @@ async fn search(
             },
             ..StageTimingsDto::default()
         };
-        stats.total = route_sw.elapsed_ms();
         let response = SearchResponseDto {
             chunks: Some(chunk_dtos),
             sources: None,
@@ -337,21 +336,16 @@ async fn search(
         // Nothing runs on this branch — it is the Bun stub — but the shape of
         // `stats` is the one every branch answers with, so a client parsing it
         // does not have to know which branch it hit.
-        let total = route_sw.elapsed_ms();
         return Ok(finish_search(
             SearchResponseDto {
                 chunks: None,
                 sources: Some(Vec::new()),
                 context: Some(String::new()),
                 results: Some(Vec::new()),
-                stats: Some(search_stats(
-                    StageTimingsDto {
-                        total,
-                        ..StageTimingsDto::default()
-                    },
-                    0,
-                    0,
-                )),
+                // Same shape as every other branch, every number zero: nothing
+                // ran here. `total` and `serialise` are stamped by
+                // `finish_search`, which is the only place that can measure them.
+                stats: Some(search_stats(StageTimingsDto::default(), 0, 0)),
                 note: None,
                 degrades: Vec::new(),
             },
@@ -386,8 +380,9 @@ async fn search(
         .map_err(ApiError::from)?;
     let mut response = SearchResponseDto::from(outcome);
     if let Some(stats) = response.stats.as_mut() {
+        // The route knows two stages the engine does not: building the scope,
+        // and everything above it in the handler.
         stats.stage_timings_ms.scope_build = scope_build_ms;
-        stats.total_time_ms = route_sw.elapsed_ms();
     }
     Ok(finish_search(response, route_sw))
 }
@@ -421,11 +416,11 @@ fn search_stats(
 
 /// Serialise a search response and measure it, once.
 ///
-/// The route's total stops before serialisation and `stageTimingsMs.serialise`
-/// is the cost of the bytes that go on the wire — spliced in afterwards, so the
-/// number reported is the number paid for the body that contains it. Logging
-/// the stages at debug level happens here too, under the same names the
-/// response uses.
+/// This is the only place the total and the serialisation cost are stamped:
+/// both are measured here, over a body that has already been assembled, and
+/// both are then spliced into it — so the numbers reported are the numbers paid
+/// for the body that carries them. Logging the stages at debug level happens
+/// here too, under the same names the response uses.
 fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Response {
     let body_sw = Stopwatch::start(&SystemClock);
     let dto = SearchResponseDto {
