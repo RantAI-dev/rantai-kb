@@ -34,12 +34,17 @@ pub fn schema_statements(dim: u32) -> Vec<String> {
         "DEFINE FIELD IF NOT EXISTS content ON document_chunk TYPE string;".to_string(),
         "DEFINE FIELD IF NOT EXISTS chunk_index ON document_chunk TYPE int;".to_string(),
         "DEFINE FIELD IF NOT EXISTS embedding ON document_chunk TYPE array<float>;".to_string(),
-        "DEFINE FIELD IF NOT EXISTS contextual_prefix ON document_chunk TYPE option<string>;".to_string(),
-        "DEFINE FIELD IF NOT EXISTS embedding_model ON document_chunk TYPE option<string>;".to_string(),
-        "DEFINE INDEX IF NOT EXISTS document_id_idx ON document_chunk FIELDS document_id;".to_string(),
+        "DEFINE FIELD IF NOT EXISTS contextual_prefix ON document_chunk TYPE option<string>;"
+            .to_string(),
+        "DEFINE FIELD IF NOT EXISTS embedding_model ON document_chunk TYPE option<string>;"
+            .to_string(),
+        "DEFINE INDEX IF NOT EXISTS document_id_idx ON document_chunk FIELDS document_id;"
+            .to_string(),
         analyzer_sql,
         index_sql,
-        format!("DEFINE INDEX IF NOT EXISTS embedding_idx ON document_chunk FIELDS embedding HNSW DIMENSION {dim} DIST COSINE;"),
+        format!(
+            "DEFINE INDEX IF NOT EXISTS embedding_idx ON document_chunk FIELDS embedding HNSW DIMENSION {dim} DIST COSINE;"
+        ),
     ]
 }
 
