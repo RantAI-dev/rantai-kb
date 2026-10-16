@@ -160,6 +160,8 @@ target or a guardrail.
 ### Step 1: fix what we already know is broken (cheap; one commit each, each measured)
 - Merge across the hybrid arms by normalising record ids. Today RRF never merges a chunk found
   by both arms.
+- RRF tie-break: today the vector arm wins every tie (`insert_index`), so a noisy dense arm
+  owns rank 1. Break ties on the summed fused score across arms; measure Hit@1.
 - Turn the reranker on by default with a real cross-encoder.
   - Rerank 24 candidates at 1,500 characters each.
   - Hand the original scores out in the new order, so the 0.30 floor keeps its meaning.
@@ -226,6 +228,11 @@ is a measured number (see Target), not only a choice of database.
    - Keyword search uses sparse vectors with the IDF modifier, replacing SurrealDB BM25. We
      tokenise in Rust (the same tokenizer and Indonesian/English stemming for documents and
      queries).
+     - Matching is OR-of-terms with BM25 scoring, never boolean AND. SurrealDB's `@@` is AND,
+       and it returns 0 hits for natural questions (`docs/findings-bm25-collapse.md`).
+     - **Acceptance:** on `miracl-id-200`, the keyword arm alone must score ≥ the independent
+       `rank_bm25` reference on the same corpus: nDCG@10 **0.708**, Recall@10 0.909.
+       The fused dense + sparse result must beat both arms alone.
    - Server-side hybrid search: the `query` API with prefetch (dense + sparse + page arm) and
      RRF, so all arms run in one round trip.
    - Native multivector with MaxSim for late-interaction page retrieval (assumption 2).
