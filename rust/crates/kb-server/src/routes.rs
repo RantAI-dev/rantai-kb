@@ -30,13 +30,17 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use kb_core::policy::MimeRegistry;
+use kb_engine::timing::{Stopwatch, SystemClock};
 use kb_ports::{
     AuthContext, DocumentFilter, DocumentId, DocumentMeta, KnowledgeBaseId, ScopeRequest,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::auth::Authed;
-use crate::dto::{ChunkDto, SearchRequestDto, SearchResponseDto};
+use crate::dto::{
+    ChunkDto, SearchRequestDto, SearchResponseDto, SearchStatsDto, StageDetailDto, StageTimingsDto,
+    splice_json_member,
+};
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -199,6 +203,9 @@ async fn search(
     if !crate::auth::has_scope(&auth, "kb:read") {
         return Err(ApiError::missing_scope("kb:read"));
     }
+    // From here the request is ours to account for: scope build, the pipeline
+    // and serialisation all land in `stageTimingsMs`.
+    let route_sw = Stopwatch::start(&SystemClock);
     let body: SearchRequestDto = crate::dto::parse_json(&body);
     // `!body.query || typeof body.query !== "string"` in TypeScript: an absent,
     // non-string or blank query is the same 400.
@@ -236,6 +243,7 @@ async fn search(
             .iter()
             .map(|id| DocumentId::new_unchecked(id.clone()))
             .collect();
+        let scope_sw = Stopwatch::start(&SystemClock);
         let alive = state
             .documents
             .find_alive_meta_by_ids(&auth.tenant_id, &requested)
@@ -259,16 +267,22 @@ async fn search(
             .await
             .map_err(ApiError::from)?;
         let scope = full_scope.narrowed_to(&requested);
-        let query_vec = state
+        let scope_build_ms = scope_sw.elapsed_ms();
+        let embed_sw = Stopwatch::start(&SystemClock);
+        let embedded = state
             .embedder
-            .embed_query(&query)
+            .embed_query_detailed(&query)
             .await
             .map_err(|e| ApiError::Internal(format!("embed: {e}")))?;
+        let query_vec = embedded.vector;
+        let query_embed_ms = embed_sw.elapsed_ms();
+        let vector_sw = Stopwatch::start(&SystemClock);
         let mut hits = state
             .chunks
             .vector_search(&scope, &query_vec, max_chunks)
             .await
             .map_err(ApiError::from)?;
+        let vector_arm_ms = vector_sw.elapsed_ms();
         hits.retain(|h| h.similarity >= 0.30);
         hits.truncate(max_chunks as usize);
         for h in hits.iter_mut() {
@@ -278,6 +292,7 @@ async fn search(
                 h.chunk.subcategory = meta.subcategory.clone();
             }
         }
+        let vector_results = hits.len();
         let chunk_dtos: Vec<ChunkDto> = hits.into_iter().map(ChunkDto::from).collect();
         let context = if body.format.as_deref() == Some("context") {
             Some(
@@ -291,41 +306,57 @@ async fn search(
         } else {
             None
         };
-        return Ok(Json(SearchResponseDto {
+        let total_results = chunk_dtos.len();
+        let mut stats = StageTimingsDto {
+            scope_build: scope_build_ms,
+            arms: query_embed_ms + vector_arm_ms,
+            detail: StageDetailDto {
+                engine_total: query_embed_ms + vector_arm_ms,
+                query_embed: query_embed_ms,
+                query_embed_cached: embedded.cached,
+                vector_arm: vector_arm_ms,
+                ..StageDetailDto::default()
+            },
+            ..StageTimingsDto::default()
+        };
+        stats.total = route_sw.elapsed_ms();
+        let response = SearchResponseDto {
             chunks: Some(chunk_dtos),
             sources: None,
             context,
             results: None,
-            stats: None,
+            stats: Some(search_stats(stats, vector_results, total_results)),
             note: None,
             degrades: Vec::new(),
-        })
-        .into_response());
+        };
+        return Ok(finish_search(response, route_sw));
     }
 
     // Branch 2: hybrid retrieval (TypeScript api.ts:151)
     if body.hybrid == Some(true) {
-        return Ok(Json(SearchResponseDto {
-            chunks: None,
-            sources: Some(Vec::new()),
-            context: Some(String::new()),
-            results: Some(Vec::new()),
-            stats: Some(serde_json::json!({
-                "embeddingTimeMs": 0,
-                "entityResults": 0,
-                "entitySearchTimeMs": 0,
-                "fusionTimeMs": 0,
-                "graphResults": 0,
-                "graphSearchTimeMs": 0,
-                "totalResults": 0,
-                "totalTimeMs": 0,
-                "vectorResults": 0,
-                "vectorSearchTimeMs": 0
-            })),
-            note: None,
-            degrades: Vec::new(),
-        })
-        .into_response());
+        // Nothing runs on this branch — it is the Bun stub — but the shape of
+        // `stats` is the one every branch answers with, so a client parsing it
+        // does not have to know which branch it hit.
+        let total = route_sw.elapsed_ms();
+        return Ok(finish_search(
+            SearchResponseDto {
+                chunks: None,
+                sources: Some(Vec::new()),
+                context: Some(String::new()),
+                results: Some(Vec::new()),
+                stats: Some(search_stats(
+                    StageTimingsDto {
+                        total,
+                        ..StageTimingsDto::default()
+                    },
+                    0,
+                    0,
+                )),
+                note: None,
+                degrades: Vec::new(),
+            },
+            route_sw,
+        ));
     }
 
     // Branch 3: standard retrieval
@@ -337,6 +368,7 @@ async fn search(
             .collect(),
         category: body.category.clone(),
     };
+    let scope_sw = Stopwatch::start(&SystemClock);
     let scope = state
         .documents
         .build_scope(&ScopeRequest {
@@ -345,13 +377,112 @@ async fn search(
         })
         .await
         .map_err(ApiError::from)?;
+    let scope_build_ms = scope_sw.elapsed_ms();
 
     let outcome = state
         .engine
         .retrieve(&query, &scope, Some(max_chunks))
         .await
         .map_err(ApiError::from)?;
-    Ok(Json(SearchResponseDto::from(outcome)).into_response())
+    let mut response = SearchResponseDto::from(outcome);
+    if let Some(stats) = response.stats.as_mut() {
+        stats.stage_timings_ms.scope_build = scope_build_ms;
+        stats.total_time_ms = route_sw.elapsed_ms();
+    }
+    Ok(finish_search(response, route_sw))
+}
+
+/// The Bun-shaped `stats` for a set of stage timings.
+///
+/// The five legacy time fields are copies of the stages they have always
+/// named — `embeddingTimeMs` is the query embed, `vectorSearchTimeMs` the
+/// vector arm, `fusionTimeMs` the fusion — so a client that has been reading
+/// zeros on the standard path starts reading the truth instead, and one that
+/// reads the new breakdown gets the rest.
+fn search_stats(
+    stages: StageTimingsDto,
+    vector_results: usize,
+    total_results: usize,
+) -> SearchStatsDto {
+    SearchStatsDto {
+        total_time_ms: stages.total,
+        embedding_time_ms: stages.detail.query_embed,
+        vector_search_time_ms: stages.detail.vector_arm,
+        entity_search_time_ms: stages.detail.entity_arm,
+        graph_search_time_ms: 0.0,
+        fusion_time_ms: stages.fusion,
+        vector_results,
+        entity_results: 0,
+        graph_results: 0,
+        total_results,
+        stage_timings_ms: stages,
+    }
+}
+
+/// Serialise a search response and measure it, once.
+///
+/// The route's total stops before serialisation and `stageTimingsMs.serialise`
+/// is the cost of the bytes that go on the wire — spliced in afterwards, so the
+/// number reported is the number paid for the body that contains it. Logging
+/// the stages at debug level happens here too, under the same names the
+/// response uses.
+fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Response {
+    let body_sw = Stopwatch::start(&SystemClock);
+    let dto = SearchResponseDto {
+        stats: None,
+        ..response
+    };
+    let bytes = match serde_json::to_vec(&dto) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::error!(error = %err, "could not serialise a search response");
+            return ApiError::Internal("could not serialise a search response".to_string())
+                .into_response();
+        }
+    };
+    let serialise_ms = body_sw.elapsed_ms();
+    let stats = response.stats.unwrap_or_else(|| {
+        search_stats(
+            StageTimingsDto {
+                serialise: serialise_ms,
+                total: route_sw.elapsed_ms(),
+                ..StageTimingsDto::default()
+            },
+            0,
+            0,
+        )
+    });
+    let mut stages = stats.stage_timings_ms;
+    stages.serialise = serialise_ms;
+    stages.total = route_sw.elapsed_ms();
+    let stats = search_stats(stages, stats.vector_results, stats.total_results);
+    let stats_json = match serde_json::to_vec(&stats) {
+        Ok(json) => json,
+        Err(err) => {
+            tracing::error!(error = %err, "could not serialise search stats");
+            return ApiError::Internal("could not serialise search stats".to_string())
+                .into_response();
+        }
+    };
+    let body = splice_json_member(bytes, "stats", &stats_json);
+
+    for (stage, ms) in crate::dto::accounted_pairs(&stats.stage_timings_ms) {
+        tracing::debug!(
+            stage,
+            ms,
+            total_ms = stats.stage_timings_ms.total,
+            "search stage"
+        );
+    }
+
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "application/json; charset=utf-8",
+        )],
+        body,
+    )
+        .into_response()
 }
 
 /// Narrow a caller-supplied knowledge-base filter to what the key may see.

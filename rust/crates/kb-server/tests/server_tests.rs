@@ -207,6 +207,224 @@ async fn test_search_happy_path_fields() {
     assert!(context.contains("Happy path content line"));
 }
 
+/// A harness with one tenant, one document and two arms' worth of hits, ready
+/// for a timing assertion.
+fn timing_harness() -> Harness {
+    let harness = Harness::new();
+    let tenant = TenantId("tenant-1".into());
+    harness
+        .documents
+        .insert_api_key("valid-key", tenant.clone());
+    harness.documents.insert_doc(
+        tenant,
+        DocumentMeta {
+            id: DocumentId("doc-1".into()),
+            title: "Timing Document".into(),
+            categories: vec![],
+            subcategory: None,
+            status: "READY".into(),
+            chunk_count: 1,
+            file_type: None,
+            file_size: None,
+            mime_type: None,
+            s3_key: None,
+            created_at: "".into(),
+            updated_at: "".into(),
+            knowledge_base_ids: vec![],
+            metadata: None,
+        },
+    );
+    harness
+        .chunks
+        .vector_hits
+        .write()
+        .unwrap()
+        .push(make_fake_hit(
+            "c_1",
+            "doc-1",
+            "Timing Document",
+            "Vector content",
+            1,
+            0.9,
+        ));
+    harness
+        .chunks
+        .bm25_hits
+        .write()
+        .unwrap()
+        .push(make_fake_hit(
+            "c_2",
+            "doc-1",
+            "Timing Document",
+            "Keyword content",
+            2,
+            0.8,
+        ));
+    harness
+}
+
+async fn search_body(harness: &Harness, query: &str) -> serde_json::Value {
+    let request = Request::builder()
+        .uri("/v1/search")
+        .method("POST")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer valid-key")
+        .body(Body::from(
+            serde_json::json!({"query": query, "maxChunks": 5}).to_string(),
+        ))
+        .unwrap();
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Every stage the pipeline runs is named in the response, and what they add up
+/// to is bounded by the total. Without this, a timing instrument is a set of
+/// numbers nobody can trust, and a regression that double-counts two stages
+/// would look like a speed-up.
+#[tokio::test]
+async fn search_reports_stage_timings_that_add_up_to_the_total() {
+    let harness = timing_harness();
+    let body = search_body(&harness, "timing query").await;
+
+    let stats = body.get("stats").expect("stats present");
+    let stages = stats.get("stageTimingsMs").expect("stageTimingsMs present");
+    for key in [
+        "scopeBuild",
+        "expand",
+        "arms",
+        "enrich",
+        "fusion",
+        "rerank",
+        "neighbours",
+        "figures",
+        "context",
+        "serialise",
+        "total",
+        "detail",
+    ] {
+        assert!(stages.get(key).is_some(), "stage {key} is missing");
+    }
+
+    let total = stages["total"].as_f64().expect("total is a number");
+    assert!(total > 0.0, "a search that ran reports time, not zero");
+
+    let accounted = kb_server::dto::accounted_pairs(&stats_from(&body));
+    let sum: f64 = accounted.iter().map(|(_, ms)| *ms).sum();
+    assert!(
+        sum <= total + 1.0,
+        "stages sum to {sum} ms but the request took {total} ms; \
+         a stage is being counted twice or the total is not the whole request"
+    );
+
+    // The detail is overlapping, so it is reported but never summed — and on a
+    // request that actually embedded and searched, it is not all zeros.
+    let detail = &stages["detail"];
+    assert!(detail["engineTotal"].as_f64().unwrap() > 0.0);
+    assert!(detail["queryEmbed"].as_f64().unwrap() > 0.0);
+    assert!(detail["vectorArm"].as_f64().unwrap() > 0.0);
+    assert!(detail["keywordArm"].as_f64().unwrap() > 0.0);
+    assert!(
+        detail["queryEmbedCached"].is_boolean(),
+        "cache hit or miss is reported, not guessed"
+    );
+}
+
+/// The legacy Bun fields keep their names, so a client reading them keeps
+/// working — and on the standard path they now carry the real numbers.
+#[tokio::test]
+async fn search_stats_keep_the_bun_fields_and_carry_real_numbers() {
+    let harness = timing_harness();
+    let body = search_body(&harness, "another timing query").await;
+    let stats = body["stats"].clone();
+
+    for key in [
+        "totalTimeMs",
+        "embeddingTimeMs",
+        "vectorSearchTimeMs",
+        "entitySearchTimeMs",
+        "graphSearchTimeMs",
+        "fusionTimeMs",
+        "vectorResults",
+        "entityResults",
+        "graphResults",
+        "totalResults",
+        "stageTimingsMs",
+    ] {
+        assert!(stats.get(key).is_some(), "{key} disappeared");
+    }
+    assert!(
+        stats["embeddingTimeMs"].as_f64().unwrap() > 0.0,
+        "the query was embedded; zero would be the old lie"
+    );
+    assert_eq!(stats["totalResults"].as_u64(), Some(2));
+    assert_eq!(
+        stats["totalTimeMs"].as_f64().unwrap(),
+        stats["stageTimingsMs"]["total"].as_f64().unwrap(),
+        "the legacy total and the stage total are the same number"
+    );
+}
+
+/// The hybrid branch runs nothing, so it reports zeros — but in the same shape
+/// as every other branch, so a client does not have to know which one it hit.
+#[tokio::test]
+async fn the_hybrid_stub_reports_the_same_stats_shape_with_zeros() {
+    let harness = timing_harness();
+    let request = Request::builder()
+        .uri("/v1/search")
+        .method("POST")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer valid-key")
+        .body(Body::from(r#"{"query": "hybrid", "hybrid": true}"#))
+        .unwrap();
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    assert!(body["stats"]["stageTimingsMs"]["arms"].as_f64().unwrap() >= 0.0);
+    assert_eq!(body["stats"]["totalResults"], 0);
+    assert!(body["stats"]["stageTimingsMs"]["total"].as_f64().unwrap() > 0.0);
+}
+
+/// The `documentIds` branch runs its own, shorter pipeline; it reports its own
+/// stages rather than borrowing the engine's.
+#[tokio::test]
+async fn the_document_ids_branch_reports_its_own_stages() {
+    let harness = timing_harness();
+    let request = Request::builder()
+        .uri("/v1/search")
+        .method("POST")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer valid-key")
+        .body(Body::from(
+            r#"{"query": "narrow", "documentIds": ["doc-1"]}"#,
+        ))
+        .unwrap();
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    let stages = &body["stats"]["stageTimingsMs"];
+    assert!(stages["scopeBuild"].as_f64().unwrap() > 0.0);
+    assert!(stages["arms"].as_f64().unwrap() > 0.0);
+    assert!(stages["detail"]["vectorArm"].as_f64().unwrap() > 0.0);
+    assert!(stages["total"].as_f64().unwrap() > 0.0);
+    assert!(!body["chunks"].as_array().unwrap().is_empty());
+}
+
+/// Parse the typed stats back out of a response, so the test asserts on the
+/// same numbers a client would see rather than on its own arithmetic.
+fn stats_from(body: &serde_json::Value) -> kb_server::dto::StageTimingsDto {
+    serde_json::from_value(body["stats"]["stageTimingsMs"].clone()).unwrap()
+}
+
 #[tokio::test]
 async fn test_key_is_accepted_from_bearer_in_any_case_or_from_x_api_key() {
     let harness = Harness::new();
