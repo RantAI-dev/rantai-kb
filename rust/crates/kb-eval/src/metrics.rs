@@ -382,7 +382,7 @@ pub fn aggregate_level(strict: &[QueryMetrics], answered: &[QueryMetrics]) -> Le
 }
 
 /// Client-side latency summary in milliseconds.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct LatencyReport {
     pub mean: f64,
     pub p50: f64,

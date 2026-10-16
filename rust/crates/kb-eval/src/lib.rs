@@ -13,6 +13,8 @@
 //!   Hit@1, P@k).
 //! * [`report`] writes `metrics.json`, `report.md` and TREC run files.
 //! * [`runner`] is the black-box HTTP client.
+//! * [`stages`] reads the server's per-stage latency out of a response.
+//! * [`bench`] is the closed-loop load generator behind `kb-server bench search`.
 //!
 //! `kb-server eval` is the front door; see [`cli`].
 
@@ -23,6 +25,7 @@ pub mod leak_http;
 pub mod metrics;
 pub mod report;
 pub mod runner;
+pub mod stages;
 
 pub use cli::{EvalError, run};
 pub use dataset::{Dataset, DatasetError};
@@ -33,3 +36,4 @@ pub use metrics::{
 };
 pub use report::{MetricsFile, RunReport};
 pub use runner::{RunError, RunnerConfig};
+pub use stages::{StageLatencyReport, StageSample, parse_stage_timings};

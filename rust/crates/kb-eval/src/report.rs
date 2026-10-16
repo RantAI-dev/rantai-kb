@@ -19,6 +19,7 @@ use crate::metrics::{
     Gain, Gold, LatencyReport, LevelReport, Means, QueryMetrics, aggregate_level, evaluate_query,
     unique_first_occurrence,
 };
+use crate::stages::StageLatencyReport;
 
 /// How much of a response body is kept per failure.
 ///
@@ -80,6 +81,13 @@ pub struct MetricsFile {
     pub document: LevelReport,
     pub page: LevelReport,
     pub latency_ms: LatencyReport,
+    /// The server's own per-stage latency, when it reported any.
+    ///
+    /// `None` is a real answer — an older server, or a run against a build that
+    /// does not time itself — and it is kept as `None` rather than being filled
+    /// with zeros that would read like a pipeline that takes no time at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage_timings_ms: Option<StageLatencyReport>,
 }
 
 /// Which step of a run failed.
@@ -358,6 +366,7 @@ pub struct ReportParts<'a> {
     pub document_answered: Vec<QueryMetrics>,
     pub page_answered: Vec<QueryMetrics>,
     pub latency: LatencyReport,
+    pub stage_timings: Option<StageLatencyReport>,
     pub document_run: Vec<TrecRanking>,
     pub page_run: Vec<TrecRanking>,
 }
@@ -386,6 +395,7 @@ pub fn build_report(parts: ReportParts<'_>) -> RunReport {
         document: aggregate_level(&parts.document, &parts.document_answered),
         page: aggregate_level(&parts.page, &parts.page_answered),
         latency_ms: parts.latency,
+        stage_timings_ms: parts.stage_timings,
     };
     RunReport {
         metrics,
@@ -496,6 +506,7 @@ pub fn render_markdown(m: &MetricsFile) -> String {
         "Latency over {} answered queries (ms): mean {:.1}, p50 {:.1}, p95 {:.1}, p99 {:.1}\n",
         m.latency_ms.n, m.latency_ms.mean, m.latency_ms.p50, m.latency_ms.p95, m.latency_ms.p99,
     ));
+    out.push_str(&render_stage_table(m));
     if m.n_failed > 0 {
         out.push_str(&format!(
             "\n> {} of {} queries failed. Each one is a zero in the strict table above and\n\
@@ -683,6 +694,7 @@ pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize, gain: G
         }
     }
     let metrics = MetricsFile {
+        stage_timings_ms: None,
         label: "score".to_string(),
         dataset: "offline".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
@@ -711,6 +723,65 @@ pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize, gain: G
         },
     };
     render_markdown(&metrics)
+}
+
+/// The server's stage timings, as a table, with the client/server gap.
+///
+/// The two numbers answer different questions and both are needed: the client's
+/// is what a user waits for, the server's is what the request cost. The
+/// difference is the HTTP layer, the serialisation the route could not measure
+/// from the inside, and the client's own JSON parsing — which is exactly the
+/// part a store change cannot fix.
+fn render_stage_table(m: &MetricsFile) -> String {
+    let Some(stages) = m.stage_timings_ms.as_ref() else {
+        return String::from(
+            "\nThe server reported no per-stage timings (`stats.stageTimingsMs` was absent),\n\
+             so the latency above is only the client-side number.\n",
+        );
+    };
+    let mut out = String::from("\n### Server-side stage timings (ms)\n\n");
+    out.push_str(&format!(
+        "Server-side total over {} responses: p50 {:.1}, p95 {:.1}, p99 {:.1}. \
+         Client-measured: p50 {:.1}, p95 {:.1}, p99 {:.1} over {} answered queries — the gap is \
+         HTTP, the serialisation the route cannot time from the inside, and the client's JSON \
+         parsing.\n\n",
+        stages.reports,
+        stages.server_total_ms.p50,
+        stages.server_total_ms.p95,
+        stages.server_total_ms.p99,
+        m.latency_ms.p50,
+        m.latency_ms.p95,
+        m.latency_ms.p99,
+        m.latency_ms.n,
+    ));
+    if stages.reports < stages.answers {
+        out.push_str(&format!(
+            "> {} of {} answers reported timings; the rest are missing from every row below.\n\n",
+            stages.answers - stages.reports,
+            stages.answers
+        ));
+    }
+    out.push_str(
+        "The first block is a partition of the request: those stages run one after another and\n\
+         add up to no more than `total`. `detail.*` rows are overlapping — the query embed and\n\
+         both arms happen inside `arms` — and must never be summed with it.\n\n",
+    );
+    out.push_str("| stage | n | mean | p50 | p95 | p99 |\n");
+    out.push_str("|---|---:|---:|---:|---:|---:|\n");
+    for (stage, report) in &stages.stages {
+        out.push_str(&format!(
+            "| {} | {} | {:.1} | {:.1} | {:.1} | {:.1} |\n",
+            stage, report.n, report.mean, report.p50, report.p95, report.p99
+        ));
+    }
+    if stages.query_embed_cache_hits + stages.query_embed_cache_misses > 0 {
+        out.push_str(&format!(
+            "\nQuery embeddings: {} cache hit(s), {} provider call(s). The two are counted \
+             rather than averaged: one number for both states would describe neither.\n",
+            stages.query_embed_cache_hits, stages.query_embed_cache_misses
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -769,6 +840,7 @@ mod tests {
 
     fn empty_parts<'a>(server_version: Option<&'a str>) -> ReportParts<'a> {
         ReportParts {
+            stage_timings: None,
             label: "run",
             dataset: "tiny",
             gain: Gain::Linear,
@@ -797,6 +869,95 @@ mod tests {
             document_run: Vec::new(),
             page_run: Vec::new(),
         }
+    }
+
+    /// The stage table has to carry the two numbers a reader needs to act:
+    /// what each stage costs, and how much of the client-visible latency is
+    /// *not* the server's stages at all.
+    #[test]
+    fn the_report_carries_the_stage_table_and_the_client_server_gap() {
+        let mut parts = empty_parts(Some("1.0.0"));
+        parts.latency = LatencyReport {
+            mean: 2_400.0,
+            p50: 2_300.0,
+            p95: 2_600.0,
+            p99: 2_700.0,
+            n: 50,
+        };
+        parts.stage_timings = Some(StageLatencyReport {
+            reports: 50,
+            answers: 50,
+            query_embed_cache_hits: 3,
+            query_embed_cache_misses: 47,
+            stages: BTreeMap::from([
+                (
+                    "arms".to_string(),
+                    LatencyReport {
+                        mean: 2_100.0,
+                        p50: 2_000.0,
+                        p95: 2_300.0,
+                        p99: 2_400.0,
+                        n: 50,
+                    },
+                ),
+                (
+                    "detail.queryEmbed".to_string(),
+                    LatencyReport {
+                        mean: 1_900.0,
+                        p50: 1_850.0,
+                        p95: 2_100.0,
+                        p99: 2_200.0,
+                        n: 50,
+                    },
+                ),
+            ]),
+            server_total_ms: LatencyReport {
+                mean: 2_250.0,
+                p50: 2_200.0,
+                p95: 2_400.0,
+                p99: 2_500.0,
+                n: 50,
+            },
+        });
+        let report = build_report(parts);
+        let md = render_markdown(&report.metrics);
+        assert!(md.contains("### Server-side stage timings (ms)"));
+        assert!(
+            md.contains("| arms |"),
+            "the phase is in the table:
+{md}"
+        );
+        assert!(
+            md.contains("| detail.queryEmbed |"),
+            "the overlapping detail is in the table too:
+{md}"
+        );
+        assert!(md.contains("3 cache hit(s), 47 provider call(s)"));
+        // Both numbers, so the reader can see the 200 ms that is not ours.
+        assert!(
+            md.contains("p50 2300.0"),
+            "client p50:
+{md}"
+        );
+        assert!(
+            md.contains("p95 2400.0"),
+            "server p95:
+{md}"
+        );
+    }
+
+    /// A run against a server that does not time itself must say so. A table
+    /// of zeros would read like a pipeline that costs nothing.
+    #[test]
+    fn a_run_without_stage_timings_says_the_server_reported_none() {
+        let report = build_report(empty_parts(Some("1.0.0")));
+        let md = render_markdown(&report.metrics);
+        assert!(md.contains("The server reported no per-stage timings"));
+        assert!(!md.contains("| arms |"));
+        assert!(
+            report.metrics.stage_timings_ms.is_none(),
+            "and metrics.json says null rather than zeros"
+        );
     }
 
     #[test]
@@ -970,6 +1131,7 @@ mod tests {
         )
         .expect("evaluable");
         let report = build_report(ReportParts {
+            stage_timings: None,
             label: "run",
             dataset: "tiny",
             gain: Gain::Linear,

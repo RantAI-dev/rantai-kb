@@ -124,6 +124,11 @@ struct SearchAnswer {
     /// The server's "I did not search what you asked for" message.
     #[serde(default)]
     note: Option<String>,
+    /// Kept as raw JSON: the stage names live in the response, not in this
+    /// harness, so a server that adds a stage is measured without a code change
+    /// here.
+    #[serde(default)]
+    stats: Option<serde_json::Value>,
 }
 
 /// One answered query, as the scoreboard needs it.
@@ -135,6 +140,7 @@ struct Answered<'a> {
     latency_ms: f64,
     degrades: &'a [String],
     note: Option<&'a str>,
+    stats: &'a serde_json::Value,
 }
 
 /// The per-query accounting of a run, kept separate from the HTTP loop so the
@@ -161,6 +167,8 @@ struct Scoreboard {
     document_run: Vec<TrecRanking>,
     page_run: Vec<TrecRanking>,
     latencies: Vec<f64>,
+    /// Per-stage server-side timings, parsed off each response as it lands.
+    stages: crate::stages::StageCollector,
     n_queries: usize,
     n_failed: usize,
     n_degraded: usize,
@@ -175,6 +183,9 @@ impl Scoreboard {
     fn record_answer(&mut self, k: usize, answer: Answered<'_>) {
         self.n_queries += 1;
         self.latencies.push(answer.latency_ms);
+        if !answer.stats.is_null() {
+            self.stages.record(answer.stats);
+        }
         if !answer.degrades.is_empty() {
             self.n_degraded += 1;
             self.degrades.extend(answer.degrades.iter().cloned());
@@ -293,6 +304,7 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
                 latency_ms: elapsed_ms,
                 degrades: &answer.degrades,
                 note: answer.note.as_deref(),
+                stats: answer.stats.as_ref().unwrap_or(&serde_json::Value::Null),
             },
         );
     }
@@ -319,6 +331,7 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
         document_answered: board.document_answered,
         page_answered: board.page_answered,
         latency,
+        stage_timings: board.stages.finish(),
         document_run: board.document_run,
         page_run: board.page_run,
     });
@@ -795,6 +808,7 @@ mod tests {
                 doc_keys: &["alpha".to_string()],
                 page_keys: &[],
                 latency_ms: 12.0,
+                stats: &serde_json::Value::Null,
                 degrades: &[],
                 note: None,
             },
@@ -835,6 +849,7 @@ mod tests {
                 doc_keys: &[],
                 page_keys: &[],
                 latency_ms: 5.0,
+                stats: &serde_json::Value::Null,
                 degrades: &[],
                 note: None,
             },
@@ -861,6 +876,7 @@ mod tests {
                     doc_keys: &["alpha".to_string()],
                     page_keys: &[],
                     latency_ms: 4.0,
+                    stats: &serde_json::Value::Null,
                     degrades: &[],
                     note: None,
                 },
@@ -909,6 +925,7 @@ mod tests {
                 doc_keys: &["alpha".to_string()],
                 page_keys: &[],
                 latency_ms: 5.0,
+                stats: &serde_json::Value::Null,
                 degrades: &["vector arm unavailable".to_string()],
                 note: Some("API key is not bound to any of the requested knowledge bases"),
             },
@@ -933,6 +950,7 @@ mod tests {
                 doc_keys: &["alpha".to_string()],
                 page_keys: &["alpha#p1".to_string()],
                 latency_ms: 5.0,
+                stats: &serde_json::Value::Null,
                 degrades: &[],
                 note: None,
             },
@@ -953,6 +971,7 @@ mod tests {
                 doc_keys: &["beta".to_string()],
                 page_keys: &[],
                 latency_ms: 5.0,
+                stats: &serde_json::Value::Null,
                 degrades: &[],
                 note: None,
             },

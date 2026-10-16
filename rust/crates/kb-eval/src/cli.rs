@@ -156,8 +156,37 @@ async fn eval(args: &[String]) -> Result<(), EvalError> {
         "measured server version: {}",
         m.server_version.as_deref().unwrap_or("unknown")
     );
+    print_stage_summary(m);
     println!("wrote metrics.json, report.md, run.trec, run.page.trec");
     gate_on_failures(m, allow_failures)
+}
+
+/// The stage table on the terminal, largest p95 first, because that is the
+/// order that answers "where does the time go".
+fn print_stage_summary(m: &MetricsFile) {
+    let Some(stages) = m.stage_timings_ms.as_ref() else {
+        println!("stage timings: the server reported none");
+        return;
+    };
+    println!(
+        "stage timings (server-side ms): total p50 {:.1}, p95 {:.1}; client p50 {:.1}, p95 {:.1} \
+         over {} answers ({} reported timings)",
+        stages.server_total_ms.p50,
+        stages.server_total_ms.p95,
+        m.latency_ms.p50,
+        m.latency_ms.p95,
+        stages.answers,
+        stages.reports
+    );
+    let mut ranked: Vec<(&String, &crate::metrics::LatencyReport)> = stages.stages.iter().collect();
+    ranked.sort_by(|a, b| {
+        b.1.p95
+            .partial_cmp(&a.1.p95)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (stage, report) in ranked.iter().take(6) {
+        println!("  {stage}: p50 {:.1}, p95 {:.1}", report.p50, report.p95);
+    }
 }
 
 /// Fail the command when the run was not clean, unless the caller opted out.
@@ -536,6 +565,7 @@ mod tests {
 
     fn metrics(n_failed: usize, n_ingest_failed: usize) -> MetricsFile {
         MetricsFile {
+            stage_timings_ms: None,
             label: "run".to_string(),
             dataset: "tiny".to_string(),
             timestamp: "2026-10-16T00:00:00Z".to_string(),
@@ -666,6 +696,7 @@ mod tests {
         };
 
         MetricsFile {
+            stage_timings_ms: None,
             label: "test".to_string(),
             dataset: dataset.to_string(),
             timestamp: "2026-10-16T00:00:00Z".to_string(),
