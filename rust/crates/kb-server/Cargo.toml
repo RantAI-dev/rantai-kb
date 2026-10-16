@@ -18,6 +18,7 @@ kb-store-surreal = { path = "../kb-store-surreal" }
 kb-store-blob = { path = "../kb-store-blob" }
 kb-extract = { path = "../kb-extract" }
 kb-engine = { path = "../kb-engine" }
+kb-eval = { path = "../kb-eval" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -37,4 +38,5 @@ uuid = { workspace = true }
 [dev-dependencies]
 kb-ports = { path = "../kb-ports" }
 kb-engine = { path = "../kb-engine", features = ["test-utils"] }
+kb-eval = { path = "../kb-eval" }
 tokio = { workspace = true }

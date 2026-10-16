@@ -11,6 +11,10 @@
 //!                       ←  kb-engine  ←  kb-server (composition root)
 //! ```
 //!
+//! `kb-eval` is the black-box measurement client. It speaks HTTP to a running
+//! `kb-server` and links no store, engine or inference crate, so it is an
+//! adapter-side crate: inner crates may never depend on it, either.
+//!
 //! What it buys is the property the import-boundary lint buys in TypeScript:
 //! the domain crates stay runnable — and testable — without a database, an
 //! inference provider or an HTTP server anywhere in sight.
@@ -30,6 +34,7 @@ pub const ADAPTER_CRATES: &[&str] = &[
     "kb-store-pg",
     "kb-store-surreal",
     "kb-store-blob",
+    "kb-eval",
     "kb-server",
 ];
 

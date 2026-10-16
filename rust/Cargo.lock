@@ -1157,6 +1157,7 @@ dependencies = [
  "hex",
  "kb-core",
  "kb-engine",
+ "kb-eval",
  "kb-extract",
  "kb-inference",
  "kb-ports",

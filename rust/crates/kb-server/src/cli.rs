@@ -22,7 +22,7 @@ use crate::config::Config;
 /// `Failed` is the operation itself failing.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
-    #[error("{0}\n\nusage: kb-server <serve|create-api-key|apply-schema|migrate|check-boundary>")]
+    #[error("{0}\n\nusage: kb-server <serve|create-api-key|apply-schema|migrate|eval|check-boundary>")]
     Usage(String),
     #[error("{0}")]
     Failed(String),
@@ -53,6 +53,7 @@ pub async fn dispatch(args: &[String]) -> Result<(), CliError> {
         Some("apply-schema") => apply_schema().await,
         Some("migrate") => migrate().await,
         Some("check-boundary") => check_boundary(),
+        Some("eval") => eval(&args[1..]).await,
         Some("-h" | "--help" | "help") => {
             print_help();
             Ok(())
@@ -75,6 +76,8 @@ USAGE
     kb-server create-api-key <tenantId> [name] [--scopes a,b] [--kb id,id]
     kb-server apply-schema                     Apply the SurrealDB chunk schema
     kb-server migrate                          Apply prisma/migrations in order
+    kb-server eval --base-url URL --dataset DIR  Measure retrieval quality
+    kb-server eval score --qrels F --run F       Score an existing run offline
     kb-server check-boundary                   Fail if an inner crate depends on an adapter
 
 ENVIRONMENT
@@ -137,6 +140,14 @@ async fn apply_schema() -> Result<(), CliError> {
     }
     println!("[kb-schema] done (embedding dimension {dim})");
     Ok(())
+}
+
+/// `kb-server eval …` — the retrieval-quality harness, from the `kb-eval` crate.
+async fn eval(args: &[String]) -> Result<(), CliError> {
+    kb_eval::run(args).await.map_err(|err| match err {
+        kb_eval::EvalError::Usage(message) => CliError::Usage(message),
+        kb_eval::EvalError::Failed(message) => CliError::Failed(message),
+    })
 }
 
 /// `kb-server check-boundary` — the layering rule as an executable check.
