@@ -26,7 +26,7 @@ BM25, entities), S3-compatible blobs. Docs: `docs/porting-plan.md`, `docs/rust-c
 |---|---|
 | TS typecheck / tests | `bun run typecheck` · `bun run test` |
 | TS boundary | `bun run check:kb-boundary` |
-| Rust format / lint | `cargo fmt --manifest-path rust/Cargo.toml --check` · `cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings` |
+| Rust format / lint | `cargo fmt --all --manifest-path rust/Cargo.toml --check` · `cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings` |
 | Rust tests | `cargo test --manifest-path rust/Cargo.toml --workspace` (needs libpdfium: `./rust/scripts/fetch-pdfium.sh ./rust/.vendor/pdfium`) |
 | Rust boundary | `cargo run --manifest-path rust/Cargo.toml -p kb-server -- check-boundary` |
 | Live checks | `rust/scripts/smoke.sh` · `rust/scripts/mixed-fleet.sh` · `rust/scripts/search-parity.sh` |
