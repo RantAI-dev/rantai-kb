@@ -27,8 +27,8 @@ use async_trait::async_trait;
 use kb_core::sparse::{BM25_K1, SparseVector};
 use kb_ports::{
     ArmRanks, ArmScores, Candidate, ChunkId, DocumentId, DocumentScope, Fusion, HybridQuery,
-    IndexCapabilities, IndexUnit, KeywordSemantics, PortError, RetrievalIndex, TenantId,
-    sort_candidates,
+    IndexCapabilities, IndexUnit, KeywordQuery, KeywordSemantics, PortError, RetrievalIndex,
+    TenantId, sort_candidates,
 };
 
 /// One stored unit plus everything an arm needs to score it.
@@ -318,13 +318,13 @@ impl InMemoryIndex {
     fn sparse_arm(
         &self,
         units: &[StoredUnit],
-        query: &SparseVector,
+        query: &KeywordQuery,
         per_arm_k: usize,
     ) -> Vec<(ChunkId, f32)> {
         let n_docs = units.len() as f32;
         let mut scored: Vec<(ChunkId, f32)> = Vec::new();
         for stored in units {
-            let score = bm25(&stored.unit.sparse, query, n_docs, |term| {
+            let score = bm25(&stored.unit.sparse, &query.vector, n_docs, |term| {
                 count_df(units.iter().map(|u| &u.unit), term)
             });
             if score > 0.0 {

@@ -21,7 +21,7 @@ pub use error::{EngineError, PortError, RetrievalDegrade};
 pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 pub use retrieval::{
     ArmRanks, ArmScores, Candidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit,
-    KeywordSemantics, RetrievalIndex, sort_candidates,
+    KeywordQuery, KeywordSemantics, RetrievalIndex, sort_candidates,
 };
 pub use scope::DocumentScope;
 #[cfg(feature = "scope-adapter")]

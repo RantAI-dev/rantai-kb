@@ -29,12 +29,13 @@
 //! factory that creates a fresh namespace or collection, as the SurrealDB
 //! adapter does with its own database.
 
-use kb_core::sparse::{SparseVector, encode_document, encode_query};
+use kb_core::sparse::encode_document;
 
 use crate::error::PortError;
 use crate::ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 use crate::retrieval::{
-    Candidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit, KeywordSemantics, RetrievalIndex,
+    Candidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit, KeywordQuery, KeywordSemantics,
+    RetrievalIndex,
 };
 use crate::scope::DocumentScope;
 use crate::scope::adapter::ScopeToken;
@@ -508,7 +509,7 @@ async fn scope_containment(index: &impl RetrievalIndex) -> Outcome {
         .search(
             &HybridQuery {
                 dense: Some(dense_query_for(CANDY_GOLD)),
-                sparse: Some(encode_query(CANDY_QUERY)),
+                sparse: Some(KeywordQuery::from_text(CANDY_QUERY)),
                 per_arm_k: 10,
                 k: 10,
                 fusion: Fusion::default(),
@@ -560,7 +561,7 @@ async fn keyword_or_semantics(index: &impl RetrievalIndex) -> Outcome {
         .search(
             &HybridQuery {
                 dense: None,
-                sparse: Some(encode_query(CANDY_QUERY)),
+                sparse: Some(KeywordQuery::from_text(CANDY_QUERY)),
                 per_arm_k: 10,
                 k: 5,
                 fusion: Fusion::None,
@@ -893,7 +894,7 @@ async fn fusion_merges_arms(index: &impl RetrievalIndex) -> Outcome {
     // keyword arm also ranks first.
     let query = HybridQuery {
         dense: Some(dense_query_for("doc-a1_0")),
-        sparse: Some(encode_query(CANDY_QUERY)),
+        sparse: Some(KeywordQuery::from_text(CANDY_QUERY)),
         per_arm_k: 10,
         k: 10,
         fusion: Fusion::Rrf { k: 60 },
@@ -1088,10 +1089,10 @@ fn out_of_scope_probe(scope: &DocumentScope) -> Option<(ChunkId, DocumentId)> {
 }
 
 /// A dense and a sparse probe query, using whichever arms the adapter has.
-fn hybrid_probe(caps: IndexCapabilities) -> (Vec<f32>, SparseVector) {
+fn hybrid_probe(caps: IndexCapabilities) -> (Vec<f32>, KeywordQuery) {
     let dense = dense_query_for("doc-a1_0");
     let _ = caps;
-    (dense, encode_query(CANDY_QUERY))
+    (dense, KeywordQuery::from_text(CANDY_QUERY))
 }
 
 /// The first candidate that is not visible in `scope`, described.

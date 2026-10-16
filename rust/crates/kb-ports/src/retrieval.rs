@@ -38,16 +38,55 @@ use crate::types::ChunkType;
 pub struct HybridQuery {
     /// Query embedding, when the dense arm should run.
     pub dense: Option<Vec<f32>>,
-    /// Sparse query vector, from `kb_core::sparse::encode_query`. Keyword
-    /// terms are hashed to u32 ids, never passed as text, so an adapter cannot
-    /// re-analyse them differently from the documents.
-    pub sparse: Option<SparseVector>,
+    /// Keyword arm input, when it should run.
+    pub sparse: Option<KeywordQuery>,
     /// Candidates fetched per arm before fusion. Qdrant's prefetch limit.
     pub per_arm_k: usize,
     /// Candidates returned after fusion.
     pub k: usize,
     /// How the arms are combined.
     pub fusion: Fusion,
+}
+
+/// A keyword query in both shapes an index might need.
+///
+/// An index whose keyword arm is native sparse vectors consumes [`vector`]. An
+/// index with its own text analyzer consumes [`terms`], because it will
+/// re-analyse the text with *its* rules — and those rules are the thing
+/// [`IndexCapabilities::sparse`] is reporting on. Carrying both is what lets one
+/// port serve Qdrant and SurrealDB without either one re-deriving the other's
+/// vocabulary.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct KeywordQuery {
+    /// Hashed term ids at weight 1.0, from `kb_core::sparse::encode_query`.
+    pub vector: SparseVector,
+    /// The same terms, folded, lowercased and deduplicated, in first-seen order.
+    /// Never empty when [`Self::vector`] is not.
+    pub terms: Vec<String>,
+}
+
+impl KeywordQuery {
+    /// Tokenise `text` once into both shapes, so a document and a query go
+    /// through the same tokenizer by construction.
+    #[must_use]
+    pub fn from_text(text: &str) -> Self {
+        let mut terms: Vec<String> = Vec::new();
+        for term in kb_core::sparse::tokenize(text) {
+            if !terms.contains(&term) {
+                terms.push(term);
+            }
+        }
+        Self {
+            vector: kb_core::sparse::encode_query(text),
+            terms,
+        }
+    }
+
+    /// True when there is nothing to search for.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.vector.is_empty() && self.terms.is_empty()
+    }
 }
 
 /// How two arm result lists become one.
@@ -357,5 +396,41 @@ mod tests {
     #[test]
     fn default_fusion_is_rrf_at_sixty() {
         assert_eq!(Fusion::default(), Fusion::Rrf { k: 60 });
+    }
+
+    #[test]
+    fn a_keyword_query_carries_both_shapes_of_the_same_tokens() {
+        let q = KeywordQuery::from_text("Siapakah yang menulis Candy Candy?");
+        // Folded, deduplicated, question words present — an adapter with its own
+        // analyzer needs the text, not the hashes, and that text must be the
+        // tokenizer's output or the two arms disagree about the vocabulary.
+        assert_eq!(q.terms, vec!["siapakah", "yang", "menulis", "candy"]);
+        assert_eq!(q.vector.len(), 4);
+        assert!(q.vector.values.iter().all(|v| *v == 1.0));
+        // The hashes must be the ids of exactly those terms, or an adapter using
+        // `vector` would be searching for something else entirely.
+        for term in &q.terms {
+            assert!(
+                q.vector.indices.contains(&kb_core::sparse::term_id(term)),
+                "{term}"
+            );
+        }
+        assert!(!q.is_empty());
+    }
+
+    #[test]
+    fn a_query_with_no_word_characters_is_empty_in_both_shapes() {
+        let q = KeywordQuery::from_text("?! …");
+        assert!(q.is_empty(), "{q:?}");
+        assert!(q.vector.is_empty());
+        assert!(q.terms.is_empty());
+    }
+
+    #[test]
+    fn hybrid_capability_constructor_declares_or_semantics() {
+        let caps = IndexCapabilities::hybrid(1024, false);
+        assert_eq!(caps.sparse, Some(KeywordSemantics::AnyTerm));
+        assert!(caps.server_side_fusion);
+        assert!(!caps.approximate_dense);
     }
 }
