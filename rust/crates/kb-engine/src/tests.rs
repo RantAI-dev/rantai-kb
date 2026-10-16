@@ -10,7 +10,10 @@ mod pipeline_tests {
         make_fake_scope,
     };
     use crate::retrieval::{RetrievalOptions, execute_pipeline};
-    use kb_ports::{ChunkType, DocumentFilter, DocumentId, DocumentMeta, DocumentStore, EngineError, KnowledgeBaseId, RetrievalDegrade, ScopeRequest, TenantId};
+    use kb_ports::{
+        ChunkType, DocumentFilter, DocumentId, DocumentMeta, DocumentStore, EngineError,
+        KnowledgeBaseId, RetrievalDegrade, ScopeRequest, TenantId,
+    };
 
     fn setup() -> (
         Arc<FakeDocumentStore>,
@@ -620,10 +623,20 @@ mod pipeline_tests {
         setup_two_kb_docs(&doc_store, &tenant);
 
         chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
-            "chunk_a", "doc_a", "Doc in KB A", "BM25 match for A", 0, 1.0,
+            "chunk_a",
+            "doc_a",
+            "Doc in KB A",
+            "BM25 match for A",
+            0,
+            1.0,
         ));
         chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
-            "chunk_b", "doc_b", "Doc in KB B", "BM25 match for B", 1, 0.9,
+            "chunk_b",
+            "doc_b",
+            "Doc in KB B",
+            "BM25 match for B",
+            1,
+            0.9,
         ));
 
         let scope_kb_a = doc_store
@@ -651,8 +664,18 @@ mod pipeline_tests {
         .unwrap();
 
         assert!(!outcome.chunks.is_empty());
-        assert!(outcome.chunks.iter().all(|h| h.chunk.document_id.0 == "doc_a"));
-        assert!(outcome.chunks.iter().all(|h| h.chunk.document_id.0 != "doc_b"));
+        assert!(
+            outcome
+                .chunks
+                .iter()
+                .all(|h| h.chunk.document_id.0 == "doc_a")
+        );
+        assert!(
+            outcome
+                .chunks
+                .iter()
+                .all(|h| h.chunk.document_id.0 != "doc_b")
+        );
     }
 
     #[tokio::test]
@@ -662,10 +685,20 @@ mod pipeline_tests {
         setup_two_kb_docs(&doc_store, &tenant);
 
         chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
-            "chunk_a", "doc_a", "Doc in KB A", "BM25 match for A", 0, 1.0,
+            "chunk_a",
+            "doc_a",
+            "Doc in KB A",
+            "BM25 match for A",
+            0,
+            1.0,
         ));
         chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
-            "chunk_b", "doc_b", "Doc in KB B", "BM25 match for B", 1, 0.9,
+            "chunk_b",
+            "doc_b",
+            "Doc in KB B",
+            "BM25 match for B",
+            1,
+            0.9,
         ));
 
         let scope_cat_a = doc_store
@@ -693,8 +726,18 @@ mod pipeline_tests {
         .unwrap();
 
         assert!(!outcome.chunks.is_empty());
-        assert!(outcome.chunks.iter().all(|h| h.chunk.document_id.0 == "doc_a"));
-        assert!(outcome.chunks.iter().all(|h| h.chunk.document_id.0 != "doc_b"));
+        assert!(
+            outcome
+                .chunks
+                .iter()
+                .all(|h| h.chunk.document_id.0 == "doc_a")
+        );
+        assert!(
+            outcome
+                .chunks
+                .iter()
+                .all(|h| h.chunk.document_id.0 != "doc_b")
+        );
     }
 
     #[tokio::test]
@@ -704,10 +747,20 @@ mod pipeline_tests {
         setup_two_kb_docs(&doc_store, &tenant);
 
         chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
-            "chunk_a", "doc_a", "Doc in KB A", "BM25 match for A", 0, 1.0,
+            "chunk_a",
+            "doc_a",
+            "Doc in KB A",
+            "BM25 match for A",
+            0,
+            1.0,
         ));
         chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
-            "chunk_b", "doc_b", "Doc in KB B", "BM25 match for B", 1, 0.9,
+            "chunk_b",
+            "doc_b",
+            "Doc in KB B",
+            "BM25 match for B",
+            1,
+            0.9,
         ));
 
         let full_scope = doc_store
@@ -733,8 +786,18 @@ mod pipeline_tests {
         .unwrap();
 
         assert!(!outcome.chunks.is_empty());
-        assert!(outcome.chunks.iter().all(|h| h.chunk.document_id.0 == "doc_a"));
-        assert!(outcome.chunks.iter().all(|h| h.chunk.document_id.0 != "doc_b"));
+        assert!(
+            outcome
+                .chunks
+                .iter()
+                .all(|h| h.chunk.document_id.0 == "doc_a")
+        );
+        assert!(
+            outcome
+                .chunks
+                .iter()
+                .all(|h| h.chunk.document_id.0 != "doc_b")
+        );
     }
 
     #[tokio::test]
@@ -744,10 +807,20 @@ mod pipeline_tests {
         setup_two_kb_docs(&doc_store, &tenant);
 
         chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
-            "chunk_a", "doc_a", "Doc in KB A", "BM25 match for A", 0, 1.0,
+            "chunk_a",
+            "doc_a",
+            "Doc in KB A",
+            "BM25 match for A",
+            0,
+            1.0,
         ));
         chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
-            "chunk_b", "doc_b", "Doc in KB B", "BM25 match for B", 1, 0.9,
+            "chunk_b",
+            "doc_b",
+            "Doc in KB B",
+            "BM25 match for B",
+            1,
+            0.9,
         ));
 
         let full_scope = doc_store
