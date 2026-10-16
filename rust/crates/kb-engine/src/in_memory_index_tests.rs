@@ -77,9 +77,7 @@ async fn an_empty_scope_returns_nothing_even_with_a_matching_query() {
     // silently: a search with no visible documents must be empty, not "the best
     // match in the collection".
     let index = InMemoryIndex::new(DIMS);
-    let token = kb_ports::adapter::ScopeToken::new_for_adapter();
-    let scope =
-        kb_ports::DocumentScope::new(&token, kb_ports::TenantId::new_unchecked("t"), vec![]);
+    let scope = crate::fakes::make_fake_scope(kb_ports::TenantId::new_unchecked("t"), vec![]);
     let out = index
         .search(
             &kb_ports::HybridQuery {
@@ -121,8 +119,7 @@ impl RetrievalIndex for LeakyIndex {
     ) -> Result<Vec<kb_ports::Candidate>, PortError> {
         // A scope that sees everything is the cheapest way to model "the store
         // filtered nothing and the caller did not check".
-        let everything = kb_ports::DocumentScope::new(
-            &kb_ports::adapter::ScopeToken::new_for_adapter(),
+        let everything = crate::fakes::make_fake_scope(
             kb_ports::TenantId::new_unchecked("contract-tenant-a"),
             vec![
                 kb_ports::DocumentId::new_unchecked("doc-a1"),
@@ -138,8 +135,7 @@ impl RetrievalIndex for LeakyIndex {
         _scope: &kb_ports::DocumentScope,
         ids: &[kb_ports::ChunkId],
     ) -> Result<Vec<kb_ports::Candidate>, PortError> {
-        let everything = kb_ports::DocumentScope::new(
-            &kb_ports::adapter::ScopeToken::new_for_adapter(),
+        let everything = crate::fakes::make_fake_scope(
             kb_ports::TenantId::new_unchecked("contract-tenant-a"),
             vec![
                 kb_ports::DocumentId::new_unchecked("doc-a1"),
@@ -156,8 +152,7 @@ impl RetrievalIndex for LeakyIndex {
         document_id: &kb_ports::DocumentId,
         chunk_indices: &[u32],
     ) -> Result<Vec<kb_ports::Candidate>, PortError> {
-        let everything = kb_ports::DocumentScope::new(
-            &kb_ports::adapter::ScopeToken::new_for_adapter(),
+        let everything = crate::fakes::make_fake_scope(
             kb_ports::TenantId::new_unchecked("contract-tenant-a"),
             vec![
                 kb_ports::DocumentId::new_unchecked("doc-a1"),
