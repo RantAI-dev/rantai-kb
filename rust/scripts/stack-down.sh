@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stop the kb-smoke stack started by stack-up.sh.
 #
-# Only the two pids in $KB_STACK_DIR and the three `kb-smoke-*` containers are
+# Only the two pids in $KB_STACK_DIR and the `kb-smoke-*` containers are
 # touched. Other people's containers on this host are never named here, and a
 # missing container is not an error.
 set -euo pipefail
@@ -30,8 +30,8 @@ stop_pid_file() {
 stop_pid_file "$SERVER_PID_FILE" "kb-server"
 stop_pid_file "$STUB_PID_FILE" "stub embeddings"
 
-echo "removing containers kb-smoke-pg kb-smoke-surreal kb-smoke-rustfs"
-docker rm -f kb-smoke-pg kb-smoke-surreal kb-smoke-rustfs >/dev/null 2>&1 || true
+echo "removing containers kb-smoke-pg kb-smoke-surreal kb-smoke-rustfs kb-smoke-tei-embed kb-smoke-tei-rerank"
+docker rm -f kb-smoke-pg kb-smoke-surreal kb-smoke-rustfs kb-smoke-tei-embed kb-smoke-tei-rerank >/dev/null 2>&1 || true
 
 rm -f "$STACK_DIR/stack.env"
 echo "kb-smoke stack is down (logs left in $STACK_DIR for inspection)"
