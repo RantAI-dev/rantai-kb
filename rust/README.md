@@ -12,6 +12,7 @@ The Rust workspace under `rust/` implements the full standalone service, complet
 kb-core  ←  kb-ports  ←  kb-inference · kb-store-pg · kb-store-surreal · kb-store-blob
                       ←  kb-extract
                       ←  kb-engine  ←  kb-server (composition root)
+                                 ←  kb-eval (black-box HTTP measurement client)
 ```
 
 - **`kb-core`**: Pure domain logic: chunking (smart, table-aware, code-block-aware), Reciprocal Rank Fusion (RRF), neighbour window expansion, source numbering, figure policy, text-layer signals, page maps, ingest policy, and progress tracking. Zero I/O, no network.
@@ -23,6 +24,7 @@ kb-core  ←  kb-ports  ←  kb-inference · kb-store-pg · kb-store-surreal · 
 - **`kb-extract`**: Extraction engine: pure-Rust parsers (DOCX, PPTX, XLSX, ODT, ODS, EPUB, RTF, GLTF/GLB, HTML, XML, Markdown, Code, Plaintext), dynamic PDFium text-layer extraction, smart router, layout extractor chain (MinerU sidecar, MinerU API, Mistral OCR), and OpenRouter vision OCR fallback.
 - **`kb-engine`**: Pipeline orchestrator for ingestion and retrieval. Knows only ports, zero adapter names.
 - **`kb-server`**: Axum HTTP service (REST API, SSE progress stream), worker process loop, CLI subcommands, and configuration loader.
+- **`kb-eval`**: Retrieval-quality harness. Loads a BEIR/TREC dataset, ingests it through the public API, queries a running `kb-server`, and writes nDCG/Recall/MRR/Hit/P at document and page level with bootstrap confidence intervals, plus TREC run files `trec_eval` can re-score. Links no store or engine crate — see `crates/kb-eval/README.md`.
 
 ---
 
@@ -76,6 +78,12 @@ kb-server check-boundary
 
 # 5. Start HTTP server and ingest worker (default)
 kb-server serve
+
+# 6. Measure retrieval quality against a running server
+kb-server eval --base-url http://localhost:8080 --dataset <dataset-dir> --out ./eval-out --label baseline
+
+# 7. Re-score an existing run file offline, no server needed
+kb-server eval score --qrels <dataset-dir>/qrels/test.tsv --run ./eval-out/run.trec
 ```
 
 ---
@@ -103,6 +111,8 @@ kb-server serve
 | `KB_SKIP_MIGRATE` | Set to `1` to skip automatic migrations and schema on container boot | `0` |
 | `KB_MIGRATIONS_DIR` | Directory containing Prisma migration directories | `prisma/migrations` |
 | `RUST_LOG` | Logging filter directive (tracing subscriber) | `info` |
+| **Evaluation** | | |
+| `KB_EVAL_API_KEY` | API key `kb-server eval` uses when `--api-key` is not passed | *None* (required for `eval`) |
 | **Ingest Worker** | | |
 | `KB_WORKER_ENABLED` | Set to `false` to disable worker in API process | `true` |
 | `KB_INGEST_CONCURRENCY` | Jobs claimed per poll batch | `1` (min: 1) |
