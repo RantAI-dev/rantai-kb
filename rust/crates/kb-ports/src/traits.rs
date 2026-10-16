@@ -490,11 +490,36 @@ pub trait Embedder: Send + Sync {
     /// Embed a single query string for retrieval.
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>, PortError>;
 
+    /// Embed a single query string and say where the vector came from.
+    ///
+    /// The same call as [`Embedder::embed_query`] with one extra fact
+    /// attached: whether a cache answered it or a provider was called. Query
+    /// embedding is the round trip that dominates search latency on a local
+    /// profile, and "it was 900 ms" means something very different for a
+    /// repeat of the same question than for a first-time question, so the
+    /// latency report needs to separate the two instead of averaging them.
+    ///
+    /// The default says `cached: false` — correct for an embedder that does not
+    /// cache, and the honest default for one that does and does not report it.
+    async fn embed_query_detailed(&self, text: &str) -> Result<QueryEmbedding, PortError> {
+        self.embed_query(text)
+            .await
+            .map(|vector| QueryEmbedding { vector, cached: false })
+    }
+
     /// Embed a batch of document chunks during ingest.
     async fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, PortError>;
 
     /// Expected dimensionality of vectors produced by this embedder.
     fn dimension(&self) -> u32;
+}
+
+/// A query embedding plus its provenance.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryEmbedding {
+    pub vector: Vec<f32>,
+    /// True when a cache answered this query rather than the provider.
+    pub cached: bool,
 }
 
 /// Cross-encoder reranker. Scores (query, candidate) pairs.

@@ -21,7 +21,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use kb_ports::{Embedder, PortError};
+use kb_ports::{Embedder, PortError, QueryEmbedding};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::warn;
@@ -138,6 +138,12 @@ impl EmbedderImpl {
             .ok_or_else(|| PortError::Invalid("embedding api key not set".into()))
     }
 
+    /// The query-cache key. Model-scoped, so switching models cannot serve a
+    /// vector from the other model's space.
+    fn cache_key(&self, text: &str) -> String {
+        format!("{}|{}", self.settings.model, text.trim())
+    }
+
     /// POST a prepared body and return the raw response bytes, retrying
     /// transient failures (5xx, 429, transport) up to `MAX_RETRIES`.
     async fn post(&self, body: Vec<u8>) -> Result<Vec<u8>, PortError> {
@@ -224,7 +230,7 @@ impl EmbedderImpl {
 
     /// Embed a single text. Caches query-side calls.
     async fn embed_one(&self, text: &str, kind: EmbedKind) -> Result<Vec<f32>, PortError> {
-        let cache_key = format!("{}|{}", self.settings.model, text.trim());
+        let cache_key = self.cache_key(text);
         if kind == EmbedKind::Query {
             let mut cache = self.query_cache.lock().await;
             if let Some(v) = cache.get(&cache_key) {
@@ -395,6 +401,16 @@ async fn backoff(attempt: u32) {
 impl Embedder for EmbedderImpl {
     async fn embed_query(&self, text: &str) -> Result<Vec<f32>, PortError> {
         self.embed_one(text, EmbedKind::Query).await
+    }
+
+    async fn embed_query_detailed(&self, text: &str) -> Result<QueryEmbedding, PortError> {
+        let cache_key = self.cache_key(text);
+        let cached = {
+            let mut cache = self.query_cache.lock().await;
+            cache.get(&cache_key).is_some()
+        };
+        let vector = self.embed_one(text, EmbedKind::Query).await?;
+        Ok(QueryEmbedding { vector, cached })
     }
 
     async fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, PortError> {
@@ -568,6 +584,27 @@ mod tests {
             input.iter().collect::<Vec<_>>(),
             "inputs unsplit"
         );
+    }
+
+    /// The latency report tells a cache hit from a provider call, so the
+    /// embedder has to be able to tell it too.
+    #[tokio::test]
+    async fn detailed_query_embed_reports_cache_hit_and_miss() {
+        let (embedder, seen) = embedder_for(Mode::InOrder, 2).await;
+
+        let first = embedder.embed_query_detailed("apa itu rantai").await.unwrap();
+        assert!(!first.cached, "a first query is never a cache hit");
+        assert_eq!(first.vector, vector_for("apa itu rantai"));
+
+        let second = embedder.embed_query_detailed("apa itu rantai").await.unwrap();
+        assert!(second.cached, "the same question again comes from the cache");
+        assert_eq!(second.vector, first.vector);
+
+        let other = embedder.embed_query_detailed("apa itu rantai-kb").await.unwrap();
+        assert!(!other.cached, "a different question is a miss");
+
+        // The point of a cache hit: no provider call for it.
+        assert_eq!(seen.lock().await.len(), 2);
     }
 
     #[tokio::test]
