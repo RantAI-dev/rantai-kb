@@ -9,13 +9,20 @@
 mod blob;
 mod error;
 mod ids;
+mod retrieval;
 mod scope;
 mod traits;
 mod types;
 
 pub use blob::{BlobStore, asset_path, document_path, sanitize_filename};
+#[cfg(feature = "contract")]
+pub mod contract;
 pub use error::{EngineError, PortError, RetrievalDegrade};
 pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
+pub use retrieval::{
+    ArmRanks, ArmScores, Candidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit,
+    KeywordSemantics, RetrievalIndex, sort_candidates,
+};
 pub use scope::DocumentScope;
 #[cfg(feature = "scope-adapter")]
 pub use scope::adapter;

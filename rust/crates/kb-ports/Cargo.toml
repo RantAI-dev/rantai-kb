@@ -19,3 +19,6 @@ async-trait = { workspace = true }
 [features]
 # Enabled only by DocumentStore adapters and engine test fakes. See src/scope.rs.
 scope-adapter = []
+# The RetrievalIndex contract suite. Implies `scope-adapter`, because the suite
+# builds DocumentScopes itself to prove that no adapter escapes one.
+contract = ["scope-adapter"]
