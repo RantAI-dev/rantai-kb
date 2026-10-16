@@ -1164,6 +1164,7 @@ dependencies = [
  "kb-store-blob",
  "kb-store-pg",
  "kb-store-surreal",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

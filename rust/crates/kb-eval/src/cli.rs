@@ -1,11 +1,13 @@
 //! `kb-server eval` argument handling.
 //!
-//! Two modes:
+//! Three modes:
 //!
 //! * `eval <flags>` — run the black-box harness against a live server.
 //! * `eval score --qrels <file> --run <run.trec>` — score an existing run file
 //!   offline, with no server, so our arithmetic can be checked against
 //!   `trec_eval`/`ranx`.
+//! * `eval leak <flags>` — the red-team matrix: every retrieval arm × every
+//!   scope type, with a positive control on every cell.
 //!
 //! Argument handling mirrors `kb-server create-api-key`: `--flag value` pairs
 //! and a positional-free shape, so it feels the same to an operator.
@@ -14,6 +16,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::dataset::parse_qrels;
+use crate::leak::{Arm, ScopeKind};
+use crate::leak_http::{self, LeakConfig};
 use crate::metrics::Gain;
 use crate::report::{MetricsFile, parse_trec, score_offline};
 use crate::runner::{RunnerConfig, run as run_harness};
@@ -46,6 +50,7 @@ pub async fn run(args: &[String]) -> Result<(), EvalError> {
             Ok(())
         }
         Some("score") => score(&args[1..]),
+        Some("leak") => leak(&args[1..]).await,
         _ => eval(args).await,
     }
 }
@@ -57,6 +62,7 @@ fn print_help() {
 USAGE
     kb-server eval --base-url URL --dataset DIR [flags]
     kb-server eval score --qrels FILE --run FILE [--k N] [--gain G]
+    kb-server eval leak --base-url URL [--api-key KEY] [--peer-key KEY]
 
 RUN FLAGS
     --base-url URL      kb-server to measure against (required)
@@ -74,12 +80,31 @@ RUN FLAGS
     --allow-failures    exit 0 even when queries or corpus files failed
                         (the outputs are written either way)
 
+LEAK FLAGS
+    --base-url URL      kb-server to probe (required)
+    --api-key KEY       full-access key of the first tenant; defaults to
+                        $KB_EVAL_API_KEY
+    --peer-key KEY      full-access key of a *different* tenant; defaults to
+                        $KB_EVAL_PEER_API_KEY. Without it the cross-tenant row
+                        of the matrix is UNTESTED, not passing.
+    --out DIR           output directory (default eval-out/leak)
+    --max-chunks N      chunks requested per probe (default 20)
+    --canary-seed N     seed for the planted canary tokens (default: fixed)
+    --timeout SECS      per-document ingest timeout (default 900)
+    --poll-ms MS        job poll interval (default 400)
+    --keep              leave the seeded corpus behind
+    --strict            also exit non-zero when an arm is UNTESTED
+
 OUTPUTS (in --out)
     metrics.json  every metric with a 95% bootstrap CI, plus latency
     report.md     the same, as a table
     run.trec      document-level TREC run
     run.page.trec page-level TREC run
-    ingest-map.json  doc-key -> documentId, reused by --skip-ingest"
+    ingest-map.json  doc-key -> documentId, reused by --skip-ingest
+
+LEAK OUTPUTS (in --out)
+    leak-report.md   the arm x scope matrix, with every leak's evidence
+    leak.json        the same, machine-readable, plus the seeded corpus"
     );
 }
 
@@ -141,6 +166,112 @@ fn gate_on_failures(m: &MetricsFile, allow_failures: bool) -> Result<(), EvalErr
          (metrics.json and report.md were written)",
         m.n_failed, m.n_ingest_failed
     )))
+}
+
+async fn leak(args: &[String]) -> Result<(), EvalError> {
+    let base_url = flag(args, "--base-url")
+        .ok_or_else(|| EvalError::Usage("missing --base-url".to_string()))?;
+    let api_key = flag(args, "--api-key")
+        .or_else(|| std::env::var("KB_EVAL_API_KEY").ok())
+        .filter(|k| !k.trim().is_empty())
+        .ok_or_else(|| {
+            EvalError::Usage("missing API key: pass --api-key or set KB_EVAL_API_KEY".to_string())
+        })?;
+    let peer_key = flag(args, "--peer-key")
+        .or_else(|| std::env::var("KB_EVAL_PEER_API_KEY").ok())
+        .filter(|k| !k.trim().is_empty());
+
+    let mut config = LeakConfig::new(&base_url, &api_key);
+    config.peer_key = peer_key;
+    config.out_dir = PathBuf::from(flag(args, "--out").unwrap_or_else(|| "eval-out/leak".into()));
+    config.max_chunks = u32::try_from(parse_uint(args, "--max-chunks", 20)?)
+        .map_err(|_| EvalError::Usage("--max-chunks is too large".to_string()))?;
+    config.canary_seed = parse_uint_u64(args, "--canary-seed", config.canary_seed)?;
+    config.job_timeout = Duration::from_secs(parse_uint_u64(args, "--timeout", 900)?);
+    config.poll_interval = Duration::from_millis(parse_uint_u64(args, "--poll-ms", 400)?);
+    config.keep = has_flag(args, "--keep");
+    config.strict = has_flag(args, "--strict");
+
+    let run = leak_http::run(config)
+        .await
+        .map_err(|e| EvalError::Failed(e.to_string()))?;
+    let matrix = &run.matrix;
+
+    print_leak_matrix(matrix);
+    println!("wrote {}", run.out_dir.join("leak-report.md").display());
+    println!("wrote {}", run.out_dir.join("leak.json").display());
+    for note in &matrix.notes {
+        println!("note: {note}");
+    }
+
+    if run.failed {
+        let detail = if matrix.any_leak() {
+            format!(
+                "{} leak(s) across {} probes — see {}",
+                matrix.total_leaks(),
+                matrix.total_probes(),
+                run.out_dir.join("leak-report.md").display()
+            )
+        } else {
+            format!(
+                "{} arm(s) UNTESTED; --strict makes that a failure",
+                matrix
+                    .arms
+                    .iter()
+                    .filter(|a| a.status == kb_eval_status_untested())
+                    .count()
+            )
+        };
+        return Err(EvalError::Failed(detail));
+    }
+    Ok(())
+}
+
+/// The one comparison the CLI needs, so it does not have to import the enum's
+/// variants by name in a match it would only use once.
+fn kb_eval_status_untested() -> crate::leak::Status {
+    crate::leak::Status::Untested
+}
+
+/// Print the arm × scope matrix as a table, one line per arm.
+fn print_leak_matrix(matrix: &crate::leak::LeakMatrix) {
+    println!(
+        "leak matrix: {} probes, {} leak(s)",
+        matrix.total_probes(),
+        matrix.total_leaks()
+    );
+    let header: String = ScopeKind::ALL.iter().fold(
+        String::from("| arm | probes | leaks | positive | status |"),
+        |mut acc, k| {
+            acc.push_str(&format!("{} | ", k.as_str()));
+            acc
+        },
+    );
+    println!("{header}");
+    println!("|---|---:|---:|---|---|---|---|---|");
+    for arm in Arm::ALL {
+        let Some(report) = matrix.arms.iter().find(|a| a.arm == arm) else {
+            continue;
+        };
+        let cells: String = ScopeKind::ALL
+            .iter()
+            .map(
+                |kind| match report.cells.iter().find(|c| c.scope == *kind) {
+                    Some(cell) => format!("{} | ", cell.status.as_str()),
+                    None => "n/a | ".to_string(),
+                },
+            )
+            .collect();
+        println!(
+            "| {} | {} | {} | {}/{} | {} | {cells}",
+            arm.as_str(),
+            report.probes,
+            report.leaks,
+            report.positive_hits,
+            report.positive_probes,
+            report.status.as_str()
+        );
+    }
 }
 
 fn score(args: &[String]) -> Result<(), EvalError> {

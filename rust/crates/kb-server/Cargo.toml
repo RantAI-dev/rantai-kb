@@ -39,4 +39,7 @@ uuid = { workspace = true }
 kb-ports = { path = "../kb-ports" }
 kb-engine = { path = "../kb-engine", features = ["test-utils"] }
 kb-eval = { path = "../kb-eval" }
+# The leak matrix drives kb-eval as a black-box HTTP client, so its test needs
+# the same client library kb-eval uses.
+reqwest = { workspace = true }
 tokio = { workspace = true }

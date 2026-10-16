@@ -18,12 +18,15 @@
 
 pub mod cli;
 pub mod dataset;
+pub mod leak;
+pub mod leak_http;
 pub mod metrics;
 pub mod report;
 pub mod runner;
 
 pub use cli::{EvalError, run};
 pub use dataset::{Dataset, DatasetError};
+pub use leak::{Arm, LeakMatrix, ScopeKind, SeedPlan, Status};
 pub use metrics::{
     Aggregate, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, Gain, LatencyReport, LevelReport, Means,
     QueryMetrics,

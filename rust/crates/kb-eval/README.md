@@ -147,6 +147,75 @@ binaries:
   (`BOOTSTRAP_SEED`) — the same data always produces the same interval.
 * Latency is client-side and covers answered queries only: mean, p50, p95, p99.
 
+## The red-team leak matrix (`kb-server eval leak`)
+
+```sh
+rust/scripts/stack-up.sh
+source /tmp/kb-stack/stack.env
+KEY_A=$("$KB_SERVER_BIN" create-api-key leak-a a --scopes kb:read,kb:write | grep -o 'rkb_[a-z0-9_-]*' | head -1)
+KEY_B=$("$KB_SERVER_BIN" create-api-key leak-b b --scopes kb:read,kb:write | grep -o 'rkb_[a-z0-9_-]*' | head -1)
+kb-server eval leak --base-url "$KB_STACK_BASE_URL" --api-key "$KEY_A" --peer-key "$KEY_B"
+```
+
+It is the same black-box client as the quality harness, so the matrix re-runs
+unchanged against the Qdrant + Postgres-graph backend.
+
+**Seed.** 2 tenants × 2 knowledge bases × 2 categories = 8 documents, one per
+(knowledge base, category) cell, each planted with its own canaries: a nonsense
+token for BM25, a distinctive sentence for the vector arm, an invented proper
+noun for entities, a figure caption, and a paragraph that is not the head of the
+document for the neighbour weave. Canaries are derived from `--canary-seed`, so
+a run is reproducible and two documents can never collide.
+
+**Arms.** Each answer is attributed to an arm *from the wire*: `ChunkDto` marks a
+BM25 hit by omitting `chunkType`, `page` and `assetKey`, and a figure hit by
+carrying an `assetKey`. The entity arm is `GET /v1/documents/:id/intelligence`;
+the figure arm also fetches `/v1/documents/:id/assets` when the target document
+has a figure.
+
+**Scopes.** `tenant` (no filter), `knowledge_base` (`knowledgeBaseIds`),
+`category` (`category`), `document_ids` (`documentIds`). A document-addressed
+route is judged against **tenant** visibility rather than the search filters,
+because that is how the API authorises it — `knowledgeBaseIds` narrows a
+*search*, it is not an access boundary for a document the caller already owns.
+
+**Positive control (the point).** Every cell also runs the same canary from a
+scope that *does* contain the target. A cell whose positive control never hits
+is `UNTESTED`, never `PASS`: "zero leaks" from a probe that cannot find anything
+proves nothing. A leak always wins over a missing control.
+
+| status | meaning |
+|---|---|
+| `PASS` | no cross-scope hit, and the positive control found its own target |
+| `LEAK` | at least one document outside the scope came back; the exit code is non-zero |
+| `UNTESTED` | no leak was found, but the evidence is thin: no positive control, no out-of-scope probe, or the arm cannot answer in that scope at all |
+
+Outputs: `leak-report.md` (the matrix, every leak with its request and response,
+and a "what this run does not prove" section) and `leak.json`. Exits non-zero on
+any `LEAK`, and with `--strict` on any `UNTESTED` too. `--keep` leaves the seeded
+corpus behind; by default the documents, knowledge bases and categories it
+created are deleted afterwards.
+
+### Two keys, not one
+
+API keys are minted per tenant by `kb-server create-api-key`; there is no
+"admin key" that spans tenants. `--api-key` seeds the first tenant and
+`--peer-key` a second one. Without the second key the cross-tenant row has
+nothing to look for and is reported `UNTESTED` rather than passing — which is
+the whole reason the positive control exists.
+
+### What the stack cannot answer
+
+* **Figures need a layout extractor.** `kb-extract` produces figure crops from
+  the MinerU sidecar, `mineru-api` or Mistral. A markdown corpus has none, so on
+  a plain stack the figure arm is `UNTESTED`. The report says so; it does not
+  pass on an empty result.
+* **`documentIds` bypasses hybrid retrieval.** `POST /v1/search` with
+  `documentIds` takes the documentIds branch, which answers from the vector arm
+  alone, so the bm25 and figure cells for that scope type are `UNTESTED`. That
+  is a finding about the current implementation, recorded rather than papered
+  over.
+
 ## Trying it by hand
 
 With a local server on `:3000` and an API key that has `kb:write` and
