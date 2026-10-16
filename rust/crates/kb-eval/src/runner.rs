@@ -19,7 +19,9 @@ use crate::metrics::{
     Gain, LatencyReport, QueryMetrics, evaluate_query, has_positive_gold, latency_report,
     unique_first_occurrence,
 };
-use crate::report::{ReportParts, RunReport, TrecRanking, build_report, write_outputs};
+use crate::report::{
+    Failure, FailureStage, ReportParts, RunReport, TrecRanking, build_report, write_outputs,
+};
 
 /// Everything a run needs.
 #[derive(Debug, Clone)]
@@ -72,8 +74,40 @@ pub enum RunError {
     Http(#[from] reqwest::Error),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// A request the server answered with an error status. Kept apart from the
+    /// transport failures above because it carries the evidence — status, error
+    /// code, body — that turns "a query failed" into "this query failed because
+    /// the key is wrong".
+    #[error("{}", failure_summary(.0))]
+    Failure(Failure),
     #[error("{0}")]
     Other(String),
+}
+
+impl RunError {
+    /// Turn any runner error into the record a reader can act on.
+    ///
+    /// A transport error, a timeout or an unreadable body becomes status `0`:
+    /// the harness is honest that no HTTP response arrived rather than inventing
+    /// a status for one. `id` always wins over whatever the error carried, so a
+    /// failure is named by the query id rather than by its text.
+    fn into_failure(self, stage: FailureStage, id: &str) -> Failure {
+        match self {
+            Self::Failure(mut failure) => {
+                failure.id = id.to_string();
+                failure
+            }
+            other => Failure::local(stage, id, &other.to_string()),
+        }
+    }
+}
+
+fn failure_summary(failure: &Failure) -> String {
+    if failure.body.is_empty() {
+        failure.summary()
+    } else {
+        format!("{}: {}", failure.summary(), failure.body)
+    }
 }
 
 /// What one `POST /v1/search` answered with.
@@ -132,6 +166,8 @@ struct Scoreboard {
     n_degraded: usize,
     n_noted: usize,
     degrades: BTreeSet<String>,
+    /// Every failure, with the server's own words for it.
+    failures: Vec<Failure>,
 }
 
 impl Scoreboard {
@@ -185,10 +221,12 @@ impl Scoreboard {
     /// timing out on exactly the queries that would have exposed it: drop the
     /// hard ones and the mean over the rest goes up.
     ///
-    /// It stays out of the run files and out of the answered-only means.
-    fn record_failure(&mut self, qrels: &[Qrel]) {
+    /// It stays out of the run files and out of the answered-only means, and its
+    /// cause is kept: a failure whose reason is not recorded cannot be fixed.
+    fn record_failure(&mut self, qrels: &[Qrel], cause: Failure) {
         self.n_queries += 1;
         self.n_failed += 1;
+        self.failures.push(cause);
         if has_positive_gold(&gold_for_documents(qrels)) {
             self.document.push(QueryMetrics::ZERO);
         }
@@ -212,8 +250,8 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
         .timeout(Duration::from_secs(120))
         .build()?;
 
-    let (ingest_map, n_ingest_failed) = if config.skip_ingest {
-        (load_ingest_map(&config.out_dir)?, 0)
+    let (ingest_map, n_ingest_failed, ingest_failures) = if config.skip_ingest {
+        (load_ingest_map(&config.out_dir)?, 0, Vec::new())
     } else {
         ingest_all(&client, &config, &dataset).await?
     };
@@ -224,6 +262,7 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
 
     let mut board = Scoreboard {
         gain: config.gain,
+        failures: ingest_failures,
         ..Scoreboard::default()
     };
     for query in &dataset.queries {
@@ -233,8 +272,10 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
         let answer = match search {
             Ok(answer) => answer,
             Err(err) => {
-                board.record_failure(&dataset.qrels_for(&query.id));
-                eprintln!("query {} failed: {err}", query.id);
+                let mut cause = err.into_failure(FailureStage::Query, &query.id);
+                cause.redact(&config.api_key);
+                eprintln!("{}: {}", cause.summary(), cause.body);
+                board.record_failure(&dataset.qrels_for(&query.id), cause);
                 continue;
             }
         };
@@ -272,6 +313,7 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
         n_documents: ingest_map.len(),
         n_ingest_failed,
         degrades: board.degrades.into_iter().collect(),
+        failures: board.failures,
         document: board.document,
         page: board.page,
         document_answered: board.document_answered,
@@ -331,49 +373,66 @@ fn endpoint(base_url: &str, path: &str) -> String {
 /// Reuses an existing `ingest-map.json` so a partial re-run does not re-upload
 /// files that already landed. Failures are counted, logged and skipped: the
 /// queries that touch them score as misses, which is visible in the report
-/// rather than hidden by aborting the run.
+/// rather than hidden by aborting the run. Each one keeps its cause, so
+/// "3 corpus files failed" comes with the status and body that explain them.
 async fn ingest_all(
     client: &reqwest::Client,
     config: &RunnerConfig,
     dataset: &Dataset,
-) -> Result<(HashMap<String, String>, usize), RunError> {
+) -> Result<(HashMap<String, String>, usize, Vec<Failure>), RunError> {
     let map_path = config.out_dir.join("ingest-map.json");
     let mut map: HashMap<String, String> = if map_path.is_file() {
         load_ingest_map(&config.out_dir).unwrap_or_default()
     } else {
         HashMap::new()
     };
-    let mut failures = 0;
+    let mut failures: Vec<Failure> = Vec::new();
     for file in &dataset.corpus {
         if map.contains_key(&file.key) {
             continue;
         }
         match ingest_one(client, config, file).await {
-            Ok(Some(document_id)) => {
+            Ok(IngestOutcome::Landed(document_id)) => {
                 map.insert(file.key.clone(), document_id);
                 save_ingest_map(&map_path, &map)?;
             }
-            Ok(None) => {
-                failures += 1;
-                eprintln!("ingest failed: {}", file.key);
+            Ok(IngestOutcome::Failed(mut cause)) => {
+                cause.redact(&config.api_key);
+                eprintln!("ingest: {}", cause.summary());
+                eprintln!("  {}", cause.body);
+                failures.push(cause);
             }
             Err(err) => {
-                failures += 1;
-                eprintln!("ingest error for {}: {err}", file.key);
+                let cause = err.into_failure(FailureStage::Ingest, &file.key);
+                eprintln!("ingest error for {}: {cause}", file.key);
+                failures.push(cause);
             }
         }
     }
-    if failures > 0 {
-        eprintln!("{failures} corpus file(s) failed to ingest; continuing with the rest");
+    let n = failures.len();
+    if n > 0 {
+        eprintln!("{n} corpus file(s) failed to ingest; continuing with the rest");
     }
-    Ok((map, failures))
+    Ok((map, n, failures))
+}
+
+/// What one upload did.
+enum IngestOutcome {
+    Landed(String),
+    Failed(Failure),
+}
+
+/// What an ingest job did.
+enum JobOutcome {
+    Success,
+    Failed(Failure),
 }
 
 async fn ingest_one(
     client: &reqwest::Client,
     config: &RunnerConfig,
     file: &crate::dataset::CorpusFile,
-) -> Result<Option<String>, RunError> {
+) -> Result<IngestOutcome, RunError> {
     let bytes = std::fs::read(&file.path)?;
     let file_name = file
         .path
@@ -388,25 +447,39 @@ async fn ingest_one(
         .send()
         .await?;
     if !response.status().is_success() {
-        eprintln!("upload of {} returned HTTP {}", file.key, response.status());
-        return Ok(None);
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        return Ok(IngestOutcome::Failed(Failure::from_response(
+            FailureStage::Ingest,
+            &file.key,
+            status,
+            &body,
+        )));
     }
     let body: UploadResponse = response.json().await?;
     if body.job_id.is_empty() {
-        return Ok(None);
+        return Ok(IngestOutcome::Failed(Failure::local(
+            FailureStage::Ingest,
+            &file.key,
+            "the upload returned neither a job id nor an error",
+        )));
     }
-    let done = poll_job(client, config, &body.job_id).await?;
-    Ok(done.then_some(body.id))
+    match poll_job(client, config, &body.job_id).await? {
+        JobOutcome::Success => Ok(IngestOutcome::Landed(body.id)),
+        JobOutcome::Failed(cause) => Ok(IngestOutcome::Failed(cause)),
+    }
 }
 
 /// Poll `GET /v1/jobs/:id` until the job is terminal or the timeout elapses.
 ///
-/// Returns `true` on `success`, `false` on `failed` or timeout.
+/// A `failed` job and a job that never finished are both failures, and both keep
+/// the server's own error text: "the worker died" and "the job took longer than
+/// 900s" need different fixes.
 async fn poll_job(
     client: &reqwest::Client,
     config: &RunnerConfig,
     job_id: &str,
-) -> Result<bool, RunError> {
+) -> Result<JobOutcome, RunError> {
     let deadline = Instant::now() + config.job_timeout;
     loop {
         let response = client
@@ -415,26 +488,36 @@ async fn poll_job(
             .send()
             .await?;
         if !response.status().is_success() {
-            return Err(RunError::Other(format!(
-                "job {job_id} returned HTTP {}",
-                response.status()
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            return Err(RunError::Failure(Failure::from_response(
+                FailureStage::Ingest,
+                job_id,
+                status,
+                &text,
             )));
         }
         let job: JobStatus = response.json().await?;
         match job.status.as_str() {
-            "success" => return Ok(true),
+            "success" => return Ok(JobOutcome::Success),
             "failed" => {
-                eprintln!(
-                    "job {job_id} failed: {}",
-                    job.error.as_deref().unwrap_or("(no error)")
-                );
-                return Ok(false);
+                return Ok(JobOutcome::Failed(Failure::local(
+                    FailureStage::Ingest,
+                    job_id,
+                    job.error.as_deref().unwrap_or("the job failed with no error message"),
+                )));
             }
             _ => {}
         }
         if Instant::now() >= deadline {
-            eprintln!("job {job_id} timed out after {:?}", config.job_timeout);
-            return Ok(false);
+            return Ok(JobOutcome::Failed(Failure::local(
+                FailureStage::Ingest,
+                job_id,
+                &format!(
+                    "the job did not finish within {:?}",
+                    config.job_timeout
+                ),
+            )));
         }
         tokio::time::sleep(config.poll_interval).await;
     }
@@ -463,6 +546,10 @@ async fn fetch_server_version(client: &reqwest::Client, config: &RunnerConfig) -
 }
 
 /// POST one search and return its answer.
+///
+/// An HTTP error keeps the body. "HTTP 401" alone leaves the reader guessing
+/// between a bad key, a revoked key and a missing scope; the body says which,
+/// and the report groups on it.
 async fn search_one(
     client: &reqwest::Client,
     config: &RunnerConfig,
@@ -475,7 +562,12 @@ async fn search_one(
         .send()
         .await?;
     if !response.status().is_success() {
-        return Err(RunError::Other(format!("HTTP {}", response.status())));
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        // `into_failure` replaces this placeholder with the query id, which only
+        // the caller knows; nothing is lost by carrying the text meanwhile.
+        let failure = Failure::from_response(FailureStage::Query, text, status, &body);
+        return Err(RunError::Failure(failure));
     }
     // A body that does not parse is a failure of this query, not of the run.
     let body: SearchAnswer = response
@@ -629,6 +721,68 @@ mod tests {
         }
     }
 
+    /// A failure that carries its cause, as the HTTP path would record it.
+    fn refused() -> Failure {
+        Failure::from_response(
+            FailureStage::Query,
+            "q",
+            403,
+            r#"{"error":"API key lacks scope kb:read"}"#,
+        )
+    }
+
+    #[test]
+    fn a_failure_keeps_the_reason_it_had() {
+        let mut board = Scoreboard::default();
+        board.record_failure(&[qrel("q1", "alpha", 2)], refused());
+        assert_eq!(board.failures.len(), 1);
+        assert_eq!(board.failures[0].status, 403);
+        assert_eq!(board.failures[0].stage, FailureStage::Query);
+        // kb-server sends `{"error": …}` and no code, so none is invented.
+        assert_eq!(board.failures[0].code, None);
+        assert!(board.failures[0].body.contains("kb:read"));
+    }
+
+    #[test]
+    fn a_transport_error_is_recorded_without_an_http_status() {
+        let err = RunError::Other("connection refused".to_string());
+        let cause = err.into_failure(FailureStage::Query, "q7");
+        assert_eq!(cause.id, "q7");
+        assert_eq!(cause.status, 0);
+        assert_eq!(cause.code, None);
+        assert_eq!(cause.body, "connection refused");
+        assert!(cause.summary().contains("no HTTP response"), "{cause:?}");
+    }
+
+    #[test]
+    fn a_server_failure_is_recorded_under_the_query_id_not_its_text() {
+        let cause = Failure::from_response(
+            FailureStage::Query,
+            "the query text",
+            401,
+            r#"{"code":"unauthorized"}"#,
+        );
+        let err = RunError::Failure(cause);
+        let recorded = err.into_failure(FailureStage::Query, "q3");
+        assert_eq!(recorded.id, "q3");
+        assert_eq!(recorded.status, 401);
+        assert_eq!(recorded.code.as_deref(), Some("unauthorized"));
+        assert!(recorded.summary().contains("q3"), "{recorded:?}");
+    }
+
+    #[test]
+    fn the_api_key_is_never_written_into_a_failure() {
+        let mut cause = Failure::from_response(
+            FailureStage::Query,
+            "q1",
+            401,
+            "rejected key rkb_secret-Abc_123 for tenant t1",
+        );
+        cause.redact("rkb_secret-Abc_123");
+        assert!(!cause.body.contains("rkb_secret"), "{}", cause.body);
+        assert!(cause.body.contains("[redacted]"), "{}", cause.body);
+    }
+
     #[test]
     fn a_failed_query_is_counted_and_scored_as_a_zero() {
         let mut board = Scoreboard::default();
@@ -647,7 +801,7 @@ mod tests {
         );
         // q2 could not be answered. It has gold at the document level, so it is
         // a zero there rather than an absence.
-        board.record_failure(&[qrel("q2", "alpha", 2)]);
+        board.record_failure(&[qrel("q2", "alpha", 2)], refused());
 
         assert_eq!(board.n_queries, 2);
         assert_eq!(board.n_failed, 1);
@@ -712,7 +866,7 @@ mod tests {
                 },
             );
         }
-        board.record_failure(&[qrel("q3", "alpha", 2)]);
+        board.record_failure(&[qrel("q3", "alpha", 2)], refused());
 
         let strict = aggregate_level(&board.document, &board.document_answered);
         assert_eq!(strict.n_queries, 3);
@@ -730,13 +884,13 @@ mod tests {
     #[test]
     fn a_failed_query_with_no_page_gold_is_not_a_page_zero() {
         let mut board = Scoreboard::default();
-        board.record_failure(&[qrel("q1", "alpha", 2)]);
+        board.record_failure(&[qrel("q1", "alpha", 2)], refused());
         assert_eq!(board.page.len(), 0);
         assert_eq!(board.page_answered.len(), 0);
         assert_eq!(board.document.len(), 1);
 
         let mut page_only = Scoreboard::default();
-        page_only.record_failure(&[qrel("q1", "alpha#p3", 3)]);
+        page_only.record_failure(&[qrel("q1", "alpha#p3", 3)], refused());
         // Page gold is judged, document gold collapses onto alpha, so both
         // levels are evaluable and both take the zero.
         assert_eq!(page_only.page.len(), 1);

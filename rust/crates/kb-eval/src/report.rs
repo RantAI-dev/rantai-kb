@@ -7,7 +7,7 @@
 //! mentions them, the TREC score column encodes rank (`1 / rank`) rather than
 //! the cosine similarity, so a re-scoring tool reproduces the same order.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -19,6 +19,12 @@ use crate::metrics::{
     Gain, Gold, LatencyReport, LevelReport, Means, QueryMetrics, aggregate_level, evaluate_query,
     unique_first_occurrence,
 };
+
+/// How much of a response body is kept per failure.
+///
+/// Enough to recognise the error, short enough that `metrics.json` stays
+/// readable and cannot smuggle a whole HTML error page into an artifact.
+pub const FAILURE_BODY_CHARS: usize = 200;
 
 /// The top-level contents of `metrics.json`.
 ///
@@ -66,9 +72,227 @@ pub struct MetricsFile {
     pub n_ingest_failed: usize,
     /// Every distinct degradation label the server reported.
     pub degrades: Vec<String>,
+    /// Every failed query and every corpus file that never ingested, each with
+    /// the status, the error code and the head of the body that came back. This
+    /// is what turns "12 of 12 queries failed" into "12 × HTTP 401
+    /// `unauthorized`" — a number nobody has to guess at.
+    pub failures: Vec<Failure>,
     pub document: LevelReport,
     pub page: LevelReport,
     pub latency_ms: LatencyReport,
+}
+
+/// Which step of a run failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FailureStage {
+    /// `POST /v1/search` for one query.
+    Query,
+    /// `POST /v1/documents` (or the job it created) for one corpus file.
+    Ingest,
+}
+
+impl FailureStage {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::Ingest => "ingest",
+        }
+    }
+}
+
+/// Why one query, or one corpus file, failed.
+///
+/// Recorded rather than summarised, because "12 of 12 queries failed" is a fact
+/// an operator cannot act on: a bad API key, a 500 from the vector arm and a
+/// malformed dataset all produce that sentence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Failure {
+    pub stage: FailureStage,
+    /// The query id, or the corpus document key.
+    pub id: String,
+    /// The HTTP status. `0` when the request never got one — a transport error,
+    /// a job that failed, a poll that timed out.
+    pub status: u16,
+    /// The `code` member of an RFC-9457 problem body, when the server sent one.
+    /// `None` is a real answer, not a gap: `kb-server` answers `{"error": …}`,
+    /// which carries no code and is not given a fabricated one.
+    pub code: Option<String>,
+    /// The first [`FAILURE_BODY_CHARS`] characters of what the server said.
+    pub body: String,
+}
+
+impl Failure {
+    /// A failure the server described in an HTTP response.
+    #[must_use]
+    pub fn from_response(
+        stage: FailureStage,
+        id: impl Into<String>,
+        status: u16,
+        body: &str,
+    ) -> Self {
+        Self {
+            stage,
+            id: id.into(),
+            status,
+            code: error_code(body),
+            body: head(body),
+        }
+    }
+
+    /// A failure with no HTTP response: a transport error, a failed ingest job,
+    /// a poll that ran out of time. Status `0` says exactly that.
+    #[must_use]
+    pub fn local(stage: FailureStage, id: impl Into<String>, reason: &str) -> Self {
+        Self {
+            stage,
+            id: id.into(),
+            status: 0,
+            code: None,
+            body: head(reason),
+        }
+    }
+
+    /// Scrub the API key out of the recorded body, in place.
+    ///
+    /// The harness never sends the key in a body it records, but an error page
+    /// that echoes a header back would, and a metrics file is an artifact that
+    /// gets uploaded. Cheap to guarantee, so it is guaranteed here rather than
+    /// assumed at every call site.
+    pub fn redact(&mut self, secret: &str) {
+        self.body = redact_secret(&self.body, secret);
+    }
+
+    /// One line for a terminal or a log.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let status = if self.status == 0 {
+            "no HTTP response"
+        } else {
+            &format!("HTTP {}", self.status)
+        };
+        match &self.code {
+            Some(code) => format!("{} {} failed: {} — {}", self.stage.as_str(), self.id, status, code),
+            None => format!("{} {} failed: {}", self.stage.as_str(), self.id, status),
+        }
+    }
+}
+
+/// Replace every occurrence of `secret` with `[redacted]`.
+#[must_use]
+pub fn redact_secret(text: &str, secret: &str) -> String {
+    if secret.trim().is_empty() {
+        return text.to_string();
+    }
+    text.replace(secret, "[redacted]")
+}
+
+/// The first [`FAILURE_BODY_CHARS`] characters, with the tail marked.
+///
+/// Truncation happens on a character boundary, never mid-codepoint.
+fn head(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.chars().count() <= FAILURE_BODY_CHARS {
+        return trimmed.to_string();
+    }
+    let cut: String = trimmed.chars().take(FAILURE_BODY_CHARS).collect();
+    format!("{cut}…")
+}
+
+/// The `code` member of a JSON error body, RFC-9457 style.
+///
+/// `None` when the body is not JSON, or is JSON without a `code`. A `code` is
+/// never invented from a message: `{"error": "Internal error"}` has no code, and
+/// reporting one would be a fabrication in an artifact people trust.
+#[must_use]
+pub fn error_code(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body.trim()).ok()?;
+    let code = value.get("code")?.as_str()?.trim();
+    if code.is_empty() {
+        return None;
+    }
+    Some(code.to_string())
+}
+
+/// Failures collapsed into one row per `(status, code)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureGroup {
+    pub stage: FailureStage,
+    pub status: u16,
+    pub code: Option<String>,
+    pub count: usize,
+    /// The first id that produced this combination — enough to reproduce it.
+    pub example_id: String,
+}
+
+/// Group failures by what went wrong, not by who was affected.
+///
+/// Twelve queries failing on HTTP 401 is one bug; twelve queries failing twelve
+/// different ways is twelve. The grouping is what tells the two apart, so it is
+/// ordered deterministically (status, then code) rather than by insertion.
+#[must_use]
+pub fn group_failures(failures: &[Failure]) -> Vec<FailureGroup> {
+    let mut grouped: BTreeMap<(FailureStage, u16, String), FailureGroup> = BTreeMap::new();
+    for failure in failures {
+        let key = (
+            failure.stage,
+            failure.status,
+            failure.code.clone().unwrap_or_default(),
+        );
+        grouped
+            .entry(key)
+            .or_insert_with(|| FailureGroup {
+                stage: failure.stage,
+                status: failure.status,
+                code: failure.code.clone(),
+                count: 0,
+                example_id: failure.id.clone(),
+            })
+            .count += 1;
+    }
+    grouped.into_values().collect()
+}
+
+/// `status` and `code` rendered the way a reader thinks of them.
+#[must_use]
+pub fn describe_failure_key(status: u16, code: Option<&str>) -> String {
+    let status = if status == 0 {
+        "no response".to_string()
+    } else {
+        format!("HTTP {status}")
+    };
+    match code {
+        Some(code) => format!("{status} `{code}`"),
+        None => format!("{status} (no error code)"),
+    }
+}
+
+/// The failure table `report.md` prints: one row per distinct cause.
+#[must_use]
+pub fn render_failure_table(failures: &[Failure]) -> String {
+    let groups = group_failures(failures);
+    if groups.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n## Why they failed\n\nGrouped by what the server said, not by which query it said it \
+         to.\n\n| stage | what came back | count | first id |\n|---|---|---:|---|\n",
+    );
+    for group in groups {
+        out.push_str(&format!(
+            "| {} | {} | {} | `{}` |\n",
+            group.stage.as_str(),
+            describe_failure_key(group.status, group.code.as_deref()),
+            group.count,
+            group.example_id
+        ));
+    }
+    out.push_str(
+        "\n`no error code` means the body carried no RFC-9457 `code` member. Every failure, \
+         one per line, is in `metrics.json` under `failures`.\n",
+    );
+    out
 }
 
 /// One query's ranked docnos for the TREC run files.
@@ -101,6 +325,8 @@ pub struct ReportParts<'a> {
     pub n_documents: usize,
     pub n_ingest_failed: usize,
     pub degrades: Vec<String>,
+    /// Per-failure detail, already redacted of the API key by the caller.
+    pub failures: Vec<Failure>,
     /// Strict: every evaluable query, failures included as zeros.
     pub document: Vec<QueryMetrics>,
     pub page: Vec<QueryMetrics>,
@@ -132,6 +358,7 @@ pub fn build_report(parts: ReportParts<'_>) -> RunReport {
         n_documents: parts.n_documents,
         n_ingest_failed: parts.n_ingest_failed,
         degrades: parts.degrades,
+        failures: parts.failures,
         document: aggregate_level(&parts.document, &parts.document_answered),
         page: aggregate_level(&parts.page, &parts.page_answered),
         latency_ms: parts.latency,
@@ -259,6 +486,7 @@ pub fn render_markdown(m: &MetricsFile) -> String {
             m.n_ingest_failed
         ));
     }
+    out.push_str(&render_failure_table(&m.failures));
     out.push_str(
         "\n`n` is the number of queries evaluable at that level: a query with no judged\n\
          document, or no judged page, is left out rather than scored as zero.\n",
@@ -447,6 +675,7 @@ pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize, gain: G
         n_documents: documents.len(),
         n_ingest_failed: 0,
         degrades: Vec::new(),
+        failures: Vec::new(),
         document: aggregate_level(&doc_metrics, &doc_answered),
         page: aggregate_level(&page_metrics, &page_answered),
         latency_ms: LatencyReport {
@@ -543,6 +772,118 @@ mod tests {
             document_run: Vec::new(),
             page_run: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_failure_carries_status_code_and_the_head_of_the_body() {
+        let body = format!(r#"{{"code":"unauthorized","detail":"{}"}}"#, "x".repeat(400));
+        let failure = Failure::from_response(FailureStage::Query, "q1", 401, &body);
+        assert_eq!(failure.status, 401);
+        assert_eq!(failure.code.as_deref(), Some("unauthorized"));
+        assert_eq!(failure.id, "q1");
+        assert_eq!(failure.stage, FailureStage::Query);
+        // Truncated on a character boundary, and marked as truncated.
+        assert_eq!(failure.body.chars().count(), FAILURE_BODY_CHARS + 1);
+        assert!(failure.body.ends_with('…'), "{}", failure.body);
+        assert!(failure.summary().contains("HTTP 401"), "{}", failure.summary());
+    }
+
+    #[test]
+    fn a_body_with_no_code_reports_no_code() {
+        // kb-server answers `{"error": …}`. Inventing a code for it would put a
+        // fabrication in an artifact people trust.
+        let failure = Failure::from_response(
+            FailureStage::Query,
+            "q1",
+            500,
+            r#"{"error":"Internal error"}"#,
+        );
+        assert_eq!(failure.code, None);
+        assert_eq!(error_code("not json at all"), None);
+        assert_eq!(error_code(r#"{"code":""}"#), None);
+        assert_eq!(error_code(r#"{"code":7}"#), None);
+        assert_eq!(
+            error_code(r#"{"type":"about:blank","code":"not_found"}"#),
+            Some("not_found".to_string())
+        );
+    }
+
+    #[test]
+    fn a_local_failure_says_it_never_got_a_response() {
+        let failure = Failure::local(FailureStage::Ingest, "coffee", "the job did not finish");
+        assert_eq!(failure.status, 0);
+        assert_eq!(failure.stage.as_str(), "ingest");
+        assert_eq!(failure.summary(), "ingest coffee failed: no HTTP response");
+    }
+
+    #[test]
+    fn failures_group_by_what_went_wrong_not_by_who_it_happened_to() {
+        let mut failures = vec![
+            Failure::from_response(FailureStage::Query, "q1", 401, r#"{"code":"unauthorized"}"#),
+            Failure::from_response(FailureStage::Query, "q2", 401, r#"{"code":"unauthorized"}"#),
+            Failure::from_response(FailureStage::Query, "q3", 500, r#"{"error":"boom"}"#),
+            Failure::from_response(FailureStage::Query, "q4", 401, r#"{"code":"unauthorized"}"#),
+            Failure::from_response(FailureStage::Ingest, "coffee", 413, r#"{"error":"too big"}"#),
+        ];
+        let groups = group_failures(&failures);
+        assert_eq!(groups.len(), 3, "{groups:?}");
+        // Ordered by stage, status, code: the ingest failure comes first, then
+        // the two query causes.
+        assert_eq!(groups[0].stage, FailureStage::Ingest);
+        assert_eq!(groups[0].status, 413);
+        assert_eq!(groups[0].count, 1);
+        assert_eq!(groups[1].status, 401);
+        assert_eq!(groups[1].count, 3);
+        assert_eq!(groups[1].code.as_deref(), Some("unauthorized"));
+        // The first id that produced it is enough to reproduce the failure.
+        assert_eq!(groups[1].example_id, "q1");
+        assert_eq!(groups[2].status, 500);
+        assert_eq!(groups[2].code, None);
+
+        let table = render_failure_table(&failures);
+        assert!(table.contains("| query | HTTP 401 `unauthorized` | 3 | `q1` |"), "{table}");
+        assert!(table.contains("(no error code)"), "{table}");
+        assert!(render_failure_table(&[]).is_empty());
+        assert!(!group_failures(&failures).is_empty());
+        failures.clear();
+        assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn the_api_key_is_scrubbed_from_a_recorded_body() {
+        let mut failure = Failure::from_response(
+            FailureStage::Query,
+            "q1",
+            401,
+            "key rkb_live_ABC-123 rejected",
+        );
+        failure.redact("rkb_live_ABC-123");
+        assert!(!failure.body.contains("ABC-123"), "{}", failure.body);
+        assert!(failure.body.contains("[redacted]"), "{}", failure.body);
+        // An empty secret must not turn every gap into "[redacted]".
+        assert_eq!(redact_secret("abc", "  "), "abc");
+    }
+
+    #[test]
+    fn the_report_says_why_each_query_failed() {
+        let report = build_report(ReportParts {
+            failures: vec![
+                Failure::from_response(FailureStage::Query, "q1", 401, r#"{"code":"unauthorized"}"#),
+                Failure::from_response(FailureStage::Query, "q2", 401, r#"{"code":"unauthorized"}"#),
+                Failure::from_response(FailureStage::Ingest, "rust-lang", 415, r#"{"error":"nope"}"#),
+            ],
+            ..empty_parts(Some("9.9.9"))
+        });
+        assert_eq!(report.metrics.failures.len(), 3);
+        let md = render_markdown(&report.metrics);
+        assert!(md.contains("## Why they failed"), "{md}");
+        assert!(md.contains("HTTP 401 `unauthorized`"), "{md}");
+        assert!(md.contains("| ingest | HTTP 415"), "{md}");
+        // Every failure, one per line, is in the JSON.
+        let json = serde_json::to_string(&report.metrics).expect("json");
+        assert!(json.contains("\"stage\": \"query\""), "{json}");
+        assert!(json.contains("\"code\": \"unauthorized\""), "{json}");
+        assert!(json.contains("\"id\": \"rust-lang\""), "{json}");
     }
 
     #[test]
