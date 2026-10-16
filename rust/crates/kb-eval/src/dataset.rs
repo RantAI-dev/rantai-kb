@@ -161,6 +161,18 @@ fn load_corpus(dir: &Path) -> Result<Vec<CorpusFile>, DatasetError> {
     }
     // Deterministic order, so an ingest is reproducible.
     files.sort_by(|a, b| a.key.cmp(&b.key));
+    // The file stem *is* the document key, so two files that share one would
+    // silently overwrite each other in the ingest map and one document's chunks
+    // would stop being attributable to the corpus.
+    for pair in files.windows(2) {
+        if pair[0].key == pair[1].key {
+            return Err(DatasetError::DuplicateKey {
+                key: pair[0].key.clone(),
+                first: pair[0].path.clone(),
+                second: pair[1].path.clone(),
+            });
+        }
+    }
     Ok(files)
 }
 
@@ -377,6 +389,12 @@ pub enum DatasetError {
     NotFound(PathBuf),
     #[error("corpus directory has no files: {0}")]
     EmptyCorpus(PathBuf),
+    #[error("two corpus files share the document key {key}: {first} and {second}")]
+    DuplicateKey {
+        key: String,
+        first: PathBuf,
+        second: PathBuf,
+    },
     #[error("could not read {path}: {source}")]
     Io {
         path: PathBuf,
@@ -530,5 +548,18 @@ mod tests {
     fn a_missing_dataset_is_an_error() {
         let err = Dataset::load("/nonexistent/kb-eval-dataset").unwrap_err();
         assert!(matches!(err, DatasetError::NotFound(_)), "{err:?}");
+    }
+
+    #[test]
+    fn two_corpus_files_with_one_stem_are_refused() {
+        let dir = std::env::temp_dir().join(format!("kb-eval-dup-{}", std::process::id()));
+        let corpus = dir.join("corpus");
+        fs::create_dir_all(&corpus).unwrap();
+        fs::write(corpus.join("report.md"), "a").unwrap();
+        fs::write(corpus.join("report.txt"), "b").unwrap();
+        let err = load_corpus(&corpus).unwrap_err();
+        assert!(matches!(err, DatasetError::DuplicateKey { .. }), "{err:?}");
+        assert!(err.to_string().contains("report"), "{err}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
