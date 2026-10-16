@@ -1,29 +1,23 @@
 #!/usr/bin/env bash
 # End-to-end smoke test for rantai-kb (Rust service).
 # Real Postgres 16 + SurrealDB v2 + S3 (rustfs), stub embeddings (dim 8).
+#
+# The stack itself lives in `stack-up.sh` / `stack-down.sh`, so the same live
+# server can be measured by `kb-server eval` or `kb-server eval leak` while it
+# is up; this script is the behavioural walk-through and tears the stack down on
+# the way out.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$WORKSPACE_ROOT/.." && pwd)"
 
-PG_CONTAINER="kb-smoke-pg"
-SURREAL_CONTAINER="kb-smoke-surreal"
-RUSTFS_CONTAINER="kb-smoke-rustfs"
-
-PG_PORT="15432"
-SURREAL_PORT="18000"
-S3_PORT="19000"
-STUB_PORT="19111"
-SERVER_PORT="18080"
+STACK_DIR="${KB_STACK_DIR:-/tmp/kb-stack}"
+SERVER_PORT="${KB_STACK_SERVER_PORT:-18080}"
 
 TMP_DIR="$(mktemp -d -t kb-smoke-XXXXXX)"
 EVENTS_LOG="$TMP_DIR/events.log"
-SERVER_LOG="$TMP_DIR/server.log"
-STUB_LOG="$TMP_DIR/stub.log"
-
-STUB_PID=""
-SERVER_PID=""
+SERVER_LOG="$STACK_DIR/server.log"
 EVENTS_PID=""
 
 cleanup() {
@@ -33,119 +27,20 @@ cleanup() {
     cat "$SERVER_LOG"
   fi
   echo "--- Cleaning up smoke test resources ---"
-  if [ -n "$EVENTS_PID" ] && kill -0 "$EVENTS_PID" 2>/dev/null; then
-    kill "$EVENTS_PID" 2>/dev/null || true
-  fi
-  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    kill "$SERVER_PID" 2>/dev/null || true
-  fi
-  if [ -n "$STUB_PID" ] && kill -0 "$STUB_PID" 2>/dev/null; then
-    kill "$STUB_PID" 2>/dev/null || true
-  fi
-  docker rm -f "$PG_CONTAINER" "$SURREAL_CONTAINER" "$RUSTFS_CONTAINER" 2>/dev/null || true
+  "$SCRIPT_DIR/stack-down.sh"
   rm -rf "$TMP_DIR"
   echo "--- Cleanup complete ---"
 }
 trap cleanup EXIT
 
-echo "=== 1. Starting clean containers ==="
-docker rm -f "$PG_CONTAINER" "$SURREAL_CONTAINER" "$RUSTFS_CONTAINER" 2>/dev/null || true
+echo "=== 0. Bringing up the kb-smoke stack ==="
+"$SCRIPT_DIR/stack-up.sh"
+# shellcheck disable=SC1091
+source "$STACK_DIR/stack.env"
 
-docker run -d --name "$PG_CONTAINER" \
-  -p "${PG_PORT}:5432" \
-  -e POSTGRES_USER=kb \
-  -e POSTGRES_PASSWORD=kb \
-  -e POSTGRES_DB=rantai_kb \
-  postgres:16
-
-docker run -d --name "$SURREAL_CONTAINER" \
-  -p "${SURREAL_PORT}:8000" \
-  surrealdb/surrealdb:v2 start --user root --pass root memory
-
-docker run -d --name "$RUSTFS_CONTAINER" \
-  -p "${S3_PORT}:9000" \
-  -e MINIO_ROOT_USER=kbadmin \
-  -e MINIO_ROOT_PASSWORD=kbsecret123 \
-  rustfs/rustfs:latest
-
-echo "Waiting for Postgres to be ready..."
-for _ in {1..30}; do
-  if docker exec "$PG_CONTAINER" pg_isready -U kb >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-
-echo "Waiting for SurrealDB to be ready..."
-for _ in {1..30}; do
-  if curl -s "http://127.0.0.1:${SURREAL_PORT}/health" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-
-echo "Waiting for RustFS (S3) to be ready..."
-for _ in {1..30}; do
-  if curl -s "http://127.0.0.1:${S3_PORT}/minio/health/ready" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-
-echo "Creating S3 bucket rantai-kb..."
-docker run --rm --network host \
-  -e AWS_ACCESS_KEY_ID=kbadmin \
-  -e AWS_SECRET_ACCESS_KEY=kbsecret123 \
-  amazon/aws-cli:latest --endpoint-url "http://127.0.0.1:${S3_PORT}" s3 mb s3://rantai-kb
-
-echo "=== 2. Starting stub OpenAI embedding server ==="
-STUB_BIN="$WORKSPACE_ROOT/target/debug/examples/stub_embeddings"
-if [ ! -f "$STUB_BIN" ]; then
-  cargo build -p kb-server --example stub_embeddings --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
-fi
-"$STUB_BIN" "127.0.0.1:${STUB_PORT}" 8 > "$STUB_LOG" 2>&1 &
-STUB_PID=$!
-
-for _ in {1..20}; do
-  if curl -s "http://127.0.0.1:${STUB_PORT}/health" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 0.5
-done
-echo "Stub embeddings running on 127.0.0.1:${STUB_PORT} (PID: $STUB_PID)"
-
-export DATABASE_URL="postgresql://kb:kb@127.0.0.1:${PG_PORT}/rantai_kb?schema=public"
-export SURREAL_DB_URL="http://127.0.0.1:${SURREAL_PORT}"
-export SURREAL_DB_USER="root"
-export SURREAL_DB_PASS="root"
-export SURREAL_DB_NAMESPACE="rantai"
-export SURREAL_DB_DATABASE="knowledge"
-export S3_ENDPOINT="http://127.0.0.1:${S3_PORT}"
-export S3_ACCESS_KEY_ID="kbadmin"
-export S3_SECRET_ACCESS_KEY="kbsecret123"
-export S3_BUCKET="rantai-kb"
-export S3_ENABLE_PATH_STYLE="1"
-export KB_EMBEDDING_BASE_URL="http://127.0.0.1:${STUB_PORT}/embeddings"
-export KB_EMBEDDING_API_KEY="stub"
-export KB_EMBEDDING_MODEL="stub"
-export KB_EMBEDDING_DIM="8"
-export KB_ENTITY_EXTRACTION_ENABLED="false"
-export KB_WORKER_ENABLED="true"
-export PORT="${SERVER_PORT}"
-export KB_MIGRATIONS_DIR="$REPO_ROOT/prisma/migrations"
-export RUST_LOG="info,kb_server=debug,kb_store_blob=debug,kb_engine=debug"
-
-KB_SERVER_BIN="$WORKSPACE_ROOT/target/debug/kb-server"
-if [ ! -f "$KB_SERVER_BIN" ]; then
-  cargo build -p kb-server --bin kb-server --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
-fi
-
-echo "=== 3. Running migrations ==="
-"$KB_SERVER_BIN" migrate
-
-echo "=== 4. Applying vector schema ==="
-"$KB_SERVER_BIN" apply-schema
-
+# Containers, S3 bucket, stub embedder, migrations, schema and kb-server were
+# all started by stack-up.sh above; the API keys are minted here because they are
+# part of what this script asserts, not part of the infrastructure.
 echo "=== 5. Minting API keys ==="
 KEY_OUTPUT=$("$KB_SERVER_BIN" create-api-key "smoke-tenant" "smoke-key" --scopes kb:read,kb:write)
 echo "$KEY_OUTPUT"
@@ -155,18 +50,6 @@ test -n "$API_KEY"
 KEY2_OUTPUT=$("$KB_SERVER_BIN" create-api-key "other-tenant" "other-key" --scopes kb:read,kb:write)
 OTHER_KEY=$(echo "$KEY2_OUTPUT" | grep -o 'rkb_[a-zA-Z0-9_-]*' | head -n 1)
 test -n "$OTHER_KEY"
-
-echo "=== 6. Starting kb-server ==="
-"$KB_SERVER_BIN" serve > "$SERVER_LOG" 2>&1 &
-SERVER_PID=$!
-
-for _ in {1..30}; do
-  if curl -s "http://127.0.0.1:${SERVER_PORT}/health" >/dev/null 2>&1; then
-    break
-  fi
-  sleep 0.5
-done
-echo "kb-server listening on port ${SERVER_PORT} (PID: $SERVER_PID)"
 
 echo "=== 7. Health & Auth checks ==="
 HEALTH_RESP=$(curl -s "http://127.0.0.1:${SERVER_PORT}/health")
