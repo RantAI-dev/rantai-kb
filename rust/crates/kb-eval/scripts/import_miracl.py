@@ -51,6 +51,12 @@ def main():
     parser.add_argument("--num-queries", type=int, default=200, help="Number of dev queries to sample (default: 200)")
     parser.add_argument("--num-distractors", type=int, default=1000, help="Number of unjudged distractor passages (default: 1000)")
     parser.add_argument(
+        "--force-qids",
+        type=str,
+        default="",
+        help="Comma-separated query IDs to force into the sampled topics",
+    )
+    parser.add_argument(
         "--out-dir",
         type=Path,
         default=Path(__file__).resolve().parent.parent / "datasets" / "miracl-id-200",
@@ -62,6 +68,8 @@ def main():
     print(f"  Seed: {args.seed}")
     print(f"  Num queries: {args.num_queries}")
     print(f"  Num distractors: {args.num_distractors}")
+    if args.force_qids:
+        print(f"  Forced query IDs: {args.force_qids}")
     print(f"  Output directory: {args.out_dir}")
 
     # 1. Download dev topics and qrels from miracl/miracl
@@ -92,7 +100,12 @@ def main():
 
     # 3. Sample queries
     rng = random.Random(args.seed)
-    sampled_topics = rng.sample(topics, args.num_queries)
+    forced_qids = set(q.strip() for q in args.force_qids.split(",") if q.strip())
+    forced_topics = [t for t in topics if t[0] in forced_qids]
+    remaining_topics = [t for t in topics if t[0] not in forced_qids]
+    needed = max(0, args.num_queries - len(forced_topics))
+    sampled_remaining = rng.sample(remaining_topics, needed)
+    sampled_topics = forced_topics + sampled_remaining
     sampled_topics.sort(key=lambda t: int(t[0]))
     sampled_qids = set(t[0] for t in sampled_topics)
     print(f"Sampled {len(sampled_topics)} queries with seed {args.seed}")

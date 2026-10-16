@@ -149,8 +149,13 @@ if [ "$KB_STACK_EMBEDDINGS" = "tei" ]; then
   echo "TEI embedding server ready on 127.0.0.1:${TEI_EMBED_PORT}"
 else
   echo "Starting stub embedding server on port ${STUB_PORT}..."
-  nohup "$STUB_BIN" "127.0.0.1:${STUB_PORT}" 8 > "$STUB_LOG" 2>&1 &
-  echo $! > "$STUB_PID_FILE"
+  if command -v tmux >/dev/null 2>&1; then
+    tmux kill-session -t kb-smoke-stub 2>/dev/null || true
+    tmux new-session -d -s kb-smoke-stub "bash -c 'echo \$\$ > \"$STUB_PID_FILE\" && exec \"$STUB_BIN\" \"127.0.0.1:${STUB_PORT}\" 8 > \"$STUB_LOG\" 2>&1'"
+  else
+    nohup "$STUB_BIN" "127.0.0.1:${STUB_PORT}" 8 > "$STUB_LOG" 2>&1 &
+    echo $! > "$STUB_PID_FILE"
+  fi
 
   for _ in {1..30}; do
     if curl -s "http://127.0.0.1:${STUB_PORT}/health" >/dev/null 2>&1; then
@@ -258,8 +263,13 @@ echo "=== 4. Migrations and vector schema ==="
 "$KB_SERVER_BIN" apply-schema | tail -n 1
 
 echo "=== 5. Starting kb-server ==="
-nohup "$KB_SERVER_BIN" serve > "$SERVER_LOG" 2>&1 &
-echo $! > "$SERVER_PID_FILE"
+if command -v tmux >/dev/null 2>&1; then
+  tmux kill-session -t kb-smoke-server 2>/dev/null || true
+  tmux new-session -d -s kb-smoke-server "bash -c 'source \"$STACK_ENV\" && echo \$\$ > \"$SERVER_PID_FILE\" && exec \"$KB_SERVER_BIN\" serve > \"$SERVER_LOG\" 2>&1'"
+else
+  nohup "$KB_SERVER_BIN" serve > "$SERVER_LOG" 2>&1 &
+  echo $! > "$SERVER_PID_FILE"
+fi
 
 for _ in {1..60}; do
   if curl -s "http://127.0.0.1:${SERVER_PORT}/health" >/dev/null 2>&1; then

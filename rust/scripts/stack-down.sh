@@ -30,6 +30,9 @@ stop_pid_file() {
 stop_pid_file "$SERVER_PID_FILE" "kb-server"
 stop_pid_file "$STUB_PID_FILE" "stub embeddings"
 
+tmux kill-session -t kb-smoke-server 2>/dev/null || true
+tmux kill-session -t kb-smoke-stub 2>/dev/null || true
+
 echo "removing containers kb-smoke-pg kb-smoke-surreal kb-smoke-rustfs kb-smoke-tei-embed kb-smoke-tei-rerank"
 docker rm -f kb-smoke-pg kb-smoke-surreal kb-smoke-rustfs kb-smoke-tei-embed kb-smoke-tei-rerank >/dev/null 2>&1 || true
 

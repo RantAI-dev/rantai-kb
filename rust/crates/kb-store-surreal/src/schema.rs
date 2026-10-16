@@ -14,6 +14,20 @@ use crate::client::SurrealChunkStore;
 /// The statements, in order, for an embedding space of `dim` dimensions.
 #[must_use]
 pub fn schema_statements(dim: u32) -> Vec<String> {
+    let neutral = std::env::var("KB_EXP_ANALYZER_NEUTRAL")
+        .map(|v| v.trim() == "true" || v.trim() == "1")
+        .unwrap_or(false);
+    let (analyzer_sql, index_sql) = if neutral {
+        (
+            "DEFINE ANALYZER OVERWRITE kb_en TOKENIZERS class FILTERS lowercase, ascii;".to_string(),
+            "DEFINE INDEX OVERWRITE content_search_idx ON document_chunk FIELDS content SEARCH ANALYZER kb_en BM25(1.2, 0.75) HIGHLIGHTS;".to_string(),
+        )
+    } else {
+        (
+            "DEFINE ANALYZER IF NOT EXISTS kb_en TOKENIZERS class FILTERS lowercase, snowball(english);".to_string(),
+            "DEFINE INDEX IF NOT EXISTS content_search_idx ON document_chunk FIELDS content SEARCH ANALYZER kb_en BM25(1.2, 0.75) HIGHLIGHTS;".to_string(),
+        )
+    };
     vec![
         "DEFINE TABLE IF NOT EXISTS document_chunk SCHEMALESS;".to_string(),
         "DEFINE FIELD IF NOT EXISTS document_id ON document_chunk TYPE string;".to_string(),
@@ -23,8 +37,8 @@ pub fn schema_statements(dim: u32) -> Vec<String> {
         "DEFINE FIELD IF NOT EXISTS contextual_prefix ON document_chunk TYPE option<string>;".to_string(),
         "DEFINE FIELD IF NOT EXISTS embedding_model ON document_chunk TYPE option<string>;".to_string(),
         "DEFINE INDEX IF NOT EXISTS document_id_idx ON document_chunk FIELDS document_id;".to_string(),
-        "DEFINE ANALYZER IF NOT EXISTS kb_en TOKENIZERS class FILTERS lowercase, snowball(english);".to_string(),
-        "DEFINE INDEX IF NOT EXISTS content_search_idx ON document_chunk FIELDS content SEARCH ANALYZER kb_en BM25(1.2, 0.75) HIGHLIGHTS;".to_string(),
+        analyzer_sql,
+        index_sql,
         format!("DEFINE INDEX IF NOT EXISTS embedding_idx ON document_chunk FIELDS embedding HNSW DIMENSION {dim} DIST COSINE;"),
     ]
 }
@@ -56,7 +70,10 @@ mod tests {
         // A statement without IF NOT EXISTS fails on the second deploy, which
         // is the case the container entrypoint hits on every restart.
         for sql in schema_statements(8) {
-            assert!(sql.contains("IF NOT EXISTS"), "not idempotent: {sql}");
+            assert!(
+                sql.contains("IF NOT EXISTS") || sql.contains("OVERWRITE"),
+                "not idempotent: {sql}"
+            );
         }
     }
 
