@@ -38,3 +38,4 @@ uuid = { workspace = true, features = ["v5"] }
 
 [dev-dependencies]
 kb-engine = { path = "../kb-engine", features = ["test-utils"] }
+kb-eval = { path = "../kb-eval" }

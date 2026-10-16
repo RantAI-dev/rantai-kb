@@ -1402,6 +1402,7 @@ dependencies = [
  "async-trait",
  "kb-core",
  "kb-engine",
+ "kb-eval",
  "kb-ports",
  "qdrant-client",
  "serde",
