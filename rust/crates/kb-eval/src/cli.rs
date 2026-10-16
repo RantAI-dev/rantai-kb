@@ -162,9 +162,9 @@ fn gate_on_failures(m: &MetricsFile, allow_failures: bool) -> Result<(), EvalErr
         return Ok(());
     }
     Err(EvalError::Failed(format!(
-        "{} quer(y|ies) and {} corpus file(s) failed; pass --allow-failures to exit 0 anyway \
-         (metrics.json and report.md were written)",
-        m.n_failed, m.n_ingest_failed
+        "{} of {} queries and {} corpus file(s) failed; pass --allow-failures to exit 0 \
+         anyway (metrics.json and report.md were written)",
+        m.n_failed, m.n_queries, m.n_ingest_failed
     )))
 }
 
@@ -434,7 +434,8 @@ mod tests {
             .expect_err("a failed run must not exit zero")
             .to_string();
         assert!(err.contains("--allow-failures"), "{err}");
-        assert!(err.contains("3 quer"), "{err}");
+        assert!(err.contains("3 of 12 queries"), "{err}");
+        assert!(err.contains("2 corpus file(s)"), "{err}");
     }
 
     #[tokio::test]
