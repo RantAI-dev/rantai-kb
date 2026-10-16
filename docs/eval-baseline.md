@@ -527,6 +527,29 @@ documents. **This is not a new quality row**; the corpus differs from §4's and
 the section exists for latency. It is recorded so nobody mistakes a latency
 change for a quality change, or the reverse.
 
+### Qdrant RetrievalIndex (L.2)
+
+Measurements of the `kb-store-qdrant` adapter against Qdrant v1.19.2 (pinned in `kb-smoke-qdrant`), evaluated on the full `miracl-id-200` benchmark (**2,933 corpus documents**, single chunk each, 200 dev queries) on the same 6-core machine (Intel Xeon E5-2680 v4 @ 2.40 GHz, 11 GB RAM, Linux).
+
+#### Benchmark results (200 queries, 2,933 docs)
+
+| Arm / Representation | Scope filter | p50 latency | p95 latency | Notes |
+|---|---|---:|---:|---|
+| **Sparse (IDF BM25)** | all 2,933 doc IDs | **12.11 ms** | **15.42 ms** | Worst-case match-any tenant + doc scope filter |
+| **Sparse (IDF BM25)** | 10 doc IDs | **1.82 ms** | **2.27 ms** | Narrow document scope filter |
+| **Dense (1024-d Cosine HNSW)** | all 2,933 doc IDs | **8.51 ms** | **11.76 ms** | HNSW traversal with index payload scope filter |
+| **Dense (1024-d Cosine HNSW)** | 10 doc IDs | **2.03 ms** | **2.30 ms** | Exact/filtered kNN |
+
+#### What is comparable: index-level timing vs. end-to-end `/v1/search`
+
+- **Index-level timing (apples-to-apples)**:
+  - SurrealDB's index-level vector arm (`detail.vectorArm`) was **1,590.2 ms p50 / 1,670.3 ms p95** on 1,687 chunks because it performed a linear cosine scan across every chunk in scope without using HNSW.
+  - Qdrant's index-level dense HNSW arm (`RetrievalIndex::search` via gRPC) is **8.51 ms p50 / 11.76 ms p95** on 2,933 chunks — a **~187x latency reduction** at the storage/retrieval layer, dropping to **~2.0 ms** when scoped to 10 documents.
+  - SurrealDB's keyword arm collapsed to 0 hits for natural language questions due to boolean `@@` AND semantics. Qdrant's sparse IDF arm completes in **12.11 ms p50 / 15.42 ms p95** while delivering full OR-of-terms BM25 quality (**0.726 nDCG@10**, **0.911 Recall@10** on default avgdl).
+- **End-to-end `/v1/search`**:
+  - The numbers reported above measure the pure index port (`RetrievalIndex::search`): network gRPC round trip to Qdrant, payload filtering on `tenant_id` and `document_id`, HNSW / sparse index scoring, and candidate mapping.
+  - They do **not** include query embedding generation (which takes ~640 ms on CPU via TEI), reranking, or HTTP layer overhead. Once the engine switches to Qdrant, query embedding generation will be the dominant stage in `/v1/search`, exactly as anticipated in `docs/plan-best-multimodal-kb.md` §L.2.
+
 ### What this section does NOT prove
 
 * **One store, one box.** 6 cores, 11 GB, no GPU. TEI on CPU is 640 ms per
