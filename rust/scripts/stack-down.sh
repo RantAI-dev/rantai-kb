@@ -33,8 +33,8 @@ stop_pid_file "$STUB_PID_FILE" "stub embeddings"
 tmux kill-session -t kb-smoke-server 2>/dev/null || true
 tmux kill-session -t kb-smoke-stub 2>/dev/null || true
 
-echo "removing containers kb-smoke-pg kb-smoke-surreal kb-smoke-rustfs kb-smoke-tei-embed kb-smoke-tei-rerank"
-docker rm -f kb-smoke-pg kb-smoke-surreal kb-smoke-rustfs kb-smoke-tei-embed kb-smoke-tei-rerank >/dev/null 2>&1 || true
+echo "removing containers kb-smoke-pg kb-smoke-surreal kb-smoke-rustfs kb-smoke-tei-embed kb-smoke-tei-rerank kb-smoke-qdrant"
+docker rm -f kb-smoke-pg kb-smoke-surreal kb-smoke-rustfs kb-smoke-tei-embed kb-smoke-tei-rerank kb-smoke-qdrant >/dev/null 2>&1 || true
 
 rm -f "$STACK_DIR/stack.env"
 echo "kb-smoke stack is down (logs left in $STACK_DIR for inspection)"

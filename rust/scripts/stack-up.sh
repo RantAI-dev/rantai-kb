@@ -12,6 +12,7 @@
 # Opt-in modes:
 #   KB_STACK_EMBEDDINGS=tei         # starts kb-smoke-tei-embed (Qwen3-Embedding-0.6B, dim 1024)
 #   KB_STACK_RERANK=tei             # starts kb-smoke-tei-rerank (bge-reranker-v2-m3)
+#   KB_STACK_QDRANT=1               # starts kb-smoke-qdrant (Qdrant v1.19.2; HTTP 6333, gRPC 6334)
 #
 # ONLY the `kb-smoke-*` containers belong to this stack. This machine runs
 # other people's containers (ClickHouse, Postgres); `stack-down.sh` never names
@@ -27,6 +28,7 @@ SURREAL_CONTAINER="kb-smoke-surreal"
 RUSTFS_CONTAINER="kb-smoke-rustfs"
 TEI_EMBED_CONTAINER="kb-smoke-tei-embed"
 TEI_RERANK_CONTAINER="kb-smoke-tei-rerank"
+QDRANT_CONTAINER="kb-smoke-qdrant"
 
 PG_PORT="${KB_STACK_PG_PORT:-15432}"
 SURREAL_PORT="${KB_STACK_SURREAL_PORT:-18000}"
@@ -35,9 +37,18 @@ STUB_PORT="${KB_STACK_STUB_PORT:-19111}"
 SERVER_PORT="${KB_STACK_SERVER_PORT:-18080}"
 TEI_EMBED_PORT="${KB_STACK_TEI_EMBED_PORT:-18081}"
 TEI_RERANK_PORT="${KB_STACK_TEI_RERANK_PORT:-18082}"
+QDRANT_HTTP_PORT="${KB_STACK_QDRANT_HTTP_PORT:-16333}"
+QDRANT_GRPC_PORT="${KB_STACK_QDRANT_GRPC_PORT:-16334}"
+
+# Pinned. The Qdrant adapter (kb-store-qdrant) targets the Query API with
+# `prefetch` + RRF fusion, which needs >= 1.10, and the tiered-multitenancy and
+# per-tenant `idf` corpus-filter notes in docs/architecture-target.md §2 want
+# 1.16 / 1.19 respectively. 1.19.2 is the current release (2026-10-16).
+QDRANT_IMAGE="${KB_STACK_QDRANT_IMAGE:-qdrant/qdrant:v1.19.2}"
 
 KB_STACK_EMBEDDINGS="${KB_STACK_EMBEDDINGS:-stub}"
 KB_STACK_RERANK="${KB_STACK_RERANK:-none}"
+KB_STACK_QDRANT="${KB_STACK_QDRANT:-0}"
 KB_STACK_INGEST_POLL_MS="${KB_STACK_INGEST_POLL_MS:-500}"
 KB_MODELS_CACHE="${KB_MODELS_CACHE:-$HOME/.cache/kb-models}"
 
@@ -69,7 +80,7 @@ free -h
 
 echo "=== 1. Starting kb-smoke base containers ==="
 # Only kb-smoke-* names. Nothing else on this host is ours.
-docker rm -f "$PG_CONTAINER" "$SURREAL_CONTAINER" "$RUSTFS_CONTAINER" "$TEI_EMBED_CONTAINER" "$TEI_RERANK_CONTAINER" >/dev/null 2>&1 || true
+docker rm -f "$PG_CONTAINER" "$SURREAL_CONTAINER" "$RUSTFS_CONTAINER" "$TEI_EMBED_CONTAINER" "$TEI_RERANK_CONTAINER" "$QDRANT_CONTAINER" >/dev/null 2>&1 || true
 
 docker run -d --name "$PG_CONTAINER" \
   -p "${PG_PORT}:5432" \
@@ -117,6 +128,31 @@ docker run --rm --network host \
   -e AWS_ACCESS_KEY_ID=kbadmin \
   -e AWS_SECRET_ACCESS_KEY=kbsecret123 \
   amazon/aws-cli:latest --endpoint-url "http://127.0.0.1:${S3_PORT}" s3 mb s3://rantai-kb >/dev/null
+
+if [ "$KB_STACK_QDRANT" = "1" ]; then
+  # Opt-in (docs/plan-best-multimodal-kb.md step L.2): Qdrant is the store the
+  # engine will move to, but nothing is switched over to it in this round, so CI
+  # never starts it and the default stack is unchanged.
+  echo "Starting Qdrant (${QDRANT_IMAGE}) http ${QDRANT_HTTP_PORT} / grpc ${QDRANT_GRPC_PORT}..."
+  docker run -d --name "$QDRANT_CONTAINER" \
+    -p "${QDRANT_HTTP_PORT}:6333" \
+    -p "${QDRANT_GRPC_PORT}:6334" \
+    "$QDRANT_IMAGE" >/dev/null
+
+  for _ in {1..60}; do
+    if curl -s "http://127.0.0.1:${QDRANT_HTTP_PORT}/readyz" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+
+  if ! curl -sf "http://127.0.0.1:${QDRANT_HTTP_PORT}/readyz" >/dev/null 2>&1; then
+    echo "Qdrant did not come up ready; container logs:" >&2
+    docker logs "$QDRANT_CONTAINER" | tail -n 30 >&2 || true
+    exit 1
+  fi
+  echo "Qdrant ready on 127.0.0.1:${QDRANT_HTTP_PORT}"
+fi
 
 echo "=== 2. Building binaries (before memory-heavy models start) ==="
 if [ "$KB_STACK_EMBEDDINGS" != "tei" ]; then
@@ -220,6 +256,16 @@ export KB_STACK_TEI_EMBED_CONTAINER="$TEI_EMBED_CONTAINER"
 export KB_STACK_TEI_RERANK_CONTAINER="$TEI_RERANK_CONTAINER"
 EOF
 
+# QDRANT_URL is exported only when Qdrant was actually started, so a script that
+# sources stack.env cannot be handed a URL that answers nothing.
+if [ "$KB_STACK_QDRANT" = "1" ]; then
+  cat >> "$STACK_ENV" <<EOF
+export QDRANT_URL="http://127.0.0.1:${QDRANT_HTTP_PORT}"
+export QDRANT_GRPC_URL="http://127.0.0.1:${QDRANT_GRPC_PORT}"
+export KB_STACK_QDRANT_CONTAINER="$QDRANT_CONTAINER"
+EOF
+fi
+
 if [ "$KB_STACK_EMBEDDINGS" = "tei" ]; then
   cat >> "$STACK_ENV" <<EOF
 export KB_EMBEDDING_BASE_URL="http://127.0.0.1:${TEI_EMBED_PORT}/v1/embeddings"
@@ -295,6 +341,9 @@ else
 fi
 if [ "$KB_STACK_RERANK" = "tei" ]; then
   echo "  tei-rerank  http://127.0.0.1:${TEI_RERANK_PORT} (bge-reranker-v2-m3)"
+fi
+if [ "$KB_STACK_QDRANT" = "1" ]; then
+  echo "  qdrant      http://127.0.0.1:${QDRANT_HTTP_PORT} (grpc 127.0.0.1:${QDRANT_GRPC_PORT}, ${QDRANT_IMAGE})"
 fi
 echo "  source $STACK_ENV"
 echo "  $SCRIPT_DIR/stack-down.sh   # stop"
