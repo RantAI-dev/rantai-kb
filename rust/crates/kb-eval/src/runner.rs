@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::dataset::{Dataset, DatasetError, Qrel, gold_for_documents, gold_for_pages, page_key};
 use crate::metrics::{
-    LatencyReport, QueryMetrics, evaluate_query, latency_report, unique_first_occurrence,
+    Gain, LatencyReport, QueryMetrics, evaluate_query, latency_report, unique_first_occurrence,
 };
 use crate::report::{ReportParts, RunReport, TrecRanking, build_report, write_outputs};
 
@@ -31,6 +31,8 @@ pub struct RunnerConfig {
     pub out_dir: PathBuf,
     pub skip_ingest: bool,
     pub label: String,
+    /// Which nDCG gain the whole run is scored under. Recorded in every output.
+    pub gain: Gain,
     /// How long to wait for one ingest job before giving up on it.
     pub job_timeout: Duration,
     pub poll_interval: Duration,
@@ -53,6 +55,7 @@ impl RunnerConfig {
             out_dir: PathBuf::from("eval-out"),
             skip_ingest: false,
             label: "run".to_string(),
+            gain: Gain::default(),
             job_timeout: Duration::from_secs(900),
             poll_interval: Duration::from_millis(500),
         }
@@ -107,6 +110,7 @@ struct Answered<'a> {
 /// nothing, because that would turn an outage into a quality regression.
 #[derive(Debug, Default)]
 struct Scoreboard {
+    gain: Gain,
     document: Vec<QueryMetrics>,
     page: Vec<QueryMetrics>,
     document_run: Vec<TrecRanking>,
@@ -133,10 +137,20 @@ impl Scoreboard {
         }
         // A query with no positive judgement at a level is not evaluable
         // there and is left out of that level's mean, as BEIR does.
-        if let Some(m) = evaluate_query(answer.doc_keys, &gold_for_documents(answer.qrels), k) {
+        if let Some(m) = evaluate_query(
+            answer.doc_keys,
+            &gold_for_documents(answer.qrels),
+            k,
+            self.gain,
+        ) {
             self.document.push(m);
         }
-        if let Some(m) = evaluate_query(answer.page_keys, &gold_for_pages(answer.qrels), k) {
+        if let Some(m) = evaluate_query(
+            answer.page_keys,
+            &gold_for_pages(answer.qrels),
+            k,
+            self.gain,
+        ) {
             self.page.push(m);
         }
         // The run files carry every answered query, including one that found
@@ -182,7 +196,10 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
         .map(|(k, v)| (v.clone(), k.clone()))
         .collect();
 
-    let mut board = Scoreboard::default();
+    let mut board = Scoreboard {
+        gain: config.gain,
+        ..Scoreboard::default()
+    };
     for query in &dataset.queries {
         let started = Instant::now();
         let search = search_one(&client, &config, &query.text).await;
@@ -217,6 +234,7 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
     let report = build_report(ReportParts {
         label: &config.label,
         dataset: &dataset.name,
+        gain: config.gain,
         k: config.k,
         max_chunks: config.max_chunks,
         n_queries: board.n_queries,

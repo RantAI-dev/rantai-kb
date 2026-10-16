@@ -11,13 +11,12 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::process::Command;
 
 use serde::Serialize;
 
 use crate::dataset::{Qrel, gold_for_documents, gold_for_pages};
 use crate::metrics::{
-    Gold, LatencyReport, LevelReport, QueryMetrics, aggregate_level, evaluate_query,
+    Gain, Gold, LatencyReport, LevelReport, QueryMetrics, aggregate_level, evaluate_query,
     unique_first_occurrence,
 };
 
@@ -33,7 +32,13 @@ pub struct MetricsFile {
     pub label: String,
     pub dataset: String,
     pub timestamp: String,
-    pub git_commit: String,
+    /// The commit of the harness binary that produced these numbers, baked in
+    /// at build time. It is not the commit of the server under test — see
+    /// `server_version` for what the server says about itself.
+    pub harness_commit: String,
+    /// The nDCG gain in force. `linear` matches trec_eval/BEIR/MTEB/ViDoRe;
+    /// `exponential` is Burges' variant and is not comparable with them.
+    pub gain: String,
     pub k: usize,
     pub max_chunks: u32,
     /// Queries attempted.
@@ -75,6 +80,7 @@ pub struct RunReport {
 pub struct ReportParts<'a> {
     pub label: &'a str,
     pub dataset: &'a str,
+    pub gain: Gain,
     pub k: usize,
     pub max_chunks: u32,
     pub n_queries: usize,
@@ -98,7 +104,8 @@ pub fn build_report(parts: ReportParts<'_>) -> RunReport {
         label: parts.label.to_string(),
         dataset: parts.dataset.to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
-        git_commit: git_commit(),
+        harness_commit: harness_commit(),
+        gain: parts.gain.as_str().to_string(),
         k: parts.k,
         max_chunks: parts.max_chunks,
         n_queries: parts.n_queries,
@@ -119,16 +126,17 @@ pub fn build_report(parts: ReportParts<'_>) -> RunReport {
     }
 }
 
-/// The short git commit of the working tree, or `unknown`.
+/// The git commit this binary was **built** from, or `unknown`.
+///
+/// Baked in by `build.rs` (`git rev-parse` at compile time), never read from
+/// the working directory at run time: a harness invoked from `/tmp` must still
+/// report the code that produced the number, and a working-tree read would
+/// silently attribute the harness's checkout to the server under test.
 #[must_use]
-pub fn git_commit() -> String {
-    let output = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output();
-    match output {
-        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
-        _ => "unknown".to_string(),
-    }
+pub fn harness_commit() -> String {
+    option_env!("KB_EVAL_HARNESS_COMMIT")
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 /// Write `metrics.json`, `report.md`, `run.trec` and `run.page.trec` into `dir`.
@@ -160,7 +168,8 @@ pub fn render_markdown(m: &MetricsFile) -> String {
     let mut out = String::new();
     out.push_str(&format!("# Retrieval evaluation — {}\n\n", m.label));
     out.push_str(&format!("- dataset: `{}`\n", m.dataset));
-    out.push_str(&format!("- git commit: `{}`\n", m.git_commit));
+    out.push_str(&format!("- harness commit: `{}`\n", m.harness_commit));
+    out.push_str(&format!("- nDCG gain: **{}**\n", m.gain));
     out.push_str(&format!("- timestamp: {}\n", m.timestamp));
     out.push_str(&format!("- cutoff k: {}\n", m.k));
     out.push_str(&format!("- max chunks per query: {}\n", m.max_chunks));
@@ -313,7 +322,7 @@ pub fn parse_trec(text: &str) -> Result<Vec<TrecRanking>, String> {
 /// This is the same arithmetic the online runner uses, so a cross-check against
 /// an external tool compares like with like. Returns the report as a string.
 #[must_use]
-pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize) -> String {
+pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize, gain: Gain) -> String {
     let mut per_query: HashMap<&str, Vec<&Qrel>> = HashMap::new();
     let mut documents: HashSet<String> = HashSet::new();
     for qrel in qrels {
@@ -335,7 +344,7 @@ pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize) -> Stri
         let doc_gold: Gold = gold_for_documents(&owned);
         let page_gold: Gold = gold_for_pages(&owned);
         let doc_ranked = unique_first_occurrence(ranking.docnos.iter().cloned());
-        if let Some(m) = evaluate_query(&doc_ranked, &doc_gold, k) {
+        if let Some(m) = evaluate_query(&doc_ranked, &doc_gold, k, gain) {
             doc_metrics.push(m);
         }
         // A run file of document-level keys carries no pages, so the page arm
@@ -344,7 +353,7 @@ pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize) -> Stri
             .into_iter()
             .filter(|key| crate::dataset::page_of(key).is_some())
             .collect();
-        if let Some(m) = evaluate_query(&page_ranked, &page_gold, k) {
+        if let Some(m) = evaluate_query(&page_ranked, &page_gold, k, gain) {
             page_metrics.push(m);
         }
     }
@@ -352,7 +361,8 @@ pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize) -> Stri
         label: "score".to_string(),
         dataset: "offline".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
-        git_commit: git_commit(),
+        harness_commit: harness_commit(),
+        gain: gain.as_str().to_string(),
         k,
         max_chunks: 0,
         n_queries,
@@ -425,7 +435,7 @@ mod tests {
             query_id: "q1".into(),
             docnos: vec!["a".into()],
         }];
-        let report = score_offline(&qrels, &rankings, 10);
+        let report = score_offline(&qrels, &rankings, 10, Gain::Linear);
         assert!(report.contains("1.000"), "{report}");
     }
 
@@ -435,11 +445,13 @@ mod tests {
             &["a".to_string()],
             &HashMap::from([("a".to_string(), 1)]),
             10,
+            Gain::Linear,
         )
         .expect("evaluable");
         let report = build_report(ReportParts {
             label: "run",
             dataset: "tiny",
+            gain: Gain::Linear,
             k: 10,
             max_chunks: 50,
             n_queries: 5,
@@ -481,6 +493,8 @@ mod tests {
         let json = serde_json::to_string(&report.metrics).expect("json");
         assert!(json.contains("\"n_failed\":2"), "{json}");
         assert!(json.contains("\"n_ingest_failed\":1"), "{json}");
-        assert!(json.contains("\"git_commit\""), "{json}");
+        assert!(json.contains("\"harness_commit\""), "{json}");
+        assert!(json.contains("\"gain\":\"linear\""), "{json}");
+        assert!(markdown.contains("nDCG gain: **linear**"), "{markdown}");
     }
 }

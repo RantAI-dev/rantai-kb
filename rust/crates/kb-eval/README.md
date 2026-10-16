@@ -49,6 +49,9 @@ KB_EVAL_API_KEY=… kb-server eval --base-url … --dataset … --out ./eval-out
 
 # score a run file offline, with no server, to cross-check against trec_eval
 kb-server eval score --qrels <dataset>/qrels/test.tsv --run ./eval-out/tiny/run.trec
+
+# Burges' exponential gain instead of the linear one the leaderboards use
+kb-server eval … --gain exponential
 ```
 
 | flag | meaning |
@@ -57,6 +60,7 @@ kb-server eval score --qrels <dataset>/qrels/test.tsv --run ./eval-out/tiny/run.
 | `--api-key` | API key; defaults to `$KB_EVAL_API_KEY` (required) |
 | `--dataset` | dataset directory (required) |
 | `--k` | cutoff for the `@k` metrics (default 10) |
+| `--gain` | `linear` (default) or `exponential` nDCG gain |
 | `--max-chunks` | chunks requested per query (default 50) |
 | `--out` | output directory (default `eval-out`) |
 | `--skip-ingest` | reuse `<out>/ingest-map.json` instead of uploading |
@@ -96,8 +100,14 @@ reproduces the same ordering.
 
 ## How the numbers are computed
 
-* **nDCG@k** — exponential gain `2^rel − 1` with the `log2` discount,
-  `IDCG` from the sorted grades.
+* **nDCG@k** — **linear** gain (`gain = rel`) with the `log2` discount and an
+  `IDCG` from the sorted grades. Linear is what `trec_eval`'s `ndcg_cut`,
+  `pytrec_eval`, BEIR, MTEB and the ViDoRe leaderboards compute, so a number
+  from here can be put next to a public one. Burges' exponential gain
+  (`2^rel − 1`) is behind `--gain exponential` for anyone reproducing the 2005
+  paper; the two are not interchangeable — for qrels `a 1`, `b 3` with the run
+  `a, b`, linear gives **0.797** and exponential **0.710**. The gain in force is
+  written into `metrics.json` and `report.md`.
 * **Recall@k**, **MRR@k**, **Hit@1**, **P@k** — a grade `> 0` is relevant;
   `P@k` divides by `k`, not by the number of results returned.
 * A query with **no positive judgement at a level** is not evaluable there and

@@ -4,8 +4,24 @@
 //!
 //! The metrics are the standard ones:
 //!
-//! * **nDCG@k** with exponential gains (`2^rel - 1`) and the `log2` discount,
+//! * **nDCG@k** with **linear** gain (`gain = rel`) and the `log2` discount,
 //! * **Recall@k**, **MRR@k**, **Hit@1** and **Precision@k**.
+//!
+//! # Which nDCG
+//!
+//! Linear gain is the default because it is what the public leaderboards
+//! report: `trec_eval`'s `ndcg_cut` and `ndcg` (unless `-m ndcg_burges`),
+//! `pytrec_eval`, BEIR, MTEB and the ViDoRe pipeline leaderboard all compute
+//! `rel / log2(i + 2)`. A number that is only comparable with our own past runs
+//! is worth nothing, so linear is the default and the Burges exponential gain
+//! `2^rel - 1` sits behind [`Gain::Exponential`] for anyone reproducing the
+//! 2005 paper.
+//!
+//! The two differ only when grades are graded and the order is imperfect, and
+//! they differ *a lot*: for qrels `a 1`, `b 3` with the run `a, b`, linear
+//! gives `0.797` and exponential `0.710`. Both are "nDCG@10" on different
+//! dashboards, which is exactly why the gain in force is recorded in every
+//! output.
 //!
 //! "Relevant" means a positive grade; grades above one change only nDCG. A
 //! query with no positive grade at a level is not evaluable there and is
@@ -17,6 +33,51 @@ use serde::Serialize;
 
 /// Graded relevance for one query: key → grade. A grade `<= 0` is not relevant.
 pub type Gold = HashMap<String, i32>;
+
+/// How a relevance grade turns into a gain inside nDCG.
+///
+/// The variant is part of the reported metric, never an implicit default at the
+/// call site: two runs that disagree about the gain are not comparable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Gain {
+    /// `gain = rel`. `trec_eval`, `pytrec_eval`, BEIR, MTEB, ViDoRe.
+    #[default]
+    Linear,
+    /// `gain = 2^rel - 1`. Burges et al. 2005, `ranx ndcg_burges`,
+    /// `trec_eval -m ndcg_burges`.
+    Exponential,
+}
+
+impl Gain {
+    /// The gain of a grade under this variant.
+    #[must_use]
+    pub fn of(self, rel: i32) -> f64 {
+        match self {
+            Self::Linear => rel as f64,
+            Self::Exponential => 2.0_f64.powi(rel) - 1.0,
+        }
+    }
+
+    /// Parse the `--gain` flag value.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "linear" => Some(Self::Linear),
+            "exponential" | "burges" => Some(Self::Exponential),
+            _ => None,
+        }
+    }
+
+    /// The name written into `metrics.json` and `report.md`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Exponential => "exponential",
+        }
+    }
+}
 
 /// The number of bootstrap resamples used for every confidence interval.
 pub const BOOTSTRAP_RESAMPLES: usize = 1000;
@@ -47,11 +108,6 @@ pub fn unique_first_occurrence<I: IntoIterator<Item = String>>(items: I) -> Vec<
         .collect()
 }
 
-/// Gain of a grade: `2^rel - 1`.
-fn gain(rel: i32) -> f64 {
-    2.0_f64.powi(rel) - 1.0
-}
-
 /// Discount at a 0-based position: `log2(position + 2)`.
 fn discount(position: usize) -> f64 {
     (position as f64 + 2.0).log2()
@@ -62,7 +118,7 @@ fn discount(position: usize) -> f64 {
 /// Folded from an explicit `0.0` rather than `sum()`: `Sum<f64>` folds from
 /// `-0.0`, so an empty ranking would produce `-0.0` and a report would print
 /// `-0.000` for a query that simply found nothing.
-fn dcg(ranked: &[String], gold: &Gold, k: usize) -> f64 {
+fn dcg(ranked: &[String], gold: &Gold, k: usize, gain: Gain) -> f64 {
     ranked
         .iter()
         .take(k)
@@ -70,7 +126,7 @@ fn dcg(ranked: &[String], gold: &Gold, k: usize) -> f64 {
         .map(|(i, key)| {
             let rel = gold.get(key).copied().unwrap_or(0);
             if rel > 0 {
-                gain(rel) / discount(i)
+                gain.of(rel) / discount(i)
             } else {
                 0.0
             }
@@ -78,26 +134,40 @@ fn dcg(ranked: &[String], gold: &Gold, k: usize) -> f64 {
         .fold(0.0, |acc, value| acc + value)
 }
 
-fn ideal_dcg(gold: &Gold, k: usize) -> f64 {
+fn ideal_dcg(gold: &Gold, k: usize, gain: Gain) -> f64 {
     let mut grades: Vec<i32> = gold.values().copied().filter(|&s| s > 0).collect();
     grades.sort_unstable_by(|a, b| b.cmp(a));
     grades
         .iter()
         .take(k)
         .enumerate()
-        .map(|(i, &rel)| gain(rel) / discount(i))
+        .map(|(i, &rel)| gain.of(rel) / discount(i))
         .sum()
 }
 
-/// Evaluate one query at cutoff `k`.
+/// Whether a gold set has anything to score: one positive grade or more.
+///
+/// This is the "evaluable at this level" rule the report and the failure
+/// accounting share.
+#[must_use]
+pub fn has_positive_gold(gold: &Gold) -> bool {
+    gold.values().any(|&rel| rel > 0)
+}
+
+/// Evaluate one query at cutoff `k` under `gain`.
 ///
 /// `ranked` must already be unique keys in rank order (see
 /// [`unique_first_occurrence`]). Returns `None` when the gold set has no
 /// positive grade, i.e. the query is not evaluable at this level.
 #[must_use]
-pub fn evaluate_query(ranked: &[String], gold: &Gold, k: usize) -> Option<QueryMetrics> {
+pub fn evaluate_query(
+    ranked: &[String],
+    gold: &Gold,
+    k: usize,
+    gain: Gain,
+) -> Option<QueryMetrics> {
     let k = k.max(1);
-    let idcg = ideal_dcg(gold, k);
+    let idcg = ideal_dcg(gold, k, gain);
     if idcg <= 0.0 {
         return None;
     }
@@ -116,7 +186,7 @@ pub fn evaluate_query(ranked: &[String], gold: &Gold, k: usize) -> Option<QueryM
         .first()
         .is_some_and(|key| gold.get(key).copied().unwrap_or(0) > 0);
     Some(QueryMetrics {
-        ndcg: dcg(ranked, gold, k) / idcg,
+        ndcg: dcg(ranked, gold, k, gain) / idcg,
         recall: relevant_in_top as f64 / relevant_total as f64,
         mrr,
         hit1: if hit1 { 1.0 } else { 0.0 },
@@ -311,12 +381,16 @@ mod tests {
 
     #[test]
     fn perfect_ranking_is_one() {
-        // gold: d1 grade 2, d2 grade 1.
-        // DCG  = (2^2-1)/log2(2) + (2^1-1)/log2(3)
-        //      = 3/1 + 1/1.5849625 = 3 + 0.6309298 = 3.6309298.
+        // gold: d1 grade 2, d2 grade 1, linear gain.
+        // DCG  = 2/log2(2) + 1/log2(3) = 2 + 0.6309298 = 2.6309298.
         // IDCG = the same, so nDCG = 1.
-        let m = evaluate_query(&keys(&["d1", "d2"]), &gold(&[("d1", 2), ("d2", 1)]), 10)
-            .expect("evaluable");
+        let m = evaluate_query(
+            &keys(&["d1", "d2"]),
+            &gold(&[("d1", 2), ("d2", 1)]),
+            10,
+            Gain::Linear,
+        )
+        .expect("evaluable");
         assert!(close(m.ndcg, 1.0), "ndcg {}", m.ndcg);
         assert!(close(m.recall, 1.0));
         assert!(close(m.mrr, 1.0));
@@ -327,11 +401,12 @@ mod tests {
     #[test]
     fn reversed_ranking_keeps_metric_below_one() {
         // ranked [d2, d1], gold {d1:2}. Only d1 is relevant.
-        // DCG  = 0 + 3/log2(3) = 1.8927893.
-        // IDCG = 3/log2(2) = 3. nDCG = 0.6309298...
+        // DCG  = 0 + 2/log2(3) = 1.2618595.
+        // IDCG = 2/log2(2) = 2. nDCG = 0.6309298...
         // MRR  = 1/2 = 0.5 (d1 is second). Hit@1 = 0 (d2 is not relevant).
-        let m = evaluate_query(&keys(&["d2", "d1"]), &gold(&[("d1", 2)]), 10).expect("evaluable");
-        // DCG/IDCG = (3/log2(3)) / 3 = 1/log2(3).
+        let m = evaluate_query(&keys(&["d2", "d1"]), &gold(&[("d1", 2)]), 10, Gain::Linear)
+            .expect("evaluable");
+        // DCG/IDCG = (2/log2(3)) / 2 = 1/log2(3).
         assert!(close(m.ndcg, 1.0 / 3.0_f64.log2()), "ndcg {}", m.ndcg);
         assert!(close(m.recall, 1.0));
         assert!(close(m.mrr, 0.5));
@@ -340,14 +415,15 @@ mod tests {
 
     #[test]
     fn no_relevant_gold_is_not_evaluable() {
-        assert!(evaluate_query(&keys(&["a", "b"]), &gold(&[("a", 0)]), 10).is_none());
-        assert!(evaluate_query(&keys(&["a"]), &Gold::new(), 10).is_none());
+        assert!(evaluate_query(&keys(&["a", "b"]), &gold(&[("a", 0)]), 10, Gain::Linear).is_none());
+        assert!(evaluate_query(&keys(&["a"]), &Gold::new(), 10, Gain::Linear).is_none());
     }
 
     #[test]
     fn all_retrieved_irrelevant_scores_zero() {
         // gold {a:1}; ranked [x, y] has no relevant item.
-        let m = evaluate_query(&keys(&["x", "y"]), &gold(&[("a", 1)]), 10).expect("evaluable");
+        let m = evaluate_query(&keys(&["x", "y"]), &gold(&[("a", 1)]), 10, Gain::Linear)
+            .expect("evaluable");
         assert!(close(m.ndcg, 0.0));
         assert!(close(m.recall, 0.0));
         assert!(close(m.mrr, 0.0));
@@ -359,7 +435,7 @@ mod tests {
     fn an_empty_ranking_is_plus_zero_not_negative_zero() {
         // `Sum<f64>` folds from -0.0, which made a query that retrieved nothing
         // render as "-0.000" in report.md.
-        let m = evaluate_query(&[], &gold(&[("a", 1)]), 10).expect("evaluable");
+        let m = evaluate_query(&[], &gold(&[("a", 1)]), 10, Gain::Linear).expect("evaluable");
         for (name, value) in [
             ("ndcg", m.ndcg),
             ("recall", m.recall),
@@ -375,40 +451,123 @@ mod tests {
         assert!(level.ndcg.ci_high.is_sign_positive());
     }
 
+    // The case that decided the gain: qrels `a 1`, `b 3`, run `a` then `b`.
+    //
+    // `ranx` reports `ndcg@10 = 0.7967` for this and `ndcg_burges@10 = 0.7097`;
+    // `trec_eval -m ndcg` agrees with the first. We must produce the first by
+    // default, or our nDCG is not comparable with any public leaderboard.
     #[test]
-    fn graded_relevance_uses_exponential_gains() {
-        // gold {a:3, b:2, c:1}; ranked [a,b,c]:
-        // DCG  = 7/log2(2) + 3/log2(3) + 1/log2(4)
-        //      = 7 + 1.8927893 + 0.5 = 9.3927893. IDCG is identical → 1.
-        let perfect = evaluate_query(
-            &keys(&["a", "b", "c"]),
-            &gold(&[("a", 3), ("b", 2), ("c", 1)]),
-            10,
-        )
-        .expect("evaluable");
+    fn graded_relevance_uses_linear_gain_by_default() {
+        let g = gold(&[("a", 1), ("b", 3)]);
+        let ranked = keys(&["a", "b"]);
+
+        // DCG  = 1/log2(2) + 3/log2(3) = 1 + 1.8927893 = 2.8927893
+        // IDCG = 3/log2(2) + 1/log2(3) = 3 + 0.6309298 = 3.6309298
+        // nDCG = 2.8927893 / 3.6309298 = 0.7967076...
+        let log2_3 = 3.0_f64.log2();
+        let expected = (1.0 / 1.0 + 3.0 / log2_3) / (3.0 / 1.0 + 1.0 / log2_3);
+        assert!((expected - 0.7967).abs() < 0.0001, "expected ≈ 0.797");
+
+        let linear = evaluate_query(&ranked, &g, 10, Gain::Linear).expect("evaluable");
+        assert!(
+            (linear.ndcg - expected).abs() < 1e-12,
+            "ndcg {}",
+            linear.ndcg
+        );
+        assert!(
+            (linear.ndcg - 0.797).abs() < 0.001,
+            "linear nDCG must be ≈ 0.797, was {}",
+            linear.ndcg
+        );
+
+        // The same data under Burges' exponential gain:
+        // DCG  = (2^1-1)/log2(2) + (2^3-1)/log2(3) = 1 + 4.4165088 = 5.4165088
+        // IDCG = (2^3-1)/log2(2) + (2^1-1)/log2(3) = 7 + 0.6309298 = 7.6309298
+        // nDCG = 5.4165088 / 7.6309298 = 0.709711...
+        let burges = evaluate_query(&ranked, &g, 10, Gain::Exponential).expect("evaluable");
+        let expected_burges = (1.0 + 7.0 / log2_3) / (7.0 + 1.0 / log2_3);
+        assert!(
+            (burges.ndcg - expected_burges).abs() < 1e-12,
+            "ndcg {}",
+            burges.ndcg
+        );
+        assert!(
+            (burges.ndcg - 0.710).abs() < 0.001,
+            "exponential nDCG must be ≈ 0.710, was {}",
+            burges.ndcg
+        );
+        // The two are genuinely different numbers, not a relabelling.
+        assert!(linear.ndcg - burges.ndcg > 0.08);
+        // Recall/MRR/Hit@1/P@k never depend on the gain.
+        assert!((linear.recall - burges.recall).abs() < 1e-12);
+        assert!((linear.mrr - burges.mrr).abs() < 1e-12);
+    }
+
+    #[test]
+    fn graded_relevance_under_linear_gain_is_below_one_when_reversed() {
+        // gold {a:3, b:2, c:1}; ranked [c,b,a], linear gain:
+        // DCG  = 1/log2(2) + 2/log2(3) + 3/log2(4)
+        //      = 1 + 1.2618595 + 1.5 = 3.7618595.
+        // IDCG = 3/log2(2) + 2/log2(3) + 1/log2(4)
+        //      = 3 + 1.2618595 + 0.5 = 4.7618595.
+        // nDCG = 3.7618595 / 4.7618595 = 0.7899980...
+        let g = gold(&[("a", 3), ("b", 2), ("c", 1)]);
+        let perfect =
+            evaluate_query(&keys(&["a", "b", "c"]), &g, 10, Gain::Linear).expect("evaluable");
         assert!(close(perfect.ndcg, 1.0));
 
-        // ranked [c,b,a]:
-        // DCG  = 1 + 3/1.5849625 + 7/2 = 1 + 1.8927893 + 3.5 = 6.3927893.
+        let worst =
+            evaluate_query(&keys(&["c", "b", "a"]), &g, 10, Gain::Linear).expect("evaluable");
+        let log2_3 = 3.0_f64.log2();
+        let expected = (1.0 + 2.0 / log2_3 + 3.0 / 2.0) / (3.0 + 2.0 / log2_3 + 1.0 / 2.0);
+        assert!(close(worst.ndcg, expected), "ndcg {}", worst.ndcg);
+        assert!(close(worst.mrr, 1.0)); // c is relevant, first.
+        // Exponential gain over the same data disagrees, which is why it is a
+        // flag and not the default.
+        let burges =
+            evaluate_query(&keys(&["c", "b", "a"]), &g, 10, Gain::Exponential).expect("evaluable");
+        // 0.6806 under exponential gain, 0.7900 under linear: not a relabelling.
+        assert!((burges.ndcg - worst.ndcg).abs() > 0.10);
+    }
+
+    #[test]
+    fn the_exponential_gain_is_kept_behind_an_explicit_option() {
+        // gold {a:3, b:2, c:1}; ranked [c,b,a]:
+        // DCG  = (2^1-1)/log2(2) + (2^2-1)/log2(3) + (2^3-1)/log2(4)
+        //      = 1 + 1.8927893 + 3.5 = 6.3927893.
         // IDCG = 7 + 3/1.5849625 + 1/2 = 9.3927893.
         // nDCG = 0.680606...
-        let worst = evaluate_query(
-            &keys(&["c", "b", "a"]),
-            &gold(&[("a", 3), ("b", 2), ("c", 1)]),
-            10,
-        )
-        .expect("evaluable");
+        let g = gold(&[("a", 3), ("b", 2), ("c", 1)]);
+        let worst =
+            evaluate_query(&keys(&["c", "b", "a"]), &g, 10, Gain::Exponential).expect("evaluable");
         let log2_3 = 3.0_f64.log2();
         let expected = (1.0 + 3.0 / log2_3 + 7.0 / 2.0) / (7.0 + 3.0 / log2_3 + 1.0 / 2.0);
         assert!(close(worst.ndcg, expected), "ndcg {}", worst.ndcg);
-        assert!(close(worst.mrr, 1.0)); // c is relevant, first.
+    }
+
+    #[test]
+    fn gain_parses_and_names_itself() {
+        assert_eq!(Gain::parse("linear"), Some(Gain::Linear));
+        assert_eq!(Gain::parse("  Exponential "), Some(Gain::Exponential));
+        // `ranx` and trec_eval both spell the Burges variant two ways.
+        assert_eq!(Gain::parse("burges"), Some(Gain::Exponential));
+        assert_eq!(Gain::parse("ndcg_burges"), None);
+        assert_eq!(Gain::parse("quadratic"), None);
+        assert_eq!(Gain::default(), Gain::Linear);
+        assert_eq!(Gain::Linear.as_str(), "linear");
+        assert_eq!(Gain::Exponential.as_str(), "exponential");
+        assert!(close(Gain::Linear.of(0), 0.0));
+        assert!(close(Gain::Linear.of(3), 3.0));
+        assert!(close(Gain::Exponential.of(0), 0.0));
+        assert!(close(Gain::Exponential.of(3), 7.0));
     }
 
     #[test]
     fn cutoff_k_stops_counting() {
         // Gold has two relevant docs; with k=1 only the first rank counts.
         // ranked [x, a], gold {a:1}: nDCG@1 = 0 (x not relevant), recall@1 = 0.
-        let m = evaluate_query(&keys(&["x", "a"]), &gold(&[("a", 1)]), 1).expect("evaluable");
+        let m = evaluate_query(&keys(&["x", "a"]), &gold(&[("a", 1)]), 1, Gain::Linear)
+            .expect("evaluable");
         assert!(close(m.ndcg, 0.0));
         assert!(close(m.recall, 0.0));
         assert!(close(m.mrr, 0.0));
@@ -416,7 +575,8 @@ mod tests {
         assert!(close(m.precision, 0.0));
 
         // Same ranking at k=2: a is found at rank 2.
-        let m = evaluate_query(&keys(&["x", "a"]), &gold(&[("a", 1)]), 2).expect("evaluable");
+        let m = evaluate_query(&keys(&["x", "a"]), &gold(&[("a", 1)]), 2, Gain::Linear)
+            .expect("evaluable");
         // DCG = 1/log2(3); IDCG = 1/log2(2) = 1. nDCG = 1/log2(3).
         assert!(close(m.ndcg, 1.0 / 3.0_f64.log2()));
         assert!(close(m.recall, 1.0));
@@ -430,7 +590,7 @@ mod tests {
         let ranked = unique_first_occurrence(keys(&["d1", "d1", "d2", "d1", "d3"]));
         assert_eq!(ranked, keys(&["d1", "d2", "d3"]));
         // And the collapsed ranking is what the metric sees: d2 is rank 2.
-        let m = evaluate_query(&ranked, &gold(&[("d2", 1)]), 10).expect("evaluable");
+        let m = evaluate_query(&ranked, &gold(&[("d2", 1)]), 10, Gain::Linear).expect("evaluable");
         assert!(close(m.mrr, 0.5));
     }
 
@@ -477,8 +637,8 @@ mod tests {
 
     #[test]
     fn aggregate_level_keeps_only_evaluable_queries() {
-        let q1 = evaluate_query(&keys(&["a"]), &gold(&[("a", 1)]), 10).unwrap();
-        let q2 = evaluate_query(&keys(&["x"]), &gold(&[("a", 1)]), 10).unwrap();
+        let q1 = evaluate_query(&keys(&["a"]), &gold(&[("a", 1)]), 10, Gain::Linear).unwrap();
+        let q2 = evaluate_query(&keys(&["x"]), &gold(&[("a", 1)]), 10, Gain::Linear).unwrap();
         let level = aggregate_level(&[q1, q2]);
         assert_eq!(level.n_queries, 2);
         assert!(close(level.ndcg.mean, 0.5));

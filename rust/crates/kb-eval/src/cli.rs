@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::dataset::parse_qrels;
+use crate::metrics::Gain;
 use crate::report::{parse_trec, score_offline};
 use crate::runner::{RunnerConfig, run as run_harness};
 
@@ -55,13 +56,15 @@ fn print_help() {
 
 USAGE
     kb-server eval --base-url URL --dataset DIR [flags]
-    kb-server eval score --qrels FILE --run FILE [--k N]
+    kb-server eval score --qrels FILE --run FILE [--k N] [--gain G]
 
 RUN FLAGS
     --base-url URL      kb-server to measure against (required)
     --api-key KEY       API key; defaults to $KB_EVAL_API_KEY
     --dataset DIR       BEIR/TREC dataset directory (required)
     --k N               cutoff for @k metrics (default 10)
+    --gain G            nDCG gain: linear (default, trec_eval/BEIR/MTEB) or
+                        exponential (Burges; --gain exponential)
     --max-chunks N      chunks requested per query (default 50)
     --out DIR           output directory (default eval-out)
     --skip-ingest       reuse <out>/ingest-map.json instead of uploading
@@ -97,6 +100,7 @@ async fn eval(args: &[String]) -> Result<(), EvalError> {
     config.out_dir = PathBuf::from(flag(args, "--out").unwrap_or_else(|| "eval-out".to_string()));
     config.skip_ingest = has_flag(args, "--skip-ingest");
     config.label = flag(args, "--label").unwrap_or_else(|| "run".to_string());
+    config.gain = parse_gain(args)?;
     config.job_timeout = Duration::from_secs(parse_uint_u64(args, "--timeout", 900)?);
     config.poll_interval = Duration::from_millis(parse_uint_u64(args, "--poll-ms", 500)?);
 
@@ -116,6 +120,7 @@ fn score(args: &[String]) -> Result<(), EvalError> {
     let run_path =
         flag(args, "--run").ok_or_else(|| EvalError::Usage("missing --run".to_string()))?;
     let k = parse_uint(args, "--k", 10)?;
+    let gain = parse_gain(args)?;
 
     let qrels_text = std::fs::read_to_string(&qrels_path)
         .map_err(|e| EvalError::Failed(format!("could not read {qrels_path}: {e}")))?;
@@ -126,7 +131,7 @@ fn score(args: &[String]) -> Result<(), EvalError> {
     let rankings = parse_trec(&run_text)
         .map_err(|e| EvalError::Failed(format!("could not parse {run_path}: {e}")))?;
 
-    let markdown = score_offline(&qrels, &rankings, k);
+    let markdown = score_offline(&qrels, &rankings, k, gain);
     print!("{markdown}");
     Ok(())
 }
@@ -151,6 +156,19 @@ fn parse_uint(args: &[String], name: &str, default: usize) -> Result<usize, Eval
         Some(value) => value
             .parse()
             .map_err(|_| EvalError::Usage(format!("{name} expects a number, got {value:?}"))),
+    }
+}
+
+/// `--gain linear|exponential`. Absent means the default, linear, so a run file
+/// scored with no flag is comparable with trec_eval and BEIR.
+fn parse_gain(args: &[String]) -> Result<Gain, EvalError> {
+    match flag(args, "--gain") {
+        None => Ok(Gain::default()),
+        Some(value) => Gain::parse(&value).ok_or_else(|| {
+            EvalError::Usage(format!(
+                "--gain expects linear or exponential, got {value:?}"
+            ))
+        }),
     }
 }
 
@@ -192,6 +210,23 @@ mod tests {
         let a = args(&["--k", "many"]);
         assert!(matches!(
             parse_uint(&a, "--k", 10),
+            Err(EvalError::Usage(_))
+        ));
+    }
+
+    #[test]
+    fn gain_defaults_to_linear_and_accepts_exponential() {
+        assert_eq!(parse_gain(&args(&[])).unwrap(), Gain::Linear);
+        assert_eq!(
+            parse_gain(&args(&["--gain", "linear"])).unwrap(),
+            Gain::Linear
+        );
+        assert_eq!(
+            parse_gain(&args(&["--gain", "exponential"])).unwrap(),
+            Gain::Exponential
+        );
+        assert!(matches!(
+            parse_gain(&args(&["--gain", "quadratic"])),
             Err(EvalError::Usage(_))
         ));
     }

@@ -9,7 +9,8 @@
 //! The crate is three pure pieces and one thin client:
 //!
 //! * [`dataset`] loads a BEIR/TREC dataset directory.
-//! * [`metrics`] is the arithmetic (nDCG@k, Recall@k, MRR@k, Hit@1, P@k).
+//! * [`metrics`] is the arithmetic (nDCG@k with linear gain, Recall@k, MRR@k,
+//!   Hit@1, P@k).
 //! * [`report`] writes `metrics.json`, `report.md` and TREC run files.
 //! * [`runner`] is the black-box HTTP client.
 //!
@@ -24,7 +25,7 @@ pub mod runner;
 pub use cli::{EvalError, run};
 pub use dataset::{Dataset, DatasetError};
 pub use metrics::{
-    Aggregate, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, LatencyReport, LevelReport, QueryMetrics,
+    Aggregate, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED, Gain, LatencyReport, LevelReport, QueryMetrics,
 };
 pub use report::{MetricsFile, RunReport};
 pub use runner::{RunError, RunnerConfig};
