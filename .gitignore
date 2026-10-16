@@ -8,3 +8,4 @@ prisma/dev.db
 rust/target/
 rust/.vendor/
 eval-out/
+datasets/

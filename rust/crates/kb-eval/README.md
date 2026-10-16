@@ -34,6 +34,30 @@ benchmark drops in unchanged:
   real two-page PDF), twelve queries, and qrels including two page-level
   judgements that only the PDF can answer.
 
+### MIRACL Indonesian baseline (`miracl-id-200`)
+
+Built by `rust/crates/kb-eval/scripts/import_miracl.py` from the public MIRACL
+benchmark:
+- **Licence**: Apache-2.0
+- **Sources**: Hugging Face `miracl/miracl` (topics and qrels for `id` dev split,
+  commit `5be20db9509754dadad47689368639fcec739c00`) and `miracl/miracl-corpus`
+  (corpus passages for `id`, commit `d921ec7e349ce0d28daf30b2da9da5ee698bef0d`).
+- **Composition**:
+  - 200 dev queries sampled with fixed seed 42.
+  - 1,933 judged passages for those 200 queries (both relevant passages and
+    human-judged non-relevant hard distractors).
+  - 1,000 random unjudged passages from the Indonesian corpus as extra distractors
+    (reservoir sampled with seed 42).
+  - Total corpus: 2,933 markdown files in `corpus/<docid>.md` (docids sanitized by
+    replacing `#` with `_`).
+  - Qrels: 639 document-level judgements with grade 1 (non-relevant passages stay in the
+    corpus as distractors and are omitted from `qrels/test.tsv`).
+
+To build or rebuild the identical dataset:
+```sh
+uv run rust/crates/kb-eval/scripts/import_miracl.py --seed 42 --num-queries 200 --num-distractors 1000
+```
+
 ## Running it
 
 ```sh

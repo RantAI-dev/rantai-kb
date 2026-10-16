@@ -75,3 +75,33 @@ fn every_query_has_at_least_one_judgement() {
         );
     }
 }
+
+#[test]
+fn miracl_id_200_loads_if_present() {
+    let miracl_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("datasets/miracl-id-200");
+    if !miracl_dir.is_dir() {
+        return;
+    }
+    let dataset = Dataset::load(&miracl_dir).expect("load miracl-id-200");
+    assert_eq!(dataset.name, "miracl-id-200");
+    assert_eq!(dataset.queries.len(), 200);
+    assert_eq!(dataset.corpus.len(), 2933);
+    assert_eq!(dataset.qrels.len(), 639);
+
+    let corpus_keys: std::collections::HashSet<&str> =
+        dataset.corpus.iter().map(|f| f.key.as_str()).collect();
+
+    for q in &dataset.queries {
+        let qrels = dataset.qrels_for(&q.id);
+        assert!(!qrels.is_empty(), "query {} has no qrels", q.id);
+        for qrel in qrels {
+            assert_eq!(qrel.score, 1);
+            let doc_key = base_doc_key(&qrel.corpus_id);
+            assert!(
+                corpus_keys.contains(doc_key),
+                "qrel corpus_id {} not in corpus",
+                doc_key
+            );
+        }
+    }
+}
