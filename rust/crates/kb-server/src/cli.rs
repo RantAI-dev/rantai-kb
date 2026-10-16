@@ -22,7 +22,9 @@ use crate::config::Config;
 /// `Failed` is the operation itself failing.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
-    #[error("{0}\n\nusage: kb-server <serve|create-api-key|apply-schema|migrate|eval|check-boundary>")]
+    #[error(
+        "{0}\n\nusage: kb-server <serve|create-api-key|apply-schema|migrate|eval|check-boundary>"
+    )]
     Usage(String),
     #[error("{0}")]
     Failed(String),
