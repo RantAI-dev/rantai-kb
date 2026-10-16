@@ -10,6 +10,7 @@ mod pipeline_tests {
         make_fake_scope,
     };
     use crate::retrieval::{RetrievalOptions, execute_pipeline};
+    use crate::timing::{ManualClock, SystemClock};
     use kb_ports::{
         ChunkType, DocumentFilter, DocumentId, DocumentMeta, DocumentStore, EngineError,
         KnowledgeBaseId, RetrievalDegrade, ScopeRequest, TenantId,
@@ -86,6 +87,7 @@ mod pipeline_tests {
             &scope,
             "query",
             &opts,
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -124,6 +126,7 @@ mod pipeline_tests {
             &scope,
             "query",
             &opts,
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -162,6 +165,7 @@ mod pipeline_tests {
             &scope,
             "query",
             &opts,
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -189,6 +193,7 @@ mod pipeline_tests {
             &scope,
             "query",
             &opts,
+            &SystemClock,
         )
         .await;
 
@@ -231,6 +236,7 @@ mod pipeline_tests {
             &scope,
             "query",
             &opts,
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -272,6 +278,7 @@ mod pipeline_tests {
             &scope,
             "query",
             &opts,
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -334,6 +341,7 @@ mod pipeline_tests {
             &scope,
             "query",
             &opts,
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -408,6 +416,7 @@ mod pipeline_tests {
             &scope,
             "query",
             &opts,
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -450,6 +459,7 @@ mod pipeline_tests {
             &scope,
             "query",
             &opts,
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -509,6 +519,7 @@ mod pipeline_tests {
             &scope,
             "query",
             &opts,
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -562,6 +573,7 @@ mod pipeline_tests {
             &scope,
             "query",
             &opts,
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -659,6 +671,7 @@ mod pipeline_tests {
             &scope_kb_a,
             "query",
             &RetrievalOptions::default(),
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -721,6 +734,7 @@ mod pipeline_tests {
             &scope_cat_a,
             "query",
             &RetrievalOptions::default(),
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -781,6 +795,7 @@ mod pipeline_tests {
             &scope_doc_a,
             "query",
             &RetrievalOptions::default(),
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -840,6 +855,7 @@ mod pipeline_tests {
             &full_scope,
             "query",
             &RetrievalOptions::default(),
+            &SystemClock,
         )
         .await
         .unwrap();
@@ -851,5 +867,143 @@ mod pipeline_tests {
             .collect();
         assert!(found_docs.contains("doc_a"));
         assert!(found_docs.contains("doc_b"));
+    }
+
+    /// The point of the timing module: a request that ran records every stage,
+    /// and what it recorded adds up to no more than the time it took.
+    #[tokio::test]
+    async fn a_retrieval_reports_every_stage_it_ran() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let tenant = TenantId("t1".into());
+        let scope = make_fake_scope(tenant.clone(), vec![DocumentId("d1".into())]);
+        chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+            "c1",
+            "d1",
+            "Title 1",
+            "Content 1",
+            1,
+            0.9,
+        ));
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "c2",
+            "d1",
+            "Title 1",
+            "Content 2",
+            2,
+            0.8,
+        ));
+
+        let clock = ManualClock::stepping(std::time::Duration::from_micros(200));
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &RetrievalOptions::default(),
+            &clock,
+        )
+        .await
+        .unwrap();
+
+        let t = outcome.timings;
+        assert!(t.total_ms > 0.0, "a pipeline that ran was timed");
+        assert_eq!(t.engine_total_ms, t.total_ms);
+        assert!(t.arms_ms > 0.0, "both arms ran inside one phase");
+        assert!(t.query_embed_ms > 0.0, "the query was embedded");
+        assert!(t.vector_arm_ms > 0.0);
+        assert!(t.keyword_arm_ms > 0.0);
+        assert!(t.scope_check_ms > 0.0, "the keyword arm checked Postgres");
+        assert_eq!(
+            t.entity_arm_ms, 0.0,
+            "there is no entity arm yet; it reports zero rather than going missing"
+        );
+        assert!(
+            t.accounted_sum_ms() <= t.total_ms,
+            "accounted {} exceeded the total {}",
+            t.accounted_sum_ms(),
+            t.total_ms
+        );
+    }
+
+    /// A reranker that costs 40 ms of clock has to be visible as 40 ms, and a
+    /// fusion that costs nothing must not borrow the reranker's time.
+    #[tokio::test]
+    async fn the_rerank_stage_is_timed_separately_from_the_arms() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let tenant = TenantId("t1".into());
+        let scope = make_fake_scope(tenant, vec![DocumentId("d1".into())]);
+        for i in 0..4 {
+            chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+                &format!("c{i}"),
+                "d1",
+                "Title 1",
+                &format!("Content {i}"),
+                i,
+                0.9,
+            ));
+        }
+        let opts = RetrievalOptions {
+            max_chunks: 2,
+            rerank_enabled: true,
+            ..RetrievalOptions::default()
+        };
+
+        let clock = ManualClock::stepping(std::time::Duration::from_micros(500));
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &clock,
+        )
+        .await
+        .unwrap();
+
+        let t = outcome.timings;
+        assert!(t.rerank_ms > 0.0, "the rerank stage was measured");
+        assert!(
+            t.fusion_ms > 0.0,
+            "fusion is its own stage, not part of the arms' time"
+        );
+        assert!(
+            t.rerank_ms >= t.fusion_ms,
+            "on a stepping clock the rerank future is polled no fewer times than RRF sorting"
+        );
+        assert!(t.accounted_sum_ms() <= t.total_ms);
+    }
+
+    /// The empty-result early return must still be timed: "no results" and
+    /// "nothing measured" are different answers.
+    #[tokio::test]
+    async fn an_empty_result_is_timed_too() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let tenant = TenantId("t1".into());
+        let scope = make_fake_scope(tenant, vec![DocumentId("d1".into())]);
+
+        let clock = ManualClock::stepping(std::time::Duration::from_micros(500));
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &RetrievalOptions::default(),
+            &clock,
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.chunks.is_empty());
+        assert!(outcome.timings.total_ms > 0.0);
+        assert!(outcome.timings.arms_ms > 0.0);
     }
 }

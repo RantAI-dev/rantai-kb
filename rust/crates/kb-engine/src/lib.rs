@@ -27,6 +27,7 @@ use kb_ports::{
 pub mod fakes;
 pub mod ingest;
 pub mod retrieval;
+pub mod timing;
 
 #[cfg(test)]
 mod ingest_tests;
@@ -35,6 +36,7 @@ mod tests;
 
 pub use ingest::{CancelToken, IngestSettings, IngestWorker, JobOutcome, reap_failed_job_uploads};
 pub use retrieval::{RetrievalOptions, RetrievalOutcome, enrich_titles, execute_pipeline};
+pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
 
 /// Tunable engine knobs.
 #[derive(Debug, Clone)]
@@ -111,12 +113,37 @@ pub struct EngineInputs {
 pub struct Engine {
     pub settings: EngineSettings,
     pub inputs: EngineInputs,
+    /// What the pipeline times itself against. Behind an `Arc` because it is
+    /// shared by every in-flight request and is the one piece of engine state
+    /// a test may want to replace.
+    pub clock: Arc<dyn Clock>,
 }
 
 impl Engine {
     #[must_use]
     pub fn new(settings: EngineSettings, inputs: EngineInputs) -> Self {
-        Self { settings, inputs }
+        Self {
+            settings,
+            inputs,
+            clock: Arc::new(SystemClock),
+        }
+    }
+
+    /// Build an engine whose stages are measured against `clock`.
+    ///
+    /// Production passes the real clock; a test passes a [`ManualClock`] and
+    /// asserts the stage accounting without sleeping through it.
+    #[must_use]
+    pub fn with_clock(
+        settings: EngineSettings,
+        inputs: EngineInputs,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self {
+            settings,
+            inputs,
+            clock,
+        }
     }
 
     /// Build an engine with the default no-op expander.
@@ -154,6 +181,7 @@ impl Engine {
                 sources: Vec::new(),
                 context: String::new(),
                 degrades: Vec::new(),
+                timings: StageTimings::default(),
             });
         }
 
@@ -184,6 +212,7 @@ impl Engine {
             scope,
             trimmed,
             &opts,
+            self.clock.as_ref(),
         )
         .await
     }

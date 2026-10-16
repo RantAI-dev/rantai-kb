@@ -11,8 +11,10 @@ use kb_ports::{
     FigureGate, FigureGateCandidate, NeighbourAnchor, RerankCandidate, Reranker, RetrievalDegrade,
     SearchHit, TenantId,
 };
+use tracing::Instrument;
 
 use crate::QueryExpander;
+use crate::timing::{Clock, StageTimings, Stopwatch, stage_span};
 
 /// Parameters for one retrieval execution.
 #[derive(Clone)]
@@ -80,6 +82,23 @@ pub struct RetrievalOutcome {
     pub sources: Vec<SourceEntry>,
     pub context: String,
     pub degrades: Vec<RetrievalDegrade>,
+    /// What each stage cost. Always present: a request nobody times is a
+    /// request nobody can make faster, and the numbers are the only evidence
+    /// the move off SurrealDB can be judged by.
+    pub timings: StageTimings,
+}
+
+/// What one arm cost, carried out of the `tokio::join!` that ran it.
+///
+/// The two arms run concurrently, so neither can be handed a `&mut` timings
+/// struct while the other is still running. Each returns its own numbers and
+/// the caller folds them into the report once both are back.
+#[derive(Debug, Clone, Copy, Default)]
+struct ArmTiming {
+    query_embed_ms: f64,
+    query_embed_cached: bool,
+    store_ms: f64,
+    scope_check_ms: f64,
 }
 
 /// Enrich document titles, categories, and subcategory on hits via `DocumentStore::find_alive_meta_by_ids`.
@@ -129,12 +148,16 @@ pub async fn execute_pipeline(
     scope: &DocumentScope,
     query: &str,
     opts: &RetrievalOptions,
+    clock: &dyn Clock,
 ) -> Result<RetrievalOutcome, EngineError> {
+    let total_sw = Stopwatch::start(clock);
+    let mut timings = StageTimings::default();
     let mut degrades: Vec<RetrievalDegrade> = Vec::new();
     let pool_size = opts.candidate_pool_size.clamp(1, 100);
 
     // 1. Query expansion. The original query is always first. A failed
     //    expander records a degrade and the original query is used alone.
+    let expand_sw = Stopwatch::start(clock);
     let variants: Vec<String> = if opts.expansion_enabled {
         match expander.expand(query).await {
             Ok(mut v) => {
@@ -152,25 +175,34 @@ pub async fn execute_pipeline(
     } else {
         vec![query.to_string()]
     };
+    timings.expand_ms = expand_sw.elapsed_ms();
 
     // 2. Vector arm (scoped to document IDs from KB/category if non-empty).
+    // Measured per arm, because the two arms run concurrently and only the
+    // phase's wall clock can be added to a total.
     let vector_future = async {
         if scope.document_ids().is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), ArmTiming::default()));
         }
-        let embeds = variants.iter().map(|q| embedder.embed_query(q));
+        let embed_sw = Stopwatch::start(clock);
+        let embeds = variants.iter().map(|q| embedder.embed_query_detailed(q));
         let vectors = futures::future::join_all(embeds).await;
+        let embed_ms = embed_sw.elapsed_ms();
         // Own the vectors first: the search futures borrow them, so they must
         // outlive the futures.
         let mut query_vectors: Vec<Vec<f32>> = Vec::with_capacity(vectors.len());
+        let mut cached: Option<bool> = None;
         for res in vectors {
-            let vec = res.map_err(|e| format!("vector embed: {e}"))?;
-            query_vectors.push(vec);
+            let qe = res.map_err(|e| format!("vector embed: {e}"))?;
+            cached = Some(cached.is_some_and(|c| c && qe.cached) && qe.cached);
+            query_vectors.push(qe.vector);
         }
+        let store_sw = Stopwatch::start(clock);
         let searches = query_vectors
             .iter()
             .map(|vec| chunk_store.vector_search(scope, vec, pool_size));
         let lists = futures::future::join_all(searches).await;
+        let store_ms = store_sw.elapsed_ms();
 
         let mut union: HashMap<String, SearchHit> = HashMap::new();
         for list in lists {
@@ -184,6 +216,12 @@ pub async fn execute_pipeline(
                 }
             }
         }
+        let arm = ArmTiming {
+            query_embed_ms: embed_ms,
+            query_embed_cached: cached.unwrap_or(false),
+            store_ms,
+            scope_check_ms: 0.0,
+        };
         let mut merged: Vec<SearchHit> = union.into_values().collect();
         merged.sort_by(|a, b| {
             b.similarity
@@ -197,21 +235,23 @@ pub async fn execute_pipeline(
             hit.rank = rank as u32;
             hit.is_bm25 = false;
         }
-        Ok::<Vec<SearchHit>, String>(merged)
+        Ok::<(Vec<SearchHit>, ArmTiming), String>((merged, arm))
     };
 
     // 3. BM25 arm: global in SurrealDB, filtered against alive tenant documents in Postgres,
     //    and scoped to visible document IDs when narrowed.
     let bm25_future = async {
         if !opts.hybrid_bm25_enabled || scope.document_ids().is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), ArmTiming::default()));
         }
+        let store_sw = Stopwatch::start(clock);
         let raw_hits = chunk_store
             .bm25_search_global(query, pool_size)
             .await
             .map_err(|e| format!("bm25 search: {e}"))?;
+        let store_ms = store_sw.elapsed_ms();
         if raw_hits.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), ArmTiming::default()));
         }
         let scope_doc_ids: HashSet<&DocumentId> = scope.document_ids().iter().collect();
         let mut seen = HashSet::new();
@@ -221,12 +261,14 @@ pub async fn execute_pipeline(
             .filter(|id| scope_doc_ids.contains(id) && seen.insert(id.clone()))
             .collect();
         if doc_ids.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), ArmTiming::default()));
         }
+        let scope_sw = Stopwatch::start(clock);
         let alive_metas = doc_store
             .find_alive_meta_by_ids(scope.tenant(), &doc_ids)
             .await
             .map_err(|e| format!("resolve doc metas: {e}"))?;
+        let scope_ms = scope_sw.elapsed_ms();
         let meta_map: HashMap<DocumentId, DocumentMeta> =
             alive_metas.into_iter().map(|m| (m.id.clone(), m)).collect();
 
@@ -251,10 +293,28 @@ pub async fn execute_pipeline(
         for (rank, hit) in filtered.iter_mut().enumerate() {
             hit.rank = rank as u32;
         }
-        Ok::<Vec<SearchHit>, String>(filtered)
+        let arm = ArmTiming {
+            store_ms,
+            scope_check_ms: scope_ms,
+            ..ArmTiming::default()
+        };
+        Ok::<(Vec<SearchHit>, ArmTiming), String>((filtered, arm))
     };
 
-    let (vector_res, bm25_res) = tokio::join!(vector_future, bm25_future);
+    let arms_sw = Stopwatch::start(clock);
+    let (vector_res, bm25_res) = tokio::join!(
+        vector_future.instrument(stage_span("arms.vector", "VECTOR_DB")),
+        bm25_future.instrument(stage_span("arms.keyword", "RETRIEVER"))
+    );
+    timings.arms_ms = arms_sw.elapsed_ms();
+
+    let vector_arm = vector_res.as_ref().map(|(_, arm)| *arm).unwrap_or_default();
+    let keyword_arm = bm25_res.as_ref().map(|(_, arm)| *arm).unwrap_or_default();
+    timings.query_embed_ms = vector_arm.query_embed_ms;
+    timings.query_embed_cached = vector_arm.query_embed_cached;
+    timings.vector_arm_ms = vector_arm.store_ms;
+    timings.keyword_arm_ms = keyword_arm.store_ms;
+    timings.scope_check_ms = keyword_arm.scope_check_ms;
 
     let (mut v_hits, b_hits) = match (vector_res, bm25_res) {
         (Err(v_err), Err(b_err)) => {
@@ -262,22 +322,25 @@ pub async fn execute_pipeline(
                 "both search arms failed. vector: {v_err}; bm25: {b_err}"
             )));
         }
-        (Err(_), Ok(b_hits)) => {
+        (Err(_), Ok((b_hits, _))) => {
             degrades.push(RetrievalDegrade::VectorArmFailed);
             (Vec::new(), b_hits)
         }
-        (Ok(v_hits), Err(_)) => {
+        (Ok((v_hits, _)), Err(_)) => {
             degrades.push(RetrievalDegrade::Bm25ArmFailed);
             (v_hits, Vec::new())
         }
-        (Ok(v_hits), Ok(b_hits)) => (v_hits, b_hits),
+        (Ok((v_hits, _)), Ok((b_hits, _))) => (v_hits, b_hits),
     };
 
     // Enrich titles & categories on vector hits
+    let enrich_sw = Stopwatch::start(clock);
     enrich_titles(doc_store, scope.tenant(), &mut v_hits).await;
+    timings.enrich_ms = enrich_sw.elapsed_ms();
 
     // 4. Fuse without cross-arm deduplication (matching Bun's RecordId behavior).
     // Vector hits and BM25 hits are treated as distinct candidates in RRF.
+    let fusion_sw = Stopwatch::start(clock);
     let fused_hits: Vec<SearchHit> = if b_hits.is_empty() {
         v_hits
     } else if v_hits.is_empty() {
@@ -314,61 +377,74 @@ pub async fn execute_pipeline(
         candidates.into_iter().map(|c| c.hit).collect()
     };
 
+    timings.fusion_ms = fusion_sw.elapsed_ms();
+
     if fused_hits.is_empty() {
+        timings.total_ms = total_sw.elapsed_ms();
+        timings.engine_total_ms = timings.total_ms;
         return Ok(RetrievalOutcome {
             chunks: Vec::new(),
             sources: Vec::new(),
             context: String::new(),
             degrades,
+            timings,
         });
     }
 
     // 5. Optional rerank (only if rerank_enabled AND candidates exceed max_chunks)
     let max_chunks = opts.max_chunks.clamp(1, 50) as usize;
-    let mut reranked_hits: Vec<SearchHit> = if opts.rerank_enabled && fused_hits.len() > max_chunks
-    {
-        let final_k = opts.rerank_final_k.clamp(1, 100);
-        let candidates: Vec<RerankCandidate> = fused_hits
-            .iter()
-            .map(|h| RerankCandidate {
-                id: h.chunk.id.clone(),
-                text: h.chunk.content.clone(),
-                original_rank: h.rank,
-                original_score: h.similarity,
-            })
-            .collect();
+    let rerank_sw = Stopwatch::start(clock);
+    let rerank_future = async {
+        if opts.rerank_enabled && fused_hits.len() > max_chunks {
+            let final_k = opts.rerank_final_k.clamp(1, 100);
+            let candidates: Vec<RerankCandidate> = fused_hits
+                .iter()
+                .map(|h| RerankCandidate {
+                    id: h.chunk.id.clone(),
+                    text: h.chunk.content.clone(),
+                    original_rank: h.rank,
+                    original_score: h.similarity,
+                })
+                .collect();
 
-        match reranker.rerank(query, candidates, final_k).await {
-            Ok(ordered) => {
-                let mut hit_map: HashMap<String, Vec<SearchHit>> = HashMap::new();
-                for h in fused_hits {
-                    hit_map.entry(h.chunk.id.0.clone()).or_default().push(h);
-                }
-                let mut reordered: Vec<SearchHit> = Vec::new();
-                for (rank, item) in ordered.into_iter().enumerate() {
-                    if let Some(hits) = hit_map.get_mut(&item.id.0) {
-                        if !hits.is_empty() {
-                            let mut hit = hits.remove(0);
-                            hit.rank = rank as u32;
-                            reordered.push(hit);
+            match reranker.rerank(query, candidates, final_k).await {
+                Ok(ordered) => {
+                    let mut hit_map: HashMap<String, Vec<SearchHit>> = HashMap::new();
+                    for h in fused_hits {
+                        hit_map.entry(h.chunk.id.0.clone()).or_default().push(h);
+                    }
+                    let mut reordered: Vec<SearchHit> = Vec::new();
+                    for (rank, item) in ordered.into_iter().enumerate() {
+                        if let Some(hits) = hit_map.get_mut(&item.id.0) {
+                            if !hits.is_empty() {
+                                let mut hit = hits.remove(0);
+                                hit.rank = rank as u32;
+                                reordered.push(hit);
+                            }
                         }
                     }
+                    reordered
                 }
-                reordered
+                Err(_) => {
+                    degrades.push(RetrievalDegrade::RerankUnavailable);
+                    fused_hits
+                }
             }
-            Err(_) => {
-                degrades.push(RetrievalDegrade::RerankUnavailable);
-                fused_hits
-            }
+        } else {
+            fused_hits
         }
-    } else {
-        fused_hits
     };
+
+    let mut reranked_hits: Vec<SearchHit> = rerank_future
+        .instrument(stage_span("rerank", "RERANKER"))
+        .await;
+    timings.rerank_ms = rerank_sw.elapsed_ms();
 
     // 6. Cut to max_chunks (1..=50)
     reranked_hits.truncate(max_chunks);
 
     // 7. Neighbours (when window > 0)
+    let neighbours_sw = Stopwatch::start(clock);
     if opts.neighbour_window > 0 && !reranked_hits.is_empty() {
         let anchors: Vec<NeighbourAnchor> = reranked_hits
             .iter()
@@ -404,7 +480,10 @@ pub async fn execute_pipeline(
         }
     }
 
+    timings.neighbours_ms = neighbours_sw.elapsed_ms();
+
     // 8. Figures (when figure_limit > 0)
+    let figures_sw = Stopwatch::start(clock);
     if opts.figure_limit > 0 && !reranked_hits.is_empty() {
         let mut retrieved_doc_ids: Vec<DocumentId> = Vec::new();
         let mut seen_docs: HashSet<DocumentId> = HashSet::new();
@@ -472,7 +551,10 @@ pub async fn execute_pipeline(
         }
     }
 
+    timings.figures_ms = figures_sw.elapsed_ms();
+
     // 9. Build context string and sources with kb-core
+    let context_sw = Stopwatch::start(clock);
     let context_items: Vec<ContextItem<'_>> = reranked_hits
         .iter()
         .map(|hit| ContextItem {
@@ -493,11 +575,15 @@ pub async fn execute_pipeline(
         .collect();
 
     let (context, sources) = build_context_and_sources(&context_items);
+    timings.context_ms = context_sw.elapsed_ms();
+    timings.total_ms = total_sw.elapsed_ms();
+    timings.engine_total_ms = timings.total_ms;
 
     Ok(RetrievalOutcome {
         chunks: reranked_hits,
         sources,
         context,
         degrades,
+        timings,
     })
 }

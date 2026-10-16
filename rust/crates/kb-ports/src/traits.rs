@@ -502,9 +502,10 @@ pub trait Embedder: Send + Sync {
     /// The default says `cached: false` — correct for an embedder that does not
     /// cache, and the honest default for one that does and does not report it.
     async fn embed_query_detailed(&self, text: &str) -> Result<QueryEmbedding, PortError> {
-        self.embed_query(text)
-            .await
-            .map(|vector| QueryEmbedding { vector, cached: false })
+        self.embed_query(text).await.map(|vector| QueryEmbedding {
+            vector,
+            cached: false,
+        })
     }
 
     /// Embed a batch of document chunks during ingest.

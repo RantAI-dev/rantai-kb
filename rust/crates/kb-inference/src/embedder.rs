@@ -592,15 +592,27 @@ mod tests {
     async fn detailed_query_embed_reports_cache_hit_and_miss() {
         let (embedder, seen) = embedder_for(Mode::InOrder, 2).await;
 
-        let first = embedder.embed_query_detailed("apa itu rantai").await.unwrap();
+        let first = embedder
+            .embed_query_detailed("apa itu rantai")
+            .await
+            .unwrap();
         assert!(!first.cached, "a first query is never a cache hit");
         assert_eq!(first.vector, vector_for("apa itu rantai"));
 
-        let second = embedder.embed_query_detailed("apa itu rantai").await.unwrap();
-        assert!(second.cached, "the same question again comes from the cache");
+        let second = embedder
+            .embed_query_detailed("apa itu rantai")
+            .await
+            .unwrap();
+        assert!(
+            second.cached,
+            "the same question again comes from the cache"
+        );
         assert_eq!(second.vector, first.vector);
 
-        let other = embedder.embed_query_detailed("apa itu rantai-kb").await.unwrap();
+        let other = embedder
+            .embed_query_detailed("apa itu rantai-kb")
+            .await
+            .unwrap();
         assert!(!other.cached, "a different question is a miss");
 
         // The point of a cache hit: no provider call for it.
