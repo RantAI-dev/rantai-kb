@@ -85,6 +85,19 @@ Two cells are untested, and both are findings rather than passes:
 
 ## 3. Real-model baseline (MIRACL-id-200)
 
+> **Reviewer note (2026-10-16): do not quote this section as a quality baseline.**
+>
+> - **Row (a) is a bug, not a baseline.** A 30-line independent BM25 (`rank_bm25`, scored
+>   with ranx) on the *same* 2,933 documents and 200 queries gets nDCG@10 **0.708**,
+>   Recall@10 0.909 and Hit@1 0.52. rantai-kb gets 0.003. Search over natural-language
+>   Indonesian questions is effectively broken. This is under investigation in
+>   `docs/findings-bm25-collapse.md` (step 0e).
+> - **Row (b) indexed only 86 of 2,933 documents.**
+> - **Row (c) measured nothing.** It ran on 5 queries; 4 of 5 rerank calls timed out
+>   (`rerank_unavailable`), so it equals the no-rerank result on the same queries.
+> - **Not a semantic-retrieval result.** The "0.317 / Hit@1 0.400" figures come from 5
+>   hand-picked queries whose gold documents happened to be indexed.
+
 Evaluated on the human-labelled Indonesian development set from the MIRACL
 benchmark (*Zhang et al., 2023, TACL*), sampled to 200 dev queries with a
 judged distractor corpus (seed 42, BEIR layout at
