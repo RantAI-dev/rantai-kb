@@ -308,7 +308,7 @@ impl Config {
             model: embedding_model,
             api_key: embedding_api_key.clone(),
             dimension: embedding_dim,
-            batch_size: 32,
+            batch_size: int_var(&lookup, "KB_EMBEDDING_BATCH_SIZE", 32)?.max(1),
             embed_concurrency: 4,
             query_prefix: lookup("KB_EMBEDDING_QUERY_PREFIX").unwrap_or_default(),
             passage_prefix: lookup("KB_EMBEDDING_PASSAGE_PREFIX").unwrap_or_default(),
