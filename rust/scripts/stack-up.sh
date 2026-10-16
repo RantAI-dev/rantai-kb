@@ -141,7 +141,7 @@ EOF
 source "$STACK_ENV"
 
 echo "=== 3. Starting the stub embedding server ==="
-"$STUB_BIN" "127.0.0.1:${STUB_PORT}" 8 > "$STUB_LOG" 2>&1 &
+nohup "$STUB_BIN" "127.0.0.1:${STUB_PORT}" 8 > "$STUB_LOG" 2>&1 &
 echo $! > "$STUB_PID_FILE"
 
 for _ in {1..30}; do
@@ -157,7 +157,7 @@ echo "=== 4. Migrations and vector schema ==="
 "$KB_SERVER_BIN" apply-schema | tail -n 1
 
 echo "=== 5. Starting kb-server ==="
-"$KB_SERVER_BIN" serve > "$SERVER_LOG" 2>&1 &
+nohup "$KB_SERVER_BIN" serve > "$SERVER_LOG" 2>&1 &
 echo $! > "$SERVER_PID_FILE"
 
 for _ in {1..60}; do

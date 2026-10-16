@@ -1,0 +1,158 @@
+{
+  "label": "baseline-tiny-stub",
+  "dataset": "tiny",
+  "timestamp": "2026-10-16T11:55:25.229736192+00:00",
+  "harness_commit": "282b9c1-dirty",
+  "gain": "linear",
+  "server_version": "dev",
+  "server_commit": null,
+  "k": 10,
+  "max_chunks": 50,
+  "n_queries": 12,
+  "n_failed": 0,
+  "n_degraded": 0,
+  "n_noted": 0,
+  "n_documents": 6,
+  "n_ingest_failed": 0,
+  "degrades": [],
+  "failures": [],
+  "document": {
+    "ndcg": {
+      "mean": 0.5117495986746416,
+      "ci_low": 0.3481897198845654,
+      "ci_high": 0.6937504980482406,
+      "n": 12
+    },
+    "recall": {
+      "mean": 0.8333333333333334,
+      "ci_low": 0.5833333333333334,
+      "ci_high": 1.0,
+      "n": 12
+    },
+    "mrr": {
+      "mean": 0.4055555555555556,
+      "ci_low": 0.2457986111111111,
+      "ci_high": 0.604236111111111,
+      "n": 12
+    },
+    "hit1": {
+      "mean": 0.16666666666666666,
+      "ci_low": 0.0,
+      "ci_high": 0.4166666666666667,
+      "n": 12
+    },
+    "precision": {
+      "mean": 0.08333333333333333,
+      "ci_low": 0.05833333333333333,
+      "ci_high": 0.09999999999999999,
+      "n": 12
+    },
+    "n_queries": 12,
+    "answered": {
+      "ndcg": {
+        "mean": 0.5117495986746416,
+        "ci_low": 0.3481897198845654,
+        "ci_high": 0.6937504980482406,
+        "n": 12
+      },
+      "recall": {
+        "mean": 0.8333333333333334,
+        "ci_low": 0.5833333333333334,
+        "ci_high": 1.0,
+        "n": 12
+      },
+      "mrr": {
+        "mean": 0.4055555555555556,
+        "ci_low": 0.2457986111111111,
+        "ci_high": 0.604236111111111,
+        "n": 12
+      },
+      "hit1": {
+        "mean": 0.16666666666666666,
+        "ci_low": 0.0,
+        "ci_high": 0.4166666666666667,
+        "n": 12
+      },
+      "precision": {
+        "mean": 0.08333333333333333,
+        "ci_low": 0.05833333333333333,
+        "ci_high": 0.09999999999999999,
+        "n": 12
+      },
+      "n_queries": 12
+    }
+  },
+  "page": {
+    "ndcg": {
+      "mean": 0.5,
+      "ci_low": 0.0,
+      "ci_high": 1.0,
+      "n": 2
+    },
+    "recall": {
+      "mean": 0.5,
+      "ci_low": 0.0,
+      "ci_high": 1.0,
+      "n": 2
+    },
+    "mrr": {
+      "mean": 0.5,
+      "ci_low": 0.0,
+      "ci_high": 1.0,
+      "n": 2
+    },
+    "hit1": {
+      "mean": 0.5,
+      "ci_low": 0.0,
+      "ci_high": 1.0,
+      "n": 2
+    },
+    "precision": {
+      "mean": 0.05,
+      "ci_low": 0.0,
+      "ci_high": 0.1,
+      "n": 2
+    },
+    "n_queries": 2,
+    "answered": {
+      "ndcg": {
+        "mean": 0.5,
+        "ci_low": 0.0,
+        "ci_high": 1.0,
+        "n": 2
+      },
+      "recall": {
+        "mean": 0.5,
+        "ci_low": 0.0,
+        "ci_high": 1.0,
+        "n": 2
+      },
+      "mrr": {
+        "mean": 0.5,
+        "ci_low": 0.0,
+        "ci_high": 1.0,
+        "n": 2
+      },
+      "hit1": {
+        "mean": 0.5,
+        "ci_low": 0.0,
+        "ci_high": 1.0,
+        "n": 2
+      },
+      "precision": {
+        "mean": 0.05,
+        "ci_low": 0.0,
+        "ci_high": 0.1,
+        "n": 2
+      },
+      "n_queries": 2
+    }
+  },
+  "latency_ms": {
+    "mean": 188.91497591666666,
+    "p50": 186.92556000000002,
+    "p95": 209.1219041,
+    "p99": 212.25758082,
+    "n": 12
+  }
+}

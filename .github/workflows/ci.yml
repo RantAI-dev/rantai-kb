@@ -199,3 +199,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Run search parity harness
         run: ./rust/scripts/search-parity.sh
+
+  rust-eval-gate:
+    name: Rust retrieval eval & scope isolation gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # With stub embeddings these numbers are deterministic plumbing numbers.
+      - name: Fetch libpdfium
+        run: |
+          ./rust/scripts/fetch-pdfium.sh ./rust/.vendor/pdfium
+          echo "PDFIUM_DYNAMIC_LIB_PATH=$GITHUB_WORKSPACE/rust/.vendor/pdfium/lib/libpdfium.so" >> $GITHUB_ENV
+      - name: Run CI eval gate
+        run: ./rust/scripts/ci-eval-gate.sh
+      - name: Upload eval artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-artifacts
+          path: |
+            eval-out/tiny/report.md
+            eval-out/tiny/metrics.json
+            eval-out/leak/leak-report.md
