@@ -87,7 +87,7 @@ kb-server eval … --gain exponential
 
 | file | what it is |
 |---|---|
-| `metrics.json` | every metric with its 95% CI, the counters, latency, label, timestamp, harness commit, server version, nDCG gain and dataset name |
+| `metrics.json` | every metric with its 95% CI, the counters, latency, label, timestamp, provenance and dataset name |
 | `report.md` | the same numbers as a table, for a human |
 | `run.trec` | document-level TREC run (`qid Q0 docno rank score tag`) |
 | `run.page.trec` | page-level TREC run |
@@ -98,6 +98,17 @@ them, which is how this harness is checked against a tool that did not write it.
 Because a document's rank here is the rank of its first chunk, the score column
 encodes the rank (`1/rank`) rather than a similarity, so a re-scoring tool
 reproduces the same ordering.
+
+## Who produced the number
+
+Every run records **two** independent identities, because they are two different
+binaries:
+
+| field | where it comes from |
+|---|---|
+| `harness_commit` | `git rev-parse` run by `build.rs` **at compile time**, baked into the binary. Never read from the working directory: a harness invoked from `/tmp` must still name the code that produced the number. |
+| `server_version` | `GET /health` on the server under test (`KB_VERSION`, default `dev`). `null` if it does not answer. |
+| `server_commit` | `null` — **no `kb-server` route exposes a build commit**. `/health` reports `version` only, and filling this in with the harness's commit would attribute one binary's identity to another. |
 
 ## How the numbers are computed
 

@@ -256,11 +256,13 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
         );
     }
 
+    let server_version = fetch_server_version(&client, &config).await;
     let latency: LatencyReport = latency_report(std::mem::take(&mut board.latencies));
     let report = build_report(ReportParts {
         label: &config.label,
         dataset: &dataset.name,
         gain: config.gain,
+        server_version: server_version.as_deref(),
         k: config.k,
         max_chunks: config.max_chunks,
         n_queries: board.n_queries,
@@ -288,6 +290,14 @@ struct UploadResponse {
     id: String,
     #[serde(rename = "jobId", default)]
     job_id: String,
+}
+
+/// `GET /health`. Unauthenticated by design, so the harness can identify the
+/// server it is about to measure without holding a key.
+#[derive(Debug, Deserialize)]
+struct HealthAnswer {
+    #[serde(default)]
+    version: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -430,6 +440,28 @@ async fn poll_job(
     }
 }
 
+/// Ask the server what version it is, best effort.
+///
+/// Non-fatal: a run against a server that cannot answer `/health` still
+/// produces metrics, and the report says the build is unidentified. What must
+/// never happen is inventing a value here.
+async fn fetch_server_version(client: &reqwest::Client, config: &RunnerConfig) -> Option<String> {
+    let response = client
+        .get(endpoint(&config.base_url, "/health"))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        eprintln!(
+            "GET /health returned HTTP {}; the server version is unknown",
+            response.status()
+        );
+        return None;
+    }
+    let health: HealthAnswer = response.json().await.ok()?;
+    health.version.filter(|v| !v.trim().is_empty())
+}
+
 /// POST one search and return its answer.
 async fn search_one(
     client: &reqwest::Client,
@@ -503,6 +535,16 @@ mod tests {
     use super::*;
     use crate::dataset::{base_doc_key, page_of};
     use crate::metrics::aggregate_level;
+
+    #[test]
+    fn a_health_answer_without_a_version_is_none() {
+        let ok: HealthAnswer = serde_json::from_str(r#"{"ok":true,"version":"1.4.2"}"#).unwrap();
+        assert_eq!(ok.version.as_deref(), Some("1.4.2"));
+        let blank: HealthAnswer = serde_json::from_str(r#"{"ok":true,"version":"  "}"#).unwrap();
+        assert_eq!(blank.version.as_deref(), Some("  "));
+        let missing: HealthAnswer = serde_json::from_str(r#"{"ok":true}"#).unwrap();
+        assert!(missing.version.is_none());
+    }
 
     #[test]
     fn endpoint_handles_a_trailing_slash() {

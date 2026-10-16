@@ -211,6 +211,14 @@ async fn runner_measures_a_live_server_end_to_end() {
     let metrics = std::fs::read_to_string(out_dir.join("metrics.json")).unwrap();
     assert!(metrics.contains("\"dataset\": \"kb-eval-e2e-"), "{metrics}");
     assert!(metrics.contains("\"n_failed\": 1"), "{metrics}");
+    // Provenance: the harness names the server it measured (the fake state's
+    // version is "test") and records that no route exposes a server commit.
+    assert!(
+        metrics.contains("\"server_version\": \"test\""),
+        "{metrics}"
+    );
+    assert!(metrics.contains("\"server_commit\": null"), "{metrics}");
+    assert!(metrics.contains("\"harness_commit\": \""), "{metrics}");
     let md = std::fs::read_to_string(out_dir.join("report.md")).unwrap();
     assert!(md.contains("1 of 3 queries failed"), "{md}");
     assert!(md.contains("Answered only (secondary)"), "{md}");

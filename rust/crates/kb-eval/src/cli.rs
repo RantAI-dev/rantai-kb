@@ -119,6 +119,10 @@ async fn eval(args: &[String]) -> Result<(), EvalError> {
         "answered-only (secondary): document nDCG@{} {:.3} over {} queries",
         m.k, m.document.answered.ndcg.mean, m.document.answered.n_queries
     );
+    println!(
+        "measured server version: {}",
+        m.server_version.as_deref().unwrap_or("unknown")
+    );
     println!("wrote metrics.json, report.md, run.trec, run.page.trec");
     gate_on_failures(m, allow_failures)
 }
@@ -263,6 +267,8 @@ mod tests {
             timestamp: "2026-10-16T00:00:00Z".to_string(),
             harness_commit: "abc1234".to_string(),
             gain: "linear".to_string(),
+            server_version: Some("dev".to_string()),
+            server_commit: None,
             k: 10,
             max_chunks: 50,
             n_queries: 12,

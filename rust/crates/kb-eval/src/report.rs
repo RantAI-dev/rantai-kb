@@ -39,6 +39,16 @@ pub struct MetricsFile {
     /// The nDCG gain in force. `linear` matches trec_eval/BEIR/MTEB/ViDoRe;
     /// `exponential` is Burges' variant and is not comparable with them.
     pub gain: String,
+    /// What the server said about itself on `GET /health` (`KB_VERSION`).
+    /// `None` when the endpoint is unreachable or says nothing.
+    pub server_version: Option<String>,
+    /// What the server said about the code it was built from.
+    ///
+    /// Always `None`: no `kb-server` route exposes a build commit — `/health`
+    /// reports only `version`, which an operator sets by hand. Recorded as `null`
+    /// rather than filled with the harness's own commit, which would be a lie
+    /// about a different binary.
+    pub server_commit: Option<String>,
     pub k: usize,
     pub max_chunks: u32,
     /// Queries attempted.
@@ -81,6 +91,7 @@ pub struct ReportParts<'a> {
     pub label: &'a str,
     pub dataset: &'a str,
     pub gain: Gain,
+    pub server_version: Option<&'a str>,
     pub k: usize,
     pub max_chunks: u32,
     pub n_queries: usize,
@@ -110,6 +121,8 @@ pub fn build_report(parts: ReportParts<'_>) -> RunReport {
         timestamp: chrono::Utc::now().to_rfc3339(),
         harness_commit: harness_commit(),
         gain: parts.gain.as_str().to_string(),
+        server_version: parts.server_version.map(str::to_string),
+        server_commit: None,
         k: parts.k,
         max_chunks: parts.max_chunks,
         n_queries: parts.n_queries,
@@ -174,6 +187,19 @@ pub fn render_markdown(m: &MetricsFile) -> String {
     out.push_str(&format!("- dataset: `{}`\n", m.dataset));
     out.push_str(&format!("- harness commit: `{}`\n", m.harness_commit));
     out.push_str(&format!("- nDCG gain: **{}**\n", m.gain));
+    match m.server_version.as_deref() {
+        Some(version) => out.push_str(&format!("- server version: `{version}` (GET /health)\n")),
+        None => out.push_str(
+            "- server version: unknown (GET /health did not answer; the run measured an \
+             unidentified build)\n",
+        ),
+    }
+    out.push_str(&format!(
+        "- server commit: {}\n",
+        m.server_commit
+            .as_deref()
+            .map_or_else(|| "null — no kb-server route exposes a build commit (`/health` reports only `version`)".to_string(), |c| format!("`{c}`"))
+    ));
     out.push_str(&format!("- timestamp: {}\n", m.timestamp));
     out.push_str(&format!("- cutoff k: {}\n", m.k));
     out.push_str(&format!("- max chunks per query: {}\n", m.max_chunks));
@@ -410,6 +436,8 @@ pub fn score_offline(qrels: &[Qrel], rankings: &[TrecRanking], k: usize, gain: G
         timestamp: chrono::Utc::now().to_rfc3339(),
         harness_commit: harness_commit(),
         gain: gain.as_str().to_string(),
+        server_version: None,
+        server_commit: None,
         k,
         max_chunks: 0,
         n_queries,
@@ -486,6 +514,56 @@ mod tests {
         assert!(report.contains("1.000"), "{report}");
     }
 
+    fn empty_parts<'a>(server_version: Option<&'a str>) -> ReportParts<'a> {
+        ReportParts {
+            label: "run",
+            dataset: "tiny",
+            gain: Gain::Linear,
+            server_version,
+            k: 10,
+            max_chunks: 50,
+            n_queries: 0,
+            n_failed: 0,
+            n_degraded: 0,
+            n_noted: 0,
+            n_documents: 0,
+            n_ingest_failed: 0,
+            degrades: Vec::new(),
+            document: Vec::new(),
+            page: Vec::new(),
+            document_answered: Vec::new(),
+            page_answered: Vec::new(),
+            latency: LatencyReport {
+                mean: 0.0,
+                p50: 0.0,
+                p95: 0.0,
+                p99: 0.0,
+                n: 0,
+            },
+            document_run: Vec::new(),
+            page_run: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn an_unidentified_server_says_so_rather_than_guessing() {
+        // `/health` unreachable: the report must name the gap, not fill it in
+        // with the harness's own commit (a different binary entirely).
+        let report = build_report(empty_parts(None));
+        assert!(report.metrics.server_version.is_none());
+        assert!(report.metrics.server_commit.is_none());
+        let md = render_markdown(&report.metrics);
+        assert!(
+            md.contains("server version: unknown (GET /health did not answer"),
+            "{md}"
+        );
+        assert!(md.contains("server commit: null"), "{md}");
+        assert!(
+            md.contains(&format!("harness commit: `{}`", harness_commit())),
+            "{md}"
+        );
+    }
+
     #[test]
     fn n_queries_is_what_was_asked_not_what_was_scored() {
         let scored = evaluate_query(
@@ -499,6 +577,7 @@ mod tests {
             label: "run",
             dataset: "tiny",
             gain: Gain::Linear,
+            server_version: Some("9.9.9"),
             k: 10,
             max_chunks: 50,
             n_queries: 5,
@@ -560,6 +639,16 @@ mod tests {
         assert!(json.contains("\"n_ingest_failed\":1"), "{json}");
         assert!(json.contains("\"harness_commit\""), "{json}");
         assert!(json.contains("\"gain\":\"linear\""), "{json}");
+        assert!(json.contains("\"server_version\":\"9.9.9\""), "{json}");
+        assert!(json.contains("\"server_commit\":null"), "{json}");
         assert!(markdown.contains("nDCG gain: **linear**"), "{markdown}");
+        assert!(
+            markdown.contains("server version: `9.9.9` (GET /health)"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("server commit: null — no kb-server route exposes a build commit"),
+            "{markdown}"
+        );
     }
 }
