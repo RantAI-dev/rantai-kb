@@ -26,5 +26,7 @@ tracing = { workspace = true }
 
 
 [dev-dependencies]
-# Test builds of kb-engine need the scope adapter token for its fakes.
-kb-ports = { path = "../kb-ports", features = ["scope-adapter"] }
+# Test builds of kb-engine need the scope adapter token for its fakes, and the
+# contract suite so the in-memory reference index is held to the same
+# properties as every real adapter.
+kb-ports = { path = "../kb-ports", features = ["scope-adapter", "contract"] }

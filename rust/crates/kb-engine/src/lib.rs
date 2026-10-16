@@ -29,6 +29,17 @@ pub mod ingest;
 pub mod retrieval;
 pub mod timing;
 
+/// The reference `RetrievalIndex`. Under `test-utils` so an adapter's contract
+/// test can depend on it as a control; it is also the implementation the engine
+/// will use once the Qdrant swap lands.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod in_memory_index;
+
+#[cfg(any(test, feature = "test-utils"))]
+pub use in_memory_index::InMemoryIndex;
+
+#[cfg(all(test, feature = "test-utils"))]
+mod in_memory_index_tests;
 #[cfg(test)]
 mod ingest_tests;
 #[cfg(test)]

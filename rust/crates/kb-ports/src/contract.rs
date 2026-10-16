@@ -126,9 +126,7 @@ macro_rules! dispatch {
                 "keyword_or_semantics" => keyword_or_semantics(&index).await,
                 "dense_top_k" => dense_top_k(&index).await,
                 "idempotent_upsert" => idempotent_upsert(&index).await,
-                "reingest_leaves_no_stale_tail" => {
-                    reingest_leaves_no_stale_tail(&index).await
-                }
+                "reingest_leaves_no_stale_tail" => reingest_leaves_no_stale_tail(&index).await,
                 "deterministic_order" => deterministic_order(&index).await,
                 "fusion_merges_arms" => fusion_merges_arms(&index).await,
                 "neighbours_are_adjacent_and_in_scope" => {
@@ -189,9 +187,17 @@ const FIXTURE_DOCS: &[FixtureDoc] = &[
         kb: Some("kb-1"),
         category: Some("kategori-1"),
         contents: &[
+            // The gold for the Candy Candy question. `candy` twice in a short
+            // document is what makes it win on term frequency, which is the
+            // point: under OR-of-terms a question must reach the document that
+            // is actually about the topic.
             "Candy Candy adalah manga karya Kyoko Mizuki",
-            "Candi Borobudur dibangun pada abad ke delapan",
-            "Gula aren adalah pemanis alami dari pohon aren",
+            // A distractor on the same term, so top-1 is earned rather than
+            // being the only match.
+            "Toko permen candy itu berada di ujung jalan besar",
+            // The `candi` / `Candy` collision SurrealDB's English stemmer
+            // created: under our tokenizer this document scores zero.
+            "Candi Borobudur dibangun pada abad kedelapan secara bertahap",
         ],
     },
     FixtureDoc {
@@ -200,8 +206,8 @@ const FIXTURE_DOCS: &[FixtureDoc] = &[
         kb: Some("kb-2"),
         category: Some("kategori-2"),
         contents: &[
-            "Candy adalah istilah dagang lazim dipakai",
-            "Menulis laporan tahunan butuh ketelitian",
+            "Gula aren adalah pemanis alami dari pohon aren",
+            "Menulis laporan tahunan butuh ketelitian dan waktu panjang",
         ],
     },
     FixtureDoc {
@@ -209,7 +215,31 @@ const FIXTURE_DOCS: &[FixtureDoc] = &[
         tenant: "contract-tenant-a",
         kb: Some("kb-1"),
         category: Some("kategori-2"),
-        contents: &["Permen candy gula aren dijual di pasar pagi"],
+        contents: &[
+            "Belajar menulis puisi membutuhkan latihan setiap hari",
+            "Metode menulis alternatif dikenal sebagai metode Diana",
+            "Kelas menulis profesional dibuka setiap tahun oleh sekolah",
+        ],
+    },
+    // Filler whose only job is to make `yang` and `menulis` ordinary words in
+    // this corpus. Without it their IDF is near-maximal on a 14-document scope
+    // and any document mentioning them outranks the gold, which would make the
+    // property test BM25's behaviour on a toy corpus rather than the port's
+    // OR-of-terms semantics. This mirrors the real corpus, where `menulis` and
+    // `yang` are common and `candy` is rare.
+    FixtureDoc {
+        id: "doc-a4",
+        tenant: "contract-tenant-a",
+        kb: Some("kb-2"),
+        category: Some("kategori-1"),
+        contents: &[
+            "Surat yang panjang dibaca teliti oleh penerima yang sabar",
+            "Panduan menulis dokumen resmi tersedia untuk semua warga",
+            "Halaman yang sering dibuka memuat informasi berguna",
+            "Buku yang tebal biasanya ditulis oleh penulis yang sibuk",
+            "Alat yang bagus membuat pekerjaan yang sulit jadi mudah",
+            "Tempat yang nyaman adalah syarat belajar yang penting",
+        ],
     },
     FixtureDoc {
         id: "doc-b1",
@@ -217,6 +247,8 @@ const FIXTURE_DOCS: &[FixtureDoc] = &[
         kb: Some("kb-9"),
         category: Some("kategori-9"),
         contents: &[
+            // Byte-identical to the gold. A scope escape therefore shows up as
+            // a wrong top-1 with an identical score, not as a missing result.
             "Candy Candy adalah manga karya Kyoko Mizuki",
             "Dokumen ini milik tenant lain sepenuhnya",
             "Halaman kosong untuk menguji jumlah chunk",
@@ -237,7 +269,10 @@ fn scope_for(tenant: &str, doc_ids: &[&str]) -> DocumentScope {
     DocumentScope::new(
         &token,
         TenantId::new_unchecked(tenant),
-        doc_ids.iter().map(|id| DocumentId::new_unchecked(*id)).collect(),
+        doc_ids
+            .iter()
+            .map(|id| DocumentId::new_unchecked(*id))
+            .collect(),
     )
 }
 
@@ -246,23 +281,37 @@ fn scope_for(tenant: &str, doc_ids: &[&str]) -> DocumentScope {
 /// containment property runs all of them rather than one.
 fn all_scopes() -> Vec<(&'static str, DocumentScope)> {
     vec![
-        ("tenant-a", scope_for("contract-tenant-a", &["doc-a1", "doc-a2", "doc-a3"])),
-        ("kb-1", scope_for("contract-tenant-a", &["doc-a1", "doc-a3"])),
-        ("kategori-2", scope_for("contract-tenant-a", &["doc-a2", "doc-a3"])),
-        ("single-doc", scope_for("contract-tenant-a", &["doc-a2"])),
-        ("tenant-b", scope_for("contract-tenant-b", &["doc-b1", "doc-b2"])),
+        ("tenant-a", scope_tenant_a()),
+        ("kb-1", scope_kb_1()),
+        ("kategori-2", scope_kategori_2()),
+        ("single-doc", scope_single_doc()),
+        ("tenant-b", scope_tenant_b()),
     ]
 }
 
-/// Tenant A's widest scope. Used where a property needs ids from any of A's
-/// documents.
+/// Tenant A's whole scope: 14 units across 4 documents and 2 knowledge bases.
 fn scope_tenant_a() -> DocumentScope {
-    scope_for("contract-tenant-a", &["doc-a1", "doc-a2", "doc-a3"])
+    scope_for(
+        "contract-tenant-a",
+        &["doc-a1", "doc-a2", "doc-a3", "doc-a4"],
+    )
 }
 
 /// Tenant A's `kb-1` scope.
 fn scope_kb_1() -> DocumentScope {
     scope_for("contract-tenant-a", &["doc-a1", "doc-a3"])
+}
+
+/// Tenant A's `kategori-2` scope. Deliberately contains no `candy` document, so
+/// a keyword search here must return results from the other terms rather than
+/// the gold.
+fn scope_kategori_2() -> DocumentScope {
+    scope_for("contract-tenant-a", &["doc-a2", "doc-a3"])
+}
+
+/// Tenant A's `doc-a2` alone.
+fn scope_single_doc() -> DocumentScope {
+    scope_for("contract-tenant-a", &["doc-a2"])
 }
 
 fn scope_tenant_b() -> DocumentScope {
@@ -399,43 +448,55 @@ async fn scope_containment(index: &impl RetrievalIndex) -> Outcome {
         // fetch: in-scope ids come back, out-of-scope ids return nothing at all
         // rather than an error that would confirm existence.
         let in_scope_id = ChunkId::new_unchecked(format!("{}_0", first_doc_of(&scope)));
-        match index.fetch(&scope, std::slice::from_ref(&in_scope_id)).await {
+        match index
+            .fetch(&scope, std::slice::from_ref(&in_scope_id))
+            .await
+        {
             Ok(_) => {}
             Err(err) => return Outcome::Failed(format!("fetch(in-scope) errored: {err}")),
         }
-        let foreign_id = ChunkId::new_unchecked(foreign_unit_id());
-        match index.fetch(&scope, &[foreign_id]).await {
+        // The out-of-scope id has to be chosen against *this* scope. Hardcoding
+        // one id would make the tenant-B run fetch a document that tenant B can
+        // see, and the property would be asserting nothing.
+        let Some((foreign_id, foreign_document)) = out_of_scope_probe(&scope) else {
+            return Outcome::Skipped(format!(
+                "scope {scope_name} sees every fixture document, so there is no out-of-scope \
+                 id to probe"
+            ));
+        };
+        match index.fetch(&scope, std::slice::from_ref(&foreign_id)).await {
             Ok(rows) => {
                 if !rows.is_empty() {
                     return Outcome::Failed(format!(
-                        "fetch of an out-of-scope id in scope {scope_name} returned {} row(s)",
+                        "fetch of {foreign_id} — outside scope {scope_name} — returned {} row(s)",
                         rows.len()
                     ));
                 }
             }
             Err(err) => {
                 return Outcome::Failed(format!(
-                    "fetch of an out-of-scope id in scope {scope_name} leaked existence via an error: {err}"
+                    "fetch of {foreign_id}, outside scope {scope_name}, leaked existence via an \
+                     error: {err}"
                 ));
             }
         }
 
         // neighbours: a scope never reaches into a document it cannot see.
-        match index
-            .neighbours(&scope, &DocumentId::new_unchecked(foreign_doc()), &[1])
-            .await
-        {
+        match index.neighbours(&scope, &foreign_document, &[1]).await {
             Ok(rows) => {
                 if !rows.is_empty() {
                     return Outcome::Failed(format!(
-                        "neighbours of an out-of-scope document in scope {scope_name} returned {} row(s)",
+                        "neighbours of {} in scope {scope_name} returned {} row(s); it is not in \
+                         the scope",
+                        foreign_document.as_str(),
                         rows.len()
                     ));
                 }
             }
             Err(err) => {
                 return Outcome::Failed(format!(
-                    "neighbours of an out-of-scope document in scope {scope_name} errored: {err}"
+                    "neighbours of {} in scope {scope_name} errored: {err}",
+                    foreign_document.as_str()
                 ));
             }
         }
@@ -568,12 +629,7 @@ async fn dense_top_k(index: &impl RetrievalIndex) -> Outcome {
     let mut truth: Vec<(String, f32)> = fixture_units()
         .iter()
         .filter(|u| u.tenant == *scope.tenant() && scope.document_ids().contains(&u.document_id))
-        .map(|u| {
-            (
-                u.id.as_str().to_string(),
-                cosine(&u.dense, &query_vec),
-            )
-        })
+        .map(|u| (u.id.as_str().to_string(), cosine(&u.dense, &query_vec)))
         .collect();
     truth.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
@@ -656,7 +712,10 @@ async fn reingest_leaves_no_stale_tail(index: &impl RetrievalIndex) -> Outcome {
 
     // doc-a1 has three chunks; re-ingest it with one.
     index
-        .delete_document(&TenantId::new_unchecked("contract-tenant-a"), &DocumentId::new_unchecked("doc-a1"))
+        .delete_document(
+            &TenantId::new_unchecked("contract-tenant-a"),
+            &DocumentId::new_unchecked("doc-a1"),
+        )
         .await
         .ok();
     let mut shorter: Vec<IndexUnit> = fixture_units()
@@ -711,7 +770,10 @@ async fn reingest_leaves_no_stale_tail(index: &impl RetrievalIndex) -> Outcome {
         ));
     }
     let removed = match index
-        .delete_document(&TenantId::new_unchecked("contract-tenant-b"), &DocumentId::new_unchecked("doc-b1"))
+        .delete_document(
+            &TenantId::new_unchecked("contract-tenant-b"),
+            &DocumentId::new_unchecked("doc-b1"),
+        )
         .await
     {
         Ok(n) => n,
@@ -796,7 +858,10 @@ async fn deterministic_order(index: &impl RetrievalIndex) -> Outcome {
                 Ok(rows) => rows,
                 Err(err) => return Outcome::Failed(format!("search errored on run {run}: {err}")),
             };
-            let ids: Vec<String> = rows.iter().map(|c| c.unit_id.as_str().to_string()).collect();
+            let ids: Vec<String> = rows
+                .iter()
+                .map(|c| c.unit_id.as_str().to_string())
+                .collect();
             if let Some(first) = &previous
                 && *first != ids
             {
@@ -921,7 +986,8 @@ async fn neighbours_are_adjacent_and_in_scope(index: &impl RetrievalIndex) -> Ou
     };
     if rows.is_empty() {
         return Outcome::Failed(
-            "neighbours of chunk 1 in doc-a1 returned nothing; doc-a1 has chunks 0 and 2".to_string(),
+            "neighbours of chunk 1 in doc-a1 returned nothing; doc-a1 has chunks 0 and 2"
+                .to_string(),
         );
     }
     for row in &rows {
@@ -931,16 +997,12 @@ async fn neighbours_are_adjacent_and_in_scope(index: &impl RetrievalIndex) -> Ou
                 row.document_id.as_str()
             ));
         }
-        if row.chunk_index == 1 {
-            return Outcome::Failed(
-                "neighbours returned the anchor itself; a caller cannot tell an expansion \
-                 from its own hit"
-                    .to_string(),
-            );
-        }
-        if row.chunk_index > 2 {
+        // doc-a1's chunks are 0, 1 and 2. The anchor is 1, so the only legal
+        // neighbours are 0 and 2 — anything else means the adapter ignored the
+        // adjacency bound and returned the document.
+        if row.chunk_index != 0 && row.chunk_index != 2 {
             return Outcome::Failed(format!(
-                "neighbours of chunk 1 returned chunk {}, which is not adjacent",
+                "neighbours of chunk 1 returned chunk {}; only 0 and 2 are adjacent",
                 row.chunk_index
             ));
         }
@@ -952,12 +1014,32 @@ async fn neighbours_are_adjacent_and_in_scope(index: &impl RetrievalIndex) -> Ou
             ));
         }
     }
+    let got: Vec<u32> = rows.iter().map(|r| r.chunk_index).collect();
+    if got != vec![0, 2] {
+        return Outcome::Failed(format!(
+            "neighbours of chunk 1 returned {got:?}, expected [0, 2] in ascending order"
+        ));
+    }
 
-    // A document outside the scope yields nothing (already asserted in the
-    // containment property); here we check a document that exists in scope but
-    // has no chunks at those positions.
+    // Anchoring at index 0 must reach forward only: chunk 0 has no predecessor,
+    // and returning one would mean the adapter wrapped or filtered wrongly.
+    let edge = match index
+        .neighbours(&scope, &DocumentId::new_unchecked("doc-a1"), &[0])
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => return Outcome::Failed(format!("neighbours errored: {err}")),
+    };
+    let edge_indices: Vec<u32> = edge.iter().map(|r| r.chunk_index).collect();
+    if edge_indices != vec![1] {
+        return Outcome::Failed(format!(
+            "neighbours of chunk 0 returned {edge_indices:?}, expected [1]"
+        ));
+    }
+
+    // An anchor past the end of a document must reach nothing at all.
     let none = match index
-        .neighbours(&scope, &DocumentId::new_unchecked("doc-a3"), &[99])
+        .neighbours(&scope, &DocumentId::new_unchecked("doc-a1"), &[99])
         .await
     {
         Ok(rows) => rows,
@@ -965,7 +1047,7 @@ async fn neighbours_are_adjacent_and_in_scope(index: &impl RetrievalIndex) -> Ou
     };
     if !none.is_empty() {
         return Outcome::Failed(format!(
-            "anchoring on chunk 99 of a one-chunk document returned {} row(s)",
+            "anchoring on chunk 99 of a three-chunk document returned {} row(s)",
             none.len()
         ));
     }
@@ -982,14 +1064,27 @@ fn first_doc_of(scope: &DocumentScope) -> String {
         .map_or_else(|| "none".to_string(), |d| d.as_str().to_string())
 }
 
-/// A unit id that is never in tenant A's scope, for the out-of-scope probes.
-fn foreign_unit_id() -> &'static str {
-    "doc-b1_0"
-}
-
-/// A document that tenant A's scope never contains.
-fn foreign_doc() -> &'static str {
-    "doc-b1"
+/// The first fixture unit that this scope must not see, as `(unit id, document
+/// id)`.
+///
+/// Chosen against the scope rather than hardcoded: a probe id that the scope
+/// happens to contain asserts nothing, and the tenant-B leg of the containment
+/// property would silently pass. `None` when the scope sees everything, which
+/// is not the case for any fixture scope but is handled rather than assumed.
+fn out_of_scope_probe(scope: &DocumentScope) -> Option<(ChunkId, DocumentId)> {
+    FIXTURE_DOCS.iter().find_map(|doc| {
+        if scope
+            .document_ids()
+            .contains(&DocumentId::new_unchecked(doc.id))
+            && doc.tenant == scope.tenant().as_str()
+        {
+            return None;
+        }
+        Some((
+            ChunkId::new_unchecked(format!("{}_0", doc.id)),
+            DocumentId::new_unchecked(doc.id),
+        ))
+    })
 }
 
 /// A dense and a sparse probe query, using whichever arms the adapter has.

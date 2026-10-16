@@ -245,6 +245,12 @@ pub trait RetrievalIndex: Send + Sync {
 
     /// Adjacent chunks of one document, by chunk index, within scope. Used by
     /// the small-to-big expansion phase.
+    ///
+    /// "Adjacent" means index ± 1 of an anchor and nothing else: a caller must
+    /// be able to bound the expansion without trusting the adapter, and an
+    /// implementation that returned the whole document would make a 3,000-chunk
+    /// page cost 3,000 unit reads. The anchors themselves are excluded, since a
+    /// caller cannot tell its own hit from its expansion otherwise.
     async fn neighbours(
         &self,
         scope: &DocumentScope,
