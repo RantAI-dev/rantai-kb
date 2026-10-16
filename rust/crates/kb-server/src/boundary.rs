@@ -38,6 +38,28 @@ pub const ADAPTER_CRATES: &[&str] = &[
     "kb-server",
 ];
 
+/// Clients that must measure the service from the outside.
+///
+/// `kb-eval` scores a running `kb-server` over HTTP. If it linked the engine or
+/// a store it would be scoring its own in-process assumptions instead of the
+/// thing that is deployed, and the number would stop meaning what the run label
+/// says it means. This is the one dependency rule the inner/adapter split does
+/// not express on its own, so it is expressed here.
+pub const BLACK_BOX_CRATES: &[&str] = &["kb-eval"];
+
+/// Crates a black-box client may not depend on: every crate that knows how the
+/// service is built rather than how it answers.
+pub const BLACK_BOX_FORBIDDEN: &[&str] = &[
+    "kb-core",
+    "kb-ports",
+    "kb-engine",
+    "kb-extract",
+    "kb-inference",
+    "kb-store-pg",
+    "kb-store-surreal",
+    "kb-store-blob",
+];
+
 /// One forbidden edge, with the manifest it appears in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Violation {
@@ -134,11 +156,14 @@ pub fn parse_metadata(json: &str) -> Result<Vec<Violation>, String> {
         let Some(package) = metadata.packages.iter().find(|p| &p.id == member_id) else {
             continue;
         };
-        if !INNER_CRATES.contains(&package.name.as_str()) {
-            continue;
-        }
         for dependency in &package.dependencies {
-            if ADAPTER_CRATES.contains(&dependency.name.as_str()) {
+            let forbidden = if INNER_CRATES.contains(&package.name.as_str()) {
+                ADAPTER_CRATES.contains(&dependency.name.as_str())
+            } else {
+                BLACK_BOX_CRATES.contains(&package.name.as_str())
+                    && BLACK_BOX_FORBIDDEN.contains(&dependency.name.as_str())
+            };
+            if forbidden {
                 violations.push(Violation {
                     crate_name: package.name.clone(),
                     dependency: dependency.name.clone(),
@@ -239,6 +264,50 @@ mod tests {
             json!([
                 "path+file:///w/kb-server#kb-server@0.1.0",
                 "path+file:///w/kb-store-pg#kb-store-pg@0.1.0",
+            ]),
+        );
+        assert!(parse_metadata(&json).expect("parse").is_empty());
+    }
+
+    #[test]
+    fn a_black_box_client_may_not_link_the_thing_it_measures() {
+        for dependency in BLACK_BOX_FORBIDDEN {
+            let json = metadata_json(
+                json!([
+                    package("kb-eval", &[dependency]),
+                    package("kb-server", &["kb-eval"])
+                ]),
+                json!([
+                    "path+file:///w/kb-eval#kb-eval@0.1.0",
+                    "path+file:///w/kb-server#kb-server@0.1.0"
+                ]),
+            );
+            let violations = parse_metadata(&json).expect("parse");
+            assert_eq!(violations.len(), 1, "kb-eval → {dependency} was allowed");
+            assert_eq!(violations[0].crate_name, "kb-eval");
+            assert_eq!(violations[0].dependency, *dependency);
+        }
+    }
+
+    #[test]
+    fn a_black_box_client_may_still_use_third_party_crates() {
+        let json = metadata_json(
+            json!([package("kb-eval", &["serde", "reqwest", "kb-server"])]),
+            json!(["path+file:///w/kb-eval#kb-eval@0.1.0"]),
+        );
+        assert!(parse_metadata(&json).expect("parse").is_empty());
+    }
+
+    #[test]
+    fn the_composition_root_may_name_the_measurement_client() {
+        let json = metadata_json(
+            json!([
+                package("kb-server", &["kb-engine", "kb-store-pg", "kb-eval"]),
+                package("kb-eval", &["reqwest"]),
+            ]),
+            json!([
+                "path+file:///w/kb-server#kb-server@0.1.0",
+                "path+file:///w/kb-eval#kb-eval@0.1.0"
             ]),
         );
         assert!(parse_metadata(&json).expect("parse").is_empty());

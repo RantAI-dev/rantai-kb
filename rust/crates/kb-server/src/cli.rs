@@ -171,8 +171,15 @@ fn check_boundary() -> Result<(), CliError> {
             );
             for violation in &violations {
                 eprintln!("  {}", violation);
+                eprintln!(
+                    "    {}",
+                    if crate::boundary::INNER_CRATES.contains(&violation.crate_name.as_str()) {
+                        "an inner crate must reach adapters through kb-ports"
+                    } else {
+                        "a black-box client must measure the service over HTTP only"
+                    }
+                );
             }
-            eprintln!("\nThe engine must reach adapters through kb-ports.\n");
             Err(CliError::Failed("KB boundary violated".to_string()))
         }
         Err(err) => Err(CliError::Failed(err)),
