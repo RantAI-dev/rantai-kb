@@ -1,12 +1,19 @@
 //! End-to-end check of the eval harness against a real HTTP server backed by
 //! the in-process fakes.
 //!
-//! The runner is a black-box client, so the only way to test it honestly is to
-//! serve the real router on a loopback port and point the runner at it. The
-//! corpus is not uploaded (`--skip-ingest`): a pre-written `ingest-map.json`
-//! maps the dataset's document keys onto documents seeded in the fake store.
+//! The runner is a black-box client, so the only honest way to test it is to
+//! serve the real router on a loopback port and point the runner at it: the
+//! fakes sit behind real HTTP, real auth and real JSON. Nothing about the
+//! retrieval code is stubbed out from the harness's side.
+//!
+//! The corpus is not uploaded (`--skip-ingest`): a pre-written `ingest-map.json`
+//! in the output directory maps the dataset's document keys onto documents
+//! seeded in the fake store. The ingest path itself is exercised by
+//! `upload_tests.rs` against the same fakes.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod harness;
 
 use std::sync::Arc;
 
@@ -15,11 +22,11 @@ use kb_engine::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityStore, FakeJobStore,
     FakeReranker,
 };
-use kb_ports::{
-    Chunk, ChunkId, ChunkMetadata, ChunkType, DocumentId, DocumentMeta, SearchHit, TenantId,
-};
+use kb_ports::{Chunk, ChunkId, ChunkMetadata, ChunkType, DocumentId, SearchHit, TenantId};
 use kb_server::events::EventBus;
 use kb_server::state::{AppState, StateParts};
+
+use harness::doc_meta;
 
 fn engine_settings() -> EngineSettings {
     EngineSettings {
@@ -36,26 +43,14 @@ fn engine_settings() -> EngineSettings {
     }
 }
 
-fn doc_meta(id: &str, title: &str) -> DocumentMeta {
-    DocumentMeta {
-        id: DocumentId(id.to_string()),
-        title: title.to_string(),
-        categories: vec![],
-        subcategory: None,
-        status: "ready".to_string(),
-        chunk_count: 1,
-        file_type: Some("text/plain".to_string()),
-        file_size: Some(10),
-        mime_type: Some("text/plain".to_string()),
-        s3_key: None,
-        created_at: "2026-01-01T00:00:00.000Z".to_string(),
-        updated_at: "2026-01-01T00:00:00.000Z".to_string(),
-        knowledge_base_ids: vec![],
-        metadata: None,
-    }
-}
-
-fn hit(id: &str, doc_id: &str, title: &str, content: &str, page: Option<u32>, similarity: f32) -> SearchHit {
+fn hit(
+    id: &str,
+    doc_id: &str,
+    title: &str,
+    content: &str,
+    page: Option<u32>,
+    similarity: f32,
+) -> SearchHit {
     SearchHit {
         chunk: Chunk {
             id: ChunkId(id.to_string()),
@@ -76,8 +71,10 @@ fn hit(id: &str, doc_id: &str, title: &str, content: &str, page: Option<u32>, si
     }
 }
 
-async fn write_fixture_dir() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("kb-eval-e2e-{}", std::process::id()));
+/// A dataset directory plus the output directory the harness is told to use.
+/// `q3` has a blank text, which the server answers with a 400: that is the
+/// failed query the harness must count rather than score.
+fn write_dataset(dir: &std::path::Path) {
     let corpus = dir.join("corpus");
     let qrels = dir.join("qrels");
     std::fs::create_dir_all(&corpus).unwrap();
@@ -86,7 +83,11 @@ async fn write_fixture_dir() -> std::path::PathBuf {
     std::fs::write(corpus.join("beta.txt"), "beta is about mountains\n").unwrap();
     std::fs::write(
         dir.join("queries.jsonl"),
-        "{\"_id\":\"q1\",\"text\":\"tell me about alpha\"}\n{\"_id\":\"q2\",\"text\":\"tell me about beta\"}\n",
+        concat!(
+            "{\"_id\":\"q1\",\"text\":\"tell me about alpha\"}\n",
+            "{\"_id\":\"q2\",\"text\":\"tell me about beta\"}\n",
+            "{\"_id\":\"q3\",\"text\":\"   \"}\n"
+        ),
     )
     .unwrap();
     // q1 is graded on doc alpha and its first page; q2 on doc beta.
@@ -95,16 +96,10 @@ async fn write_fixture_dir() -> std::path::PathBuf {
         "query-id\tcorpus-id\tscore\nq1\talpha\t2\nq1\talpha#p1\t2\nq2\tbeta\t2\n",
     )
     .unwrap();
-    std::fs::write(
-        dir.join("ingest-map.json"),
-        "{\"alpha\":\"doc-alpha\",\"beta\":\"doc-beta\"}\n",
-    )
-    .unwrap();
-    dir
 }
 
-#[tokio::test]
-async fn runner_measures_a_live_server_end_to_end() {
+/// Serve the router with two seeded documents and return its address.
+async fn serve() -> String {
     let documents = FakeDocumentStore::default();
     let chunks = FakeChunkStore::default();
     let blobs = FakeBlobStore::default();
@@ -117,16 +112,22 @@ async fn runner_measures_a_live_server_end_to_end() {
     documents.insert_api_key("eval-key", tenant.clone());
     documents.insert_doc(tenant.clone(), doc_meta("doc-alpha", "Alpha"));
     documents.insert_doc(tenant, doc_meta("doc-beta", "Beta"));
-    chunks
-        .vector_hits
-        .write()
-        .unwrap()
-        .push(hit("c-alpha", "doc-alpha", "Alpha", "river content", Some(0), 0.9));
-    chunks
-        .vector_hits
-        .write()
-        .unwrap()
-        .push(hit("c-beta", "doc-beta", "Beta", "mountain content", None, 0.8));
+    chunks.vector_hits.write().unwrap().push(hit(
+        "c-alpha",
+        "doc-alpha",
+        "Alpha",
+        "river content",
+        Some(0),
+        0.9,
+    ));
+    chunks.vector_hits.write().unwrap().push(hit(
+        "c-beta",
+        "doc-beta",
+        "Beta",
+        "mountain content",
+        None,
+        0.8,
+    ));
 
     let state = AppState::from_parts(
         StateParts {
@@ -142,18 +143,31 @@ async fn runner_measures_a_live_server_end_to_end() {
         Arc::new(FakeReranker::default()),
         engine_settings(),
     );
-    let router = kb_server::build_router(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let _ = axum::serve(listener, router).await;
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, kb_server::build_router(state)).await;
     });
+    format!("http://{addr}")
+}
 
-    let dataset_dir = write_fixture_dir().await;
+#[tokio::test]
+async fn runner_measures_a_live_server_end_to_end() {
+    let base_url = serve().await;
+    let dataset_dir = std::env::temp_dir().join(format!("kb-eval-e2e-{}", std::process::id()));
+    write_dataset(&dataset_dir);
     let out_dir = dataset_dir.join("out");
-    let mut config =
-        kb_eval::RunnerConfig::new(format!("http://{addr}"), "eval-key", &dataset_dir);
+    std::fs::create_dir_all(&out_dir).unwrap();
+    // --skip-ingest reads this from the *output* directory, which is where a
+    // previous ingest run would have written it.
+    std::fs::write(
+        out_dir.join("ingest-map.json"),
+        "{\"alpha\":\"doc-alpha\",\"beta\":\"doc-beta\"}\n",
+    )
+    .unwrap();
+
+    let mut config = kb_eval::RunnerConfig::new(&base_url, "eval-key", &dataset_dir);
     config.out_dir = out_dir.clone();
     config.skip_ingest = true;
     config.k = 5;
@@ -161,22 +175,44 @@ async fn runner_measures_a_live_server_end_to_end() {
 
     let report = kb_eval::runner::run(config).await.expect("run harness");
 
-    assert_eq!(report.metrics.n_queries, 2);
-    assert_eq!(report.metrics.n_failed, 0);
+    // Three queries were asked. One of them (q3) is answered 400 by the server.
+    assert_eq!(report.metrics.n_queries, 3);
+    assert_eq!(report.metrics.n_failed, 1);
+    assert_eq!(report.metrics.n_documents, 2);
+    assert_eq!(report.metrics.n_ingest_failed, 0);
+    // The failure is excluded from the means: two evaluable document queries,
+    // and only the two that were answered.
+    assert_eq!(report.metrics.document.n_queries, 2);
     // The fake vector search returns alpha first for both queries; q1 finds its
     // gold at rank 1, q2 at rank 2.
-    assert!(report.metrics.document.ndcg.mean > 0.5, "{:?}", report.metrics.document);
-    // The page-level arm only has q1, which is a perfect hit.
+    assert!(
+        report.metrics.document.ndcg.mean > 0.5,
+        "{:?}",
+        report.metrics.document
+    );
+    // The page-level arm only has q1, which is a perfect hit on its first page.
     assert_eq!(report.metrics.page.n_queries, 1);
     assert!(report.metrics.page.ndcg.mean > 0.99);
+    // Latency is measured over the two answered queries.
+    assert_eq!(report.metrics.latency_ms.n, 2);
+    assert!(report.metrics.latency_ms.p95 >= report.metrics.latency_ms.p50);
 
     let metrics = std::fs::read_to_string(out_dir.join("metrics.json")).unwrap();
-    assert!(metrics.contains("\"dataset\": \"kb-eval-e2e-"));
-    assert!(out_dir.join("report.md").is_file());
+    assert!(metrics.contains("\"dataset\": \"kb-eval-e2e-"), "{metrics}");
+    assert!(metrics.contains("\"n_failed\": 1"), "{metrics}");
+    let md = std::fs::read_to_string(out_dir.join("report.md")).unwrap();
+    assert!(md.contains("1 of 3 queries failed"), "{md}");
+
     let run = std::fs::read_to_string(out_dir.join("run.trec")).unwrap();
     assert!(run.contains("q1 Q0 alpha 1 1.000000 e2e"), "{run}");
-    assert!(out_dir.join("run.page.trec").is_file());
+    // q3 was never answered, so it must not appear as an empty ranking.
+    assert!(!run.contains("q3"), "{run}");
+    let page_run = std::fs::read_to_string(out_dir.join("run.page.trec")).unwrap();
+    // The API's 0-based page 0 became the qrels' 1-based `#p1`.
+    assert!(
+        page_run.contains("q1 Q0 alpha#p1 1 1.000000 e2e"),
+        "{page_run}"
+    );
 
-    server.abort();
     let _ = std::fs::remove_dir_all(&dataset_dir);
 }
