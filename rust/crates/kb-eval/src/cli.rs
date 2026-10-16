@@ -409,6 +409,7 @@ mod tests {
             n_documents: 6,
             n_ingest_failed,
             degrades: Vec::new(),
+            failures: Vec::new(),
             document: crate::metrics::aggregate_level(&[], &[]),
             page: crate::metrics::aggregate_level(&[], &[]),
             latency_ms: crate::metrics::latency_report(Vec::new()),

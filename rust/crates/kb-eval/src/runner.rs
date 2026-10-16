@@ -403,7 +403,8 @@ async fn ingest_all(
                 failures.push(cause);
             }
             Err(err) => {
-                let cause = err.into_failure(FailureStage::Ingest, &file.key);
+                let mut cause = err.into_failure(FailureStage::Ingest, &file.key);
+                cause.redact(&config.api_key);
                 eprintln!("ingest error for {}: {cause}", file.key);
                 failures.push(cause);
             }
@@ -504,7 +505,9 @@ async fn poll_job(
                 return Ok(JobOutcome::Failed(Failure::local(
                     FailureStage::Ingest,
                     job_id,
-                    job.error.as_deref().unwrap_or("the job failed with no error message"),
+                    job.error
+                        .as_deref()
+                        .unwrap_or("the job failed with no error message"),
                 )));
             }
             _ => {}
@@ -513,10 +516,7 @@ async fn poll_job(
             return Ok(JobOutcome::Failed(Failure::local(
                 FailureStage::Ingest,
                 job_id,
-                &format!(
-                    "the job did not finish within {:?}",
-                    config.job_timeout
-                ),
+                &format!("the job did not finish within {:?}", config.job_timeout),
             )));
         }
         tokio::time::sleep(config.poll_interval).await;
@@ -972,5 +972,93 @@ mod tests {
         let missing: SearchAnswer = serde_json::from_str(r#"{"sources":[]}"#).unwrap();
         assert!(missing.chunks.is_none());
         assert!(missing.note.is_none());
+    }
+
+    #[tokio::test]
+    async fn fake_server_returning_401_and_500_records_failures_with_causes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    if req.contains("GET /health") {
+                        let resp = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 18\r\n\r\n{\"version\":\"test\"}";
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else if req.contains("q1-fail-401") {
+                        let body = r#"{"code":"unauthorized","error":"bad key"}"#;
+                        let resp = format!(
+                            "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    } else {
+                        let body = r#"{"error":"db down"}"#;
+                        let resp = format!(
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = socket.write_all(resp.as_bytes()).await;
+                    }
+                });
+            }
+        });
+
+        let dir = std::env::temp_dir().join(format!("kb-eval-fake-test-{}", std::process::id()));
+        let out_dir = dir.join("out");
+        std::fs::create_dir_all(dir.join("corpus")).unwrap();
+        std::fs::write(dir.join("corpus").join("doc1.txt"), "hello").unwrap();
+        std::fs::create_dir_all(dir.join("qrels")).unwrap();
+        std::fs::create_dir_all(&out_dir).unwrap();
+        std::fs::write(
+            dir.join("queries.jsonl"),
+            "{\"_id\":\"q1\",\"text\":\"q1-fail-401\"}\n{\"_id\":\"q2\",\"text\":\"q2-fail-500\"}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("qrels").join("test.tsv"),
+            "q1\tdoc1\t1\nq2\tdoc1\t1\n",
+        )
+        .unwrap();
+        std::fs::write(out_dir.join("ingest-map.json"), "{\"doc1\":\"d1\"}\n").unwrap();
+
+        let mut config = RunnerConfig::new(format!("http://{addr}"), "secret-api-key", &dir);
+        config.out_dir = out_dir.clone();
+        config.skip_ingest = true;
+
+        let report = run(config).await.expect("run runner");
+        assert_eq!(report.metrics.n_queries, 2);
+        assert_eq!(report.metrics.n_failed, 2);
+        assert_eq!(report.metrics.failures.len(), 2);
+
+        let f1 = &report.metrics.failures[0];
+        assert_eq!(f1.id, "q1");
+        assert_eq!(f1.status, 401);
+        assert_eq!(f1.code.as_deref(), Some("unauthorized"));
+
+        let f2 = &report.metrics.failures[1];
+        assert_eq!(f2.id, "q2");
+        assert_eq!(f2.status, 500);
+        assert_eq!(f2.code, None);
+        assert!(f2.body.contains("db down"));
+
+        let md = std::fs::read_to_string(out_dir.join("report.md")).unwrap();
+        assert!(md.contains("## Why they failed"));
+        assert!(md.contains("HTTP 401 `unauthorized`"));
+        assert!(md.contains("HTTP 500 (no error code)"));
+
+        let metrics_json = std::fs::read_to_string(out_dir.join("metrics.json")).unwrap();
+        assert!(metrics_json.contains("\"code\": \"unauthorized\""));
+        assert!(!metrics_json.contains("secret-api-key"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

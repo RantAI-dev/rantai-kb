@@ -86,10 +86,10 @@ pub struct MetricsFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FailureStage {
-    /// `POST /v1/search` for one query.
-    Query,
     /// `POST /v1/documents` (or the job it created) for one corpus file.
     Ingest,
+    /// `POST /v1/search` for one query.
+    Query,
 }
 
 impl FailureStage {
@@ -173,9 +173,21 @@ impl Failure {
             &format!("HTTP {}", self.status)
         };
         match &self.code {
-            Some(code) => format!("{} {} failed: {} — {}", self.stage.as_str(), self.id, status, code),
+            Some(code) => format!(
+                "{} {} failed: {} — {}",
+                self.stage.as_str(),
+                self.id,
+                status,
+                code
+            ),
             None => format!("{} {} failed: {}", self.stage.as_str(), self.id, status),
         }
+    }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.summary())
     }
 }
 
@@ -758,6 +770,7 @@ mod tests {
             n_documents: 0,
             n_ingest_failed: 0,
             degrades: Vec::new(),
+            failures: Vec::new(),
             document: Vec::new(),
             page: Vec::new(),
             document_answered: Vec::new(),
@@ -776,7 +789,10 @@ mod tests {
 
     #[test]
     fn a_failure_carries_status_code_and_the_head_of_the_body() {
-        let body = format!(r#"{{"code":"unauthorized","detail":"{}"}}"#, "x".repeat(400));
+        let body = format!(
+            r#"{{"code":"unauthorized","detail":"{}"}}"#,
+            "x".repeat(400)
+        );
         let failure = Failure::from_response(FailureStage::Query, "q1", 401, &body);
         assert_eq!(failure.status, 401);
         assert_eq!(failure.code.as_deref(), Some("unauthorized"));
@@ -785,7 +801,11 @@ mod tests {
         // Truncated on a character boundary, and marked as truncated.
         assert_eq!(failure.body.chars().count(), FAILURE_BODY_CHARS + 1);
         assert!(failure.body.ends_with('…'), "{}", failure.body);
-        assert!(failure.summary().contains("HTTP 401"), "{}", failure.summary());
+        assert!(
+            failure.summary().contains("HTTP 401"),
+            "{}",
+            failure.summary()
+        );
     }
 
     #[test]
@@ -823,7 +843,12 @@ mod tests {
             Failure::from_response(FailureStage::Query, "q2", 401, r#"{"code":"unauthorized"}"#),
             Failure::from_response(FailureStage::Query, "q3", 500, r#"{"error":"boom"}"#),
             Failure::from_response(FailureStage::Query, "q4", 401, r#"{"code":"unauthorized"}"#),
-            Failure::from_response(FailureStage::Ingest, "coffee", 413, r#"{"error":"too big"}"#),
+            Failure::from_response(
+                FailureStage::Ingest,
+                "coffee",
+                413,
+                r#"{"error":"too big"}"#,
+            ),
         ];
         let groups = group_failures(&failures);
         assert_eq!(groups.len(), 3, "{groups:?}");
@@ -841,7 +866,10 @@ mod tests {
         assert_eq!(groups[2].code, None);
 
         let table = render_failure_table(&failures);
-        assert!(table.contains("| query | HTTP 401 `unauthorized` | 3 | `q1` |"), "{table}");
+        assert!(
+            table.contains("| query | HTTP 401 `unauthorized` | 3 | `q1` |"),
+            "{table}"
+        );
         assert!(table.contains("(no error code)"), "{table}");
         assert!(render_failure_table(&[]).is_empty());
         assert!(!group_failures(&failures).is_empty());
@@ -868,9 +896,24 @@ mod tests {
     fn the_report_says_why_each_query_failed() {
         let report = build_report(ReportParts {
             failures: vec![
-                Failure::from_response(FailureStage::Query, "q1", 401, r#"{"code":"unauthorized"}"#),
-                Failure::from_response(FailureStage::Query, "q2", 401, r#"{"code":"unauthorized"}"#),
-                Failure::from_response(FailureStage::Ingest, "rust-lang", 415, r#"{"error":"nope"}"#),
+                Failure::from_response(
+                    FailureStage::Query,
+                    "q1",
+                    401,
+                    r#"{"code":"unauthorized"}"#,
+                ),
+                Failure::from_response(
+                    FailureStage::Query,
+                    "q2",
+                    401,
+                    r#"{"code":"unauthorized"}"#,
+                ),
+                Failure::from_response(
+                    FailureStage::Ingest,
+                    "rust-lang",
+                    415,
+                    r#"{"error":"nope"}"#,
+                ),
             ],
             ..empty_parts(Some("9.9.9"))
         });
@@ -880,7 +923,7 @@ mod tests {
         assert!(md.contains("HTTP 401 `unauthorized`"), "{md}");
         assert!(md.contains("| ingest | HTTP 415"), "{md}");
         // Every failure, one per line, is in the JSON.
-        let json = serde_json::to_string(&report.metrics).expect("json");
+        let json = serde_json::to_string_pretty(&report.metrics).expect("json");
         assert!(json.contains("\"stage\": \"query\""), "{json}");
         assert!(json.contains("\"code\": \"unauthorized\""), "{json}");
         assert!(json.contains("\"id\": \"rust-lang\""), "{json}");
@@ -928,6 +971,7 @@ mod tests {
             n_documents: 6,
             n_ingest_failed: 1,
             degrades: vec!["vector arm unavailable".to_string()],
+            failures: Vec::new(),
             document: vec![scored, QueryMetrics::ZERO],
             page: Vec::new(),
             document_answered: vec![scored],
