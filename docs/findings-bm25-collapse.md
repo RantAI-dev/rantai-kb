@@ -128,6 +128,21 @@ Evaluated on `miracl-id-50` (50 queries, 1,246 corpus documents) with `kb-server
 
 *Note on Hit@1 = 0.000 in hybrid search with stub embedder*: In RRF fusion, candidate 0 (vector hit) is assigned `insert_index: 0` and candidate 0 (BM25 hit) is assigned `insert_index: 1`. Because both have initial score `1/61`, the vector candidate wins tie-breaking and takes rank 1. With the stub embedder, rank 1 is always pseudo-random noise, capping Hit@1 at 0 and MRR@10 at ~0.35.
 
+### Update (2026-10-16, real embeddings): the collapse is still real, but it is no longer the binding constraint
+
+The table above was measured with the **stub** embedder, which made BM25 the only
+working arm. With `Qwen3-Embedding-0.6B` on the same `miracl-id-50` subset
+(50 queries, 1,485 documents), the current BM25 already scores **nDCG@10 0.724**
+and `KB_EXP_BM25_OR_TERMS=1` moves it to 0.719 — a difference well inside the
+±0.07 bootstrap interval. Both flags together score 0.699. See
+`docs/eval-baseline.md` §4 for the rows, the intervals and the `ranx`
+cross-check.
+
+So: the `@@` AND-semantics bug and the English stemmer are real and still worth
+fixing before the vector arm is ever degraded or switched off — but on this
+corpus a working dense arm hides them. Treat "+0.410 from OR-terms" as a
+*stub-artefact* number, not as the size of the prize on a real system.
+
 ---
 
 ## Bun / TypeScript Runtime Parity (AGENTS Rule 4)

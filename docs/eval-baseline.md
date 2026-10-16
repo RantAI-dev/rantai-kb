@@ -190,11 +190,184 @@ docker run -d --name kb-smoke-tei-rerank -p 18082:80 -v ~/.cache/kb-models:/data
 # Re-run with KB_RERANK_ENABLED=true and --skip-ingest
 ```
 
-## 4. What to run next
+## 4. First real-model rows — `miracl-id-50`, 50 queries, full subset corpus
+
+2026-10-16, **harness commit `ca2599f`** (`kb-eval` stamped by `build.rs`; the
+`kb-server` under test is the same tree). Embedder `Qwen/Qwen3-Embedding-0.6B`
+(dim 1024, query instruction prefix) on local TEI, CPU, zero spend. nDCG@10
+uses **linear** gain, `--k 10 --max-chunks 50`, document level, strict means
+(failed and unanswerable queries score zero and stay in the mean).
+
+Dataset: `rust/crates/kb-eval/datasets/miracl-id-50` — 50 dev queries, **1,485
+corpus documents**, 154 relevant judgements:
+
+```sh
+uv run rust/crates/kb-eval/scripts/import_miracl.py --seed 42 --num-queries 50 \
+  --out-dir rust/crates/kb-eval/datasets/miracl-id-50
+```
+
+### The three rows
+
+| Row | Configuration | Corpus indexed | nDCG@10 | Recall@10 | MRR@10 | Hit@1 | P@10 | lat p50 | lat p95 | n_failed | n_degraded |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | `qwen3-0.6b`, current BM25 (both flags off) | 1,482 / 1,485 | **0.724** [0.649–0.792] | 0.899 [0.824–0.951] | 0.724 [0.632–0.813] | 0.580 [0.460–0.700] | 0.272 | 2,279 ms | 2,617 ms | 0 | 0 |
+| 2 | `qwen3-0.6b+or-terms` (`KB_EXP_BM25_OR_TERMS=1`) | same ingest | 0.719 [0.647–0.791] | 0.909 [0.846–0.960] | 0.711 [0.617–0.804] | 0.580 [0.460–0.700] | 0.278 | 2,324 ms | 2,784 ms | 0 | 0 |
+| 3 | `qwen3-0.6b+or-terms+neutral` (both flags) | 1,481 / 1,485 (4 ingest failures) | 0.699 [0.623–0.771] | 0.889 [0.815–0.948] | 0.691 [0.588–0.785] | 0.560 [0.420–0.680] | 0.276 | 2,322 ms | 2,976 ms | 0 | 0 |
+| — | **independent BM25** (`rank_bm25` + `ranx`, same 1,485 docs) | — | **0.734** | 0.938 | 0.717 | 0.580 | 0.286 | — | — | — | — |
+
+Rows 1 and 2 share one ingest; row 3 needs its own, because
+`KB_EXP_ANALYZER_NEUTRAL=1` re-`OVERWRITE`s the analyzer **and** the search
+index, so every chunk has to be re-indexed under the new analyzer.
+
+### What these rows say
+
+* **The BM25 collapse is no longer the binding constraint once a real embedder
+  is in place.** With the 8-dim stub, row 1 scored 0.000 and the OR-terms fix
+  was worth +0.410 (`docs/findings-bm25-collapse.md`). With real embeddings,
+  the vector arm already answers most questions: row 1 is **0.724**, and
+  OR-terms moves nothing (0.719, and 0.909 vs 0.899 on Recall — both inside
+  the ±0.07 bootstrap interval). The collapse was real, but it was only
+  visible because the vector arm was noise. **Read the two documents
+  together; neither number alone is the quality of this system.**
+* **Row 1 already matches an independent BM25** (0.724 vs 0.734 nDCG@10,
+  identical Hit@1 0.580) on the same corpus with the same 50 queries. That is
+  the reference a reranker or a better sparse arm has to beat, not the 0.003
+  the stub produced.
+* **The neutral analyzer did not help here** (0.699 vs 0.719 with the same
+  OR-terms query). It removes the English stemmer's damage to Indonesian
+  tokens, but with a working dense arm the affected queries were not the ones
+  being lost. Its value was measured against a stub, where BM25 was the *only*
+  arm.
+* **Ingest cost dominates everything else**: 1,485 documents took **5,247 s
+  (87 min, ≈17.4 docs/min)** for row 1, and the same for row 3. All 50 queries
+  together took 121 s. A CPU embedding profile is an evaluation-time cost
+  center, not a serving-time one.
+* **Four documents in row 3 failed to ingest** (`n_ingest_failed: 4`),
+  all with `embedding failed: backend unavailable: execute: error sending
+  request` — a reqwest **transport** error against TEI after 3 retries
+  (0.27% of 1,485 documents). Rows 1 and 2 had none. This is a real robustness
+  gap against a local inference server and is worth its own fix; it is the one
+  reason row 3's corpus is 4 documents short.
+
+### Cross-check with `ranx`
+
+Every `run.trec` re-scored independently (`uv run --with ranx`) against the
+same `qrels/test.tsv`. Strict means match the harness exactly, to 4 decimals:
+
+| Row | metric | harness | ranx |
+|---|---|---|---|
+| 1 | nDCG@10 / Recall@10 / MRR@10 / Hit@1 / P@10 | 0.7235 / 0.8988 / 0.7242 / 0.580 / 0.272 | 0.7235 / 0.8988 / 0.7242 / 0.580 / 0.272 |
+| 2 | nDCG@10 / Recall@10 / MRR@10 / Hit@1 / P@10 | 0.7190 / 0.9091 / 0.7105 / 0.580 / 0.278 | 0.7190 / 0.9091 / 0.7105 / 0.580 / 0.278 |
+| 3 | nDCG@10 / Recall@10 / MRR@10 / Hit@1 / P@10 | 0.6990 / 0.8891 / 0.6905 / 0.560 / 0.276 | 0.6990 / 0.8891 / 0.6905 / 0.560 / 0.276 |
+
+### Exact reproduction
+
+```sh
+# 0. build the 50-query subset (deterministic, seed 42)
+uv run rust/crates/kb-eval/scripts/import_miracl.py --seed 42 --num-queries 50 \
+  --out-dir rust/crates/kb-eval/datasets/miracl-id-50
+
+# 1. stack with real embeddings, no experiment flags  → row 1 (ingests the corpus)
+rust/scripts/stack-up.sh && rust/scripts/stack-down.sh
+KB_STACK_EMBEDDINGS=tei rust/scripts/stack-up.sh
+source /tmp/kb-stack/stack.env
+KEY=$("$KB_SERVER_BIN" create-api-key r1-tenant key --scopes kb:read,kb:write \
+      | grep -oE 'rkb_[A-Za-z0-9_-]+' | head -1)
+"$KB_SERVER_BIN" eval --base-url "$KB_STACK_BASE_URL" --api-key "$KEY" \
+  --dataset rust/crates/kb-eval/datasets/miracl-id-50 \
+  --out eval-out/miracl-id-50-q1 --label qwen3-0.6b
+
+# 2. same corpus, OR-terms BM25 → row 2 (query-time only, reuse the ingest)
+#    (restart kb-server with KB_EXP_BM25_OR_TERMS=1 in its environment)
+mkdir -p eval-out/miracl-id-50-q2
+cp eval-out/miracl-id-50-q1/ingest-map.json eval-out/miracl-id-50-q2/
+"$KB_SERVER_BIN" eval --base-url "$KB_STACK_BASE_URL" --api-key "$KEY" \
+  --dataset rust/crates/kb-eval/datasets/miracl-id-50 \
+  --out eval-out/miracl-id-50-q2 --skip-ingest --label qwen3-0.6b+or-terms
+
+# 3. both flags → row 3 (the analyzer is OVERWRITE, so this needs a fresh stack
+#    and a full re-ingest)
+rust/scripts/stack-down.sh
+KB_EXP_ANALYZER_NEUTRAL=1 KB_EXP_BM25_OR_TERMS=1 KB_STACK_EMBEDDINGS=tei \
+  rust/scripts/stack-up.sh
+source /tmp/kb-stack/stack.env
+KEY3=$("$KB_SERVER_BIN" create-api-key r3-tenant key --scopes kb:read,kb:write \
+       | grep -oE 'rkb_[A-Za-z0-9_-]+' | head -1)
+"$KB_SERVER_BIN" eval --base-url "$KB_STACK_BASE_URL" --api-key "$KEY3" \
+  --dataset rust/crates/kb-eval/datasets/miracl-id-50 \
+  --out eval-out/miracl-id-50-q3 --label qwen3-0.6b+or-terms+neutral
+
+# 4. the independent BM25 reference on the same subset
+uv run rust/crates/kb-eval/scripts/eval_bm25.py \
+  --dataset rust/crates/kb-eval/datasets/miracl-id-50
+```
+
+Verify the neutral analyzer actually took effect before trusting row 3:
+
+```sh
+curl -s -X POST http://127.0.0.1:18000/sql -u root:root \
+  -H 'Surreal-NS: rantai' -H 'Surreal-DB: knowledge' -H 'Accept: application/json' \
+  -d "RETURN search::analyze('kb_en', 'Siapakah yang menulis Candy Candy?')"
+# ["siapakah","yang","menulis","candy","candy","?"] — unstemmed
+```
+
+### Ingest throughput, before and after batched embedding requests
+
+`EmbedderImpl::embed_many` now sends one `/v1/embeddings` request per
+`KB_EMBEDDING_BATCH_SIZE` inputs (default 32) instead of one per chunk.
+Measured on this 6-core box against the same warm TEI container:
+
+| corpus | binary | docs | chunks | TEI requests | wall | docs/min |
+|---|---|---|---|---|---|---|
+| 100 MIRACL passages (1 chunk each) | before (`8827786`) | 100 | 100 | 99 | 361 s | **16.6** |
+| same 100 | after | 100 | 100 | 99 | 497 s (1 ingest failure) | **12.1** |
+| same 100 | after, repeat run | 100 | 100 | 99 | 396 s | **15.1** |
+| 12 multi-passage docs (~24 chunks each) | before (`8827786`) | 12 | 288 | 297 | 656 s | 1.10 |
+| 12 multi-passage docs | after | 12 | 288 | 12 | 605 s | 1.19 |
+| 1 multi-passage doc | after | 1 | 24 | **1** | 67 s | — |
+
+**Read that honestly: batching bought almost nothing on this box.**
+
+* Every MIRACL document is a **single chunk** (verified in the store:
+  `SELECT c, count(*) … GROUP BY c` returns `1 → 99 docs`), so there was never
+  more than one input per call to batch. Two runs of the *same* 100-document
+  corpus differ by 12.1 vs 15.1 vs 16.6 docs/min, i.e. the run-to-run noise is
+  larger than any effect of the change.
+* Where batching does apply, it works exactly as intended — 24 chunks became
+  **1** request, 297 became 12 — and wall time moved 656 s → 605 s (−8%,
+  within noise).
+* The reason is that TEI on **CPU** is compute-bound, not request-bound. Direct
+  measurement against the same server: 8 single-input requests = **13.3 s**;
+  1 request carrying those 8 inputs = **13.8 s**. Σ `inference_time` over 182
+  embedding requests averaged 2.74 s each. Batching removes HTTP overhead and
+  tokenisation duplication; it cannot remove FLOPs.
+* **The real bottleneck is document-level serialisation**, reported here and
+  deliberately not changed in this round: `IngestWorker::tick` runs
+  `run_job(job).await` one job at a time (`rust/crates/kb-engine/src/ingest.rs:253`),
+  and `kb-eval`'s uploader polls each job to completion before uploading the
+  next document (`rust/crates/kb-eval/src/runner.rs:432`). So the box runs
+  exactly one embedding at a time, and a local TEI that can serve several
+  concurrent requests never sees more than one. Document-level concurrency is
+  the next lever, and it is worth measuring before any further embedder work.
+
+### What this section does NOT prove
+
+* **50 queries.** Every interval is ±0.07 wide; rows 1 and 2 are not
+  distinguishable from each other, and neither is from independent BM25.
+* **`miracl-id-200` was not re-run.** The full 2,933-document corpus at 17
+  docs/min is ≈2.9 h per ingest, and row 3 needs a second one. Section 3's
+  `miracl-id-200` numbers stand as written, still marked as a bug report.
+* **No reranker.** `bge-reranker-v2-m3` was not run: ~21 s per query on this
+  CPU (section 3) against a 2.3 s p50 today, and it timed out on 4/5 queries
+  last time. It needs a smaller candidate set or a different machine before
+  it can be measured at all.
+* **Page level is not measured**: MIRACL has no page-level judgements.
+
+## 5. What to run next
 
 | Target (plan) | Today | Gap |
 |---|---|---|
 | right page ranked first, ≥ 87% over ≥ 200 labelled questions | no labelled set exists | build `eval/id-internal/`, then measure |
-| ViDoRe v3 pipeline leaderboard, top 3 | not run; needs real embeddings | drop a ViDoRe v3 subset into `kb-eval` and run it with a real model profile |
+| ViDoRe v3 pipeline leaderboard, top 3 | MIRACL-id-50 measured with real embeddings (§4), ViDoRe not run | drop a ViDoRe v3 subset into `kb-eval` and run it with a real model profile |
 | cross-tenant hits over the red-team matrix: 0 | **0 over 240 probes**, 1 arm partial, 1 arm untested | close the figure arm with a layout extractor |
 | `/v1/search` p95 warm, local profile < 300 ms | 354 ms with an 8-dim stub, 6 documents | re-measure with real embeddings on a real corpus |
