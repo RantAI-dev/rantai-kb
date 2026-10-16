@@ -14,6 +14,7 @@ pub mod page_map;
 pub mod policy;
 mod progress;
 pub mod signals;
+pub mod sparse;
 mod weave;
 
 pub use chunk::{
@@ -45,4 +46,8 @@ pub use progress::{
     IngestStep, ProgressFlags, StepProgress, compute_eta_seconds, compute_overall_progress,
 };
 pub use signals::{RouterOpts, has_columnar_lines, has_dense_currency, is_unpdf_sufficient};
+pub use sparse::{
+    BM25_AVGDL, BM25_B, BM25_K1, SparseVector, encode_document, encode_document_avgdl,
+    encode_query, saturate_tf, term_id, tokenize,
+};
 pub use weave::{WeaveItem, weave_neighbours, weave_neighbours_with};
