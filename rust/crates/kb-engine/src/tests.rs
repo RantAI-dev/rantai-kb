@@ -928,6 +928,52 @@ mod pipeline_tests {
         );
     }
 
+    /// The cache flag has to survive the fold over the query variants.
+    ///
+    /// It used not to: the conjunction over variants was written as
+    /// `cached.is_some_and(..) && qe.cached`, and on the *first* variant
+    /// `is_some_and` on a `None` is false, so a single-variant pipeline — the
+    /// only one that exists while expansion is off — always reported a miss.
+    /// The symptom was invisible in the fake embedder (which always misses) and
+    /// obvious the first time a repeated query came back in 0.07 ms with
+    /// `queryEmbedCached: false`.
+    #[tokio::test]
+    async fn a_cache_hit_reaches_the_stage_timings() {
+        for cached in [true, false] {
+            let (doc_store, chunk_store, embedder, reranker) = setup();
+            embedder.cached.store(cached, Ordering::Relaxed);
+            let tenant = TenantId("t1".into());
+            let scope = make_fake_scope(tenant, vec![DocumentId("d1".into())]);
+            chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+                "c1",
+                "d1",
+                "Title 1",
+                "Content 1",
+                1,
+                0.9,
+            ));
+
+            let outcome = execute_pipeline(
+                &(doc_store as Arc<_>),
+                &(chunk_store as Arc<_>),
+                &(embedder as Arc<_>),
+                &(reranker as Arc<_>),
+                &noop_expander(),
+                &scope,
+                "query",
+                &RetrievalOptions::default(),
+                &SystemClock,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(
+                outcome.timings.query_embed_cached, cached,
+                "the embedder's answer has to reach the report"
+            );
+        }
+    }
+
     /// A reranker that costs 40 ms of clock has to be visible as 40 ms, and a
     /// fusion that costs nothing must not borrow the reranker's time.
     #[tokio::test]

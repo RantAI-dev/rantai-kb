@@ -48,9 +48,9 @@ use kb_ports::{
     DocumentStore, Embedder, Entity, EntityExtractor, EntityStore, EntityView, ExtractionOptions,
     ExtractionResult, Extractor, FigureGate, FigureGateCandidate, JobRecord, JobStore, JobView,
     KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor, NewDocument,
-    PatchCategory, PatchDocument, PatchKnowledgeBase, PortError, ProgressSink, ReapableJob,
-    Relation, RelationView, RerankCandidate, RerankResult, Reranker, RetryJobOutcome, ScopeRequest,
-    SearchHit, StoredChunk, TenantId, adapter::ScopeToken,
+    PatchCategory, PatchDocument, PatchKnowledgeBase, PortError, ProgressSink, QueryEmbedding,
+    ReapableJob, Relation, RelationView, RerankCandidate, RerankResult, Reranker, RetryJobOutcome,
+    ScopeRequest, SearchHit, StoredChunk, TenantId, adapter::ScopeToken,
 };
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -837,6 +837,9 @@ impl ChunkStore for FakeChunkStore {
 #[derive(Clone, Default)]
 pub struct FakeEmbedder {
     pub fail: Arc<AtomicBool>,
+    /// What `embed_query_detailed` reports as a cache hit. The default is a
+    /// miss, which is what an embedder that does not cache should say.
+    pub cached: Arc<AtomicBool>,
 }
 
 #[async_trait]
@@ -846,6 +849,14 @@ impl Embedder for FakeEmbedder {
             return Err(PortError::Unavailable("forced embed failure".to_string()));
         }
         Ok(vec![0.1, 0.2, 0.3, 0.4])
+    }
+
+    async fn embed_query_detailed(&self, text: &str) -> Result<QueryEmbedding, PortError> {
+        let vector = self.embed_query(text).await?;
+        Ok(QueryEmbedding {
+            vector,
+            cached: self.cached.load(Ordering::Relaxed),
+        })
     }
 
     async fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, PortError> {

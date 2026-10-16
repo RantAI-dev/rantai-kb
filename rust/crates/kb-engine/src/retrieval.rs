@@ -191,10 +191,15 @@ pub async fn execute_pipeline(
         // Own the vectors first: the search futures borrow them, so they must
         // outlive the futures.
         let mut query_vectors: Vec<Vec<f32>> = Vec::with_capacity(vectors.len());
+        // One query embedding per variant, and the reported cache flag is the
+        // conjunction across them: a report that says "cache hit" while one of
+        // the variants called the provider is a lie in the direction that
+        // flatters us. With expansion off there is exactly one variant, and the
+        // fold must pass it through rather than discard it.
         let mut cached: Option<bool> = None;
         for res in vectors {
             let qe = res.map_err(|e| format!("vector embed: {e}"))?;
-            cached = Some(cached.is_some_and(|c| c && qe.cached) && qe.cached);
+            cached = Some(cached.map_or(qe.cached, |seen| seen && qe.cached));
             query_vectors.push(qe.vector);
         }
         let store_sw = Stopwatch::start(clock);

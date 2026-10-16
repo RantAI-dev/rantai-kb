@@ -727,3 +727,51 @@ mod tests {
         assert!(err.to_string().contains("carry an index"), "{err}");
     }
 }
+
+#[cfg(test)]
+mod dispatch_tests {
+    //! The override has to be reachable *through the trait object*, because
+    //! that is how the engine holds it. Calling the method on the concrete type
+    //! proves nothing about dispatch.
+    use super::*;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn the_cache_flag_survives_dispatch_through_the_trait_object() {
+        use axum::Json;
+        use axum::Router;
+        use axum::routing::post;
+
+        async fn handle(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+            let count = body["input"].as_array().map(Vec::len).unwrap_or(0);
+            Json(serde_json::json!({
+                "object": "list",
+                "data": (0..count).map(|i| serde_json::json!({"index": i, "embedding": [1.0, 0.0, 0.0, 0.0]})).collect::<Vec<_>>()
+            }))
+        }
+        let app = Router::new().route("/v1/embeddings", post(handle));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let settings = EmbedderSettings {
+            base_url: format!("http://{addr}/v1/embeddings"),
+            model: "test-model".into(),
+            api_key: Some("k".into()),
+            dimension: 4,
+            batch_size: 2,
+            embed_concurrency: 2,
+            query_prefix: String::new(),
+            passage_prefix: String::new(),
+            request_timeout: std::time::Duration::from_secs(5),
+        };
+        let embedder: Arc<dyn Embedder> = Arc::new(EmbedderImpl::new(settings).unwrap());
+
+        let first = embedder.embed_query_detailed("sama").await.unwrap();
+        assert!(!first.cached);
+        let second = embedder.embed_query_detailed("sama").await.unwrap();
+        assert!(second.cached, "the trait object must reach the override");
+        assert_eq!(second.vector, first.vector);
+    }
+}
