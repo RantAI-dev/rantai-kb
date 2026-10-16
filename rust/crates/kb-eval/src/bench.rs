@@ -140,6 +140,14 @@ pub struct LevelResult {
     pub error_samples: Vec<String>,
     /// Responses that reported per-stage timings.
     pub stage_reports: u64,
+    /// Responses that answered 2xx *with a degrade*: an arm failed and the
+    /// other one answered alone, or nobody did. Counted separately from errors
+    /// because the status is 200 and the body looks like a normal answer — a
+    /// load test that calls those a clean sheet is measuring the error path
+    /// and calling it a result.
+    pub degraded: u64,
+    /// The degrade labels the server reported.
+    pub degrades: BTreeMap<String, u64>,
 }
 
 /// The whole bench run.
@@ -299,6 +307,8 @@ async fn run_level(
     let errors: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let requests = Arc::new(AtomicU64::new(0));
     let error_count = Arc::new(AtomicU64::new(0));
+    let degraded_count = Arc::new(AtomicU64::new(0));
+    let degrades: Arc<Mutex<BTreeMap<String, u64>>> = Arc::new(Mutex::new(BTreeMap::new()));
     let stage_reports = Arc::new(AtomicU64::new(0));
     let next_query = Arc::new(AtomicU64::new(0));
     let done = Arc::new(AtomicBool::new(false));
@@ -317,6 +327,8 @@ async fn run_level(
         let errors = Arc::clone(&errors);
         let requests = Arc::clone(&requests);
         let error_count = Arc::clone(&error_count);
+        let degraded_count = Arc::clone(&degraded_count);
+        let degrades = Arc::clone(&degrades);
         let stage_reports = Arc::clone(&stage_reports);
         let next_query = Arc::clone(&next_query);
         let done = Arc::clone(&done);
@@ -348,6 +360,24 @@ async fn run_level(
                             let elapsed_us = clamp_us(at.elapsed().as_micros() as u64);
                             let _ = hist.lock().await.record(elapsed_us);
                             bump(statuses.as_ref(), &status.to_string()).await;
+                            let reported: Vec<String> = body
+                                .get("degrades")
+                                .and_then(|d| d.as_array())
+                                .map(|labels| {
+                                    labels
+                                        .iter()
+                                        .filter_map(|l| l.as_str())
+                                        .map(ToString::to_string)
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            if !reported.is_empty() {
+                                degraded_count.fetch_add(1, Ordering::Relaxed);
+                                let mut guard = degrades.lock().await;
+                                for label in reported {
+                                    *guard.entry(label).or_insert(0) += 1;
+                                }
+                            }
                             if let Some(sample) = parse_stage_timings(&body) {
                                 stage_reports.fetch_add(1, Ordering::Relaxed);
                                 let mut guard = stages.lock().await;
@@ -427,6 +457,8 @@ async fn run_level(
         statuses: statuses.lock().await.clone(),
         error_samples: errors.lock().await.clone(),
         stage_reports: stage_reports.load(Ordering::Relaxed),
+        degraded: degraded_count.load(Ordering::Relaxed),
+        degrades: degrades.lock().await.clone(),
     })
 }
 
@@ -472,15 +504,16 @@ pub fn render_markdown(report: &BenchReport) -> String {
          least the server's own `total` below.\n\n",
     );
     out.push_str(
-        "| concurrency | requests | errors | req/s | p50 ms | p95 ms | p99 ms | max ms |\n",
+        "| concurrency | requests | errors | degraded | req/s | p50 ms | p95 ms | p99 ms | max ms |\n",
     );
-    out.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|\n");
+    out.push_str("|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for level in &report.levels {
         out.push_str(&format!(
-            "| {} | {} | {} | {:.2} | {:.1} | {:.1} | {:.1} | {:.1} |\n",
+            "| {} | {} | {} | {} | {:.2} | {:.1} | {:.1} | {:.1} | {:.1} |\n",
             level.concurrency,
             level.requests,
             level.errors,
+            level.degraded,
             level.throughput_rps,
             level.latency_ms.p50,
             level.latency_ms.p95,
@@ -489,8 +522,23 @@ pub fn render_markdown(report: &BenchReport) -> String {
         ));
     }
     let (requests, errors) = report.totals();
-    out.push_str(&format!("\n{requests} requests, {errors} error(s).\n"));
+    let degraded: u64 = report.levels.iter().map(|l| l.degraded).sum();
+    out.push_str(&format!(
+        "\n{requests} requests, {errors} error(s), {degraded} degraded.\n"
+    ));
     for level in &report.levels {
+        if !level.degrades.is_empty() {
+            out.push_str(&format!(
+                "\nDegrades at concurrency {} (a 2xx answer with an arm down, not an error):\n{}\n",
+                level.concurrency,
+                level
+                    .degrades
+                    .iter()
+                    .map(|(label, count)| format!("- {label} × {count}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
         if !level.statuses.is_empty() {
             out.push_str(&format!(
                 "\nHTTP statuses at concurrency {}: {}\n",
@@ -637,15 +685,16 @@ fn print_report(report: &BenchReport) {
         report.label, report.base_url, report.n_queries, report.max_chunks
     );
     println!(
-        "{:<4} {:>9} {:>7} {:>9} {:>9} {:>9} {:>9}",
-        "conc", "requests", "errors", "req/s", "p50 ms", "p95 ms", "p99 ms"
+        "{:<4} {:>9} {:>7} {:>9} {:>9} {:>9} {:>9} {:>9}",
+        "conc", "requests", "errors", "degraded", "req/s", "p50 ms", "p95 ms", "p99 ms"
     );
     for level in &report.levels {
         println!(
-            "{:<4} {:>9} {:>7} {:>9.2} {:>9.1} {:>9.1} {:>9.1}",
+            "{:<4} {:>9} {:>7} {:>9} {:>9.2} {:>9.1} {:>9.1} {:>9.1}",
             level.concurrency,
             level.requests,
             level.errors,
+            level.degraded,
             level.throughput_rps,
             level.latency_ms.p50,
             level.latency_ms.p95,
@@ -935,6 +984,68 @@ mod tests {
         assert_eq!(level.latency_ms.n, 6);
     }
 
+    /// A 2xx answer with a degrade is not a clean answer: an arm was down and
+    /// the response carries fewer results because of it. The bench counts those
+    /// separately from errors, because the status is 200.
+    #[tokio::test]
+    async fn degraded_answers_are_counted_separately_from_errors() {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let url = degrade_server(Arc::clone(&hits)).await;
+        let mut cfg = config(&url, &["q"]);
+        cfg.warmup = 0;
+        cfg.requests = Some(4);
+        cfg.concurrency = vec![1];
+
+        let report = run(cfg).await.expect("bench runs");
+        let level = &report.levels[0];
+        assert_eq!(level.requests, 4);
+        assert_eq!(level.errors, 0, "the status was 200");
+        assert_eq!(level.degraded, 2);
+        assert_eq!(level.degrades.get("vector_arm_failed"), Some(&2));
+        assert!(render_markdown(&report).contains("vector_arm_failed × 2"));
+    }
+
+    /// Half the answers come back 200 with `degrades: ["vector_arm_failed"]`.
+    async fn degrade_server(hits: Arc<AtomicUsize>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                let hits = Arc::clone(&hits);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 4096];
+                    let _ = socket.read(&mut buf).await;
+                    let seen = hits.fetch_add(1, Ordering::SeqCst) + 1;
+                    let body = if seen % 2 == 0 {
+                        serde_json::json!({
+                            "chunks": [],
+                            "degrades": ["vector_arm_failed"],
+                            "stats": {"stageTimingsMs": {"total": 1.0}}
+                        })
+                    } else {
+                        serde_json::json!({
+                            "chunks": [{"id": "c1"}],
+                            "degrades": [],
+                            "stats": {"stageTimingsMs": {"total": 1.0}}
+                        })
+                    }
+                    .to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.flush().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
     #[tokio::test]
     async fn a_server_that_fails_the_warmup_is_not_measured() {
         let hits = Arc::new(AtomicUsize::new(0));
@@ -1013,6 +1124,8 @@ mod tests {
                 statuses: BTreeMap::from([("500".to_string(), 1)]),
                 error_samples: vec!["HTTP 500: boom".into()],
                 stage_reports: 9,
+                degraded: 2,
+                degrades: BTreeMap::from([("vector_arm_failed".to_string(), 2)]),
             }],
         };
         let md = render_markdown(&report);
@@ -1023,5 +1136,6 @@ mod tests {
         );
         assert!(md.contains("HTTP 500: boom"));
         assert!(md.contains("9 of 10 responses reported timings"));
+        assert!(md.contains("vector_arm_failed × 2"), "degrades:\n{md}");
     }
 }

@@ -327,11 +327,15 @@ pub async fn execute_pipeline(
                 "both search arms failed. vector: {v_err}; bm25: {b_err}"
             )));
         }
-        (Err(_), Ok((b_hits, _))) => {
+        (Err(v_err), Ok((b_hits, _))) => {
+            // The degrade travels in the response; the reason is logged here,
+            // because a degrade nobody can diagnose is a degrade nobody fixes.
+            tracing::warn!(error = %v_err, bm25_hits = b_hits.len(), "vector arm failed");
             degrades.push(RetrievalDegrade::VectorArmFailed);
             (Vec::new(), b_hits)
         }
-        (Ok((v_hits, _)), Err(_)) => {
+        (Ok((v_hits, _)), Err(b_err)) => {
+            tracing::warn!(error = %b_err, "keyword arm failed");
             degrades.push(RetrievalDegrade::Bm25ArmFailed);
             (v_hits, Vec::new())
         }
