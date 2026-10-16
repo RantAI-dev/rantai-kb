@@ -223,51 +223,106 @@ pub fn parse_answers(text: &str) -> Result<Vec<Answer>, String> {
     Ok(out)
 }
 
+/// Which column of a qrels line holds what.
+///
+/// The documented shape is `query-id corpus-id score`. A header, when present,
+/// is obeyed: TREC and MS MARCO files put an `iteration` column in the middle,
+/// and a public benchmark that imports with the wrong column silently produces
+/// numbers about nothing.
+#[derive(Debug, Clone, Copy)]
+struct QrelColumns {
+    query: usize,
+    corpus: usize,
+    score: usize,
+}
+
+const DEFAULT_COLUMNS: QrelColumns = QrelColumns {
+    query: 0,
+    corpus: 1,
+    score: 2,
+};
+
+/// Recognise a qrels header row and read the column positions off it.
+fn columns_from_header(fields: &[&str]) -> Option<QrelColumns> {
+    if fields.len() < 2 {
+        return None;
+    }
+    let normalized: Vec<String> = fields
+        .iter()
+        .map(|f| f.to_ascii_lowercase().replace(['-', '_', ' '], ""))
+        .collect();
+    let position = |names: &[&str]| normalized.iter().position(|f| names.contains(&f.as_str()));
+    let query = position(&["queryid", "qid", "query", "topicid"]);
+    let corpus = position(&["corpusid", "docid", "documentid"]);
+    let score = position(&["score", "relevance", "rel", "label", "grade"]);
+    match (query, corpus, score) {
+        (Some(query), Some(corpus), Some(score)) => Some(QrelColumns {
+            query,
+            corpus,
+            score,
+        }),
+        // A partial header is not a header; fall back to the documented shape.
+        _ => None,
+    }
+}
+
 /// Parse `qrels/test.tsv`, with or without the `query-id corpus-id score` header.
 ///
 /// Fields may be separated by tabs or spaces; blank lines and `#` comments are
-/// ignored.
+/// ignored. A score may be written as an integer or as an integer-valued float
+/// (`2.0`); anything fractional is rejected rather than rounded.
 ///
 /// # Errors
 ///
-/// A message with the offending line number.
+/// A message naming the offending line number.
 pub fn parse_qrels(text: &str) -> Result<Vec<Qrel>, String> {
     let mut out = Vec::new();
+    let mut columns = DEFAULT_COLUMNS;
     for (idx, line) in text.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         let fields: Vec<&str> = trimmed.split_whitespace().collect();
-        if fields.len() == 3
-            && matches!(
-                fields[0].to_ascii_lowercase().as_str(),
-                "query-id" | "query_id" | "queryid" | "qid"
-            )
-        {
-            continue;
+        if out.is_empty() {
+            if let Some(header) = columns_from_header(&fields) {
+                columns = header;
+                continue;
+            }
         }
-        if fields.len() < 3 {
+        let needed = columns.query.max(columns.corpus).max(columns.score);
+        if fields.len() <= needed {
             return Err(format!(
-                "line {}: expected 3 columns (query-id, corpus-id, score), got {}",
+                "line {}: expected {} columns (query-id, corpus-id, score), got {}",
                 idx + 1,
+                needed + 1,
                 fields.len()
             ));
         }
-        let score: i32 = fields[2].parse().map_err(|e| {
+        let raw = fields[columns.score];
+        let score = parse_grade(raw).ok_or_else(|| {
             format!(
-                "line {}: score {:?} is not an integer: {e}",
-                idx + 1,
-                fields[2]
+                "line {}: score {raw:?} is not a whole relevance grade",
+                idx + 1
             )
         })?;
         out.push(Qrel {
-            query_id: fields[0].to_string(),
-            corpus_id: fields[1].to_string(),
+            query_id: fields[columns.query].to_string(),
+            corpus_id: fields[columns.corpus].to_string(),
             score,
         });
     }
     Ok(out)
+}
+
+/// A relevance grade, tolerating the `2.0` spelling some exports use.
+fn parse_grade(raw: &str) -> Option<i32> {
+    if let Ok(value) = raw.parse::<i32>() {
+        return Some(value);
+    }
+    let value = raw.parse::<f64>().ok()?;
+    (value.fract() == 0.0 && value >= i32::MIN as f64 && value <= i32::MAX as f64)
+        .then_some(value as i32)
 }
 
 /// The document key of a corpus id, stripping a `#p<N>` page suffix.
@@ -374,6 +429,40 @@ mod tests {
         assert_eq!(qrels.len(), 2);
         assert_eq!(qrels[0].score, 2);
         assert_eq!(qrels[1].score, 0);
+    }
+
+    #[test]
+    fn a_trec_header_with_an_iteration_column_is_read_in_the_right_places() {
+        // MS MARCO / TREC shape: query-id, iteration, corpus-id, relevance.
+        let text = "query-id\titeration\tcorpus-id\trelevance\nq1\t0\tdoc-a\t3\nq2\t0\tdoc-b\t1\n";
+        let qrels = parse_qrels(text).unwrap();
+        assert_eq!(qrels.len(), 2);
+        assert_eq!(qrels[0].query_id, "q1");
+        assert_eq!(qrels[0].corpus_id, "doc-a");
+        assert_eq!(qrels[0].score, 3);
+        assert_eq!(qrels[1].corpus_id, "doc-b");
+    }
+
+    #[test]
+    fn a_data_line_is_never_mistaken_for_a_header() {
+        // "qid docid rel" is the column-name shape, not a query named "qid".
+        let qrels = parse_qrels("q1 doc-a 2\n").unwrap();
+        assert_eq!(qrels.len(), 1);
+        assert_eq!(qrels[0].query_id, "q1");
+    }
+
+    #[test]
+    fn an_integer_valued_float_score_is_accepted_and_a_real_one_is_not() {
+        let qrels = parse_qrels("q1\tdoc-a\t2.0\n").unwrap();
+        assert_eq!(qrels[0].score, 2);
+        let err = parse_qrels("q1\tdoc-a\t2.5\n").unwrap_err();
+        assert!(err.contains("line 1"), "{err}");
+    }
+
+    #[test]
+    fn a_short_data_line_names_its_line() {
+        let err = parse_qrels("query-id\tcorpus-id\tscore\nq1\tdoc-a\n").unwrap_err();
+        assert!(err.contains("line 2"), "{err}");
     }
 
     #[test]
