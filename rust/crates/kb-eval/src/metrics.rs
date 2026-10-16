@@ -415,10 +415,42 @@ pub fn latency_report(mut samples: Vec<f64>) -> LatencyReport {
     }
 }
 
+/// Summarise an `hdrhistogram` of microseconds into milliseconds.
+///
+/// The histogram is the bench's sampler: it keeps a fixed set of buckets rather
+/// than every sample, so a 30 s run at concurrency 32 costs the same memory as
+/// one request, and p99 is a real quantile of the run rather than of a sample
+/// of it.
+#[must_use]
+pub fn from_histogram(hist: &hdrhistogram::Histogram<u64>) -> LatencyReport {
+    LatencyReport {
+        mean: hist.mean() / 1000.0,
+        p50: hist.value_at_quantile(0.50) as f64 / 1000.0,
+        p95: hist.value_at_quantile(0.95) as f64 / 1000.0,
+        p99: hist.value_at_quantile(0.99) as f64 / 1000.0,
+        n: usize::try_from(hist.len()).unwrap_or(usize::MAX),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_histogram_summarises_into_the_same_shape_as_a_sample_list() {
+        let mut hist = hdrhistogram::Histogram::new_with_bounds(1, 3_600_000_000, 3).unwrap();
+        for ms in [10.0, 20.0, 30.0] {
+            hist.record((ms * 1000.0) as u64).unwrap();
+        }
+        let report = from_histogram(&hist);
+        assert_eq!(report.n, 3);
+        // A histogram reports the top of the bucket, so these are exact only
+        // to its resolution: three significant digits.
+        assert!((report.mean - 20.0).abs() < 0.01);
+        assert!((report.p50 - 20.0).abs() < 0.1);
+        assert!((report.p99 - 30.0).abs() < 0.1);
+    }
 
     fn keys(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()

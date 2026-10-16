@@ -18,6 +18,7 @@
 //!
 //! `kb-server eval` is the front door; see [`cli`].
 
+pub mod bench;
 pub mod cli;
 pub mod dataset;
 pub mod leak;
@@ -27,6 +28,7 @@ pub mod report;
 pub mod runner;
 pub mod stages;
 
+pub use bench::{BenchConfig, BenchReport, run_cli as run_bench};
 pub use cli::{EvalError, run};
 pub use dataset::{Dataset, DatasetError};
 pub use leak::{Arm, LeakMatrix, ScopeKind, SeedPlan, Status};

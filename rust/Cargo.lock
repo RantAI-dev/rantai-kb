@@ -733,6 +733,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hdrhistogram"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "765c9198f173dd59ce26ff9f95ef0aafd0a0fe01fb9d72841bc5066a4c06511d"
+dependencies = [
+ "byteorder",
+ "num-traits",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1088,6 +1098,7 @@ name = "kb-eval"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hdrhistogram",
  "reqwest",
  "serde",
  "serde_json",

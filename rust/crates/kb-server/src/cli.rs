@@ -23,7 +23,8 @@ use crate::config::Config;
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
     #[error(
-        "{0}\n\nusage: kb-server <serve|create-api-key|apply-schema|migrate|eval|check-boundary>"
+        "{0}\n\nusage: kb-server \
+         <serve|create-api-key|apply-schema|migrate|eval|bench|check-boundary>"
     )]
     Usage(String),
     #[error("{0}")]
@@ -56,6 +57,7 @@ pub async fn dispatch(args: &[String]) -> Result<(), CliError> {
         Some("migrate") => migrate().await,
         Some("check-boundary") => check_boundary(),
         Some("eval") => eval(&args[1..]).await,
+        Some("bench") => bench(&args[1..]).await,
         Some("-h" | "--help" | "help") => {
             print_help();
             Ok(())
@@ -81,6 +83,7 @@ USAGE
     kb-server eval --base-url URL --dataset DIR  Measure retrieval quality
     kb-server eval score --qrels F --run F       Score an existing run offline
     kb-server eval compare --baseline F --current F  Compare two runs against a baseline
+    kb-server bench search --base-url URL --queries F  Closed-loop load test for /v1/search
     kb-server check-boundary                   Fail if an inner crate depends on an adapter
 
 ENVIRONMENT
@@ -150,6 +153,16 @@ async fn eval(args: &[String]) -> Result<(), CliError> {
     kb_eval::run(args).await.map_err(|err| match err {
         kb_eval::EvalError::Usage(message) => CliError::Usage(message),
         kb_eval::EvalError::Failed(message) => CliError::Failed(message),
+    })
+}
+
+/// `kb-server bench search …` — the closed-loop load test. Same crate as the
+/// evaluation harness and the same reason it is a dependency: the load test has
+/// to measure the deployed service from the outside.
+async fn bench(args: &[String]) -> Result<(), CliError> {
+    kb_eval::run_bench(args).await.map_err(|err| match err {
+        kb_eval::bench::BenchError::Usage(message) => CliError::Usage(message),
+        kb_eval::bench::BenchError::Failed(message) => CliError::Failed(message),
     })
 }
 
