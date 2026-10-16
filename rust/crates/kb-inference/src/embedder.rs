@@ -733,6 +733,8 @@ mod dispatch_tests {
     //! The override has to be reachable *through the trait object*, because
     //! that is how the engine holds it. Calling the method on the concrete type
     //! proves nothing about dispatch.
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
     use super::*;
     use std::sync::Arc;
 
