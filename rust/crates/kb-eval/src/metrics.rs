@@ -29,7 +29,7 @@
 
 use std::collections::HashMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Graded relevance for one query: key → grade. A grade `<= 0` is not relevant.
 pub type Gold = HashMap<String, i32>;
@@ -211,7 +211,7 @@ pub fn evaluate_query(
 }
 
 /// A mean with a bootstrap confidence interval.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Aggregate {
     pub mean: f64,
     pub ci_low: f64,
@@ -317,7 +317,7 @@ pub fn bootstrap_ci(values: &[f64], resamples: usize, seed: u64) -> Aggregate {
 }
 
 /// One metric aggregated over a set of per-query values, with its interval.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Means {
     pub ndcg: Aggregate,
     pub recall: Aggregate,
@@ -335,7 +335,7 @@ pub struct Means {
 /// [`QueryMetrics::ZERO`]). `answered` is the same arithmetic over answered
 /// queries only and is published as a secondary diagnostic, because that is the
 /// number that separates "the backend is worse" from "the backend is down".
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LevelReport {
     pub ndcg: Aggregate,
     pub recall: Aggregate,
@@ -382,7 +382,7 @@ pub fn aggregate_level(strict: &[QueryMetrics], answered: &[QueryMetrics]) -> Le
 }
 
 /// Client-side latency summary in milliseconds.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LatencyReport {
     pub mean: f64,
     pub p50: f64,

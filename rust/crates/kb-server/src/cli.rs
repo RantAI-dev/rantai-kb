@@ -80,6 +80,7 @@ USAGE
     kb-server migrate                          Apply prisma/migrations in order
     kb-server eval --base-url URL --dataset DIR  Measure retrieval quality
     kb-server eval score --qrels F --run F       Score an existing run offline
+    kb-server eval compare --baseline F --current F  Compare two runs against a baseline
     kb-server check-boundary                   Fail if an inner crate depends on an adapter
 
 ENVIRONMENT

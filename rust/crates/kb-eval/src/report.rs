@@ -12,7 +12,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::dataset::{Qrel, gold_for_documents, gold_for_pages};
 use crate::metrics::{
@@ -33,7 +33,7 @@ pub const FAILURE_BODY_CHARS: usize = 200;
 /// answer, and `n_degraded` is what it answered while an arm was down. A run
 /// that quietly scored a broken server as zero relevance would be a lie, so the
 /// denominators are all published.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsFile {
     pub label: String,
     pub dataset: String,
@@ -83,13 +83,25 @@ pub struct MetricsFile {
 }
 
 /// Which step of a run failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FailureStage {
     /// `POST /v1/documents` (or the job it created) for one corpus file.
     Ingest,
     /// `POST /v1/search` for one query.
     Query,
+}
+
+impl MetricsFile {
+    /// Load a `metrics.json` file from disk.
+    ///
+    /// # Errors
+    ///
+    /// An I/O error or a JSON deserialisation error.
+    pub fn load(path: &Path) -> io::Result<Self> {
+        let text = fs::read_to_string(path)?;
+        serde_json::from_str(&text).map_err(io::Error::other)
+    }
 }
 
 impl FailureStage {
@@ -107,7 +119,7 @@ impl FailureStage {
 /// Recorded rather than summarised, because "12 of 12 queries failed" is a fact
 /// an operator cannot act on: a bad API key, a 500 from the vector arm and a
 /// malformed dataset all produce that sentence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failure {
     pub stage: FailureStage,
     /// The query id, or the corpus document key.
