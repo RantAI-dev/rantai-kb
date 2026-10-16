@@ -57,6 +57,11 @@ fn discount(position: usize) -> f64 {
     (position as f64 + 2.0).log2()
 }
 
+/// DCG over the top `k` of `ranked`.
+///
+/// Folded from an explicit `0.0` rather than `sum()`: `Sum<f64>` folds from
+/// `-0.0`, so an empty ranking would produce `-0.0` and a report would print
+/// `-0.000` for a query that simply found nothing.
 fn dcg(ranked: &[String], gold: &Gold, k: usize) -> f64 {
     ranked
         .iter()
@@ -70,7 +75,7 @@ fn dcg(ranked: &[String], gold: &Gold, k: usize) -> f64 {
                 0.0
             }
         })
-        .sum()
+        .fold(0.0, |acc, value| acc + value)
 }
 
 fn ideal_dcg(gold: &Gold, k: usize) -> f64 {
@@ -348,6 +353,26 @@ mod tests {
         assert!(close(m.mrr, 0.0));
         assert!(close(m.hit1, 0.0));
         assert!(close(m.precision, 0.0));
+    }
+
+    #[test]
+    fn an_empty_ranking_is_plus_zero_not_negative_zero() {
+        // `Sum<f64>` folds from -0.0, which made a query that retrieved nothing
+        // render as "-0.000" in report.md.
+        let m = evaluate_query(&[], &gold(&[("a", 1)]), 10).expect("evaluable");
+        for (name, value) in [
+            ("ndcg", m.ndcg),
+            ("recall", m.recall),
+            ("mrr", m.mrr),
+            ("precision", m.precision),
+        ] {
+            assert_eq!(value, 0.0, "{name} was {value}");
+            assert!(value.is_sign_positive(), "{name} was {value:?}");
+        }
+        let level = aggregate_level(&[m]);
+        assert!(level.ndcg.mean.is_sign_positive());
+        assert!(level.ndcg.ci_low.is_sign_positive());
+        assert!(level.ndcg.ci_high.is_sign_positive());
     }
 
     #[test]

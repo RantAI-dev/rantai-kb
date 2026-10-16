@@ -223,7 +223,10 @@ fn level_row(name: &str, level: &LevelReport) -> String {
 }
 
 fn fmt_agg(mean: f64, low: f64, high: f64) -> String {
-    format!("{mean:.3} [{low:.3}–{high:.3}]")
+    // Normalise negative zero: a metric that is exactly zero prints as 0.000,
+    // never as -0.000.
+    let clean = |v: f64| if v == 0.0 { 0.0 } else { v };
+    format!("{:.3} [{:.3}–{:.3}]", clean(mean), clean(low), clean(high))
 }
 
 /// Write a TREC run file: `qid Q0 docno rank score tag`.

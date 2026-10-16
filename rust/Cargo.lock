@@ -1088,7 +1088,6 @@ name = "kb-eval"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "kb-engine",
  "reqwest",
  "serde",
  "serde_json",
