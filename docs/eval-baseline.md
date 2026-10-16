@@ -19,7 +19,7 @@ what plumbing is worth* — not as a quality claim about retrieval.
 rust/scripts/stack-up.sh
 source /tmp/kb-stack/stack.env
 KEY=$("$KB_SERVER_BIN" create-api-key baseline-tenant baseline \
-        --scopes kb:read,kb:write | grep -o 'rkb_[a-z0-9_-]*' | head -1)
+        --scopes kb:read,kb:write | grep -oE 'rkb_[A-Za-z0-9_-]+' | head -1)
 kb-server eval --base-url "$KB_STACK_BASE_URL" --api-key "$KEY" \
   --dataset rust/crates/kb-eval/fixtures/tiny --out /tmp/kb-eval-final \
   --label live-tiny
@@ -50,8 +50,8 @@ commit the `report.md` next to this file.
 ## 2. Cross-scope leak matrix — Rust
 
 ```sh
-A=$("$KB_SERVER_BIN" create-api-key leak-a a --scopes kb:read,kb:write | grep -o 'rkb_[a-z0-9_-]*' | head -1)
-B=$("$KB_SERVER_BIN" create-api-key leak-b b --scopes kb:read,kb:write | grep -o 'rkb_[a-z0-9_-]*' | head -1)
+A=$("$KB_SERVER_BIN" create-api-key leak-a a --scopes kb:read,kb:write | grep -oE 'rkb_[A-Za-z0-9_-]+' | head -1)
+B=$("$KB_SERVER_BIN" create-api-key leak-b b --scopes kb:read,kb:write | grep -oE 'rkb_[A-Za-z0-9_-]+' | head -1)
 kb-server eval leak --base-url "$KB_STACK_BASE_URL" --api-key "$A" --peer-key "$B" \
   --out /tmp/kb-leak-final
 ```

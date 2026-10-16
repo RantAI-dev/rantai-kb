@@ -152,8 +152,8 @@ binaries:
 ```sh
 rust/scripts/stack-up.sh
 source /tmp/kb-stack/stack.env
-KEY_A=$("$KB_SERVER_BIN" create-api-key leak-a a --scopes kb:read,kb:write | grep -o 'rkb_[a-z0-9_-]*' | head -1)
-KEY_B=$("$KB_SERVER_BIN" create-api-key leak-b b --scopes kb:read,kb:write | grep -o 'rkb_[a-z0-9_-]*' | head -1)
+KEY_A=$("$KB_SERVER_BIN" create-api-key leak-a a --scopes kb:read,kb:write | grep -oE 'rkb_[A-Za-z0-9_-]+' | head -1)
+KEY_B=$("$KB_SERVER_BIN" create-api-key leak-b b --scopes kb:read,kb:write | grep -oE 'rkb_[A-Za-z0-9_-]+' | head -1)
 kb-server eval leak --base-url "$KB_STACK_BASE_URL" --api-key "$KEY_A" --peer-key "$KEY_B"
 ```
 
