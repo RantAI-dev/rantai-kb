@@ -62,7 +62,7 @@ knowledge bases × 2 categories), 12 scopes, **240 probes, 0 cross-scope hits**.
 | arm | tenant | knowledge_base | category | document_ids | arm |
 |---|---|---|---|---|---|
 | vector | PASS | PASS | PASS | PASS | **PASS** |
-| bm25 | PASS | PASS | PASS | UNTESTED | **PASS** |
+| bm25 | PASS | PASS | PASS | UNTESTED | **PARTIAL** |
 | neighbour | PASS | PASS | PASS | PASS | **PASS** |
 | figure | UNTESTED | UNTESTED | UNTESTED | UNTESTED | **UNTESTED** |
 | entity | PASS | PASS | PASS | PASS | **PASS** |
@@ -89,5 +89,5 @@ Two cells are untested, and both are findings rather than passes:
 |---|---|---|
 | right page ranked first, ≥ 87% over ≥ 200 labelled questions | no labelled set exists | build `eval/id-internal/`, then measure |
 | ViDoRe v3 pipeline leaderboard, top 3 | not run; needs real embeddings | drop a ViDoRe v3 subset into `kb-eval` and run it with a real model profile |
-| cross-tenant hits over the red-team matrix: 0 | **0 over 240 probes**, 2 arms untested | close the figure arm with a layout extractor |
+| cross-tenant hits over the red-team matrix: 0 | **0 over 240 probes**, 1 arm partial, 1 arm untested | close the figure arm with a layout extractor |
 | `/v1/search` p95 warm, local profile < 300 ms | 354 ms with an 8-dim stub, 6 documents | re-measure with real embeddings on a real corpus |

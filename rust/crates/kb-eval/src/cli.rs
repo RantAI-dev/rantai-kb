@@ -218,19 +218,16 @@ async fn leak(args: &[String]) -> Result<(), EvalError> {
                 matrix
                     .arms
                     .iter()
-                    .filter(|a| a.status == kb_eval_status_untested())
+                    .filter(|a| matches!(
+                        a.status,
+                        crate::leak::Status::Untested | crate::leak::Status::Partial
+                    ))
                     .count()
             )
         };
         return Err(EvalError::Failed(detail));
     }
     Ok(())
-}
-
-/// The one comparison the CLI needs, so it does not have to import the enum's
-/// variants by name in a match it would only use once.
-fn kb_eval_status_untested() -> crate::leak::Status {
-    crate::leak::Status::Untested
 }
 
 /// Print the arm × scope matrix as a table, one line per arm.

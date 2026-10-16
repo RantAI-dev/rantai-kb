@@ -498,6 +498,7 @@ pub fn positive_hit(answer: &Answer, document_id: &str) -> bool {
 pub enum Status {
     Pass,
     Leak,
+    Partial,
     #[default]
     Untested,
 }
@@ -508,6 +509,7 @@ impl Status {
         match self {
             Self::Pass => "PASS",
             Self::Leak => "LEAK",
+            Self::Partial => "PARTIAL",
             Self::Untested => "UNTESTED",
         }
     }
@@ -523,6 +525,30 @@ impl Status {
             Self::Untested
         } else {
             Self::Pass
+        }
+    }
+
+    /// The arm-level status derived from its cells:
+    /// - LEAK if any cell leaks;
+    /// - otherwise PARTIAL if some cells are UNTESTED and others PASS;
+    /// - UNTESTED if all cells are UNTESTED;
+    /// - PASS only if every cell passes.
+    #[must_use]
+    pub fn decide_arm(cells: &[Cell]) -> Self {
+        if cells.is_empty() {
+            return Self::Untested;
+        }
+        if cells.iter().any(|c| c.status == Self::Leak || c.leaks > 0) {
+            return Self::Leak;
+        }
+        let any_untested = cells.iter().any(|c| c.status == Self::Untested);
+        let any_pass = cells.iter().any(|c| c.status == Self::Pass);
+        if any_untested && any_pass {
+            Self::Partial
+        } else if any_pass {
+            Self::Pass
+        } else {
+            Self::Untested
         }
     }
 
@@ -727,10 +753,22 @@ impl LeakMatrix {
                     .status
                     .untested_reason(cell.positive_probes, cell.positive_hits);
             }
-            arm.status = Status::decide(arm.leaks, arm.positive_probes, arm.positive_hits);
-            arm.reason = arm
-                .status
-                .untested_reason(arm.positive_probes, arm.positive_hits);
+            arm.status = Status::decide_arm(&arm.cells);
+            arm.reason = match arm.status {
+                Status::Untested => arm
+                    .status
+                    .untested_reason(arm.positive_probes, arm.positive_hits),
+                Status::Partial => {
+                    let untested_scopes: Vec<_> = arm
+                        .cells
+                        .iter()
+                        .filter(|c| c.status == Status::Untested)
+                        .map(|c| c.scope.as_str())
+                        .collect();
+                    Some(format!("scopes untested: {}", untested_scopes.join(", ")))
+                }
+                _ => None,
+            };
         }
         self
     }
@@ -746,7 +784,9 @@ impl LeakMatrix {
 
     #[must_use]
     pub fn any_untested(&self) -> bool {
-        self.arms.iter().any(|a| a.status == Status::Untested)
+        self.arms
+            .iter()
+            .any(|a| matches!(a.status, Status::Untested | Status::Partial))
     }
 
     #[must_use]
@@ -1288,6 +1328,112 @@ mod tests {
         assert_eq!(vector.status, Status::Untested);
         let md = render_markdown(&matrix, &plan(corpus()));
         assert!(md.contains("http errors: 1"), "{md}");
+    }
+
+    #[test]
+    fn an_arm_with_any_untested_cell_is_partial_not_pass() {
+        let mut matrix = LeakMatrix::new("http://x");
+        matrix.record(Observation {
+            arm: Arm::Bm25,
+            scope: ScopeKind::Tenant,
+            positive: true,
+            hit: true,
+            leaked: Vec::new(),
+            errored: false,
+            refused: false,
+            degrades: Vec::new(),
+            example: None,
+        });
+        matrix.record(Observation {
+            arm: Arm::Bm25,
+            scope: ScopeKind::KnowledgeBase,
+            positive: true,
+            hit: true,
+            leaked: Vec::new(),
+            errored: false,
+            refused: false,
+            degrades: Vec::new(),
+            example: None,
+        });
+        matrix.record(Observation {
+            arm: Arm::Bm25,
+            scope: ScopeKind::DocumentIds,
+            positive: true,
+            hit: false,
+            leaked: Vec::new(),
+            errored: false,
+            refused: false,
+            degrades: Vec::new(),
+            example: None,
+        });
+        let matrix = matrix.finish();
+        let bm25 = matrix.arms.iter().find(|a| a.arm == Arm::Bm25).unwrap();
+        assert_eq!(
+            bm25.cells
+                .iter()
+                .find(|c| c.scope == ScopeKind::Tenant)
+                .unwrap()
+                .status,
+            Status::Pass
+        );
+        assert_eq!(
+            bm25.cells
+                .iter()
+                .find(|c| c.scope == ScopeKind::DocumentIds)
+                .unwrap()
+                .status,
+            Status::Untested
+        );
+        assert_eq!(bm25.status, Status::Partial);
+        assert_eq!(bm25.status.as_str(), "PARTIAL");
+        assert!(matrix.any_untested());
+    }
+
+    #[test]
+    fn arm_status_resolution_follows_hierarchy() {
+        let make_cell = |status: Status, leaks: usize| Cell {
+            status,
+            leaks,
+            ..Cell::default()
+        };
+
+        // All PASS -> PASS
+        assert_eq!(
+            Status::decide_arm(&[make_cell(Status::Pass, 0), make_cell(Status::Pass, 0)]),
+            Status::Pass
+        );
+        // Any UNTESTED with PASS -> PARTIAL
+        assert_eq!(
+            Status::decide_arm(&[make_cell(Status::Pass, 0), make_cell(Status::Untested, 0)]),
+            Status::Partial
+        );
+        // All UNTESTED -> UNTESTED
+        assert_eq!(
+            Status::decide_arm(&[
+                make_cell(Status::Untested, 0),
+                make_cell(Status::Untested, 0)
+            ]),
+            Status::Untested
+        );
+        // Any LEAK wins over everything -> LEAK
+        assert_eq!(
+            Status::decide_arm(&[make_cell(Status::Pass, 0), make_cell(Status::Leak, 1)]),
+            Status::Leak
+        );
+        assert_eq!(
+            Status::decide_arm(&[make_cell(Status::Untested, 0), make_cell(Status::Leak, 1)]),
+            Status::Leak
+        );
+        assert_eq!(
+            Status::decide_arm(&[
+                make_cell(Status::Pass, 0),
+                make_cell(Status::Untested, 0),
+                make_cell(Status::Leak, 1)
+            ]),
+            Status::Leak
+        );
+        // Empty -> UNTESTED
+        assert_eq!(Status::decide_arm(&[]), Status::Untested);
     }
 
     #[test]
