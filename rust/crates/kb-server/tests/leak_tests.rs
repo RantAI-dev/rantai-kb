@@ -213,6 +213,8 @@ async fn serve(leaking: bool) -> (String, BTreeMap<String, String>) {
             documents: Arc::new(documents),
             index,
             entities: Arc::new(entities),
+            graph: None,
+            graph_arm: None,
             blob: Arc::new(blobs),
             embedder: Arc::new(embedder),
             jobs: Arc::new(jobs),

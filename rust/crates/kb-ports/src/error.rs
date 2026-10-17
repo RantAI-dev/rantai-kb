@@ -53,6 +53,10 @@ pub enum RetrievalDegrade {
     NeighboursPartial,
     /// Figure co-retrieval ran with errors; figures may be incomplete.
     FiguresPartial,
+    /// The graph arm's store failed or timed out. The other arms' results are
+    /// returned unchanged — a search that lost one arm is degraded, not empty,
+    /// and saying nothing about it is how a silent regression ships (AGENTS rule 6).
+    GraphArmUnavailable,
 }
 
 impl RetrievalDegrade {
@@ -66,6 +70,7 @@ impl RetrievalDegrade {
             Self::RerankUnavailable => "rerank_unavailable",
             Self::NeighboursPartial => "neighbours_partial",
             Self::FiguresPartial => "figures_partial",
+            Self::GraphArmUnavailable => "graph_arm_unavailable",
         }
     }
 }

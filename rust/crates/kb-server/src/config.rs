@@ -18,6 +18,66 @@ pub enum ChunkStoreChoice {
     Qdrant,
 }
 
+/// Which [`kb_ports::EntityExtractor`] ingest uses (`KB_ENTITY_EXTRACTOR`).
+///
+/// The default is `llm`, which is what production ran before the graph arm
+/// existed and is therefore the compatible choice. `heuristic` is the free local
+/// one: no key, no network, no spend (AGENTS rule 7), which is what makes the
+/// graph arm measurable at all — an arm you can only measure by paying for it
+/// gets measured once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EntityExtractorChoice {
+    #[default]
+    Llm,
+    Heuristic,
+}
+
+/// Which [`kb_ports::GraphStore`] the entity graph is written to
+/// (`KB_GRAPH_STORE`).
+///
+/// Unset means none, and that is the default: with no graph store there is no
+/// graph, and the graph arm has nothing to walk. The Postgres adapter shares the
+/// pool the rest of the process already holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GraphStoreChoice {
+    #[default]
+    None,
+    Pg,
+}
+
+/// Graph retrieval arm tunables (`KB_GRAPH_ARM`, `KB_GRAPH_*`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GraphArmSettings {
+    /// Master switch. Off by default: §11 says graph RAG loses on fact lookup,
+    /// and an arm that is on before it has been measured is an arm that has not.
+    pub enabled: bool,
+    /// Entities seeded into personalised PageRank, from `match_entities`.
+    pub max_seeds: usize,
+    /// PPR `eps`. The push solver's termination tolerance.
+    pub tolerance: f32,
+    /// PPR restart probability.
+    pub damping: f32,
+    /// Cached scoped graphs, and the byte budget across them.
+    pub cache_entries: usize,
+    pub cache_bytes: usize,
+    /// Graph-ranked chunks fetched before fusion.
+    pub candidates: usize,
+}
+
+impl Default for GraphArmSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_seeds: 8,
+            tolerance: 1e-3,
+            damping: 0.85,
+            cache_entries: 16,
+            cache_bytes: 256 * 1024 * 1024,
+            candidates: 20,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind_addr: String,
@@ -34,6 +94,12 @@ pub struct Config {
     pub extract: ExtractConfig,
     /// LLM entity/relation extraction settings (`ENTITY_EXTRACTION_*`).
     pub entity: ExtractorSettings,
+    /// Which extractor ingest uses (`KB_ENTITY_EXTRACTOR`).
+    pub entity_extractor: EntityExtractorChoice,
+    /// Which graph store ingest writes the entity graph to (`KB_GRAPH_STORE`).
+    pub graph_store: GraphStoreChoice,
+    /// Whether the graph retrieval arm runs (`KB_GRAPH_ARM`).
+    pub graph_arm: GraphArmSettings,
     /// In-process ingest worker: whether it runs, and how it is tuned.
     pub worker: WorkerConfig,
     /// Reported by `GET /health` (`KB_VERSION`).
@@ -364,6 +430,39 @@ impl Config {
         };
 
         let entity = ExtractorSettings::from_lookup(&lookup);
+        let entity_extractor = match lookup("KB_ENTITY_EXTRACTOR")
+            .map(|v| v.trim().to_lowercase())
+            .as_deref()
+        {
+            None | Some("") | Some("llm") | Some("openrouter") => EntityExtractorChoice::Llm,
+            Some("heuristic") | Some("local") | Some("free") => EntityExtractorChoice::Heuristic,
+            Some(other) => {
+                bail!("KB_ENTITY_EXTRACTOR must be \"llm\" or \"heuristic\", got {other:?}")
+            }
+        };
+        let graph_store = match lookup("KB_GRAPH_STORE")
+            .map(|v| v.trim().to_lowercase())
+            .as_deref()
+        {
+            None | Some("") | Some("none") => GraphStoreChoice::None,
+            Some("pg") | Some("postgres") => GraphStoreChoice::Pg,
+            Some(other) => bail!("KB_GRAPH_STORE must be \"none\" or \"pg\", got {other:?}"),
+        };
+        let graph_arm = GraphArmSettings {
+            enabled: bool_flag(&lookup, "KB_GRAPH_ARM", false),
+            max_seeds: int_var(&lookup, "KB_GRAPH_MAX_SEEDS", 8)?.max(1) as usize,
+            tolerance: float_var(&lookup, "KB_GRAPH_PPR_EPS", 1e-3)?,
+            damping: float_var(&lookup, "KB_GRAPH_PPR_DAMPING", 0.85)?,
+            cache_entries: int_var(&lookup, "KB_GRAPH_CACHE_ENTRIES", 16)?.max(1) as usize,
+            cache_bytes: int_var(&lookup, "KB_GRAPH_CACHE_BYTES", 256 * 1024 * 1024)?.max(0)
+                as usize,
+            candidates: int_var(&lookup, "KB_GRAPH_CANDIDATES", 20)?.max(1) as usize,
+        };
+        // An arm with no store behind it is not a degraded arm, it is a
+        // misconfiguration that would silently return nothing. Say so at boot.
+        if graph_arm.enabled && graph_store == GraphStoreChoice::None {
+            bail!("KB_GRAPH_ARM=1 needs a graph store: set KB_GRAPH_STORE=pg");
+        }
         let worker = read_worker(&lookup);
         let version = lookup("KB_VERSION")
             .filter(|v| !v.trim().is_empty())
@@ -383,6 +482,9 @@ impl Config {
             engine,
             extract,
             entity,
+            entity_extractor,
+            graph_store,
+            graph_arm,
             worker,
             version,
             request_timeout: Duration::from_secs(30),
@@ -398,6 +500,20 @@ where
         None => default,
         Some(v) if v.trim().is_empty() => default,
         Some(v) => v.trim() == "true",
+    }
+}
+
+fn float_var<F>(lookup: &F, name: &str, default: f32) -> Result<f32>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match lookup(name) {
+        None => Ok(default),
+        Some(v) if v.trim().is_empty() => Ok(default),
+        Some(v) => v
+            .trim()
+            .parse::<f32>()
+            .map_err(|_| anyhow::anyhow!("{name} must be a number, got {v:?}")),
     }
 }
 

@@ -137,6 +137,8 @@ async fn serve() -> String {
             documents: Arc::new(documents),
             index: Arc::new(chunks),
             entities: Arc::new(entities),
+            graph: None,
+            graph_arm: None,
             blob: Arc::new(blobs),
             embedder: Arc::new(embedder),
             jobs: Arc::new(jobs),

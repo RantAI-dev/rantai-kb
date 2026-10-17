@@ -57,6 +57,8 @@ impl Harness {
                 documents: Arc::new(documents.clone()),
                 index: Arc::new(chunks.clone()),
                 entities: Arc::new(entities.clone()),
+                graph: None,
+                graph_arm: None,
                 blob: Arc::new(blobs.clone()),
                 embedder: Arc::new(embedder.clone()),
                 jobs: Arc::new(jobs.clone()),

@@ -152,6 +152,23 @@ impl TenantGraph {
         &self.mentions
     }
 
+    /// Roughly how much heap this graph holds, for a cache budget.
+    ///
+    /// The CSR's own accounting is exact ([`Csr::heap_bytes`]); the rest is
+    /// estimated from the key and chunk-id lengths. It is a budget, not a
+    /// measurement, so it is rounded up per string rather than chased to the
+    /// byte.
+    #[must_use]
+    pub fn approx_heap_bytes(&self) -> usize {
+        let keys: usize = self.map.keys().iter().map(|k| k.capacity() + 24).sum();
+        let mentions: usize = self
+            .mentions
+            .iter()
+            .map(|m| 24 + m.key.len() + m.chunk_ids.iter().map(|c| c.0.len() + 24).sum::<usize>())
+            .sum();
+        self.csr.heap_bytes() + keys + mentions
+    }
+
     /// Chunks mentioned by an entity key, empty when the key is unknown or has no
     /// in-scope mention.
     #[must_use]

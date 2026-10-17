@@ -25,6 +25,7 @@ use kb_ports::{
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod fakes;
+pub mod graph_arm;
 pub mod ingest;
 pub mod retrieval;
 pub mod timing;
@@ -48,6 +49,8 @@ pub mod in_memory_graph_store;
 #[cfg(any(test, feature = "test-utils"))]
 pub use in_memory_graph_store::InMemoryGraphStore;
 
+#[cfg(test)]
+mod graph_arm_tests;
 #[cfg(all(test, feature = "test-utils"))]
 mod in_memory_graph_store_tests;
 #[cfg(all(test, feature = "test-utils"))]
@@ -57,6 +60,7 @@ mod ingest_tests;
 #[cfg(test)]
 mod tests;
 
+pub use graph_arm::{GraphArm, GraphArmConfig, GraphCache, GraphRanking};
 pub use ingest::{CancelToken, IngestSettings, IngestWorker, JobOutcome, reap_failed_job_uploads};
 pub use retrieval::{RetrievalOptions, RetrievalOutcome, enrich_titles, execute_pipeline};
 pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
@@ -129,6 +133,10 @@ pub struct EngineInputs {
     pub document_store: Arc<dyn DocumentStore>,
     pub query_expander: Arc<dyn QueryExpander>,
     pub figure_gate: Option<Arc<dyn FigureGate>>,
+    /// The entity-graph retrieval arm, or `None` when it is off. Owns its own
+    /// scoped-graph cache, so the cache is per-process state rather than engine
+    /// settings.
+    pub graph_arm: Option<Arc<GraphArm>>,
 }
 
 /// Engine handle — cheap to clone (all state behind `Arc`s).
@@ -185,6 +193,7 @@ impl Engine {
             document_store,
             query_expander: Arc::new(NoopExpander),
             figure_gate: None,
+            graph_arm: None,
         };
         Self::new(settings, inputs)
     }
@@ -224,6 +233,7 @@ impl Engine {
             hybrid_bm25_enabled: self.settings.hybrid_bm25_enabled,
             figure_gate: self.inputs.figure_gate.clone(),
             rerank_enabled: self.settings.rerank_enabled,
+            graph_arm: self.inputs.graph_arm.clone(),
         };
 
         execute_pipeline(

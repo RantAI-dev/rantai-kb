@@ -5,16 +5,20 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
-use kb_core::{ContextItem, SourceEntry, build_context_and_sources, weave_neighbours_with};
+use kb_core::{
+    ContextItem, RrfOptions, SourceEntry, build_context_and_sources, reciprocal_rank_fusion_with,
+    weave_neighbours_with,
+};
 use kb_ports::{
     Candidate, Chunk, ChunkId, ChunkMetadata, DocumentId, DocumentMeta, DocumentScope,
     DocumentStore, Embedder, EngineError, FigureGate, FigureGateCandidate, Fusion, HybridQuery,
-    KeywordQuery, ProvenanceArm, RerankCandidate, Reranker, RetrievalDegrade, RetrievalIndex,
-    RetrievalProvenance, SearchHit, TenantId,
+    KeywordQuery, PortError, ProvenanceArm, RerankCandidate, Reranker, RetrievalDegrade,
+    RetrievalIndex, RetrievalProvenance, SearchHit, TenantId,
 };
 use tracing::Instrument;
 
 use crate::QueryExpander;
+use crate::graph_arm::{GraphArm, GraphRanking};
 use crate::timing::{Clock, StageTimings, Stopwatch, stage_span};
 
 /// Parameters for one retrieval execution.
@@ -36,6 +40,9 @@ pub struct RetrievalOptions {
     pub figure_gate: Option<Arc<dyn FigureGate>>,
     /// Whether reranker is enabled.
     pub rerank_enabled: bool,
+    /// The entity-graph arm, when `KB_GRAPH_ARM` is on. `None` leaves the
+    /// pipeline byte-identical to the two-arm version it has always been.
+    pub graph_arm: Option<std::sync::Arc<GraphArm>>,
 }
 
 impl fmt::Debug for RetrievalOptions {
@@ -50,6 +57,7 @@ impl fmt::Debug for RetrievalOptions {
             .field("expansion_enabled", &self.expansion_enabled)
             .field("expansion_paraphrases", &self.expansion_paraphrases)
             .field("hybrid_bm25_enabled", &self.hybrid_bm25_enabled)
+            .field("graph_arm", &self.graph_arm.as_ref().map(|_| "<GraphArm>"))
             .field(
                 "figure_gate",
                 &self.figure_gate.as_ref().map(|_| "<FigureGate>"),
@@ -72,6 +80,7 @@ impl Default for RetrievalOptions {
             hybrid_bm25_enabled: true,
             figure_gate: None,
             rerank_enabled: false,
+            graph_arm: None,
         }
     }
 }
@@ -344,6 +353,90 @@ pub async fn enrich_titles(
     }
 }
 
+/// Fetch the graph arm's ranked chunks and re-fuse all three arms together.
+///
+/// **The fusion is the same RRF the other arms use**, at the same `k`. That is
+/// the point of reusing it: a new scoring function would need its own calibration
+/// and its own benchmark, and there is no evidence either exists. The three input
+/// lists are the dense arm's candidates, the sparse arm's candidates, and the
+/// graph arm's — split back out of the adapter's own fused list by their
+/// per-arm ranks, which is the only record of which arm produced what.
+///
+/// Returns the fused candidates and, alongside them, each graph-ranked chunk's
+/// position in the graph arm's own list. The position is provenance; the fused
+/// score is not comparable to it.
+///
+/// `index.fetch` is scoped, so a chunk in another tenant's document, or one the
+/// caller cannot see, comes back as nothing rather than as a hit. That is the
+/// scope rule holding at the only place the arm touches storage.
+async fn fuse_graph(
+    index: &Arc<dyn RetrievalIndex>,
+    scope: &DocumentScope,
+    graph_chunks: &[ChunkId],
+    candidates: &[Candidate],
+    pool_size: u32,
+) -> Result<(Vec<Candidate>, HashMap<ChunkId, u32>), PortError> {
+    let fetched = index.fetch(scope, graph_chunks).await?;
+
+    // The graph list is the arm's own ranking; the fetched candidates come back
+    // in whatever order the adapter chose, so they are re-sorted back onto it.
+    let position: HashMap<&ChunkId, u32> = graph_chunks
+        .iter()
+        .enumerate()
+        .map(|(rank, id)| (id, rank as u32))
+        .collect();
+    let mut graph_list: Vec<Candidate> = fetched
+        .into_iter()
+        .filter(|c| position.contains_key(&c.unit_id))
+        .collect();
+    graph_list.sort_by_key(|c| position[&c.unit_id]);
+    let ranks: HashMap<ChunkId, u32> = graph_list
+        .iter()
+        .map(|c| (c.unit_id.clone(), position[&c.unit_id]))
+        .collect();
+
+    let dense_list: Vec<Candidate> = candidates
+        .iter()
+        .filter(|c| c.ranks.dense.is_some())
+        .cloned()
+        .collect();
+    let sparse_list: Vec<Candidate> = candidates
+        .iter()
+        .filter(|c| c.ranks.sparse.is_some())
+        .cloned()
+        .collect();
+    let unranked: Vec<Candidate> = candidates
+        .iter()
+        .filter(|c| c.ranks.dense.is_none() && c.ranks.sparse.is_none())
+        .cloned()
+        .collect();
+
+    let fused = reciprocal_rank_fusion_with(
+        [dense_list, sparse_list, graph_list],
+        RrfOptions {
+            k: 60,
+            limit: Some(pool_size),
+        },
+        |c: &Candidate| c.unit_id.0.as_str(),
+    );
+
+    let mut out: Vec<Candidate> = Vec::with_capacity(fused.len() + unranked.len());
+    for (position, item) in fused.into_iter().enumerate() {
+        let mut candidate = item.first;
+        candidate.scores.fused = item.rrf_score as f32;
+        candidate.ranks.fused = position as u32;
+        out.push(candidate);
+    }
+    // Candidates no arm ranked (an adapter that reported nothing) would otherwise
+    // be dropped by the fusion, which is a silent loss of a chunk the arms did
+    // return. They go last, in their original order.
+    for mut candidate in unranked {
+        candidate.ranks.fused = out.len() as u32;
+        out.push(candidate);
+    }
+    Ok((out, ranks))
+}
+
 /// Execute the full retrieval pipeline.
 ///
 /// Every collaborator is passed explicitly rather than behind a context
@@ -580,7 +673,66 @@ pub async fn execute_pipeline(
             .is_none_or(|sim| sim >= opts.min_similarity || c.scores.sparse.is_some())
     });
 
+    // 4b. The graph arm, fused as one more ranked list.
+    let graph_sw = Stopwatch::start(clock);
+    let graph_ranks = match &opts.graph_arm {
+        None => HashMap::new(),
+        Some(arm) => {
+            let ranking = match arm.rank(scope, query, clock).await {
+                Ok(ranking) => ranking,
+                Err(e) => {
+                    // A failed arm is a degraded search, not a failed one. The
+                    // other arms' candidates are already in `candidates` and go
+                    // out unchanged; what must not happen is silence, because a
+                    // graph arm that quietly stopped running looks exactly like a
+                    // graph arm that has stopped helping (AGENTS rule 6).
+                    tracing::warn!(error = %e, "graph arm failed (non-fatal)");
+                    degrades.push(RetrievalDegrade::GraphArmUnavailable);
+                    GraphRanking::default()
+                }
+            };
+            if ranking.chunks.is_empty() {
+                // No entity in this scope matches the query. That is the graph
+                // having nothing to say, not a failure, so no degrade.
+                tracing::debug!(
+                    seeds = ranking.seeds,
+                    unmatched_terms = ranking.unmatched_terms,
+                    "graph arm had nothing to say",
+                );
+                HashMap::new()
+            } else {
+                match fuse_graph(index, scope, &ranking.chunks, &candidates, pool_size).await {
+                    Ok((fused, ranks)) => {
+                        candidates = fused;
+                        ranks
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "graph arm fetch failed (non-fatal)");
+                        degrades.push(RetrievalDegrade::GraphArmUnavailable);
+                        HashMap::new()
+                    }
+                }
+            }
+        }
+    };
+    timings.graph_arm_ms = graph_sw.elapsed_ms();
+
     let mut hits: Vec<SearchHit> = candidates.into_iter().map(candidate_to_hit).collect();
+
+    // The graph arm's rank is provenance, not a score: the fused score a graph
+    // chunk carries is an RRF sum like everyone else's, and comparing it to
+    // anything would be meaningless.
+    for hit in &mut hits {
+        if let Some(rank) = graph_ranks.get(&hit.chunk.id) {
+            hit.retrieval = Some(
+                hit.retrieval
+                    .clone()
+                    .unwrap_or_else(|| RetrievalProvenance::unscored(ProvenanceArm::Graph))
+                    .with_arm(ProvenanceArm::Graph)
+                    .with_graph_rank(*rank),
+            );
+        }
+    }
 
     // Enrich titles & categories
     let enrich_sw = Stopwatch::start(clock);

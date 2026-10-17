@@ -8,7 +8,7 @@ use std::sync::Arc;
 use kb_engine::{Engine, EngineInputs, EngineSettings, NoopExpander, QueryExpander};
 use kb_inference::EmbedderSettings;
 use kb_inference::ExpansionSettings;
-use kb_ports::{BlobStore, DocumentStore, Embedder, EntityStore, JobStore, PortError};
+use kb_ports::{BlobStore, DocumentStore, Embedder, EntityStore, GraphStore, JobStore, PortError};
 
 use crate::config::{EmbedderConfig, RerankerConfig};
 use crate::events::EventBus;
@@ -22,6 +22,11 @@ pub struct AppState {
     pub index: Arc<dyn kb_ports::RetrievalIndex>,
     /// Entity and relation graph in SurrealDB, read by the intelligence route.
     pub entities: Arc<dyn EntityStore>,
+    /// The Postgres entity graph the retrieval arm walks, when one is configured
+    /// (`KB_GRAPH_STORE`). `None` means there is no graph, and the arm is off.
+    pub graph: Option<Arc<dyn GraphStore>>,
+    /// The graph retrieval arm, or `None` when `KB_GRAPH_ARM` is off.
+    pub graph_arm: Option<Arc<kb_engine::GraphArm>>,
     /// Object storage: the upload route writes, the raw/asset routes read, the
     /// hard-delete and reaper paths remove.
     pub blob: Arc<dyn BlobStore>,
@@ -40,6 +45,8 @@ pub struct StateParts {
     pub documents: Arc<dyn DocumentStore>,
     pub index: Arc<dyn kb_ports::RetrievalIndex>,
     pub entities: Arc<dyn EntityStore>,
+    pub graph: Option<Arc<dyn GraphStore>>,
+    pub graph_arm: Option<Arc<kb_engine::GraphArm>>,
     pub blob: Arc<dyn BlobStore>,
     pub embedder: Arc<dyn Embedder>,
     pub jobs: Arc<dyn JobStore>,
@@ -54,6 +61,34 @@ impl AppState {
         let pool = kb_store_pg::connect_pool(&config.pg)
             .await
             .map_err(|e| anyhow::anyhow!("pg: {e}"))?;
+        // The graph store shares the pool the rest of the process already holds:
+        // three Postgres tables are not worth a second connection pool.
+        let graph: Option<Arc<dyn GraphStore>> = match config.graph_store {
+            crate::config::GraphStoreChoice::None => None,
+            crate::config::GraphStoreChoice::Pg => {
+                Some(Arc::new(kb_store_pg::PgGraphStore::from_pool(pool.clone())))
+            }
+        };
+        let graph_arm = match (config.graph_arm.enabled, &graph) {
+            (true, Some(store)) => Some(Arc::new(kb_engine::GraphArm::new(
+                Arc::clone(store),
+                kb_engine::GraphArmConfig {
+                    max_seeds: config.graph_arm.max_seeds,
+                    tolerance: config.graph_arm.tolerance,
+                    damping: config.graph_arm.damping,
+                    candidates: config.graph_arm.candidates,
+                    cache_entries: config.graph_arm.cache_entries,
+                    cache_bytes: config.graph_arm.cache_bytes,
+                    ..kb_engine::GraphArmConfig::default()
+                },
+            ))),
+            (true, None) => {
+                // Config rejects this combination at boot; a process built by
+                // hand should still not start an arm with nothing behind it.
+                anyhow::bail!("graph arm is enabled but no graph store is configured");
+            }
+            (false, _) => None,
+        };
         let documents: Arc<dyn DocumentStore> =
             Arc::new(kb_store_pg::PgDocumentStore::from_pool(pool.clone()));
         let jobs: Arc<dyn JobStore> = Arc::new(kb_store_pg::PgJobStore::from_pool(pool));
@@ -108,12 +143,15 @@ impl AppState {
             document_store: documents.clone(),
             query_expander: expander,
             figure_gate: None,
+            graph_arm: graph_arm.clone(),
         };
         let engine = Engine::new(config.engine, inputs);
         Ok(Self {
             documents,
             index,
             entities,
+            graph,
+            graph_arm,
             blob,
             embedder,
             jobs,
@@ -138,12 +176,15 @@ impl AppState {
             document_store: parts.documents.clone(),
             query_expander: Arc::new(NoopExpander),
             figure_gate: None,
+            graph_arm: parts.graph_arm.clone(),
         };
         let engine = Engine::new(settings, inputs);
         Self {
             documents: parts.documents,
             index: parts.index,
             entities: parts.entities,
+            graph: parts.graph,
+            graph_arm: parts.graph_arm,
             blob: parts.blob,
             embedder: parts.embedder,
             jobs: parts.jobs,
@@ -168,9 +209,16 @@ impl AppState {
         let extractor = kb_extract::build_production_extractor(&config.extract)
             .map_err(|e| anyhow::anyhow!("extractor: {e}"))?
             .shared();
-        let entity_extractor = kb_inference::LlmCombinedExtractor::new(config.entity.clone())
-            .map_err(|e| anyhow::anyhow!("entity extractor: {e}"))?;
-        Ok(kb_engine::IngestWorker::new(
+        let entity_extractor: Arc<dyn kb_ports::EntityExtractor> = match config.entity_extractor {
+            crate::config::EntityExtractorChoice::Heuristic => {
+                Arc::new(kb_inference::HeuristicExtractor::default())
+            }
+            crate::config::EntityExtractorChoice::Llm => Arc::new(
+                kb_inference::LlmCombinedExtractor::new(config.entity.clone())
+                    .map_err(|e| anyhow::anyhow!("entity extractor: {e}"))?,
+            ),
+        };
+        let mut worker = kb_engine::IngestWorker::new(
             self.jobs.clone(),
             self.documents.clone(),
             self.index.clone(),
@@ -180,8 +228,12 @@ impl AppState {
             settings,
         )
         .with_entity_store(self.entities.clone())
-        .with_entity_extractor(Arc::new(entity_extractor))
-        .with_progress_sink(Arc::clone(&self.events) as Arc<dyn kb_ports::ProgressSink>))
+        .with_entity_extractor(entity_extractor)
+        .with_progress_sink(Arc::clone(&self.events) as Arc<dyn kb_ports::ProgressSink>);
+        if let Some(graph) = self.graph.as_ref() {
+            worker = worker.with_graph_store(Arc::clone(graph));
+        }
+        Ok(worker)
     }
 }
 

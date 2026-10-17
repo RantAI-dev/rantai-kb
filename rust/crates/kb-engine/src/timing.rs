@@ -195,10 +195,18 @@ pub struct StageTimings {
     pub vector_arm_ms: f64,
     /// The keyword (BM25) arm, including its alive check.
     pub keyword_arm_ms: f64,
-    /// The entity arm. Always 0 while the Rust pipeline has no entity arm;
-    /// reported rather than omitted so the shape of the answer does not change
-    /// when one is built.
+    /// The entity arm. Superseded by [`StageTimings::graph_arm_ms`]: the entity
+    /// graph now reaches search through the graph arm rather than as an arm of its
+    /// own, so this stays 0 and is kept so a response parsed by an older client
+    /// does not lose a field.
     pub entity_arm_ms: f64,
+    /// The graph arm: seed lookup, the scoped-graph load (or cache hit), the
+    /// walk, and the chunk fetch it needs to fuse. This is the whole cost, not
+    /// just the walk, because the load is the part that is expensive.
+    ///
+    /// Cold it is the `load_tenant_graph` cost; warm it is microseconds. The two
+    /// are reported apart in `docs/eval-baseline.md` §6.4 for exactly that reason.
+    pub graph_arm_ms: f64,
     /// `find_alive_meta_by_ids` inside the keyword arm (Postgres).
     pub scope_check_ms: f64,
 }
@@ -239,12 +247,13 @@ impl StageTimings {
 
     /// The overlapping measurements, as `(name, ms)` pairs.
     #[must_use]
-    pub fn detail_pairs(&self) -> [(&'static str, f64); 6] {
+    pub fn detail_pairs(&self) -> [(&'static str, f64); 7] {
         [
             ("queryEmbed", self.query_embed_ms),
             ("vectorArm", self.vector_arm_ms),
             ("keywordArm", self.keyword_arm_ms),
             ("entityArm", self.entity_arm_ms),
+            ("graphArm", self.graph_arm_ms),
             ("scopeCheck", self.scope_check_ms),
             ("engineTotal", self.engine_total_ms),
         ]
@@ -369,6 +378,6 @@ mod tests {
         assert_eq!(t.total_ms, 0.0);
         assert!(!t.query_embed_cached);
         assert_eq!(t.accounted_pairs().len(), 8);
-        assert_eq!(t.detail_pairs().len(), 6);
+        assert_eq!(t.detail_pairs().len(), 7);
     }
 }

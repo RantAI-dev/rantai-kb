@@ -23,8 +23,9 @@ use kb_core::{
 };
 use kb_ports::{
     BlobStore, ChunkId, ChunkType, DocumentId, DocumentStore, Embedder, EntityExtractor,
-    EntityStore, ExtractedFigure, ExtractionOptions, Extractor, IndexUnit, JobRecord, JobStore,
-    PortError, ProgressSink, RetrievalIndex, asset_path,
+    EntityStore, EntityUpsert, ExtractedFigure, ExtractionOptions, Extractor, GraphStore,
+    IndexUnit, JobRecord, JobStore, PortError, ProgressSink, RelationUpsert, RetrievalIndex,
+    asset_path,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
@@ -147,6 +148,11 @@ pub struct IngestWorker {
     embedder: Arc<dyn Embedder>,
     entities: Option<Arc<dyn EntityStore>>,
     entity_extractor: Option<Arc<dyn EntityExtractor>>,
+    /// The Postgres entity graph, when one is configured. Written as a second
+    /// destination for the *same* extraction, never instead of it: SurrealDB
+    /// keeps its rows because Bun and `/v1/documents/:id/intelligence` read
+    /// them, and the graph tables exist so the graph arm has something to walk.
+    graph: Option<Arc<dyn GraphStore>>,
     progress_sink: Option<Arc<dyn ProgressSink>>,
     /// Per-job throttle state for progress emits, mirroring `lastEmit` in
     /// `src/lib/ingest/job.ts`: always emit on a step change, otherwise at most
@@ -177,6 +183,7 @@ impl IngestWorker {
             embedder,
             entities: None,
             entity_extractor: None,
+            graph: None,
             progress_sink: None,
             emit_state: Mutex::new(HashMap::new()),
             settings,
@@ -206,6 +213,18 @@ impl IngestWorker {
     #[must_use]
     pub fn with_entity_extractor(mut self, extractor: Arc<dyn EntityExtractor>) -> Self {
         self.entity_extractor = Some(extractor);
+        self
+    }
+
+    /// Equip the worker with a graph store, so the same extraction also lands in
+    /// the entity graph the graph arm walks.
+    ///
+    /// Independent of [`IngestWorker::with_entity_store`] on purpose: the two are
+    /// different stores with different readers, and a deployment may legitimately
+    /// have one without the other.
+    #[must_use]
+    pub fn with_graph_store(mut self, graph: Arc<dyn GraphStore>) -> Self {
+        self.graph = Some(graph);
         self
     }
 
@@ -456,6 +475,7 @@ impl IngestWorker {
                     job,
                     document_id,
                     &content,
+                    &chunks,
                     use_combined,
                     started,
                     &flags,
@@ -604,18 +624,48 @@ impl IngestWorker {
             .await
     }
 
-    /// Extract entities and relations, upserting them to SurrealDB.
-    /// Non-fatal on failure: logs warning and continues.
+    /// Extract entities and relations once, then write them to every store that
+    /// wants them. Non-fatal on failure: logs a warning and continues.
+    ///
+    /// One extraction, two destinations. The SurrealDB write is unchanged — same
+    /// ids, same order, same skips — because Bun reads those rows and so does the
+    /// intelligence route, and AGENTS rule 4 makes them a contract. The graph
+    /// write is additive and best-effort: a graph that fails to load must not
+    /// cost the document its search index.
+    #[allow(clippy::too_many_arguments)]
     async fn extract_and_store_entities(
         &self,
         job: &JobRecord,
         document_id: &DocumentId,
         content: &str,
+        chunks: &[Chunk],
         use_combined: bool,
         started: Instant,
         flags: &ProgressFlags,
     ) {
-        let (entities, relations) = if let Some(extractor) = &self.entity_extractor {
+        let Some((entities, relations)) = self
+            .extract_entities(job, content, document_id, use_combined)
+            .await
+        else {
+            return;
+        };
+
+        self.store_entities_surreal(job, document_id, &entities, &relations, started, flags)
+            .await;
+        self.store_entities_graph(job, document_id, chunks, &entities, &relations)
+            .await;
+    }
+
+    /// Run the configured extractor, or the pattern fallback. `None` when the
+    /// extraction failed: every caller treats that as non-fatal.
+    async fn extract_entities(
+        &self,
+        job: &JobRecord,
+        content: &str,
+        document_id: &DocumentId,
+        use_combined: bool,
+    ) -> Option<(Vec<kb_core::Entity>, Vec<kb_core::Relation>)> {
+        if let Some(extractor) = &self.entity_extractor {
             if use_combined {
                 match extractor
                     .extract_entities_and_relations(
@@ -625,42 +675,53 @@ impl IngestWorker {
                     )
                     .await
                 {
-                    Ok(pair) => pair,
+                    Ok(pair) => return Some(pair),
                     Err(e) => {
                         tracing::warn!("Entity/Relation extraction failed (non-fatal): {e}");
-                        return;
-                    }
-                }
-            } else {
-                match extractor
-                    .extract_entities(content, Some(&document_id.0), None)
-                    .await
-                {
-                    Ok(ents) => (ents, Vec::new()),
-                    Err(e) => {
-                        tracing::warn!("Entity extraction failed (non-fatal): {e}");
-                        return;
+                        return None;
                     }
                 }
             }
-        } else {
-            // Pattern fallback
-            let pat_extractor = kb_core::intelligence::PatternEntityExtractor::default();
-            let entities = pat_extractor.extract(content, Some(&document_id.0), None);
-            let relations = if use_combined {
-                let pat_rel_extractor = kb_core::intelligence::PatternRelationExtractor::default();
-                pat_rel_extractor.extract(
-                    content,
-                    &entities,
-                    Some(&document_id.0),
-                    job.user_id.as_deref(),
-                )
-            } else {
-                Vec::new()
-            };
-            (entities, relations)
-        };
+            match extractor
+                .extract_entities(content, Some(&document_id.0), None)
+                .await
+            {
+                Ok(ents) => return Some((ents, Vec::new())),
+                Err(e) => {
+                    tracing::warn!("Entity extraction failed (non-fatal): {e}");
+                    return None;
+                }
+            }
+        }
 
+        // Pattern fallback
+        let pat_extractor = kb_core::intelligence::PatternEntityExtractor::default();
+        let entities = pat_extractor.extract(content, Some(&document_id.0), None);
+        let relations = if use_combined {
+            let pat_rel_extractor = kb_core::intelligence::PatternRelationExtractor::default();
+            pat_rel_extractor.extract(
+                content,
+                &entities,
+                Some(&document_id.0),
+                job.user_id.as_deref(),
+            )
+        } else {
+            Vec::new()
+        };
+        Some((entities, relations))
+    }
+
+    /// Write entities and relations to SurrealDB, exactly as before the graph
+    /// store existed. Nothing here changes shape, id or ordering.
+    async fn store_entities_surreal(
+        &self,
+        job: &JobRecord,
+        document_id: &DocumentId,
+        entities: &[kb_core::Entity],
+        relations: &[kb_core::Relation],
+        started: Instant,
+        flags: &ProgressFlags,
+    ) {
         let Some(store) = &self.entities else {
             return;
         };
@@ -669,7 +730,7 @@ impl IngestWorker {
         let mut entity_idx: u32 = 0;
         let mut entity_id_map: HashMap<String, String> = HashMap::new();
 
-        for entity in &entities {
+        for entity in entities.iter() {
             entity_idx = entity_idx.saturating_add(1);
             self.progress(
                 job,
@@ -707,7 +768,7 @@ impl IngestWorker {
         if !relations.is_empty() {
             let mut stored_count = 0;
             let mut skipped_count = 0;
-            for relation in &relations {
+            for relation in relations.iter() {
                 let source_name = relation
                     .metadata
                     .as_ref()
@@ -782,6 +843,96 @@ impl IngestWorker {
                 relations.len()
             );
         }
+    }
+
+    /// Write the same extraction to the graph store: the document's entities with
+    /// their chunk mentions, then its relations.
+    ///
+    /// **Non-fatal by design.** Every store call here logs a warning and returns.
+    /// The alternative — failing the job — turns a degraded graph into an
+    /// unsearchable document, which is a much worse outcome than a search that
+    /// quietly has one arm fewer. AGENTS rule 6 wants that visible, and a
+    /// `warn!` with the document id is how the SurrealDB write above has always
+    /// reported the same class of failure.
+    ///
+    /// **Replace, not merge.** A re-ingest deletes this document's graph first.
+    /// Without that, a document re-ingested with different content keeps every
+    /// relation its previous version had, and the graph asserts things about a
+    /// version of the document that no longer exists.
+    async fn store_entities_graph(
+        &self,
+        job: &JobRecord,
+        document_id: &DocumentId,
+        chunks: &[Chunk],
+        entities: &[kb_core::Entity],
+        relations: &[kb_core::Relation],
+    ) {
+        let Some(graph) = &self.graph else {
+            return;
+        };
+
+        if let Err(e) = graph.delete_document(&job.tenant_id, document_id).await {
+            tracing::warn!(
+                document_id = %document_id.0,
+                error = %e,
+                "[kb-ingest] graph delete failed (non-fatal): the graph may keep stale edges",
+            );
+            return;
+        }
+
+        let mentions = MentionIndex::build(chunks, document_id);
+        let mut keys: HashMap<String, String> = HashMap::new();
+        let mut upserts: Vec<EntityUpsert> = Vec::with_capacity(entities.len());
+        for entity in entities {
+            // `key_of` is the same normaliser the heuristic extractor uses, so an
+            // entity's key is the same string whichever extractor produced it —
+            // which is what makes the two extractors interchangeable on the same
+            // tenant.
+            let Some(key) = kb_core::key_of(&entity.name) else {
+                continue;
+            };
+            keys.insert(entity.name.to_lowercase(), key.clone());
+            upserts.push(EntityUpsert {
+                key: key.clone(),
+                name: entity.name.clone(),
+                entity_type: entity.entity_type.clone(),
+                aliases: Vec::new(),
+                mentions: mentions.chunks_for(&entity.name),
+            });
+        }
+
+        if let Err(e) = graph
+            .upsert_entities(&job.tenant_id, document_id, upserts)
+            .await
+        {
+            tracing::warn!(
+                document_id = %document_id.0,
+                error = %e,
+                "[kb-ingest] graph entity upsert failed (non-fatal): {} entities lost",
+                entities.len(),
+            );
+            return;
+        }
+
+        let relation_upserts = graph_relations(relations, &keys, &mentions);
+        if let Err(e) = graph
+            .relate(&job.tenant_id, document_id, relation_upserts.clone())
+            .await
+        {
+            tracing::warn!(
+                document_id = %document_id.0,
+                error = %e,
+                "[kb-ingest] graph relate failed (non-fatal): {} relations lost",
+                relation_upserts.len(),
+            );
+            return;
+        }
+        tracing::info!(
+            document_id = %document_id.0,
+            entities = entities.len(),
+            relations = relation_upserts.len(),
+            "[kb-ingest] graph written",
+        );
     }
 
     /// Process figure crops: upload images to BlobStore, compute captions and anchors,
@@ -1113,6 +1264,189 @@ impl Drop for Heartbeat {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// Which chunks mention which entity, for the graph write.
+///
+/// The extraction ran over the whole document, so it says nothing about *where*
+/// in the document a name appears — and the graph needs that, because a mention is
+/// the edge from an entity to the chunk a reader has to be shown. Matching is a
+/// substring search of a normalised name inside a normalised chunk.
+///
+/// The naive shape of that is O(entities x chunks) substring searches over the
+/// whole document, which on a 3,000-chunk book is 1.5 million full-text scans. So
+/// there is a token index: an entity's *rarest* token narrows the search to the
+/// handful of chunks that could possibly contain it, and the substring check then
+/// decides. The result is identical to the naive scan and costs about a
+/// millisecond.
+struct MentionIndex {
+    /// Chunk id and normalised text, in chunk order.
+    chunks: Vec<(ChunkId, String)>,
+    /// Normalised token -> the chunks it appears in.
+    by_token: HashMap<String, Vec<usize>>,
+}
+
+impl MentionIndex {
+    /// Index a document's chunks. `document_id` is used to mint the same chunk ids
+    /// the index write will mint a few lines later, because a mention has to point
+    /// at the chunk id that will actually exist in the store.
+    fn build(chunks: &[Chunk], document_id: &DocumentId) -> Self {
+        let mut indexed: Vec<(ChunkId, String)> = Vec::with_capacity(chunks.len());
+        let mut by_token: HashMap<String, Vec<usize>> = HashMap::new();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let id = ChunkId(format!("{}_{}", document_id.0, chunk.metadata.chunk_index));
+            let normalised = normalise_for_match(&chunk.content);
+            for token in normalised.split(' ') {
+                if token.is_empty() {
+                    continue;
+                }
+                let bucket = by_token.entry(token.to_string()).or_default();
+                if bucket.last() != Some(&i) {
+                    bucket.push(i);
+                }
+            }
+            indexed.push((id, normalised));
+        }
+        Self {
+            chunks: indexed,
+            by_token,
+        }
+    }
+
+    /// Chunk ids whose text contains `surface`, ascending by chunk order.
+    ///
+    /// Empty when the name cannot be normalised, when no token of it appears
+    /// anywhere, or when the name is a substring of some other word. That last one
+    /// is deliberate: "Bank" would otherwise match "Bankruptcy" and attach a
+    /// mention to every chunk that happens to discuss bankruptcy.
+    fn chunks_for(&self, surface: &str) -> Vec<ChunkId> {
+        let needle = normalise_for_match(surface);
+        let needle = needle.trim();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        self.search(needle)
+    }
+
+    /// The first chunk that mentions both names, if one does.
+    ///
+    /// A relation's provenance is the chunk that says it, so both endpoints have
+    /// to be in that chunk. A relation extracted from a summary with no single
+    /// supporting chunk gets `None`, which the port allows: it is a real edge with
+    /// no one place to point at.
+    fn chunk_for_both(&self, a: &str, b: &str) -> Option<ChunkId> {
+        let left = normalise_for_match(a);
+        let left = left.trim();
+        let right = normalise_for_match(b);
+        let right = right.trim();
+        if left.is_empty() || right.is_empty() {
+            return None;
+        }
+        let mut both = self.search(left);
+        both.retain(|id| {
+            self.chunks
+                .iter()
+                .any(|(other, text)| other == id && text.contains(right))
+        });
+        both.into_iter().next()
+    }
+
+    /// Chunk ids whose text contains `needle`, in chunk order.
+    fn search(&self, needle: &str) -> Vec<ChunkId> {
+        let tokens: Vec<&str> = needle.split(' ').filter(|t| !t.is_empty()).collect();
+        let Some(anchor) = tokens
+            .iter()
+            .filter_map(|t| self.by_token.get(*t))
+            .min_by_key(|bucket| bucket.len())
+        else {
+            return Vec::new();
+        };
+        let mut out: Vec<(usize, ChunkId)> = Vec::new();
+        for i in anchor {
+            if self.chunks[*i].1.contains(needle) {
+                out.push((*i, self.chunks[*i].0.clone()));
+            }
+        }
+        out.sort();
+        out.dedup_by(|a, b| a.0 == b.0);
+        out.into_iter().map(|(_, id)| id).collect()
+    }
+}
+
+/// Case- and diacritic-insensitive text, for the mention substring match.
+fn normalise_for_match(text: &str) -> String {
+    kb_core::key_of(text).unwrap_or_default()
+}
+
+/// Map extracted relations onto the graph store's shape.
+///
+/// Two filters, both load-bearing:
+///
+/// * a relation whose endpoints were not written as entities is dropped, because
+///   `relate` rejects a batch containing an unknown endpoint — keeping it would
+///   cost every other relation in the batch;
+/// * a relation with a non-positive weight is dropped, because in
+///   [`kb_core::graph`] a zero weight is an absent edge and storing it would be a
+///   row that walks over.
+fn graph_relations(
+    relations: &[kb_core::Relation],
+    keys: &HashMap<String, String>,
+    mentions: &MentionIndex,
+) -> Vec<RelationUpsert> {
+    relations
+        .iter()
+        .filter_map(|relation| {
+            let src = relation_name(relation, "source_entity")?;
+            let dst = relation_name(relation, "target_entity")?;
+            let src_key = keys.get(&src.to_lowercase())?.clone();
+            let dst_key = keys.get(&dst.to_lowercase())?.clone();
+            // `is_sign_positive` rather than `> 0.0`: a NaN confidence is not a
+            // positive confidence, and `NaN > 0.0` is false anyway, so both
+            // spellings agree — this one says which of them is doing the work.
+            // Zero is dropped and so is anything not finite. `is_sign_positive`
+            // is the trap here: it reads the IEEE sign *bit*, so `+0.0` is
+            // "positive" and a zero-weight relation would be stored as an edge
+            // that `kb_core::graph` then treats as absent.
+            if src_key == dst_key || !relation.confidence.is_finite() || relation.confidence <= 0.0
+            {
+                return None;
+            }
+            let label = relation.relation_type.trim();
+            let relation_type = if label.is_empty() {
+                "RELATED_TO".to_string()
+            } else {
+                label.to_string()
+            };
+            Some(RelationUpsert {
+                src_key,
+                dst_key,
+                relation_type,
+                weight: relation.confidence,
+                chunk_id: mentions.chunk_for_both(&src, &dst),
+            })
+        })
+        .collect()
+}
+
+/// An endpoint name from the extractor's own fields, falling back to the metadata
+/// the pattern and LLM extractors both write.
+fn relation_name(relation: &kb_core::Relation, field: &str) -> Option<String> {
+    let direct = match field {
+        "source_entity" => relation.source_entity.as_str(),
+        _ => relation.target_entity.as_str(),
+    };
+    let _ = field;
+    if !direct.trim().is_empty() {
+        return Some(direct.trim().to_string());
+    }
+    relation
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get(field))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Title for the embedding prefix and the chunk metadata: the job's explicit

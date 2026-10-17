@@ -255,6 +255,7 @@ pub fn build_hit(row: ChunkRow, rank: u32, score: f32, arm: ProvenanceArm) -> Se
             arms: vec![arm],
             dense_rank: (arm == ProvenanceArm::Dense).then_some(rank),
             sparse_rank: (arm == ProvenanceArm::Sparse).then_some(rank),
+            graph_rank: (arm == ProvenanceArm::Graph).then_some(rank),
             fused_score: Some(score),
         }),
     }

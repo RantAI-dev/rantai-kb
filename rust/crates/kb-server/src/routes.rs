@@ -903,12 +903,22 @@ async fn delete_document(
         return Ok(Json(serde_json::json!({ "ok": true })));
     }
 
-    // Chunks first, then the stored object, then the row. A chunk-delete or
-    // blob-delete failure is logged and does not stop the row delete: the row
-    // is what makes the document invisible, and leaving it behind would keep a
-    // document the user deleted in their list.
+    // Chunks first, then the graph, then the stored object, then the row. A
+    // chunk-delete, graph-delete or blob-delete failure is logged and does not
+    // stop the row delete: the row is what makes the document invisible, and
+    // leaving it behind would keep a document the user deleted in their list.
+    //
+    // The graph goes before the row for a specific reason. A mention or relation
+    // left behind would keep a path through a document nobody can see any more,
+    // and a path is exactly what the scope rule is about — so the cascade is
+    // best-effort but it is not optional.
     if let Err(err) = state.index.delete_document(&auth.tenant_id, &doc.id).await {
         tracing::warn!(error = %err, "chunk delete failed during hard delete");
+    }
+    if let Some(graph) = state.graph.as_ref()
+        && let Err(err) = graph.delete_document(&auth.tenant_id, &doc_id).await
+    {
+        tracing::warn!(error = %err, "graph delete failed during hard delete");
     }
     if let Some(s3_key) = doc.s3_key.as_deref() {
         if let Err(err) = state.blob.delete(s3_key).await {

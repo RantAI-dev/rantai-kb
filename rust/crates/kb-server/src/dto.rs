@@ -137,9 +137,12 @@ pub struct StageDetailDto {
     pub vector_arm: f64,
     /// The keyword arm's store call on its own.
     pub keyword_arm: f64,
-    /// Always 0 while the Rust pipeline has no entity arm; present so the
-    /// shape of the object does not change when one is built.
+    /// Always 0: the entity graph reaches search through the graph arm, not as an
+    /// arm of its own. Present so a client that reads it does not lose a field.
     pub entity_arm: f64,
+    /// The graph arm, end to end: seed lookup, scoped-graph load or cache hit,
+    /// the walk, and the chunk fetch it needs to fuse.
+    pub graph_arm: f64,
     /// `find_alive_meta_by_ids` inside the keyword arm (Postgres).
     pub scope_check: f64,
 }
@@ -218,6 +221,7 @@ impl StageDetailDto {
             vector_arm: round_ms(self.vector_arm),
             keyword_arm: round_ms(self.keyword_arm),
             entity_arm: round_ms(self.entity_arm),
+            graph_arm: round_ms(self.graph_arm),
             scope_check: round_ms(self.scope_check),
         }
     }
@@ -232,6 +236,7 @@ impl From<&StageTimings> for StageDetailDto {
             vector_arm: t.vector_arm_ms,
             keyword_arm: t.keyword_arm_ms,
             entity_arm: t.entity_arm_ms,
+            graph_arm: t.graph_arm_ms,
             scope_check: t.scope_check_ms,
         }
     }
@@ -510,6 +515,7 @@ mod tests {
                 arms: vec![ProvenanceArm::Dense],
                 dense_rank: Some(0),
                 sparse_rank: None,
+                graph_rank: None,
                 fused_score: Some(0.81f32),
             }),
         ));
@@ -564,6 +570,7 @@ mod tests {
                 arms: vec![ProvenanceArm::Sparse],
                 dense_rank: None,
                 sparse_rank: Some(2),
+                graph_rank: None,
                 fused_score: Some(0.5),
             }),
         )))
@@ -615,6 +622,7 @@ mod tests {
             ],
             dense_rank: None,
             sparse_rank: None,
+            graph_rank: None,
             fused_score: None,
         });
         assert_eq!(

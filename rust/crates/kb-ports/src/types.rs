@@ -264,6 +264,14 @@ pub enum ProvenanceArm {
     Neighbour,
     /// Retrieved as a figure co-retrieval of a hit's document.
     Figure,
+    /// Ranked by the entity graph: personalised PageRank over the caller's scoped
+    /// graph from the query's seed entities, joined to chunks through mentions.
+    ///
+    /// Between `Sparse` and `Neighbour` in the enum's order because that is where
+    /// it runs: the dense and keyword arms have already scored candidates when
+    /// this one contributes, and neighbour weave comes after the cut. The order
+    /// is only ever compared, never sorted into meaning.
+    Graph,
 }
 
 /// Which arms produced a chunk, and what each of them said about it.
@@ -284,6 +292,12 @@ pub struct RetrievalProvenance {
     /// 0-based rank inside the sparse arm's own candidate list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sparse_rank: Option<u32>,
+    /// 0-based rank inside the graph arm's own candidate list, when the entity
+    /// graph contributed this chunk. Not a score: the graph arm's list order is
+    /// where personalised PageRank put the mention, and comparing it across
+    /// queries is meaningless the same way a rank is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_rank: Option<u32>,
     /// The score the answer was ordered by. With RRF this is the fused score and
     /// is not comparable across queries. `None` for a phase that does not score
     /// (a neighbour or a figure the engine added), because reporting `0.0` there
@@ -317,6 +331,7 @@ impl RetrievalProvenance {
             arms,
             dense_rank: candidate.ranks.dense,
             sparse_rank: candidate.ranks.sparse,
+            graph_rank: None,
             fused_score: Some(candidate.scores.fused),
         })
     }
@@ -340,8 +355,20 @@ impl RetrievalProvenance {
             arms: vec![arm],
             dense_rank: None,
             sparse_rank: None,
+            graph_rank: None,
             fused_score: None,
         }
+    }
+
+    /// Record this chunk's position in the graph arm's own list.
+    #[must_use]
+    pub fn with_graph_rank(mut self, rank: u32) -> Self {
+        if !self.arms.contains(&ProvenanceArm::Graph) {
+            self.arms.push(ProvenanceArm::Graph);
+            self.arms.sort_unstable();
+        }
+        self.graph_rank = Some(rank);
+        self
     }
 
     /// Whether this provenance lists `arm`.

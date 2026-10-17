@@ -828,3 +828,407 @@ async fn test_ingest_worker_embed_failure_marks_job_and_document_failed() {
     assert!(!finished[0].success);
     assert!(finished[0].detail.contains("embedding failed"));
 }
+
+// ── the graph store dual-write ──────────────────────────────────────────────────
+//
+// Ingest writes the same extraction to SurrealDB and to the graph store. The
+// SurrealDB half is unchanged and is covered by the tests above; what is new is
+// that the graph half happens at all, that a re-ingest replaces rather than
+// accumulates, and that a broken graph store costs the document nothing.
+
+mod graph_write {
+    use super::*;
+
+    use kb_ports::{
+        ChunkId, DocumentScope, EntityExtractor, EntityMentions, EntityStore, EntityUpsert,
+        GraphStore, RelationUpsert, TenantGraph,
+    };
+
+    use crate::fakes::{FakeDocumentStore, FakeEntityExtractor, FakeEntityStore, make_fake_scope};
+    use crate::in_memory_graph_store::InMemoryGraphStore;
+
+    /// Text with two real names in it, so the graph has an edge and two mentions.
+    const GRAPH_TEXT: &str = "Alice works at Acme Corp on the Jakarta office. \
+Acme Corp also sponsors the Bandung workshop run by Alice.";
+
+    fn extractor() -> Arc<FakeExtractor> {
+        Arc::new(FakeExtractor::returning(GRAPH_TEXT, "markdown"))
+    }
+
+    fn entity_extractor() -> Arc<FakeEntityExtractor> {
+        let entity_extractor = Arc::new(FakeEntityExtractor::default());
+        *entity_extractor.entities.write().unwrap() = vec![
+            Entity {
+                name: "Alice".to_string(),
+                entity_type: "PERSON".to_string(),
+                confidence: 0.95,
+                document_id: None,
+                chunk_id: None,
+                metadata: None,
+            },
+            Entity {
+                name: "Acme Corp".to_string(),
+                entity_type: "ORGANIZATION".to_string(),
+                confidence: 0.98,
+                document_id: None,
+                chunk_id: None,
+                metadata: None,
+            },
+        ];
+        *entity_extractor.relations.write().unwrap() = vec![Relation {
+            relation_type: "WORKS_AT".to_string(),
+            confidence: 0.9,
+            source_entity: "Alice".to_string(),
+            target_entity: "Acme Corp".to_string(),
+            context: None,
+            metadata: Some(serde_json::json!({
+                "source_entity": "Alice",
+                "target_entity": "Acme Corp",
+            })),
+        }];
+        entity_extractor
+    }
+
+    struct Fixture {
+        jobs: Arc<FakeJobStore>,
+        documents: Arc<FakeDocumentStore>,
+        chunks: Arc<FakeChunkStore>,
+        blobs: Arc<FakeBlobStore>,
+        graph: Arc<InMemoryGraphStore>,
+        entities: Arc<FakeEntityStore>,
+        extractor: Arc<FakeEntityExtractor>,
+    }
+
+    async fn fixture() -> Fixture {
+        let (jobs, documents, chunks, blobs) = parts();
+        documents.insert_doc(tenant(), document());
+        blobs
+            .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+            .await
+            .unwrap();
+        Fixture {
+            jobs,
+            documents,
+            chunks,
+            blobs,
+            graph: Arc::new(InMemoryGraphStore::new()),
+            entities: Arc::new(FakeEntityStore::default()),
+            extractor: entity_extractor(),
+        }
+    }
+
+    fn worker(f: &Fixture, graph: Arc<dyn GraphStore>) -> IngestWorker {
+        IngestWorker::new(
+            f.jobs.clone(),
+            f.documents.clone(),
+            f.chunks.clone(),
+            f.blobs.clone(),
+            extractor(),
+            Arc::new(FakeEmbedder::default()),
+            IngestSettings::default(),
+        )
+        .with_entity_store(Arc::clone(&f.entities) as Arc<dyn EntityStore>)
+        .with_entity_extractor(Arc::clone(&f.extractor) as Arc<dyn EntityExtractor>)
+        .with_graph_store(graph)
+    }
+
+    fn scope() -> DocumentScope {
+        make_fake_scope(tenant(), vec![DocumentId::new_unchecked(DOC)])
+    }
+
+    #[tokio::test]
+    async fn the_same_extraction_reaches_both_the_surreal_rows_and_the_graph() {
+        let f = fixture().await;
+        let graph: Arc<dyn GraphStore> = f.graph.clone();
+        f.jobs.push(job());
+
+        assert!(worker(&f, Arc::clone(&graph)).run_once().await.unwrap());
+
+        // SurrealDB, unchanged: the TS ids and the lowercase sanitised names.
+        let upserts = f.entities.upserted_entities.read().unwrap();
+        assert_eq!(upserts.len(), 2);
+        assert!(
+            upserts
+                .iter()
+                .any(|(_, sanitised, _, _, _, _)| sanitised == "acme_corp")
+        );
+        assert_eq!(f.entities.relations.read().unwrap().len(), 1);
+
+        // The graph, keyed the other way: one tenant-wide key per entity, with the
+        // chunks that mention it.
+        assert_eq!(
+            f.graph.entity_keys(&tenant()),
+            vec!["acme corp".to_string(), "alice".to_string()]
+        );
+        let relations = f.graph.relations(&tenant());
+        assert_eq!(relations.len(), 1, "got {relations:?}");
+        assert_eq!(relations[0].0, "alice");
+        assert_eq!(relations[0].2, "WORKS_AT");
+        assert_eq!(relations[0].3, DocumentId::new_unchecked(DOC));
+    }
+
+    #[tokio::test]
+    async fn an_entity_is_attributed_to_the_chunks_that_mention_it() {
+        let f = fixture().await;
+        let graph: Arc<dyn GraphStore> = f.graph.clone();
+        f.jobs.push(job());
+        assert!(worker(&f, Arc::clone(&graph)).run_once().await.unwrap());
+
+        let scoped = f.graph.load_tenant_graph(&scope()).await.unwrap();
+        let mentions: Vec<&EntityMentions> = scoped.mentions().iter().collect();
+        assert_eq!(mentions.len(), 2);
+        for entity in &mentions {
+            assert!(
+                !entity.chunk_ids.is_empty(),
+                "{} was extracted but never attributed to a chunk: it would be a node the walk could reach but never return",
+                entity.key,
+            );
+            assert!(
+                entity
+                    .chunk_ids
+                    .iter()
+                    .all(|id| id.0.starts_with(&format!("{DOC}_"))),
+                "{:?} belongs to another document",
+                entity.chunk_ids,
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_re_ingest_replaces_the_documents_graph_rather_than_adding_to_it() {
+        let f = fixture().await;
+        let graph: Arc<dyn GraphStore> = f.graph.clone();
+        f.jobs.push(job());
+        assert!(worker(&f, Arc::clone(&graph)).run_once().await.unwrap());
+        assert_eq!(f.graph.relations(&tenant()).len(), 1);
+
+        // The same document, re-ingested with an entity the first version did not
+        // have. Without the delete-first, the old relation would still be here and
+        // the graph would assert something about a version of the document that no
+        // longer exists.
+        *f.extractor.relations.write().unwrap() = Vec::new();
+        *f.extractor.entities.write().unwrap() = vec![Entity {
+            name: "Acme Corp".to_string(),
+            entity_type: "ORGANIZATION".to_string(),
+            confidence: 0.98,
+            document_id: None,
+            chunk_id: None,
+            metadata: None,
+        }];
+        f.jobs.push(job());
+        assert!(worker(&f, Arc::clone(&graph)).run_once().await.unwrap());
+
+        assert_eq!(
+            f.graph.entity_keys(&tenant()),
+            vec!["acme corp".to_string()],
+            "the re-ingest must replace, not accumulate"
+        );
+        assert!(
+            f.graph.relations(&tenant()).is_empty(),
+            "the old edge survived a re-ingest: {:?}",
+            f.graph.relations(&tenant())
+        );
+    }
+
+    /// A store that fails every call. The document must still become searchable.
+    struct BrokenGraph;
+
+    #[async_trait::async_trait]
+    impl GraphStore for BrokenGraph {
+        async fn upsert_entities(
+            &self,
+            _: &kb_ports::TenantId,
+            _: &DocumentId,
+            _: Vec<EntityUpsert>,
+        ) -> Result<(), PortError> {
+            Err(PortError::Unavailable("graph store is down".into()))
+        }
+        async fn relate(
+            &self,
+            _: &kb_ports::TenantId,
+            _: &DocumentId,
+            _: Vec<RelationUpsert>,
+        ) -> Result<(), PortError> {
+            Err(PortError::Unavailable("graph store is down".into()))
+        }
+        async fn delete_document(
+            &self,
+            _: &kb_ports::TenantId,
+            _: &DocumentId,
+        ) -> Result<(), PortError> {
+            Err(PortError::Unavailable("graph store is down".into()))
+        }
+        async fn load_tenant_graph(&self, _: &DocumentScope) -> Result<TenantGraph, PortError> {
+            Err(PortError::Unavailable("graph store is down".into()))
+        }
+        async fn graph_version(&self, _: &kb_ports::TenantId) -> Result<u64, PortError> {
+            Err(PortError::Unavailable("graph store is down".into()))
+        }
+        async fn match_entities(
+            &self,
+            _: &DocumentScope,
+            _: &[String],
+        ) -> Result<Vec<(String, f32)>, PortError> {
+            Err(PortError::Unavailable("graph store is down".into()))
+        }
+        async fn entity_mentions(
+            &self,
+            _: &DocumentScope,
+            _: &str,
+        ) -> Result<Vec<ChunkId>, PortError> {
+            Err(PortError::Unavailable("graph store is down".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_graph_store_failure_is_non_fatal_and_the_document_still_becomes_searchable() {
+        let f = fixture().await;
+        f.jobs.push(job());
+
+        let outcome = worker(&f, Arc::new(BrokenGraph)).run_job(job()).await;
+
+        assert!(
+            matches!(outcome, JobOutcome::Ready { .. }),
+            "a broken graph must not cost the document its index: {outcome:?}"
+        );
+        assert_eq!(document_status_of(&f.documents), "ready");
+        let finished = f.jobs.finished.read().unwrap();
+        assert_eq!(finished.len(), 1);
+        assert!(finished[0].success, "{:?}", finished[0]);
+
+        // Chunks went in, and the SurrealDB entities went in too: the failure is
+        // confined to the graph.
+        let stored = f.chunks.stored_chunks.read().unwrap();
+        assert!(
+            !stored
+                .get(&DocumentId::new_unchecked(DOC))
+                .is_none_or(Vec::is_empty),
+            "the chunks never landed: the graph failure took the index with it"
+        );
+        drop(stored);
+        assert_eq!(f.entities.upserted_entities.read().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn no_graph_store_configured_is_not_an_error_and_writes_nothing() {
+        let f = fixture().await;
+        f.jobs.push(job());
+        let worker = IngestWorker::new(
+            f.jobs.clone(),
+            f.documents.clone(),
+            f.chunks.clone(),
+            f.blobs.clone(),
+            extractor(),
+            Arc::new(FakeEmbedder::default()),
+            IngestSettings::default(),
+        )
+        .with_entity_store(Arc::clone(&f.entities) as Arc<dyn EntityStore>)
+        .with_entity_extractor(Arc::clone(&f.extractor) as Arc<dyn EntityExtractor>);
+
+        assert!(worker.run_once().await.unwrap());
+        assert!(f.graph.entity_keys(&tenant()).is_empty());
+        assert_eq!(f.entities.upserted_entities.read().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_relation_to_an_entity_that_was_not_extracted_is_dropped_not_stored() {
+        let f = fixture().await;
+        *f.extractor.entities.write().unwrap() = vec![Entity {
+            name: "Alice".to_string(),
+            entity_type: "PERSON".to_string(),
+            confidence: 0.95,
+            document_id: None,
+            chunk_id: None,
+            metadata: None,
+        }];
+        // The relation names an endpoint no entity upsert introduced. `relate`
+        // rejects a whole batch containing an unknown endpoint, so keeping it
+        // would cost the batch.
+        *f.extractor.relations.write().unwrap() = vec![Relation {
+            relation_type: "WORKS_AT".to_string(),
+            confidence: 0.9,
+            source_entity: "Alice".to_string(),
+            target_entity: "Ghost Ltd".to_string(),
+            context: None,
+            metadata: Some(serde_json::json!({
+                "source_entity": "Alice",
+                "target_entity": "Ghost Ltd",
+            })),
+        }];
+        let graph: Arc<dyn GraphStore> = f.graph.clone();
+        f.jobs.push(job());
+        assert!(worker(&f, Arc::clone(&graph)).run_once().await.unwrap());
+
+        assert_eq!(f.graph.relations(&tenant()).len(), 0);
+        assert_eq!(f.graph.entity_keys(&tenant()), vec!["alice".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_zero_confidence_relation_is_dropped_because_a_zero_weight_is_not_an_edge() {
+        let f = fixture().await;
+        f.extractor.relations.write().unwrap()[0].confidence = 0.0;
+        let graph: Arc<dyn GraphStore> = f.graph.clone();
+        f.jobs.push(job());
+        assert!(worker(&f, Arc::clone(&graph)).run_once().await.unwrap());
+        assert!(
+            f.graph.relations(&tenant()).is_empty(),
+            "a zero weight is an absent edge, not a stored one: {:?}",
+            f.graph.relations(&tenant())
+        );
+    }
+
+    #[tokio::test]
+    async fn the_entity_keys_are_normalised_the_same_way_the_extractor_normalises_them() {
+        let f = fixture().await;
+        *f.extractor.entities.write().unwrap() = vec![
+            Entity {
+                name: "Bank Indonesia".to_string(),
+                entity_type: "ORGANIZATION".to_string(),
+                confidence: 0.9,
+                document_id: None,
+                chunk_id: None,
+                metadata: None,
+            },
+            Entity {
+                name: "BANK  indonesia".to_string(),
+                entity_type: "ORGANIZATION".to_string(),
+                confidence: 0.9,
+                document_id: None,
+                chunk_id: None,
+                metadata: None,
+            },
+        ];
+        let graph: Arc<dyn GraphStore> = f.graph.clone();
+        f.jobs.push(job());
+        assert!(worker(&f, Arc::clone(&graph)).run_once().await.unwrap());
+
+        assert_eq!(
+            f.graph.entity_keys(&tenant()),
+            vec!["bank indonesia".to_string()],
+            "two surface forms of one name must be one node"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_document_cascades_into_the_graph() {
+        let f = fixture().await;
+        let graph: Arc<dyn GraphStore> = f.graph.clone();
+        f.jobs.push(job());
+        assert!(worker(&f, Arc::clone(&graph)).run_once().await.unwrap());
+        assert!(!f.graph.entity_keys(&tenant()).is_empty());
+
+        // What `DELETE /v1/documents/:id?hard=true` does to the graph: an entity
+        // left behind would keep its relations alive as paths through a document
+        // nobody can see any more.
+        graph
+            .delete_document(&tenant(), &DocumentId::new_unchecked(DOC))
+            .await
+            .unwrap();
+
+        assert!(f.graph.entity_keys(&tenant()).is_empty());
+        assert!(f.graph.relations(&tenant()).is_empty());
+        let scoped = f.graph.load_tenant_graph(&scope()).await.unwrap();
+        assert_eq!(scoped.entity_count(), 0);
+        assert_eq!(scoped.arc_count(), 0);
+    }
+}

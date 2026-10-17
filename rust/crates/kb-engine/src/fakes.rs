@@ -1005,12 +1005,48 @@ impl RetrievalIndex for FakeChunkStore {
         Ok(fuse_candidates(out, query.fusion, query.k))
     }
 
+    /// Serves ids out of [`Self::stored_chunks`] and **filters by scope**.
+    ///
+    /// The scope filter is the whole point. The graph arm ranks chunks by id and
+    /// then asks for them by id, so this method is the only thing standing between
+    /// a walk that over-reached and a document the caller cannot see. A fake that
+    /// returned everything would make the arm's scope tests pass vacuously.
     async fn fetch(
         &self,
-        _scope: &DocumentScope,
-        _ids: &[ChunkId],
+        scope: &DocumentScope,
+        ids: &[ChunkId],
     ) -> Result<Vec<Candidate>, PortError> {
-        Ok(Vec::new())
+        if ids.is_empty() || scope.document_ids().is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: std::collections::HashSet<&str> = ids.iter().map(|id| id.0.as_str()).collect();
+        let stored = self.stored_chunks.read().unwrap();
+        let mut out: Vec<Candidate> = Vec::new();
+        for document_id in scope.document_ids() {
+            let Some(chunks) = stored.get(document_id) else {
+                continue;
+            };
+            for chunk in chunks {
+                let unit_id = format!("{}_{}", document_id.0, chunk.chunk_index);
+                if !wanted.contains(unit_id.as_str()) {
+                    continue;
+                }
+                out.push(Candidate {
+                    unit_id: ChunkId(unit_id),
+                    document_id: document_id.clone(),
+                    tenant: scope.tenant().clone(),
+                    chunk_index: chunk.chunk_index,
+                    page: None,
+                    chunk_type: ChunkType::Text,
+                    content: chunk.content.clone(),
+                    contextual_prefix: chunk.contextual_prefix.clone(),
+                    metadata: chunk.metadata.clone(),
+                    scores: ArmScores::default(),
+                    ranks: ArmRanks::default(),
+                });
+            }
+        }
+        Ok(out)
     }
 
     async fn neighbours(
