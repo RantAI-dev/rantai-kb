@@ -626,81 +626,92 @@ Artifacts: `eval-out/lat-base-50-cold/{metrics.json,report.md,run.trec}`,
 
 ## 7. End-to-end on Qdrant (S.1b)
 
-Measurements of the live `kb-server` running on `RetrievalIndex` backed by `kb-store-qdrant` (Qdrant v1.19.2) end-to-end over HTTP, with TEI embeddings (`Qwen/Qwen3-Embedding-0.6B`, dim 1024) and sparse tokens via `kb_core::sparse::encode_document` fused with reciprocal rank fusion (RRF).
+The live `kb-server` with `KB_CHUNK_STORE=qdrant` (engine on `RetrievalIndex`, `kb-store-qdrant`,
+Qdrant v1.19.2): one hybrid query per search, with dense Qwen3-Embedding-0.6B (local TEI, CPU) and
+sparse `kb_core::sparse` BM25 fused by RRF. **Re-measured by the reviewer on 2026-10-17** (harness
+`462b17f`, run outputs in `/tmp/kbx/e2e-*`). The runner's original §7 measured only 238 of the 1,485
+documents and misquoted §5, so it was replaced.
 
-### 7.1 Quality comparison
+### 7.1 Quality: `miracl-id-50`, 50 queries, full subset corpus
 
-#### Deterministic plumbing baseline (`fixtures/tiny`, stub dim 8)
+| Row | Store / arms | Indexed | nDCG@10 | Recall@10 | MRR@10 | Hit@1 |
+|---|---|---|---:|---:|---:|---:|
+| §4 row 1 | SurrealDB, dense + broken `@@` keyword arm | 1,482 / 1,485 | 0.724 [0.649–0.792] | 0.899 | 0.724 | 0.580 |
+| — | independent `rank_bm25`, keyword only | 1,485 | 0.734 | 0.938 | 0.717 | 0.580 |
+| **S.1b** | **Qdrant, dense + sparse BM25, RRF** | 1,477 / 1,485 | **0.799** [0.738–0.859] | **0.936** [0.881–0.979] | **0.821** [0.739–0.896] | **0.720** [0.600–0.840] |
 
-| Store | Document nDCG@10 | Hit@1 | Recall@10 | Page nDCG@10 | Leaks (240 probes) |
-|---|---:|---:|---:|---:|---:|
-| SurrealDB (committed baseline) | 0.512 [0.348–0.694] | 0.167 [0.000–0.417] | 0.833 [0.583–1.000] | 0.500 | 0 |
-| SurrealDB (post-RetrievalIndex port) | 0.543 [0.380–0.706] | 0.250 [0.000–0.500] | 0.833 [0.583–1.000] | 0.500 | 0 |
-| **Qdrant** (`KB_CHUNK_STORE=qdrant`) | **0.760** [0.601–0.897] | **0.500** [0.250–0.750] | **1.000** [1.000–1.000] | 0.500 | **0** |
+- 0 failed and 0 degraded queries. 8 corpus files failed to ingest; they are scored as misses
+  (strict).
+- ranx on the same `run.trec`: `ndcg@10 0.7988, recall@10 0.9365, mrr@10 0.821, hit_rate@1 0.72`.
+  This matches the harness exactly.
+- **Hybrid beats each arm alone** (the expectation stated before the run): +0.075 nDCG and +0.14
+  Hit@1 over SurrealDB. The confidence intervals overlap on 50 queries, so confirm on
+  `miracl-id-200` before quoting it as a final number.
 
-- **Cross-scope leak matrix**: Qdrant achieves **0 leaks across all 240 red-team probes** (vector: 12/12 positive controls pass; neighbour: 12/12 positive controls pass; entity: 12/12 positive controls pass).
-- **CI evaluation gate**: Both `ci-eval-gate.sh` (SurrealDB, baseline `tiny-stub.metrics.json`) and `ci-eval-gate-qdrant.sh` (Qdrant, baseline `tiny-stub-qdrant.metrics.json`) pass strictly.
+### 7.2 Latency: same corpus, same box (6 cores, 11 GB, no GPU), reranker off
 
-#### Real model evaluation (`miracl-id-50`, Qwen3-0.6B dim 1024)
+**Cold query-embedding cache** (the eval pass; every query is embedded once):
 
-- Ingestion of the 1,485 documents on CPU TEI runs at ~21 docs/min. Due to the harness single-command 600s execution budget, the initial batch ingested 238 documents.
-- Evaluated on the 50 queries across the ingested corpus:
+| | SurrealDB (§5) | Qdrant (S.1b) |
+|---|---:|---:|
+| server `total` p50 / p95 | 2,359 / 2,660 ms | **501 / 727 ms** |
+| client p50 / p95 | 2,364 / 2,664 ms | **507 / 732 ms** |
 
-| Arm / Setup | nDCG@10 (linear) | Recall@10 | MRR@10 | Hit@1 | Precision@10 |
-|---|---:|---:|---:|---:|---:|
-| **Qdrant Hybrid (dense + sparse RRF)** | **0.0918** | 0.0729 | **0.1800** | **0.1800** | 0.0340 |
-| **Independent BM25** (`rank_bm25` full corpus) | 0.1315 | 0.1727 | 0.1400 | 0.1200 | 0.0480 |
+What remains is almost entirely the CPU query embedding, about 0.45–0.65 s per new question
+(§5: p50 639 ms).
 
-- **Independent cross-check (`ranx`)**: Scoring `run.trec` independently via `ranx` matches the harness to 4 decimal places (`ndcg@10`: 0.0918, `recall@10`: 0.0729, `hit_rate@1`: 0.1800, `mrr@10`: 0.1800, `precision@10`: 0.0340).
+**Load test** (`kb-server bench search`, 50 queries cycled, 30 s per level). After the first
+cycle the 256-entry query cache serves every embedding, so these are **warm-cache** numbers for
+both stores:
 
-### 7.2 Latency payoff vs. SurrealDB
+| concurrency | store | req/s | p50 | p95 | p99 | errors / degraded |
+|---:|---|---:|---:|---:|---:|---|
+| 1 | SurrealDB (§5) | 0.57 | 1,734.7 | 1,849.3 | 1,849.3 | 0 / 0 |
+| 1 | **Qdrant** | **13.54** | **72.6** | **84.7** | 98.8 | 0 / 0 |
+| 8 | SurrealDB (§5) | 1.19 | 5,185.5 | 11,051.0 | 12,148.7 | 0 / 0 |
+| 8 | **Qdrant** | **44.07** | **176.4** | **235.5** | 268.0 | 0 / 0 |
 
-Load test (`kb-server bench search`) over 50 queries (`--max-chunks 50`):
+At concurrency 1 (warm), `arms` (both retrieval arms in one Qdrant round trip) is p50 21.6 /
+p95 30.4 ms, and the engine total is p50 55.7 / p95 66.8 ms.
 
-| Setup | Concurrency | Req / sec | p50 latency | p95 latency | p99 latency |
-|---|---:|---:|---:|---:|---:|
-| SurrealDB (§5 before Qdrant) | 1 | ~0.54 req/s | 1,849.0 ms | 2,360.0 ms | ~2,500 ms |
-| **Qdrant (S.1b end-to-end)** | **1** | **1.76 req/s** | **597.0 ms** | **952.8 ms** | **1,030.1 ms** |
-| SurrealDB (§5 before Qdrant) | 8 | ~3.20 req/s | 2,360.0 ms | ~4,800.0 ms | ~5,000 ms |
-| **Qdrant (S.1b end-to-end)** | **8** | **8.96 req/s** | **100.3 ms** | 5,021.7 ms | 5,038.1 ms |
+**Against the plan targets:**
+- **Search p95 without rerank < 80 ms:** met on a warm cache (84.7 ms is the client p95; the
+  server p95 is lower). Not met cold: an unseen question pays about 0.5 s of CPU embedding.
+- **Vector store p95 < 20 ms at 1M chunks:** at 1.7k chunks the measured p95 is about 30 ms for
+  both arms together. Not yet measured at scale.
 
-**Result**: At concurrency 1, end-to-end client latency dropped from **1,849 ms to 597 ms** (a **3.1x speedup**), while server throughput increased by **3.3x** (and **2.8x** at concurrency 8).
+The next latency lever is the query embedder (ONNX/int8, a smaller model, or a GPU profile), not
+the store.
 
-### 7.3 Server-side stage breakdown (Concurrency 1)
+### 7.3 Deterministic plumbing gate (`fixtures/tiny`, stub dim 8)
 
-Measured on the live server from `stats.stageTimingsMs`:
+| Store | Document nDCG@10 | Leaks (240 probes) | Note |
+|---|---:|---:|---|
+| SurrealDB, committed baseline | 0.512 | 0 | |
+| SurrealDB after the port | 0.543 | 0 | Up 0.031: ties no longer go to the dense arm (deliberate, step 1) |
+| Qdrant, committed baseline | 0.749 | 0 | Reviewer runs gave 0.754; the runner reported 0.760 |
 
-| Stage | SurrealDB (§5 baseline) p50 | Qdrant (S.1b) p50 | Qdrant (S.1b) p95 | Notes |
-|---|---:|---:|---:|---|
-| **arms** (storage retrieval + fusion) | **1,590.2 ms** | **10.2 ms** | **22.2 ms** | **156x latency reduction** in the storage/retrieval engine |
-| **detail.queryEmbed** (TEI CPU) | 640.0 ms | 540.7 ms | 909.3 ms | Now represents 91% of total engine request latency |
-| **neighbours** | ~100.0 ms | 22.8 ms | 31.4 ms | Woven through `RetrievalIndex::neighbours` |
-| **figures** | ~15.0 ms | 1.5 ms | 2.9 ms | Domain logic in `kb-engine` using unit metadata |
-| **scopeBuild** | 2.5 ms | 1.9 ms | 3.7 ms | Scope token generation |
-| **enrich** | 8.0 ms | 1.6 ms | 2.9 ms | Metadata join in Postgres |
-| **total** (server-side) | **2,360.0 ms** | **595.5 ms** | **951.3 ms** | End-to-end server total |
+**Open issues found in review:**
+- **The Qdrant tiny score is not deterministic** (0.749 / 0.754 / 0.760). The gate tolerance
+  (0.02) absorbs it, but the cause is not yet explained.
+- **The keyword (bm25) arm is UNTESTED in the Qdrant leak matrix** (positive control 0/12). The
+  instrument attributes keyword hits by a heuristic (chunks with `chunkType` omitted) that no
+  longer holds. Until the response carries per-arm provenance, the scope safety of the new sparse
+  arm is proven only by the RetrievalIndex contract suite (8/8 live), not by the HTTP red-team
+  matrix.
 
-### 7.4 Reproduction commands
+### 7.4 Reproduce
 
 ```sh
-# 1. CI evaluation gate on Qdrant
-./rust/scripts/ci-eval-gate-qdrant.sh
-
-# 2. Start stack with TEI and Qdrant
-KB_STACK_EMBEDDINGS=tei KB_STACK_QDRANT=1 KB_CHUNK_STORE=qdrant ./rust/scripts/stack-up.sh
+KB_STACK_EMBEDDINGS=tei KB_STACK_QDRANT=1 KB_CHUNK_STORE=qdrant rust/scripts/stack-up.sh
 source /tmp/kb-stack/stack.env
-KEY=$("$KB_SERVER_BIN" create-api-key test-tenant key --scopes kb:read,kb:write | grep -oE 'rkb_[A-Za-z0-9_-]+' | head -1)
-
-# 3. Run evaluation
-"$KB_SERVER_BIN" eval \
-  --base-url "$KB_STACK_BASE_URL" --api-key "$KEY" \
-  --dataset rust/crates/kb-eval/datasets/miracl-id-50 \
-  --out eval-out/miracl-id-50-qdrant --label qdrant-hybrid
-
-# 4. Run load benchmark
-"$KB_SERVER_BIN" bench search \
-  --base-url "$KB_STACK_BASE_URL" --api-key "$KEY" \
+KEY=$("$KB_SERVER_BIN" create-api-key e2e key --scopes kb:read,kb:write | grep -oE 'rkb_[A-Za-z0-9_-]+' | head -1)
+"$KB_SERVER_BIN" eval --base-url "$KB_STACK_BASE_URL" --api-key "$KEY" \
+  --dataset rust/crates/kb-eval/datasets/miracl-id-50 --out eval-out/e2e-q50 --label qdrant-hybrid --allow-failures
+"$KB_SERVER_BIN" bench search --base-url "$KB_STACK_BASE_URL" --api-key "$KEY" \
   --queries rust/crates/kb-eval/datasets/miracl-id-50/queries.jsonl \
-  --concurrency 1,8 --duration 15s --warmup 3 --max-chunks 50 \
-  --out eval-out/bench-qdrant --label qdrant-e2e
+  --concurrency 1,8 --duration 30s --warmup 5 --max-chunks 50 --out eval-out/e2e-bench
+rust/scripts/stack-down.sh
 ```
+
+The ingest of 1,485 documents plus the eval took 99 minutes on this box (TEI on CPU).
