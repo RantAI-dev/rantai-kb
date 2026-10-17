@@ -164,14 +164,80 @@ def main() -> None:
     # parameters and half are the numbers that get reported, and the split has to
     # be reproducible from the file alone.
     half = len(queries) // 2
+    split_by_id = {qid: ("tune" if i < half else "test") for i, (qid, _) in enumerate(queries)}
     with open(args.out_dir / "split.tsv", "w", encoding="utf-8") as f:
         f.write("query-id\tsplit\n")
-        for i, (qid, _) in enumerate(queries):
-            f.write(f"{qid}\t{'tune' if i < half else 'test'}\n")
+        for qid, _ in queries:
+            f.write(f"{qid}\t{split_by_id[qid]}\n")
 
     print(f"  queries:          {len(queries)} (tune {half}, test {len(queries) - half})")
     print(f"  relevant qrels:   {len(qrels)}")
     print(f"  dataset written to {args.out_dir}")
+
+    by_id = {row["id"]: row for row in rows}
+    for name, size in (("tune", half), ("test", len(queries) - half)):
+        ids = [qid for qid, _ in queries if split_by_id[qid] == name]
+        pool = {
+            slug_by_title[title] for qid in ids for title in by_id[qid]["context"]["title"]
+        }
+        write_split_view(args.out_dir, name, size, pool)
+
+
+def write_split_view(out_dir: Path, name: str, size: int, pool: set[str]) -> None:
+    """A dataset directory holding one half of the split, with its own corpus.
+
+    Two things happen here and both are load-bearing.
+
+    **The split is a directory, not a flag.** `kb-eval eval` runs every query in
+    `queries.jsonl`, so "report the test half" means a directory that holds the
+    test half. Parameters are then chosen against `hotpot-200-tune/` and the
+    reported number comes out of `hotpot-200-test/`, and neither can quietly
+    include the other.
+
+    **The corpus is that half's own distractor pool.** HotpotQA's distractor
+    setting gives each question exactly ten paragraphs — two supporting, eight
+    distractors — and a corpus that pools every question's paragraphs turns each
+    one into a 2-in-1,990 task, which is not the benchmark anyone reports numbers
+    for. The view holds the union of the paragraphs its own questions ship with,
+    as symlinks: ~995 files rather than 1,990, and the canonical difficulty.
+    """
+    view = out_dir.parent / f"{out_dir.name}-{name}"
+    (view / "qrels").mkdir(parents=True, exist_ok=True)
+    corpus_dir = view / "corpus"
+    corpus_dir.mkdir(exist_ok=True)
+    for slug in sorted(pool):
+        link = corpus_dir / f"{slug}.md"
+        if not link.exists():
+            link.symlink_to(Path("..") / ".." / out_dir.name / "corpus" / f"{slug}.md")
+
+    keep = {
+        line.split("\t")[0]
+        for line in (out_dir / "split.tsv").read_text().splitlines()[1:]
+        if line.endswith(f"\t{name}")
+    }
+    if len(keep) != size:
+        raise SystemExit(f"split.tsv does not have {size} {name} questions; it has {len(keep)}")
+
+    def filter_jsonl(source: Path, id_field: int) -> None:
+        rows = [
+            line
+            for line in source.read_text(encoding="utf-8").splitlines()
+            if line.split('"')[id_field] in keep
+        ]
+        (view / source.name).write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    filter_jsonl(out_dir / "queries.jsonl", 3)
+    filter_jsonl(out_dir / "answers.jsonl", 3)
+
+    rows = (out_dir / "qrels" / "test.tsv").read_text(encoding="utf-8").splitlines()
+    kept = [rows[0]] + [r for r in rows[1:] if r.split("\t")[0] in keep]
+    (view / "qrels" / "test.tsv").write_text("\n".join(kept) + "\n", encoding="utf-8")
+    (view / "split.tsv").write_text(
+        "".join(f"{qid}\t{name}\n" for qid in sorted(keep)), encoding="utf-8"
+    )
+    print(
+        f"  {name} split:      {view} ({len(keep)} questions, {len(pool)} paragraphs)"
+    )
 
 
 if __name__ == "__main__":

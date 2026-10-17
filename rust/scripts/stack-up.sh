@@ -13,6 +13,17 @@
 #   KB_STACK_EMBEDDINGS=tei         # starts kb-smoke-tei-embed (Qwen3-Embedding-0.6B, dim 1024)
 #   KB_STACK_RERANK=tei             # starts kb-smoke-tei-rerank (bge-reranker-v2-m3)
 #   KB_STACK_QDRANT=1               # starts kb-smoke-qdrant (Qdrant v1.19.2; HTTP 6333, gRPC 6334)
+#   KB_STACK_GRAPH=1                # ingest writes the Postgres entity graph, with the free
+#                                   # heuristic extractor instead of the OpenRouter one
+#   KB_STACK_GRAPH_ARM=1            # the graph retrieval arm runs on /v1/search
+#   KB_STACK_RESTART_SERVER=1       # with the stack already up, re-apply the
+#                                   # options and restart kb-server only. The
+#                                   # containers and their data are untouched.
+#
+# `KB_STACK_GRAPH=1` also turns entity extraction back on, which the default
+# stack keeps off because it costs money: the default extractor is an OpenRouter
+# call. With the graph on, `KB_ENTITY_EXTRACTOR=heuristic` replaces it, so the
+# whole stack stays at zero spend.
 #
 # ONLY the `kb-smoke-*` containers belong to this stack. This machine runs
 # other people's containers (ClickHouse, Postgres); `stack-down.sh` never names
@@ -48,6 +59,11 @@ QDRANT_IMAGE="${KB_STACK_QDRANT_IMAGE:-qdrant/qdrant:v1.19.2}"
 
 KB_CHUNK_STORE="${KB_CHUNK_STORE:-surreal}"
 KB_STACK_EMBEDDINGS="${KB_STACK_EMBEDDINGS:-stub}"
+# Entity-graph ingest and the graph retrieval arm, both off by default so the
+# gate stacks keep behaving exactly as they did before the graph existed.
+KB_STACK_GRAPH="${KB_STACK_GRAPH:-0}"
+KB_STACK_GRAPH_ARM="${KB_STACK_GRAPH_ARM:-0}"
+KB_STACK_RESTART_SERVER="${KB_STACK_RESTART_SERVER:-0}"
 KB_STACK_RERANK="${KB_STACK_RERANK:-none}"
 if [ "$KB_CHUNK_STORE" = "qdrant" ]; then
   KB_STACK_QDRANT=1
@@ -66,11 +82,60 @@ SERVER_LOG="$STACK_DIR/server.log"
 KB_SERVER_BIN="$WORKSPACE_ROOT/target/debug/kb-server"
 STUB_BIN="$WORKSPACE_ROOT/target/debug/examples/stub_embeddings"
 
+# Apply the entity-graph options to stack.env.
+#
+# Idempotent, and idempotent for a reason: stack.env is *sourced*, not parsed, so
+# a later `export` wins and a stale one from a previous run would silently
+# survive. The earlier block is stripped rather than appended-to.
+write_graph_env() {
+  grep -v -E '^export KB_(GRAPH_|ENTITY_EXTRACTOR)' "$STACK_ENV" > "$STACK_ENV.new" || true
+  mv "$STACK_ENV.new" "$STACK_ENV"
+  if [ "$KB_STACK_GRAPH" = "1" ]; then
+    cat >> "$STACK_ENV" <<GRAPH_ENV
+export KB_ENTITY_EXTRACTION_ENABLED="true"
+export KB_GRAPH_STORE="pg"
+export KB_ENTITY_EXTRACTOR="heuristic"
+GRAPH_ENV
+  fi
+  if [ "$KB_STACK_GRAPH_ARM" = "1" ]; then
+    if [ "$KB_STACK_GRAPH" != "1" ]; then
+      echo "KB_STACK_GRAPH_ARM=1 needs KB_STACK_GRAPH=1: an arm with no graph behind it returns nothing" >&2
+      exit 1
+    fi
+    cat >> "$STACK_ENV" <<GRAPH_ENV
+export KB_GRAPH_ARM="true"
+GRAPH_ENV
+  fi
+}
+
 alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
 
 read_pid() { [ -f "$1" ] && cat "$1" || true; }
 
 if alive "$(read_pid "$SERVER_PID_FILE")"; then
+  if [ "$KB_STACK_RESTART_SERVER" = "1" ]; then
+    # The containers and the data they hold are left alone on purpose: the
+    # graph-arm comparison needs the *same* corpus ingested once, queried twice.
+    # Tearing the stack down would drop the Postgres volume and the ingest with
+    # it, which is an hour of CPU for nothing.
+    write_graph_env
+    tmux kill-session -t kb-smoke-server 2>/dev/null || true
+    kill "$(read_pid "$SERVER_PID_FILE")" 2>/dev/null || true
+    sleep 1
+    if command -v tmux >/dev/null 2>&1; then
+      tmux new-session -d -s kb-smoke-server "bash -c 'source \"$STACK_ENV\" && echo \$\$ > \"$SERVER_PID_FILE\" && exec \"$KB_SERVER_BIN\" serve > \"$SERVER_LOG\" 2>&1'"
+    else
+      nohup "$KB_SERVER_BIN" serve > "$SERVER_LOG" 2>&1 &
+      echo $! > "$SERVER_PID_FILE"
+    fi
+    for _ in {1..60}; do
+      curl -s "http://127.0.0.1:${SERVER_PORT}/health" | grep -q '"ok":true' && break
+      sleep 0.5
+    done
+    echo "kb-smoke kb-server restarted with the current KB_STACK_* options"
+    echo "source $STACK_ENV   # then rust/scripts/stack-down.sh to stop it"
+    exit 0
+  fi
   echo "kb-smoke stack already up: kb-server on http://127.0.0.1:${SERVER_PORT} (pid $(read_pid "$SERVER_PID_FILE"))"
   echo "source $STACK_ENV   # then rust/scripts/stack-down.sh to stop it"
   exit 0
@@ -260,6 +325,8 @@ export KB_STACK_RUSTFS_CONTAINER="$RUSTFS_CONTAINER"
 export KB_STACK_TEI_EMBED_CONTAINER="$TEI_EMBED_CONTAINER"
 export KB_STACK_TEI_RERANK_CONTAINER="$TEI_RERANK_CONTAINER"
 EOF
+
+write_graph_env
 
 # QDRANT_URL is exported only when Qdrant was actually started, so a script that
 # sources stack.env cannot be handed a URL that answers nothing.
