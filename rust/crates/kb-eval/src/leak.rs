@@ -46,15 +46,25 @@ pub enum Arm {
     Neighbour,
     Figure,
     Entity,
+    /// The entity graph's retrieval arm: chunks ranked by personalised PageRank
+    /// over the caller's scoped graph.
+    ///
+    /// It is probed through `POST /v1/search`, like every other chunk-level arm,
+    /// and it is the arm that needs the matrix most. It is the only one whose
+    /// candidates come from outside the index — a walk returns chunk ids, which
+    /// are then fetched — so it is the only one with a second place for a scope
+    /// bug to hide in.
+    Graph,
 }
 
 impl Arm {
     /// Every arm, in the order the report lists them.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Vector,
         Self::Bm25,
         Self::Neighbour,
         Self::Figure,
+        Self::Graph,
         Self::Entity,
     ];
 
@@ -65,6 +75,7 @@ impl Arm {
             Self::Bm25 => "bm25",
             Self::Neighbour => "neighbour",
             Self::Figure => "figure",
+            Self::Graph => "graph",
             Self::Entity => "entity",
         }
     }
@@ -79,6 +90,7 @@ impl Arm {
             Self::Bm25 => Some("sparse"),
             Self::Neighbour => Some("neighbour"),
             Self::Figure => Some("figure"),
+            Self::Graph => Some("graph"),
             Self::Entity => None,
         }
     }
@@ -95,6 +107,7 @@ impl Arm {
             "sparse" => Some(Self::Bm25),
             "neighbour" => Some(Self::Neighbour),
             "figure" => Some(Self::Figure),
+            "graph" => Some(Self::Graph),
             _ => None,
         }
     }
@@ -105,7 +118,7 @@ impl Arm {
         match self {
             Self::Entity => ProbeKind::DocumentIntelligence,
             Self::Figure => ProbeKind::SearchOrAsset,
-            Self::Vector | Self::Bm25 | Self::Neighbour => ProbeKind::Search,
+            Self::Vector | Self::Bm25 | Self::Neighbour | Self::Graph => ProbeKind::Search,
         }
     }
 }
@@ -425,6 +438,10 @@ pub fn canary_query(document: &SeedDocument, arm: Arm) -> String {
         Arm::Bm25 => document.canaries.bm25.clone(),
         Arm::Neighbour => document.canaries.neighbour.clone(),
         Arm::Figure => document.canaries.figure.clone(),
+        // The invented proper noun is the right query for the graph arm: it is
+        // the one canary that an extractor turns into an entity, so a graph arm
+        // that is on has something to seed from.
+        Arm::Graph => document.canaries.entity.clone(),
         Arm::Entity => document.id.clone(),
     }
 }
@@ -784,7 +801,10 @@ impl LeakMatrix {
         }
         // Only the arms that retrieve chunks have an attribution to count. The
         // entity arm answers from a document-addressed route, where no chunk and
-        // therefore no `retrieval` block is ever involved.
+        // therefore no `retrieval` block is ever involved. The graph arm does
+        // return chunks, so it counts like the rest — but see `arm_of_chunk`,
+        // which cannot guess it from a chunk's shape, so a graph-arm hit with no
+        // `retrieval` block is unattributable rather than silently a vector hit.
         if seen.arm != Arm::Entity {
             match seen.attribution {
                 Attribution::Provenance => self.attribution.provenance += 1,
@@ -939,6 +959,10 @@ pub fn coverage_note(arm: Arm) -> &'static str {
         Arm::Figure => {
             "sources and chunks carrying an assetKey or a `figure` arm, plus the asset route \
              when a seeded document has a figure"
+        }
+        Arm::Graph => {
+            "chunks whose retrieval.arms include `graph`, from POST /v1/search: the chunks a \
+             walk over the caller's scoped entity graph ranked, fetched by id"
         }
         Arm::Entity => "GET /v1/documents/:id/intelligence for a document id",
     }
@@ -1678,5 +1702,38 @@ mod tests {
         assert_eq!(Arm::Entity.probe_kind(), ProbeKind::DocumentIntelligence);
         assert_eq!(Arm::Vector.probe_kind(), ProbeKind::Search);
         assert_eq!(Arm::Figure.probe_kind(), ProbeKind::SearchOrAsset);
+        assert_eq!(
+            Arm::Graph.probe_kind(),
+            ProbeKind::Search,
+            "the graph arm returns chunks through the search route"
+        );
+    }
+
+    /// The matrix has to be able to *name* the graph arm, or a graph hit would
+    /// land in the wrong cell and the row that is supposed to watch it would
+    /// report zero probes while the arm ran.
+    #[test]
+    fn the_graph_arm_is_named_on_the_wire_and_read_back() {
+        assert_eq!(Arm::Graph.as_str(), "graph");
+        assert_eq!(Arm::Graph.wire_label(), Some("graph"));
+        assert_eq!(Arm::from_wire("graph"), Some(Arm::Graph));
+        assert!(
+            Arm::ALL.contains(&Arm::Graph),
+            "an arm outside ALL is never probed"
+        );
+    }
+
+    #[test]
+    fn the_graph_arm_is_probed_with_the_canary_an_extractor_would_turn_into_an_entity() {
+        let document = doc("doc-a", "A", "kb0", "cat0", 1);
+        assert_eq!(
+            canary_query(&document, Arm::Graph),
+            document.canaries.entity
+        );
+        assert_ne!(
+            canary_query(&document, Arm::Graph),
+            document.id,
+            "the graph arm is a search arm, not a document-addressed one"
+        );
     }
 }
