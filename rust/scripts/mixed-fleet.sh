@@ -116,8 +116,54 @@ export KB_MIGRATIONS_DIR="$REPO_ROOT/prisma/migrations"
 KB_SERVER_BIN="$WORKSPACE_ROOT/target/debug/kb-server"
 
 echo "=== 3. Schema & Keys ==="
-# In Rust, SURREAL_DB_URL can be HTTP
-SURREAL_DB_URL="http://127.0.0.1:${SURREAL_PORT}" "$KB_SERVER_BIN" migrate
+
+# Bun's migration path runs FIRST, on its own, against the fresh database. This is
+# the assertion that the Postgres schema stays additive and Bun-safe: Prisma's own
+# engine has to accept every migration file, including the entity-graph tables
+# (20261017120000_graph_tables), from a database that has never been migrated.
+# A migration that touched an existing table, or that Prisma could not apply, fails
+# here rather than in production with Bun half-upgraded.
+echo "--- Bun: prisma migrate deploy (from empty)"
+# The repo has a .env with its own DATABASE_URL, and this must not deploy anything
+# anywhere but the throwaway container above. System environment variables take
+# precedence over .env in the Prisma CLI, but "relies on that" is not a guard: if
+# the exported URL is not the container's, stop before Prisma connects.
+case "$DATABASE_URL" in
+  *"127.0.0.1:${PG_PORT}"*) ;;
+  *) echo "FAIL: DATABASE_URL is not the mixed-fleet container (port ${PG_PORT}). Refusing to run prisma."; exit 1 ;;
+esac
+PRISMA_OUT=$(cd "$REPO_ROOT" && bunx prisma migrate deploy 2>&1) || {
+  echo "FAIL: prisma migrate deploy failed:"; echo "$PRISMA_OUT"; exit 1;
+}
+echo "$PRISMA_OUT" | grep -E "Applying migration|migrations found" | sed 's/^/    /'
+echo "$PRISMA_OUT" | grep -q "20261017120000_graph_tables" || {
+  echo "FAIL: Prisma did not apply the entity-graph migration."; echo "$PRISMA_OUT"; exit 1;
+}
+
+# The four graph tables exist, and they are the only thing the new migration added.
+GRAPH_TABLES=$(docker exec "$PG_CONTAINER" psql -U kb -d rantai_kb -t -A -c \
+  "SELECT count(*) FROM information_schema.tables
+    WHERE table_schema='public'
+      AND table_name IN ('KbEntity','KbMention','KbRelation','KbGraphVersion')")
+[ "$GRAPH_TABLES" = "4" ] || { echo "FAIL: expected 4 graph tables, found $GRAPH_TABLES"; exit 1; }
+echo "    graph tables: 4/4 (KbEntity, KbMention, KbRelation, KbGraphVersion)"
+
+# Rust's migrator now runs against the database Prisma just migrated. It has to read
+# Prisma's rows in _prisma_migrations and skip every one of them: one ledger, two
+# runtimes. If it applies anything, the two engines disagree about what is pending,
+# which is exactly the state where a rolling deploy diverges.
+echo "--- Rust: kb-server migrate (against Prisma's ledger)"
+MIGRATE_OUT=$(SURREAL_DB_URL="http://127.0.0.1:${SURREAL_PORT}" "$KB_SERVER_BIN" migrate 2>&1) || {
+  echo "FAIL: kb-server migrate failed:"; echo "$MIGRATE_OUT"; exit 1;
+}
+echo "$MIGRATE_OUT" | tail -n 1 | sed 's/^/    /'
+if echo "$MIGRATE_OUT" | grep -q "^applied:"; then
+  echo "FAIL: the Rust migrator applied a migration Prisma had already applied:"
+  echo "$MIGRATE_OUT" | grep "^applied:" | sed 's/^/    /'
+  exit 1
+fi
+echo "    Rust applied 0 migrations: Prisma's ledger is authoritative and shared."
+
 SURREAL_DB_URL="http://127.0.0.1:${SURREAL_PORT}" "$KB_SERVER_BIN" apply-schema
 
 KEY_OUTPUT=$("$KB_SERVER_BIN" create-api-key "mixed-tenant" "mixed-key" --scopes kb:read,kb:write)

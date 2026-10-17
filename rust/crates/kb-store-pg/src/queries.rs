@@ -125,9 +125,16 @@ pub const CREATE_MIGRATIONS_TABLE: &str = r#"
         "id" TEXT NOT NULL,
         "checksum" TEXT NOT NULL,
         "migration_name" TEXT NOT NULL,
-        "started_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        "finished_at" TIMESTAMP(3),
-        "rolled_back_at" TIMESTAMP(3),
+        -- Timestamps are `TIMESTAMPTZ`, matching what Prisma's own migration
+        -- engine creates. It used to be `TIMESTAMP(3)` here, which is a different
+        -- type: the table then depended on which runtime migrated first, and any
+        -- code reading these columns had to work for both. Nothing reads them any
+        -- more (see `SELECT_APPLIED_MIGRATION`), but a Rust-first database should
+        -- still look exactly like a Prisma-first one. `IF NOT EXISTS` means an
+        -- existing table is never altered.
+        "started_at" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        "finished_at" TIMESTAMPTZ,
+        "rolled_back_at" TIMESTAMPTZ,
         "logs" TEXT,
         "applied_steps_count" INTEGER NOT NULL DEFAULT 0,
         CONSTRAINT "_prisma_migrations_pkey" PRIMARY KEY ("id")
@@ -135,10 +142,19 @@ pub const CREATE_MIGRATIONS_TABLE: &str = r#"
 "#;
 
 /// A migration counts as applied only once it finished and was not rolled back.
+/// One applied migration's checksum, or no row.
+///
+/// The `IS NOT NULL` / `IS NULL` predicates are in the WHERE clause rather than
+/// applied in Rust on purpose: Prisma creates these columns as `timestamptz` and
+/// this crate's own CREATE TABLE makes them `TIMESTAMP(3)`, so a timestamp decoded
+/// in Rust cannot succeed against both. Null-ness is not a type question, and
+/// asking the engine for it keeps the only decoded column a `TEXT` both agree on.
 pub const SELECT_APPLIED_MIGRATION: &str = r#"
-    SELECT "checksum", "finished_at", "rolled_back_at"
+    SELECT "checksum"
       FROM "_prisma_migrations"
      WHERE "migration_name" = $1
+       AND "finished_at" IS NOT NULL
+       AND "rolled_back_at" IS NULL
      ORDER BY "started_at" ASC
      LIMIT 1
 "#;

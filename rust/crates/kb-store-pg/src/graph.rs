@@ -110,9 +110,10 @@ impl PgGraphStore {
     /// * **The next lever is the driver, not the schema.** Decoding into positional
     ///   tuples (`query_as`) or `COPY` would take the ~470 ms `PgRow` cost down
     ///   without touching the tables. Nothing else in the profile is worth more.
-    ///     Skipping the `PgRow` layer is also why the columns are read by index
-    ///     below rather than by name: `try_get("src_id")` searches the row's column
-    ///     names on every call, which cost 240 ms of the load before it was fixed.
+    /// * **Columns are read by index, not by name.** `try_get("src_id")` searches
+    ///   the row's column names on every call, which cost 240 ms of the load before
+    ///   it was fixed. The select lists are therefore load-bearing, and
+    ///   `the_scoped_statements_keep_the_column_order_the_indices_assume` pins them.
     async fn build_graph(
         pool: &PgPool,
         tenant: &TenantId,
@@ -683,6 +684,7 @@ mod tests {
     /// cost 240 ms of a load. That makes the select lists load-bearing, so they are
     /// pinned here: reordering a column without updating the index would otherwise
     /// decode the wrong field, or fail at runtime on the `f64` weight.
+
     #[test]
     fn the_scoped_statements_keep_the_column_order_the_indices_assume() {
         for (statement, expected) in [
@@ -693,26 +695,28 @@ mod tests {
                 vec!["src_id", "dst_id", "weight"],
             ),
         ] {
-            let columns: Vec<&str> = statement
-                .split_once("SELECT")
-                .expect("a select")
-                .1
-                .split_once("FROM")
-                .expect("a from")
-                .0
-                .split(',')
-                .enumerate()
-                .map(|(index, part)| {
-                    part.rsplit(" AS ")
-                        .next()
-                        .expect("an alias")
-                        .trim()
-                        .trim_matches('"')
+            // Parsed rather than asserted with `contains`, because the order is the
+            // thing being pinned and `contains` cannot see it. A parse that returns
+            // nothing yields an empty list, which fails the comparison below just
+            // as loudly as a reordered list does.
+            let columns: Vec<String> = statement
+                .split("SELECT")
+                .nth(1)
+                .and_then(|rest| rest.split("FROM").next())
+                .map(|list| {
+                    list.split(',')
+                        .map(|part| {
+                            part.rsplit(" AS ")
+                                .next()
+                                .unwrap_or_default()
+                                .trim()
+                                .trim_matches('"')
+                                .to_string()
+                        })
+                        .collect()
                 })
-                .collect();
-            let named: Vec<String> = columns.iter().map(|c| (*c).to_string()).collect();
-            let named: Vec<&str> = named.iter().map(String::as_str).collect();
-            assert_eq!(named, expected, "column order changed in:\n{statement}");
+                .unwrap_or_default();
+            assert_eq!(columns, expected, "column order changed in:\n{statement}");
         }
     }
 }

@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use kb_ports::PortError;
 use sha2::{Digest, Sha256};
-use sqlx::{Acquire, PgPool, Row};
+use sqlx::{Acquire, PgPool};
 
 use crate::queries::{
     CREATE_MIGRATIONS_TABLE, FINISH_MIGRATION, INSERT_MIGRATION, SELECT_APPLIED_MIGRATION,
@@ -189,27 +189,29 @@ async fn applied_checksum(
     conn: &mut sqlx::PgConnection,
     name: &str,
 ) -> Result<Option<String>, PortError> {
-    let row = sqlx::query(SELECT_APPLIED_MIGRATION)
+    // A single `Option<String>`, with the applied/unapplied decision made by the
+    // WHERE clause rather than by decoding timestamps in Rust.
+    //
+    // That is the whole fix, and it took two attempts to find. Prisma creates
+    // `_prisma_migrations` with `timestamp with time zone`; this crate's own
+    // CREATE TABLE made them `TIMESTAMP(3)`, without. Decoding those columns in
+    // Rust therefore cannot work for both: `DateTime<Utc>` fails on a timestamp
+    // without a zone, `NaiveDateTime` fails on one with, and both were swallowed by
+    // `.ok()` into "not applied". Against a Prisma-migrated database that meant
+    // every run re-applied every migration and died on `relation "Document" already
+    // exists` — which is the mixed fleet's exact failure mode, invisible on a fresh
+    // container because there is nothing to skip yet.
+    //
+    // Whether a column is null is not a type question, so it is asked in SQL. What
+    // comes back is one `TEXT` column whose type both engines agree on.
+    let checksum: Option<String> = sqlx::query_scalar(SELECT_APPLIED_MIGRATION)
         .bind(name)
         .fetch_optional(&mut *conn)
         .await
         .map_err(|e| PortError::Unavailable(format!("pg read _prisma_migrations: {e}")))?;
-    let Some(row) = row else { return Ok(None) };
-    // Prisma's `_prisma_migrations` timestamps are `TIMESTAMP(3)` — without a time
-    // zone — which sqlx decodes as `NaiveDateTime`. Asking for `DateTime<Utc>`
-    // fails, and the `.ok()` used to swallow that into "not applied", so every run
-    // re-applied every migration and the second run of `kb-server migrate` against
-    // a migrated database died on `relation "Document" already exists`. The
-    // failure was invisible on a fresh container, which is why it survived.
-    let finished: Option<chrono::NaiveDateTime> = row.try_get("finished_at").ok();
-    let rolled_back: Option<chrono::NaiveDateTime> = row.try_get("rolled_back_at").ok();
-    if finished.is_none() || rolled_back.is_some() {
-        return Ok(None);
-    }
-    // A row we cannot read a checksum from is not a row we can trust to have been
-    // applied, so this one reports the error instead of guessing.
-    row.try_get("checksum")
-        .map_err(|e| PortError::Unavailable(format!("pg migration checksum for {name}: {e}")))
+    // `checksum` is NOT NULL in both this crate's DDL and Prisma's, so the
+    // `Option` here can only be "no such applied row".
+    Ok(checksum)
 }
 
 /// Apply one migration and record it, atomically.
