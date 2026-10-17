@@ -61,3 +61,20 @@ The shared `RetrievalIndex` contract suite (`kb-ports/contract`) runs against st
   KB_STACK_QDRANT=1 rust/scripts/stack-up.sh
   KB_QDRANT_CONTRACT=1 cargo test -p kb-store-qdrant --features integration --test retrieval_index_contract -- --nocapture
   ```
+
+### 5. Qdrant exact-vs-HNSW benchmark
+
+The number behind `kb_store_qdrant::index::EXACT_SEARCH_THRESHOLD` — the point
+count below which the dense arm scans exactly instead of walking the graph. A
+measurement rather than a pass/fail check, so it is `#[ignore]`d and needs a
+live Qdrant:
+
+```bash
+KB_STACK_QDRANT=1 rust/scripts/stack-up.sh
+cargo test -p kb-store-qdrant --features integration --test exact_vs_hnsw -- --ignored --nocapture
+rust/scripts/stack-down.sh
+```
+
+It builds 1.5k / 15k / 50k 1024-dim points, runs 50 queries each in both modes,
+and prints latency plus HNSW `recall@20` against the exact ranking. Results and
+the decision they justify: `docs/eval-baseline.md` §7.5.3.

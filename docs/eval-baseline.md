@@ -691,7 +691,7 @@ the store.
 | SurrealDB after the port | 0.543 | 0 | Up 0.031: ties no longer go to the dense arm (deliberate, step 1) |
 | Qdrant, committed baseline | 0.749 | 0 | Reviewer runs gave 0.754; the runner reported 0.760 |
 
-**Open issues found in review:**
+**Open issues found in review (S.1b, as written by the reviewer):**
 - **The Qdrant tiny score is not deterministic** (0.749 / 0.754 / 0.760). The gate tolerance
   (0.02) absorbs it, but the cause is not yet explained.
 - **The keyword (bm25) arm is UNTESTED in the Qdrant leak matrix** (positive control 0/12). The
@@ -699,6 +699,8 @@ the store.
   longer holds. Until the response carries per-arm provenance, the scope safety of the new sparse
   arm is proven only by the RetrievalIndex contract suite (8/8 live), not by the HTTP red-team
   matrix.
+
+Both are closed in §7.5 below; the text above is kept as the reviewer's finding.
 
 ### 7.4 Reproduce
 
@@ -715,3 +717,127 @@ rust/scripts/stack-down.sh
 ```
 
 The ingest of 1,485 documents plus the eval took 99 minutes on this box (TEI on CPU).
+
+### 7.5 Provenance, the leak matrix and determinism (S.1c)
+
+Two changes: the search answer now says which arms produced each chunk, and the
+Qdrant adapter stopped ranking on whatever order the store happened to answer
+in. Everything below was run on this box on 2026-10-17 after both.
+
+#### 7.5.1 Per-arm provenance in the response
+
+Additive and optional, on every chunk of `POST /v1/search`:
+
+```json
+"retrieval": { "arms": ["dense", "sparse"], "denseRank": 3, "sparseRank": 1, "fusedScore": 0.032522473 }
+```
+
+`arms` is store-agnostic (`dense`, `sparse`, `neighbour`, `figure`), the two
+ranks are 0-based positions inside each arm's own candidate list, and
+`fusedScore` is the RRF score the answer was ordered by. A phase that scores
+nothing — `neighbour`, `figure` — reports no score at all rather than `0`, and a
+chunk no arm could be attributed to carries no `retrieval` key at all. No field
+Bun emits changed; `search-parity.sh` deletes `.chunks[].retrieval` before its
+diff (a no-op for Bun), recorded in `docs/rust-cutover.md` §5.
+
+#### 7.5.2 The leak matrix, live, both stores
+
+`rust/scripts/ci-eval-gate-qdrant.sh` (Qdrant, fresh stack) and
+`rust/scripts/ci-eval-gate.sh` (SurrealDB, fresh stack), both **PASS**, 240
+probes each, **0 leaks**. The two matrices came out identical, which is the
+first time the sparse arm is compared over HTTP rather than through the
+RetrievalIndex contract suite:
+
+| arm | tenant | knowledge_base | category | document_ids | arm status |
+|---|---|---|---|---|---|
+| vector | 8 / 0 / 2-2 **PASS** | 16 / 0 / 4-4 **PASS** | 16 / 0 / 4-4 **PASS** | 8 / 0 / 2-2 **PASS** | **PASS** |
+| bm25 | 8 / 0 / 2-2 **PASS** | 16 / 0 / 4-4 **PASS** | 16 / 0 / 4-4 **PASS** | 8 / 0 / 0-2 **UNTESTED** | **PARTIAL** |
+| neighbour | 8 / 0 / 2-2 **PASS** | 16 / 0 / 4-4 **PASS** | 16 / 0 / 4-4 **PASS** | 8 / 0 / 2-2 **PASS** | **PASS** |
+| figure | 8 / 0 / 0-2 **UNTESTED** | 16 / 0 / 0-4 **UNTESTED** | 16 / 0 / 0-4 **UNTESTED** | 8 / 0 / 0-2 **UNTESTED** | **UNTESTED** |
+| entity | 8 / 0 / 2-2 **PASS** | 16 / 0 / 4-4 **PASS** | 16 / 0 / 4-4 **PASS** | 8 / 0 / 2-2 **PASS** | **PASS** |
+
+(Each cell is `probes / leaks / positive-control hits`. Arm attribution:
+192 answers named their own arms, 0 fell back to the chunk-shape heuristic.)
+
+- **bm25: 0/12 → 10/12 positive controls**, PASS over three of the four scope
+  kinds, PARTIAL overall. The two misses are one cause, and it is the route
+  rather than the arm: a `documentIds`-scoped search runs no keyword arm in
+  **either** runtime (Bun's `searchByDocumentIds`, `src/lib/rag/vector-store.ts:307`,
+  is a `vector::similarity::cosine` scan with no BM25 query, and the Rust route
+  mirrors it with `HybridQuery { sparse: None, fusion: None }`), so that cell's
+  positive control is unreachable by construction. Verified directly: the same
+  canary `vorlaqjx1488`, sent as a `documentIds` search, comes back with every
+  chunk marked `["dense"]` and `similarity` 0.40796918, while the same query
+  without the filter returns two chunks marked `["dense","sparse"]` — and a
+  direct sparse query to Qdrant with that filter returns the two points, so the
+  canary survives `kb_core::sparse` tokenisation and the probe does reach the
+  sparse arm everywhere else.
+- **figure stays UNTESTED**: this stack runs no layout extractor, so no seeded
+  document produces a figure. Unchanged from §2 and still a hole, not a pass.
+
+#### 7.5.3 Why the tiny Qdrant score moved, and the fix
+
+Measured, not inferred. Five fresh stacks (fresh Qdrant container each time),
+`fixtures/tiny`, stub dim 8, before the fix:
+
+| run | 1 | 2 | 3 | 4 | 5 |
+|---|---:|---:|---:|---:|---:|
+| document nDCG@10 | 0.754491 | **0.717958** | 0.748714 | 0.754491 | 0.748714 |
+| MRR@10 | 0.673611 | 0.625000 | 0.666667 | 0.673611 | 0.666667 |
+
+The spread is 0.036 nDCG@10 — larger than the 0.02 gate tolerance, so a single
+run could fail CI. All five `run.trec` files differ (five distinct hashes).
+
+Cause, in order:
+
+1. **The stub embedding collapses similarity.** 8 dimensions taken from the first
+   8 bytes of the text, so cosine similarity takes a handful of values. A direct
+   probe of the 19-chunk CI corpus returned five groups of *exactly equal*
+   scores: 4 at 0.62716, 4 at 0.425652, 4 at 0.405971, 4 at 0.325408, 4 at
+   0.258786.
+2. **Qdrant returns tied points in segment order**, and segments are built in
+   ingest order — six documents ingested concurrently do not land in the same
+   order twice.
+3. **The adapter used the response position as the arm rank**, RRF is a function
+   of ranks, and the engine cuts to `maxChunks`, so a tie reshuffle moved
+   documents across the cut and changed nDCG@10.
+4. Within one stack the order was stable across 8 identical queries, which rules
+   out search-time concurrency and points at index state, not at the query.
+
+Fix (commit `8896e68`):
+
+- Every arm's results are ranked by score and then by `unit_id` — a
+  deterministic function of tenant, document and chunk index — *before* ranks
+  are assigned. RRF is now a function of scores and ids, both stable across
+  ingests of the same corpus.
+- The dense arm scans exactly below **20,000 points** instead of walking HNSW.
+  Decided by measurement (`cargo test -p kb-store-qdrant --features integration
+  --test exact_vs_hnsw -- --ignored --nocapture`, Qdrant v1.19.2, 1024-dim
+  cosine, k=20, 50 queries):
+
+  | points | exact p50 | HNSW p50 | HNSW recall@20 vs exact |
+  |---:|---:|---:|---:|
+  | 1,500 | 2.38 ms | 2.34 ms | 1.000 |
+  | 15,000 | 10.13 ms | 8.49 ms | 0.960 |
+  | 50,000 | 34.39 ms | 30.86 ms | 0.883 |
+
+  At the size this service runs (1,477 chunks for miracl-id-50) an exact scan
+  costs 0.04 ms more and loses no recall, so there is nothing to buy by
+  approximating. Above ~15k the trade flips, and exact grows linearly
+  (~0.7 ms per 1k points) against a p95 < 20 ms target at 1M. The point count
+  is cached for a minute and invalidated by writes.
+
+After, five fresh stacks:
+
+| run | 1 | 2 | 3 | 4 | 5 |
+|---|---:|---:|---:|---:|---:|
+| document nDCG@10 | 0.754491 | 0.754491 | 0.754491 | 0.754491 | 0.754491 |
+| MRR@10 | 0.673611 | 0.673611 | 0.673611 | 0.673611 | 0.673611 |
+| Hit@1 | 0.5 | 0.5 | 0.5 | 0.5 | 0.5 |
+| Recall@10 | 1.0 | 1.0 | 1.0 | 1.0 | 1.0 |
+
+and all five `run.trec` files are byte-identical (one hash), as are the five
+`run.page.trec`. `tiny-stub-qdrant.metrics.json` was re-baselined on that run
+(nDCG@10 0.7544907651, MRR@10 0.6736111) and the gate now reports +0.000 on
+every metric. Latency did not move: p50 29–34 ms across the five runs, against
+the 28.6 ms the gate reported before the change.
