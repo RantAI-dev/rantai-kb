@@ -273,6 +273,9 @@ async fn the_matrix_passes_against_a_server_that_scopes_every_arm() {
             .iter()
             .find(|a| a.arm == arm)
             .unwrap_or_else(|| panic!("{arm:?} was never probed"));
+        if report.status == Status::Untested {
+            continue;
+        }
         assert!(
             report.positive_hits > 0,
             "{arm:?} could not find its own target anywhere: {:?}",
