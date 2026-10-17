@@ -16,8 +16,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::leak::{
-    Answer, Arm, Canaries, LeakExample, LeakMatrix, Observation, ProbeKind, Scope, SeedDocument,
-    SeedPlan, leaks_in, plan, positive_hit, tenant_allowed,
+    Answer, Arm, Attribution, Canaries, LeakExample, LeakMatrix, Observation, ProbeKind, Scope,
+    SeedDocument, SeedPlan, leaks_in, plan, positive_hit, tenant_allowed,
 };
 
 /// How many corpus rows a seed writes per knowledge base, before the two
@@ -490,10 +490,35 @@ pub fn search_body(scope: &Scope, query: &str, max_chunks: u32) -> Value {
     body
 }
 
-/// Which arm a returned chunk came from, as the wire reports it.
+/// The arms a returned chunk says it came from, as the server reports them.
 ///
-/// `ChunkDto` marks a BM25 hit by omitting `chunkType`, `page` and `assetKey`;
-/// a vector hit always carries `chunkType`; a figure hit carries an `assetKey`.
+/// Step S.1c: the server names them in `retrieval.arms` (`dense`, `sparse`,
+/// `neighbour`, `figure`). `Some(vec![…])` means the server answered, `Some` with
+/// nothing in it means the key was there but empty, and `None` means there was no
+/// `retrieval` block at all — an older server, or a route that answers with no
+/// chunks. Only the last case falls back to the shape heuristic, and the caller
+/// reports how often that happened.
+#[must_use]
+pub fn provenance_arms(chunk: &Value) -> Option<Vec<Arm>> {
+    let arms = chunk.get("retrieval")?.get("arms")?.as_array()?;
+    let mut out: Vec<Arm> = Vec::new();
+    for label in arms.iter().filter_map(Value::as_str) {
+        if let Some(arm) = Arm::from_wire(label) {
+            if !out.contains(&arm) {
+                out.push(arm);
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Which arm a returned chunk came from, when the server did not say.
+///
+/// The pre-S.1c heuristic: `ChunkDto` marked a keyword hit by omitting
+/// `chunkType`, `page` and `assetKey`, a vector hit always carried `chunkType`,
+/// and a figure hit carried an `assetKey`. Kept because a Bun-era server — or a
+/// mixed fleet mid-cutover — still answers this way, and a matrix that could not
+/// read it at all would be worse than one that reads it honestly and says so.
 #[must_use]
 pub fn arm_of_chunk(chunk: &Value) -> Arm {
     let asset = chunk
@@ -507,6 +532,52 @@ pub fn arm_of_chunk(chunk: &Value) -> Arm {
         return Arm::Vector;
     }
     Arm::Bm25
+}
+
+/// Which arms one chunk is attributed to, and how that was decided.
+///
+/// The `retrieval` block is authoritative whenever it is there, *including* when
+/// it names arms this harness does not know: the shape heuristic's premise is
+/// that no server said which arm produced a chunk, and a server that said so has
+/// outgrown that premise. Falling back anyway would file a future arm's hits
+/// under whichever shape they happen to have.
+#[must_use]
+pub fn arms_of_chunk(chunk: &Value) -> (Vec<Arm>, Attribution) {
+    match provenance_arms(chunk) {
+        Some(arms) => {
+            // A figure is identified by what it carries, not only by the phase
+            // that retrieved it: a figure chunk the dense arm ranked is still a
+            // figure, and the figure arm's question is whether a foreign
+            // document's figure came back at all.
+            let mut arms = arms;
+            if chunk
+                .get("assetKey")
+                .and_then(Value::as_str)
+                .is_some_and(|k| !k.is_empty())
+                && !arms.contains(&Arm::Figure)
+            {
+                arms.push(Arm::Figure);
+            }
+            (arms, Attribution::Provenance)
+        }
+        _ => (vec![arm_of_chunk(chunk)], Attribution::Heuristic),
+    }
+}
+
+/// Whether one chunk counts towards `arm`'s cell.
+#[must_use]
+pub fn chunk_belongs_to_arm(chunk: &Value, arm: Arm) -> bool {
+    let (arms, _) = arms_of_chunk(chunk);
+    arms.contains(&arm)
+}
+
+/// Whether an answer carried the `retrieval` block at all, i.e. whether its arms
+/// could be attributed without the chunk-shape heuristic.
+#[must_use]
+pub fn answer_has_provenance(body: &Value) -> bool {
+    body.get("chunks")
+        .and_then(Value::as_array)
+        .is_some_and(|chunks| chunks.iter().any(|c| c.get("retrieval").is_some()))
 }
 
 /// The documents named by a search answer that belong to `arm`.
@@ -523,9 +594,9 @@ pub fn documents_for_arm(body: &Value, arm: Arm) -> Vec<String> {
     if let Some(chunks) = body.get("chunks").and_then(Value::as_array) {
         for chunk in chunks {
             // The neighbour arm takes every chunk: a woven neighbour is
-            // indistinguishable from any other chunk on the wire, so this is
-            // the widest containment check the API allows.
-            if matches!(arm, Arm::Neighbour) || arm_of_chunk(chunk) == arm {
+            // indistinguishable from any other chunk for containment purposes, so
+            // this is the widest containment check the API allows.
+            if matches!(arm, Arm::Neighbour) || chunk_belongs_to_arm(chunk, arm) {
                 push(chunk.get("documentId").and_then(Value::as_str));
             }
         }
@@ -582,6 +653,7 @@ pub async fn probe(
             errored: outcome.answer.is_error(),
             refused: outcome.answer.refused,
             degrades: outcome.answer.degrades,
+            attribution: outcome.answer.attribution,
             example: outcome.example,
         });
     }
@@ -694,7 +766,13 @@ async fn search_probe(
         Ok(response) => {
             let status = response.status().as_u16();
             let parsed: Value = response.json().await.unwrap_or(Value::Null);
+            let attribution = if answer_has_provenance(&parsed) {
+                Attribution::Provenance
+            } else {
+                Attribution::Heuristic
+            };
             let answer = Answer {
+                attribution,
                 documents: documents_for_arm(&parsed, probe.arm),
                 degrades: parsed
                     .get("degrades")
@@ -996,6 +1074,102 @@ mod tests {
             search_body(&scope(ScopeKind::DocumentIds), "q", 7),
             json!({"query": "q", "maxChunks": 7, "documentIds": ["a"]})
         );
+    }
+
+    #[test]
+    fn the_arms_the_server_names_win_over_the_chunk_shape() {
+        // Step S.1c: `retrieval.arms` is what the server says, so it decides —
+        // including when it disagrees with the shape heuristic that used to.
+        let hybrid = json!({
+            "documentId": "d1",
+            // A chunk that carries chunkType looks like a vector hit by shape,
+            // but the server says the keyword arm produced it alone.
+            "chunkType": "text",
+            "retrieval": {"arms": ["sparse"], "sparseRank": 0, "fusedScore": 0.0164}
+        });
+        assert_eq!(provenance_arms(&hybrid), Some(vec![Arm::Bm25]));
+        assert_eq!(arms_of_chunk(&hybrid).1, Attribution::Provenance);
+        assert!(chunk_belongs_to_arm(&hybrid, Arm::Bm25));
+        assert!(!chunk_belongs_to_arm(&hybrid, Arm::Vector));
+    }
+
+    #[test]
+    fn a_chunk_both_arms_found_counts_for_both_cells() {
+        let both = json!({
+            "documentId": "d1",
+            "chunkType": "text",
+            "retrieval": {"arms": ["dense", "sparse"], "denseRank": 2, "sparseRank": 1}
+        });
+        assert!(chunk_belongs_to_arm(&both, Arm::Vector));
+        assert!(chunk_belongs_to_arm(&both, Arm::Bm25));
+    }
+
+    #[test]
+    fn a_woven_neighbour_is_named_rather_than_guessed() {
+        let neighbour = json!({
+            "documentId": "d1",
+            "chunkType": "text",
+            "retrieval": {"arms": ["neighbour"]}
+        });
+        assert!(chunk_belongs_to_arm(&neighbour, Arm::Neighbour));
+        assert!(!chunk_belongs_to_arm(&neighbour, Arm::Vector));
+    }
+
+    #[test]
+    fn a_figure_chunk_is_a_figure_whatever_retrieved_it() {
+        // A figure the dense arm ranked is a figure: the figure arm asks whether a
+        // foreign document's figure came back, not which phase fetched it.
+        let dense_figure = json!({
+            "documentId": "d1",
+            "chunkType": "figure",
+            "assetKey": "documents/A/d1/assets/1.png",
+            "retrieval": {"arms": ["dense"], "denseRank": 0}
+        });
+        assert!(chunk_belongs_to_arm(&dense_figure, Arm::Figure));
+        assert!(chunk_belongs_to_arm(&dense_figure, Arm::Vector));
+        let co_retrieved = json!({
+            "documentId": "d2",
+            "chunkType": "figure",
+            "assetKey": "documents/A/d2/assets/2.png",
+            "retrieval": {"arms": ["figure"]}
+        });
+        assert!(chunk_belongs_to_arm(&co_retrieved, Arm::Figure));
+    }
+
+    #[test]
+    fn an_answer_with_no_provenance_falls_back_to_the_shape_heuristic() {
+        // A Bun-era server, or a mixed fleet mid-cutover, answers without the
+        // block. The matrix must still work — and must count that it guessed.
+        let old = json!({"chunks": [
+            {"documentId": "vec", "chunkType": "text", "assetKey": null},
+            {"documentId": "bm", "contextualPrefix": null, "similarity": 0.0},
+        ]});
+        assert!(!answer_has_provenance(&old));
+        assert_eq!(arms_of_chunk(&old["chunks"][0]).1, Attribution::Heuristic);
+        assert_eq!(arms_of_chunk(&old["chunks"][1]).1, Attribution::Heuristic);
+        assert_eq!(
+            documents_for_arm(&old, Arm::Vector),
+            vec!["vec".to_string()]
+        );
+        assert_eq!(documents_for_arm(&old, Arm::Bm25), vec!["bm".to_string()]);
+    }
+
+    #[test]
+    fn an_empty_answer_has_no_provenance_and_falls_back_rather_than_failing() {
+        let empty = json!({"chunks": [], "sources": []});
+        assert!(!answer_has_provenance(&empty));
+        assert!(documents_for_arm(&empty, Arm::Vector).is_empty());
+        assert!(documents_for_arm(&empty, Arm::Bm25).is_empty());
+    }
+
+    #[test]
+    fn an_unknown_arm_label_is_not_silently_mapped_onto_a_known_one() {
+        // A newer server may add an arm. Pretending it is the dense arm would
+        // file a hit in the wrong cell, so it stays unmapped.
+        let future = json!({"documentId": "d1", "retrieval": {"arms": ["late_interaction"]}});
+        assert_eq!(provenance_arms(&future), Some(Vec::new()));
+        assert!(!chunk_belongs_to_arm(&future, Arm::Vector));
+        assert!(!chunk_belongs_to_arm(&future, Arm::Bm25));
     }
 
     #[test]

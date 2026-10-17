@@ -31,11 +31,13 @@ pub const MAX_OUTSIDE_PER_SCOPE: usize = 3;
 /// A retrieval surface, named after what it retrieves.
 ///
 /// The current server fuses the vector and BM25 arms on one endpoint, so an arm
-/// is separated *from the wire*: `ChunkDto` marks a BM25 hit by omitting
-/// `chunkType`, `page` and `assetKey`, and a figure hit by carrying an
-/// `assetKey`. The woven neighbours of a hit are not separately identifiable —
-/// a neighbour is just another chunk — so that arm asserts containment over
-/// every chunk the weave could have added, and says so in the report.
+/// is separated *from the wire* in two ways. Since step S.1c the answer carries a
+/// `retrieval.arms` list per chunk and that is what is read first
+/// ([`Arm::from_wire`]); only a server that does not report it falls back to the
+/// older chunk-shape heuristic (a `chunkType` means the vector arm, its absence
+/// means the keyword arm, an `assetKey` means a figure). The fallback is counted
+/// and reported, because an arm attributed by guesswork is weaker evidence than
+/// one the server named.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Arm {
@@ -67,6 +69,36 @@ impl Arm {
         }
     }
 
+    /// The `retrieval.arms` label the server uses for this arm, or `None` for an
+    /// arm that is not a chunk-level retrieval phase (the entity graph is served
+    /// by a document-addressed route, so no chunk is ever attributed to it).
+    #[must_use]
+    pub fn wire_label(self) -> Option<&'static str> {
+        match self {
+            Self::Vector => Some("dense"),
+            Self::Bm25 => Some("sparse"),
+            Self::Neighbour => Some("neighbour"),
+            Self::Figure => Some("figure"),
+            Self::Entity => None,
+        }
+    }
+
+    /// The arm a `retrieval.arms` label names.
+    ///
+    /// `None` for a label this harness does not know: a newer server may add an
+    /// arm, and silently mapping an unknown one onto a known one would put a
+    /// hit in the wrong cell.
+    #[must_use]
+    pub fn from_wire(label: &str) -> Option<Self> {
+        match label {
+            "dense" => Some(Self::Vector),
+            "sparse" => Some(Self::Bm25),
+            "neighbour" => Some(Self::Neighbour),
+            "figure" => Some(Self::Figure),
+            _ => None,
+        }
+    }
+
     /// How the arm is exercised, and what "one answer" means for it.
     #[must_use]
     pub fn probe_kind(self) -> ProbeKind {
@@ -76,6 +108,20 @@ impl Arm {
             Self::Vector | Self::Bm25 | Self::Neighbour => ProbeKind::Search,
         }
     }
+}
+
+/// How the arms of a returned chunk were decided.
+///
+/// Both are legitimate; they are not equally strong, so the report counts them
+/// rather than quietly using whichever was available.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Attribution {
+    /// The server named the arms (`retrieval.arms`).
+    #[default]
+    Provenance,
+    /// No `retrieval` block: the arms were read off the chunk's shape.
+    Heuristic,
 }
 
 /// How one probe reaches the server.
@@ -436,6 +482,9 @@ pub struct Answer {
     pub error: Option<String>,
     /// The server refused to serve a document this scope may not see.
     pub refused: bool,
+    /// How this answer's arms were decided. Recorded per answer so the report
+    /// can separate "the server named the arm" from "the harness guessed it".
+    pub attribution: Attribution,
 }
 
 impl Answer {
@@ -586,6 +635,9 @@ pub struct Observation {
     /// The server refused to serve a document outside the scope.
     pub refused: bool,
     pub degrades: Vec<String>,
+    /// How this answer's arms were decided: the server named them, or the harness
+    /// read them off the chunk shape.
+    pub attribution: Attribution,
     /// Kept only when something leaked: the request and response that did it.
     pub example: Option<LeakExample>,
 }
@@ -650,7 +702,22 @@ pub struct LeakMatrix {
     pub arms: Vec<ArmReport>,
     /// Every degradation label the server reported during the probes.
     pub degrades: BTreeSet<String>,
+    /// How many search answers named their own arms and how many had to be
+    /// attributed by the chunk-shape heuristic.
+    pub attribution: AttributionCounts,
     pub notes: Vec<String>,
+}
+
+/// Provenance attribution, counted. `heuristic > 0` means part of this matrix was
+/// decided by guesswork, and the report says so rather than calling it a pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct AttributionCounts {
+    /// Search answers whose chunks carried `retrieval.arms`.
+    pub provenance: usize,
+    /// Search answers with no `retrieval` block (an older server, or a route that
+    /// returns no chunks).
+    pub heuristic: usize,
 }
 
 impl Default for LeakMatrix {
@@ -662,6 +729,7 @@ impl Default for LeakMatrix {
             timestamp: String::new(),
             arms: Vec::new(),
             degrades: BTreeSet::new(),
+            attribution: AttributionCounts::default(),
             notes: Vec::new(),
         }
     }
@@ -697,6 +765,15 @@ impl LeakMatrix {
     pub fn record(&mut self, seen: Observation) {
         for label in &seen.degrades {
             self.degrades.insert(label.clone());
+        }
+        // Only the arms that retrieve chunks have an attribution to count. The
+        // entity arm answers from a document-addressed route, where no chunk and
+        // therefore no `retrieval` block is ever involved.
+        if seen.arm != Arm::Entity {
+            match seen.attribution {
+                Attribution::Provenance => self.attribution.provenance += 1,
+                Attribution::Heuristic => self.attribution.heuristic += 1,
+            }
         }
         let report = self.arm(seen.arm);
         report.probes += 1;
@@ -809,15 +886,16 @@ impl LeakMatrix {
 #[must_use]
 pub fn coverage_note(arm: Arm) -> &'static str {
     match arm {
-        Arm::Vector => "chunks carrying chunkType, from POST /v1/search",
-        Arm::Bm25 => "chunks with chunkType omitted, from POST /v1/search",
+        Arm::Vector => "chunks whose retrieval.arms include `dense`, from POST /v1/search",
+        Arm::Bm25 => "chunks whose retrieval.arms include `sparse`, from POST /v1/search",
         Arm::Neighbour => {
-            "every chunk of a search answer: a woven neighbour is indistinguishable from \
-             any other chunk over HTTP, so this cell is the widest containment check"
+            "every chunk of a search answer: a woven neighbour is one thing the answer adds \
+             that no arm ranked, so this cell stays the widest containment check rather than \
+             the narrow one it could be"
         }
         Arm::Figure => {
-            "sources and chunks carrying an assetKey, plus the asset route when a \
-                        seeded document has a figure"
+            "sources and chunks carrying an assetKey or a `figure` arm, plus the asset route \
+             when a seeded document has a figure"
         }
         Arm::Entity => "GET /v1/documents/:id/intelligence for a document id",
     }
@@ -861,6 +939,15 @@ pub fn render_markdown(matrix: &LeakMatrix, plan: &SeedPlan) -> String {
         matrix.total_leaks(),
         matrix.total_probes()
     ));
+    out.push_str(&format!(
+        "- arm attribution: {} answer(s) named their own arms (`retrieval.arms`), {} had none \
+         and were attributed by the chunk-shape heuristic",
+        matrix.attribution.provenance, matrix.attribution.heuristic
+    ));
+    if matrix.attribution.heuristic > 0 {
+        out.push_str(" (this server predates step S.1c, or the probes returned no chunks)");
+    }
+    out.push_str("\n\n");
 
     out.push_str("## Matrix (arm × scope type)\n\n");
     out.push_str("Each cell is `probes / leaks / positive-control hits` and its status.\n\n");
@@ -994,6 +1081,17 @@ pub fn render_markdown(matrix: &LeakMatrix, plan: &SeedPlan) -> String {
             ));
             unproven += 1;
         }
+    }
+    if matrix.attribution.heuristic > 0 {
+        out.push_str(&format!(
+            "- {} of {} probe answers carried no `retrieval.arms`, so their arms were read off \
+             the chunk shape (`chunkType` present or not). That heuristic is weaker evidence \
+             than the server naming the arm, and it is exactly what made the keyword arm \
+             UNTESTED before step S.1c.\n",
+            matrix.attribution.heuristic,
+            matrix.attribution.provenance + matrix.attribution.heuristic,
+        ));
+        unproven += 1;
     }
     if unproven == 0 && matrix.notes.is_empty() {
         out.push_str("- nothing beyond the cells above\n");
@@ -1194,6 +1292,7 @@ mod tests {
             errored: false,
             refused: false,
             degrades: Vec::new(),
+            attribution: Attribution::Provenance,
             example: Some(LeakExample {
                 arm: Arm::Vector,
                 scope: scope.label.clone(),
@@ -1228,6 +1327,7 @@ mod tests {
             errored: false,
             refused: false,
             degrades: Vec::new(),
+            attribution: Attribution::Provenance,
             example: None,
         });
         let matrix = matrix.finish();
@@ -1247,6 +1347,7 @@ mod tests {
             errored: false,
             refused: false,
             degrades: Vec::new(),
+            attribution: Attribution::Provenance,
             example: None,
         });
         matrix.record(Observation {
@@ -1258,6 +1359,7 @@ mod tests {
             errored: false,
             refused: false,
             degrades: vec!["vector arm down".to_string()],
+            attribution: Attribution::Provenance,
             example: None,
         });
         let matrix = matrix.finish();
@@ -1285,6 +1387,7 @@ mod tests {
             errored: false,
             refused: true,
             degrades: Vec::new(),
+            attribution: Attribution::Provenance,
             example: None,
         });
         matrix.record(Observation {
@@ -1296,6 +1399,7 @@ mod tests {
             errored: false,
             refused: false,
             degrades: Vec::new(),
+            attribution: Attribution::Provenance,
             example: None,
         });
         let matrix = matrix.finish();
@@ -1320,6 +1424,7 @@ mod tests {
             errored: true,
             refused: false,
             degrades: Vec::new(),
+            attribution: Attribution::Provenance,
             example: None,
         });
         let matrix = matrix.finish();
@@ -1342,6 +1447,7 @@ mod tests {
             errored: false,
             refused: false,
             degrades: Vec::new(),
+            attribution: Attribution::Provenance,
             example: None,
         });
         matrix.record(Observation {
@@ -1353,6 +1459,7 @@ mod tests {
             errored: false,
             refused: false,
             degrades: Vec::new(),
+            attribution: Attribution::Provenance,
             example: None,
         });
         matrix.record(Observation {
@@ -1364,6 +1471,7 @@ mod tests {
             errored: false,
             refused: false,
             degrades: Vec::new(),
+            attribution: Attribution::Provenance,
             example: None,
         });
         let matrix = matrix.finish();

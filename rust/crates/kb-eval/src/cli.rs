@@ -274,6 +274,10 @@ fn print_leak_matrix(matrix: &crate::leak::LeakMatrix) {
         matrix.total_probes(),
         matrix.total_leaks()
     );
+    println!(
+        "arm attribution: {} answer(s) named their own arms, {} read off the chunk shape",
+        matrix.attribution.provenance, matrix.attribution.heuristic
+    );
     let header: String = ScopeKind::ALL.iter().fold(
         String::from("| arm | probes | leaks | positive | status |"),
         |mut acc, k| {
