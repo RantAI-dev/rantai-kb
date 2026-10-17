@@ -169,6 +169,22 @@ impl ScopeKind {
             Self::DocumentIds => "document_ids",
         }
     }
+
+    /// Whether a search scoped this way runs the keyword arm at all.
+    ///
+    /// `documentIds` does not, in **either** runtime: Bun answers it from
+    /// `searchByDocumentIds` (`src/lib/rag/vector-store.ts:307`), a
+    /// `vector::similarity::cosine` scan with no BM25 query, and the Rust route
+    /// mirrors that branch (`rust/crates/kb-server/src/routes.rs`, "Branch 1")
+    /// with `HybridQuery { sparse: None, fusion: None }`. So a keyword probe
+    /// scoped by `documentIds` cannot reach the keyword arm at all, and its
+    /// positive control is measuring the route rather than the arm. That is a
+    /// documented API property, not a retrieval failure, and the report says
+    /// which it is instead of leaving "this probe cannot find its own target".
+    #[must_use]
+    pub fn reaches_keyword_arm(self) -> bool {
+        !matches!(self, Self::DocumentIds)
+    }
 }
 
 /// The unique strings planted in one seeded document.
@@ -826,9 +842,13 @@ impl LeakMatrix {
         for arm in &mut self.arms {
             for cell in &mut arm.cells {
                 cell.status = Status::decide(cell.leaks, cell.positive_probes, cell.positive_hits);
-                cell.reason = cell
-                    .status
-                    .untested_reason(cell.positive_probes, cell.positive_hits);
+                // The specific reason wins: "this scope runs no keyword arm" is a
+                // fact about the API, "the probe cannot find its own target" is a
+                // guess about retrieval.
+                cell.reason = unreachable_arm_reason(arm.arm, cell).or_else(|| {
+                    cell.status
+                        .untested_reason(cell.positive_probes, cell.positive_hits)
+                });
             }
             arm.status = Status::decide_arm(&arm.cells);
             arm.reason = match arm.status {
@@ -880,6 +900,29 @@ impl LeakMatrix {
     pub fn total_refusals(&self) -> usize {
         self.arms.iter().map(|a| a.refusals).sum()
     }
+}
+
+/// Why a keyword cell is UNTESTED for a reason that is the API's, not retrieval's.
+///
+/// A positive control that cannot be issued is a hole in the evidence, and the
+/// matrix says so — but it should say *which* hole. When the scope kind has no
+/// keyword arm at all (see [`ScopeKind::reaches_keyword_arm`]) the control is
+/// unreachable by construction, and "the probe cannot find its own target" would
+/// read as a retrieval defect where there is none.
+#[must_use]
+pub fn unreachable_arm_reason(arm: Arm, cell: &Cell) -> Option<String> {
+    if arm != Arm::Bm25
+        || cell.status != Status::Untested
+        || cell.positive_probes == 0
+        || cell.scope.reaches_keyword_arm()
+    {
+        return None;
+    }
+    Some(format!(
+        "a `{}`-scoped search runs no keyword arm in either runtime, so this cell's \
+         positive control is unreachable by construction: it measures the route, not the arm",
+        cell.scope.as_str()
+    ))
 }
 
 /// What "this arm" can actually be observed to do, in one sentence.
@@ -1054,19 +1097,30 @@ pub fn render_markdown(matrix: &LeakMatrix, plan: &SeedPlan) -> String {
             continue;
         };
         for cell in &report.cells {
-            if cell.positive_hits < cell.positive_probes {
-                out.push_str(&format!(
-                    "- `{}` × `{}`: the positive control found its own target only {}/{} times, \
-                     so the {} leak probe(s) in that cell do not prove containment — the probe \
-                     cannot always reach what it is looking for.\n",
-                    arm.as_str(),
-                    cell.scope.as_str(),
-                    cell.positive_hits,
-                    cell.positive_probes,
-                    cell.probes - cell.positive_probes
-                ));
-                unproven += 1;
+            if cell.positive_hits >= cell.positive_probes {
+                continue;
             }
+            // When the cell already knows *why* its control could not be issued,
+            // say that instead of the generic "the probe could not reach it".
+            let why = cell.reason.as_ref().map_or_else(
+                || {
+                    format!(
+                        "the positive control found its own target only {}/{} times, so the {} \
+                         leak probe(s) in that cell do not prove containment — the probe cannot \
+                         always reach what it is looking for",
+                        cell.positive_hits,
+                        cell.positive_probes,
+                        cell.probes - cell.positive_probes
+                    )
+                },
+                |reason| reason.clone(),
+            );
+            out.push_str(&format!(
+                "- `{}` × `{}`: {why}.\n",
+                arm.as_str(),
+                cell.scope.as_str()
+            ));
+            unproven += 1;
         }
     }
     for arm in Arm::ALL {
@@ -1495,6 +1549,77 @@ mod tests {
         assert_eq!(bm25.status, Status::Partial);
         assert_eq!(bm25.status.as_str(), "PARTIAL");
         assert!(matrix.any_untested());
+    }
+
+    #[test]
+    fn a_keyword_cell_with_no_keyword_arm_says_so_instead_of_guessing() {
+        // `documentIds` runs no keyword arm in either runtime, so its keyword
+        // positive control is unreachable by construction. Saying "the probe
+        // cannot find its own target" there would blame retrieval for a
+        // property of the route.
+        let mut matrix = LeakMatrix::new("http://x");
+        for positive in [true, false] {
+            matrix.record(Observation {
+                arm: Arm::Bm25,
+                scope: ScopeKind::DocumentIds,
+                positive,
+                hit: false,
+                leaked: Vec::new(),
+                errored: false,
+                refused: false,
+                degrades: Vec::new(),
+                attribution: Attribution::Provenance,
+                example: None,
+            });
+        }
+        // A tenant-scope keyword cell that does pass, so the arm is PARTIAL the
+        // way the live matrix is, not UNTESTED.
+        matrix.record(Observation {
+            arm: Arm::Bm25,
+            scope: ScopeKind::Tenant,
+            positive: true,
+            hit: true,
+            leaked: Vec::new(),
+            errored: false,
+            refused: false,
+            degrades: Vec::new(),
+            attribution: Attribution::Provenance,
+            example: None,
+        });
+        let matrix = matrix.finish();
+        let bm25 = matrix.arms.iter().find(|a| a.arm == Arm::Bm25).unwrap();
+        let cell = bm25
+            .cells
+            .iter()
+            .find(|c| c.scope == ScopeKind::DocumentIds)
+            .unwrap();
+        assert_eq!(cell.status, Status::Untested);
+        let reason = cell.reason.as_deref().expect("a reason");
+        assert!(reason.contains("runs no keyword arm"), "{reason}");
+        assert!(reason.contains("document_ids"), "{reason}");
+        assert_eq!(bm25.status, Status::Partial);
+        let md = render_markdown(&matrix, &plan(corpus()));
+        assert!(md.contains("runs no keyword arm"), "{md}");
+    }
+
+    #[test]
+    fn a_reachable_scope_still_gets_the_generic_unreached_reason() {
+        let mut matrix = LeakMatrix::new("http://x");
+        matrix.record(Observation {
+            arm: Arm::Bm25,
+            scope: ScopeKind::Tenant,
+            positive: true,
+            hit: false,
+            leaked: Vec::new(),
+            errored: false,
+            refused: false,
+            degrades: Vec::new(),
+            attribution: Attribution::Provenance,
+            example: None,
+        });
+        let matrix = matrix.finish();
+        let reason = matrix.arms[0].cells[0].reason.as_deref().expect("a reason");
+        assert!(reason.contains("proves nothing"), "{reason}");
     }
 
     #[test]

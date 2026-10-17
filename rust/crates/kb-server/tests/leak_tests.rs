@@ -319,7 +319,11 @@ async fn the_matrix_passes_against_a_server_that_scopes_every_arm() {
         assert!(
             cell.reason
                 .as_deref()
-                .is_some_and(|r| r.contains("positive control missed")),
+                .is_some_and(|r| r.contains(if arm == Arm::Bm25 {
+                    "runs no keyword arm"
+                } else {
+                    "positive control missed"
+                })),
             "{arm:?}: {:?}",
             cell.reason
         );
