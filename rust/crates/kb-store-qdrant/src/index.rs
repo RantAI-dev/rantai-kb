@@ -461,7 +461,7 @@ impl RetrievalIndex for QdrantIndex {
                         .limit(per_arm_k),
                 )
                 .filter(filter)
-                .limit(k)
+                .limit(per_arm_k)
                 .with_payload(true);
 
             let batch = QueryBatchPointsBuilder::new(
