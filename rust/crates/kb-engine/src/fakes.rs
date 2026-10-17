@@ -1224,6 +1224,10 @@ impl Embedder for FakeEmbedder {
 #[derive(Clone, Default)]
 pub struct FakeReranker {
     pub fail: Arc<AtomicBool>,
+    /// Return only the last candidate, as a reranker with a score threshold would.
+    pub only_last: Arc<AtomicBool>,
+    /// Every candidate handed to the reranker, in the order it received them.
+    pub seen: Arc<RwLock<Vec<RerankCandidate>>>,
 }
 
 #[async_trait]
@@ -1237,6 +1241,15 @@ impl Reranker for FakeReranker {
         if self.fail.load(Ordering::Relaxed) {
             return Err(PortError::Unavailable("forced rerank failure".to_string()));
         }
+        self.seen
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(candidates.iter().cloned());
+        let candidates = if self.only_last.load(Ordering::Relaxed) {
+            candidates.into_iter().last().into_iter().collect()
+        } else {
+            candidates
+        };
         let mut results = Vec::new();
         for (i, c) in candidates.into_iter().take(top_k as usize).enumerate() {
             results.push(RerankResult {

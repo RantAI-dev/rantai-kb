@@ -1147,4 +1147,120 @@ mod pipeline_tests {
         assert!(outcome.timings.total_ms > 0.0);
         assert!(outcome.timings.arms_ms > 0.0);
     }
+
+    fn five_hits(chunk_store: &FakeChunkStore) {
+        for i in 1..=5u32 {
+            chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+                &format!("c{i}"),
+                "d1",
+                "Title 1",
+                &"x".repeat(1_000),
+                i,
+                1.0 - i as f32 * 0.1,
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn by_default_the_reranker_sees_every_candidate_in_full() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        five_hits(&chunk_store);
+        let opts = RetrievalOptions {
+            max_chunks: 3,
+            rerank_enabled: true,
+            ..RetrievalOptions::default()
+        };
+        execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker.clone() as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        let seen = reranker.seen.read().unwrap();
+        assert_eq!(seen.len(), 5, "no candidate limit unless one is configured");
+        assert!(
+            seen.iter().all(|c| c.text.len() == 1_000),
+            "no character budget unless one is configured"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_configured_budget_limits_and_truncates_candidates() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        five_hits(&chunk_store);
+        let opts = RetrievalOptions {
+            max_chunks: 3,
+            rerank_enabled: true,
+            rerank_candidate_limit: 2,
+            rerank_char_budget: 200,
+            ..RetrievalOptions::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker.clone() as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        let seen = reranker.seen.read().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen.iter().all(|c| c.text.len() <= 201));
+        // The candidates beyond the limit still come back, after the reranked ones.
+        assert_eq!(outcome.chunks.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn hits_the_reranker_drops_keep_their_fused_order() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        five_hits(&chunk_store);
+        reranker.only_last.store(true, Ordering::Relaxed);
+        let opts = RetrievalOptions {
+            max_chunks: 4,
+            rerank_enabled: true,
+            ..RetrievalOptions::default()
+        };
+
+        // Run it repeatedly: HashMap iteration order differs between maps, so an
+        // order that came from a HashMap would not survive many runs unchanged.
+        for _ in 0..20 {
+            reranker.seen.write().unwrap().clear();
+            let outcome = execute_pipeline(
+                &(doc_store.clone() as Arc<_>),
+                &(chunk_store.clone() as Arc<_>),
+                &(embedder.clone() as Arc<_>),
+                &(reranker.clone() as Arc<_>),
+                &noop_expander(),
+                &scope,
+                "query",
+                &opts,
+                &SystemClock,
+            )
+            .await
+            .unwrap();
+            let ids: Vec<&str> = outcome
+                .chunks
+                .iter()
+                .map(|c| c.chunk.id.0.as_str())
+                .collect();
+            assert_eq!(ids, ["c5", "c1", "c2", "c3"]);
+        }
+    }
 }

@@ -70,9 +70,9 @@ pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
 pub struct EngineSettings {
     /// Candidates fetched per arm before fusion (`KB_RERANK_INITIAL_K`).
     pub candidate_pool_size: u32,
-    /// Maximum candidates passed to the reranker (`KB_RERANK_CANDIDATE_LIMIT`).
+    /// Maximum candidates passed to the reranker (`KB_RERANK_CANDIDATE_LIMIT`); 0 = all.
     pub rerank_candidate_limit: u32,
-    /// Character budget per candidate (`KB_RERANK_CHAR_BUDGET`).
+    /// Character budget per candidate (`KB_RERANK_CHAR_BUDGET`); 0 = full text.
     pub rerank_char_budget: usize,
     /// Per-request reranker timeout in ms (`KB_RERANK_TIMEOUT_MS`).
     pub rerank_timeout_ms: u64,
@@ -101,9 +101,9 @@ impl Default for EngineSettings {
     fn default() -> Self {
         Self {
             candidate_pool_size: 20,
-            rerank_candidate_limit: 10,
-            rerank_char_budget: 350,
-            rerank_timeout_ms: 3000,
+            rerank_candidate_limit: 0,
+            rerank_char_budget: 0,
+            rerank_timeout_ms: 20_000,
             rerank_final_k: 5,
             max_chunks: 8,
             min_similarity: 0.30,

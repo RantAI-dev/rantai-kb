@@ -78,9 +78,9 @@ impl Default for RetrievalOptions {
             max_chunks: 8,
             min_similarity: 0.30,
             candidate_pool_size: 20,
-            rerank_candidate_limit: 10,
-            rerank_char_budget: 350,
-            rerank_timeout_ms: 3000,
+            rerank_candidate_limit: 0,
+            rerank_char_budget: 0,
+            rerank_timeout_ms: 20_000,
             rerank_final_k: 5,
             neighbour_window: 0,
             figure_limit: 0,
@@ -770,7 +770,11 @@ pub async fn execute_pipeline(
     let rerank_future = async {
         if opts.rerank_enabled && hits.len() > max_chunks {
             let final_k = opts.rerank_final_k.clamp(1, 100);
-            let candidate_limit = (opts.rerank_candidate_limit as usize).clamp(1, hits.len());
+            // 0 means no limit: every candidate goes to the reranker, as before L.4.
+            let candidate_limit = match opts.rerank_candidate_limit {
+                0 => hits.len(),
+                n => (n as usize).clamp(1, hits.len()),
+            };
             let (to_rerank, tail) = if hits.len() > candidate_limit {
                 let tail = hits.split_off(candidate_limit);
                 (hits, tail)
@@ -810,6 +814,10 @@ pub async fn execute_pipeline(
                 .await
             {
                 Ok(Ok(ordered)) => {
+                    // Remember the fused order so hits the reranker did not return are
+                    // appended deterministically, not in HashMap iteration order.
+                    let fused_order: Vec<String> =
+                        to_rerank.iter().map(|h| h.chunk.id.0.clone()).collect();
                     let mut hit_map: HashMap<String, Vec<SearchHit>> = HashMap::new();
                     for h in to_rerank {
                         hit_map.entry(h.chunk.id.0.clone()).or_default().push(h);
@@ -824,10 +832,12 @@ pub async fn execute_pipeline(
                             }
                         }
                     }
-                    for (_, remaining_hits) in hit_map {
-                        for mut hit in remaining_hits {
-                            hit.rank = reordered.len() as u32;
-                            reordered.push(hit);
+                    for id in fused_order {
+                        if let Some(remaining_hits) = hit_map.get_mut(&id) {
+                            for mut hit in remaining_hits.drain(..) {
+                                hit.rank = reordered.len() as u32;
+                                reordered.push(hit);
+                            }
                         }
                     }
                     for mut hit in tail {

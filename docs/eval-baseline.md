@@ -1182,9 +1182,20 @@ and `baseline-rerank-on`) broke down latency across server stages:
    Consolidated `embed_query_detailed` cache checks into a single mutex access pattern.
 4. **Reranker Candidate Limiting & Character Budgeting (`kb-engine`, `kb-server`)**:
    Introduced configuration knobs:
-   - `KB_RERANK_CANDIDATE_LIMIT` (default 10, tuned to 5 for CPU)
-   - `KB_RERANK_CHAR_BUDGET` (default 350, tuned to 200 chars with valid UTF-8 boundary slicing)
-   - `KB_RERANK_TIMEOUT_MS` (per-request rerank timeout with graceful fallback to fused order)
+   - `KB_RERANK_CANDIDATE_LIMIT` (default 0 = every candidate; 5 on this CPU box)
+   - `KB_RERANK_CHAR_BUDGET` (default 0 = full text; 200 chars on this CPU box, cut at a UTF-8 boundary)
+   - `KB_RERANK_TIMEOUT_MS` (default 20000, the reranker client's own ceiling; a timeout is a
+     visible `rerank_unavailable` degrade with the fused order kept)
+
+   *Reviewer note (2026-10-18):* the runner shipped 10 / 350 / 3000 as defaults, which would
+   have cut every production rerank (GPU or hosted) to 10 candidates of 350 chars. The
+   defaults were put back to the pre-L.4 behaviour; the budget is an opt-in for CPU-only
+   boxes. The same review made hits the reranker does not return keep their fused order
+   (they had been appended in `HashMap` order, so the answer could differ run to run).
+   Note also what §8 shows about the budgeted reranker on CPU: against rerank OFF it moves
+   nDCG@10 by −0.013 (CI −0.063…+0.036) for +2.2 s p95. It buys nothing measurable here, so
+   on this box the right setting is `KB_RERANK_ENABLED=false`. That comparison was tuned and
+   scored on the same 50 queries, so it is not a held-out result.
 
 ---
 
