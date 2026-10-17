@@ -8,6 +8,9 @@
 
 mod blob;
 mod error;
+pub mod graph;
+#[cfg(feature = "contract")]
+pub mod graph_contract;
 mod ids;
 mod retrieval;
 mod scope;
@@ -18,6 +21,7 @@ pub use blob::{BlobStore, asset_path, document_path, sanitize_filename};
 #[cfg(feature = "contract")]
 pub mod contract;
 pub use error::{EngineError, PortError, RetrievalDegrade};
+pub use graph::{EntityMentions, EntityUpsert, GraphStore, RelationUpsert, TenantGraph};
 pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 pub use retrieval::{
     ArmRanks, ArmScores, Candidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit,

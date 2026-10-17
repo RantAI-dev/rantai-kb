@@ -38,6 +38,18 @@ pub mod in_memory_index;
 #[cfg(any(test, feature = "test-utils"))]
 pub use in_memory_index::InMemoryIndex;
 
+/// The reference `GraphStore`. Same shape as [`InMemoryIndex`]: under
+/// `test-utils` so an adapter's contract test can use it as a control, and
+/// available as the implementation the engine will use once the Postgres graph
+/// tables are switched on.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod in_memory_graph_store;
+
+#[cfg(any(test, feature = "test-utils"))]
+pub use in_memory_graph_store::InMemoryGraphStore;
+
+#[cfg(all(test, feature = "test-utils"))]
+mod in_memory_graph_store_tests;
 #[cfg(all(test, feature = "test-utils"))]
 mod in_memory_index_tests;
 #[cfg(test)]

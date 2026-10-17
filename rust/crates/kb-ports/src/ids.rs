@@ -9,7 +9,7 @@ use std::fmt;
 
 /// Tenant scope. Every row in Postgres is keyed by it; the chunk store filters
 /// by it via [`crate::DocumentScope`].
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TenantId(pub String);
 
@@ -34,7 +34,7 @@ impl fmt::Display for TenantId {
 
 /// Document id. Postgres `Document.id`, also used as the `document_id` filter
 /// on the SurrealDB chunk store.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DocumentId(pub String);
 
@@ -59,7 +59,7 @@ impl fmt::Display for DocumentId {
 
 /// Chunk id. The SurrealDB `document_chunk.id`, written by ingest as
 /// `{documentId}_{chunkIndex}`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ChunkId(pub String);
 
@@ -83,7 +83,7 @@ impl fmt::Display for ChunkId {
 }
 
 /// Knowledge base id. Postgres `KnowledgeBase.id`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct KnowledgeBaseId(pub String);
 
