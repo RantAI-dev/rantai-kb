@@ -841,3 +841,177 @@ and all five `run.trec` files are byte-identical (one hash), as are the five
 (nDCG@10 0.7544907651, MRR@10 0.6736111) and the gate now reports +0.000 on
 every metric. Latency did not move either: document latency p50 was 28.0–36.4 ms
 across the five runs before the change and 28.8–33.7 ms across the five after.
+
+## 6. GraphStore (L.3a)
+
+The entity graph moves out of SurrealDB into Postgres tables with traversal in Rust
+(`docs/architecture-target.md` §11, step L.3). This section records the three things
+that decide whether that is viable: whether the walk fits the latency budget, whether
+a real Postgres honours the port's contract — above all the scope rule — and what one
+scoped load costs.
+
+Machine as §5: 6 cores, 11 GB RAM, no GPU, Linux. Postgres 16 in `kb-smoke-pg`.
+
+### 6.1 PPR + 2-hop expansion at 1M edges, against the §11 targets
+
+Targets: **p95 < 10 ms for PPR + expansion at ~1M edges**, and **CSR under 200 MB**.
+Both are asserted by the test, not just reported.
+
+`cargo test --release -p kb-core --test graph_bench -- --ignored --nocapture`
+
+Fixture: 100,000 nodes, 1,000,000 edges → **1,424,164 arcs** (undirected projection),
+5,000 communities, 85% intra-community, built in 309.9 ms. 50 queries, 1–5 seeds
+each, p95 over 50 runs.
+
+| Walk | p50 | p95 | p99 | max | vs 10 ms target |
+|---|---:|---:|---:|---:|---|
+| PPR, push (`eps 1e-5`) | 1.77 ms | **2.46 ms** | 2.79 ms | 2.79 ms | PASS |
+| 2-hop expansion | 0.07 ms | 0.12 ms | 0.14 ms | 0.14 ms | — |
+| **Combined (PPR + 2-hop)** | **1.84 ms** | **2.58 ms** | 2.93 ms | 2.93 ms | **PASS, 3.9x under** |
+| PPR, exact power iteration | 269.84 ms | 312.08 ms | 577.60 ms | 577.60 ms | MISS, by design |
+
+| Memory | Value | vs 200 MB budget |
+|---|---:|---|
+| CSR adjacency | **11.2 MB** (11,793,316 B) | PASS — 100,001 offsets `u32` + 1,424,164 targets `u32` + 1,424,164 weights `f32` |
+
+Scaling with seeds is flat, which is what makes the budget hold for real queries
+rather than the single-seed case:
+
+| Seeds | 1 | 2 | 3 | 4 | 5 |
+|---|---:|---:|---:|---:|---:|
+| combined p50 | 1.84 ms | 1.85 ms | 1.87 ms | 1.92 ms | 1.93 ms |
+| combined p95 | 2.42 ms | 2.46 ms | 2.58 ms | 2.78 ms | 2.93 ms |
+
+**The exact solver is the reason this is not a sweep of the same graph twice.** At
+1M arcs it costs 68 iterations × 1,997,219 arcs ≈ 135.8M arc visits per query, so
+exact PPR is ~110x the push variant and 27x over the whole budget. It is in the
+benchmark as a *reference*, not as a candidate: the push variant reaches L1 error
+1.18 against it at `eps 1e-5` while agreeing on the top-100 in 46.7% of slots, and at
+`eps 1e-3` it costs 0.69 ms with 84.9% top-100 overlap on the clustered graph. The
+sweep over both graph shapes and both algorithms is in `graph_bench.rs`
+(`exact_versus_bounded_push`, `same_algorithms_on_a_clustered_graph`,
+`sweep_one_to_five_seeds`); the choice of `eps` per graph shape is a retrieval-quality
+decision to make against a labelled set, not something this benchmark settles.
+
+### 6.2 The contract, against a live Postgres
+
+`kb_ports::graph_contract` runs the same seven properties against every adapter. The
+Postgres run is gated twice — `--features integration`, so `cargo test --workspace`
+needs no database, and `KB_PG_GRAPH_CONTRACT=1`, so turning the feature on without a
+database fails loudly instead of reporting a quiet pass.
+
+```sh
+rust/scripts/stack-up.sh
+KB_PG_GRAPH_URL="postgresql://kb:kb@127.0.0.1:15432/rantai_kb" \
+KB_PG_GRAPH_CONTRACT=1 cargo test -p kb-store-pg --features integration \
+  --test graph_contract -- --nocapture --test-threads=1
+```
+
+The in-memory reference, same suite, same properties:
+
+```
+GraphStore contract — InMemoryGraphStore (reference)
+  scope_containment                          PASS
+  no_path_through_an_out_of_scope_document   PASS
+  tenant_isolation                           PASS
+  idempotent_upsert_and_dedupe               PASS
+  delete_document_cascades                   PASS
+  version_bumps_on_every_write               PASS
+  deterministic_ordering                     PASS
+```
+
+`PgGraphStore` against `kb-smoke-pg`, zero skips (a skip is treated as a failure,
+because a skip that looks like a pass is how a suite quietly stops testing):
+
+```
+GraphStore contract — PgGraphStore
+  scope_containment                          PASS
+  no_path_through_an_out_of_scope_document   PASS
+  tenant_isolation                           PASS
+  idempotent_upsert_and_dedupe               PASS
+  delete_document_cascades                   PASS
+  version_bumps_on_every_write               PASS
+  deterministic_ordering                     PASS
+```
+
+**What the contract found that a review did not.** Four divergences between the two
+adapters, three of them invisible to the suite as first written:
+
+* `relate` with an empty batch skipped the version bump in Postgres while the
+  reference bumped it. The failure mode is a document whose extraction found no
+  relations leaving a stale cached CSR, with nothing anywhere saying so.
+* `delete_document` swept *every* mention-less entity in the reference, including
+  entities recorded from a summary that no chunk mentions. Only entities the deleted
+  document mentioned are orphans.
+* The alias union kept duplicates and dropped empty strings in Postgres, and did
+  neither in the reference. Nothing reads aliases through the port yet.
+* `SELECT DISTINCT unnest(...)` fails at *runtime*, not parse time — a set-returning
+  function in a `DISTINCT` list yields an anonymous composite. No amount of offline
+  checking finds this; the live run found it on the first attempt.
+
+The suite now pins the first two (`version_bumps_on_every_write` checks both empty
+batches; `delete_document_cascades` writes an entity with no mentions, deletes an
+unrelated document, and then requires a relation to it to still resolve).
+
+### 6.3 `load_tenant_graph` at ~100k relations
+
+```sh
+KB_PG_GRAPH_URL="postgresql://kb:kb@127.0.0.1:15432/rantai_kb" \
+KB_PG_GRAPH_CONTRACT=1 cargo test -p kb-store-pg --features integration \
+  --test graph_contract -- --ignored --nocapture
+```
+
+Fixture: 10,000 entities, 100,000 relations over 100 documents (mean degree 10).
+Resulting CSR: 10,000 entities, **199,900 arcs**, 1.6 MB. p50 over 20 samples:
+
+| | p50 | p95 |
+|---|---:|---:|
+| `load_tenant_graph` | **855 ms** | 992 ms |
+
+The fixture deliberately gives every relation a distinct `(src, dst)` and a distinct
+document, so the 100,000 rows are 100,000 distinct edges rather than 10,000 pairs
+the CSR would collapse — an earlier version of the fixture reused document ids and
+measured a graph an order of magnitude smaller than it claimed to write.
+
+**Where the 855 ms goes.** The split matters more than the total, because it says
+where the time is *not*:
+
+| Stage | ms | Share |
+|---|---:|---:|
+| Postgres executing and sending all three queries (measured via `psql`, same SQL) | ~71 | 8% |
+| sqlx building `PgRow`s for 120k rows | ~470 | 55% |
+| Resolving 200k relation endpoints to node ids | ~235 | 27% |
+| `Csr::from_edges` over 100k edges | ~65 | 8% |
+| Mentions, interning, taking ownership of the result | ~65 | 8% |
+
+Two of the five profile guesses were wrong and measurement replaced both:
+
+* Reading columns **by name** (`try_get("src_id")`) searches the row's column names
+  on every call. Switching to positional `try_get` took the load from **1165 ms to
+  940 ms p50**. The select lists are now load-bearing, and
+  `the_scoped_statements_keep_the_column_order_the_indices_assume` pins their order.
+* Resolving each endpoint twice (id → key, then key → node id) cost four hash probes
+  per relation row. One `id → node` map after interning took the load to **855 ms**.
+* The opposite result: borrowing `&str` out of the row buffers instead of decoding
+  ~230k `String`s per load made **no measurable difference**. It was kept because it
+  allocates ~30k times instead of ~230k, which matters at ten times the size — but it
+  is not one of the wins.
+
+### 6.4 What this section does NOT prove
+
+* **The load is a cache-miss cost, not a query cost.** `docs/architecture-target.md`
+  §11 puts the CSR behind a per-tenant version counter, so §6.3's 855 ms runs once
+  per graph mutation and every read after it is free. If the load were on the
+  per-query path it would be unsalvageable; amortised, it pays for itself after one
+  query. The number that has to fit the budget is §6.1's 2.58 ms, and it does. The
+  next lever on the load is the driver (`query_as` positional tuples, or `COPY`),
+  not the schema — Postgres is 8% of it.
+* **The fixture is a dense graph.** Mean degree 10 over 10,000 entities is the upper
+  end of what entity extraction produces from documents; a real tenant is sparser
+  and will load faster. It was chosen because the brief asked for ~100k relations.
+* **No quality measurement.** §6.1 says the push variant agrees with exact PPR on
+  46.7% of the top-100 at `eps 1e-5`. Whether that is good enough for entity
+  retrieval needs a labelled set; this section does not have one.
+* **Bun does not write to these tables yet** (`docs/rust-cutover.md` §2). The graph
+  is storage-complete and contract-tested, but no ingest path writes it, so none of
+  the above has been exercised on data a real extraction produced.

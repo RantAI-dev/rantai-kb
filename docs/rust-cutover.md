@@ -31,6 +31,16 @@ The PostgreSQL schema and SurrealDB vector definitions are shared between Bun an
 - **Locking**: A PostgreSQL session advisory lock (`7241331885`) prevents race conditions between multiple booting containers.
 - **Idempotency**: Already-applied migrations are safely skipped.
 - **Ownership**: Both `bunx prisma migrate deploy` and `kb-server migrate` agree on what is applied. Either binary can manage migrations.
+- **One ledger, and Rust reads Prisma's rows**: Prisma creates `_prisma_migrations` with `timestamptz` timestamp columns, so the Rust runner asks for its applied/unapplied decision in SQL (`"finished_at" IS NOT NULL AND "rolled_back_at" IS NULL`) and decodes only the `TEXT` checksum. Decoding those timestamps in Rust cannot work against both engines — `DateTime<Utc>` fails on a timestamp without a zone and `NaiveDateTime` fails on one with — and the failure was silent, because the error was swallowed into "not applied" and every run re-applied every migration. `rust/scripts/mixed-fleet.sh` now runs Prisma's deploy **first**, on an empty database, and requires the Rust runner to then apply zero migrations, so a regression here fails the gate instead of a rolling deploy.
+
+### Entity graph tables (`20261017120000_graph_tables`)
+
+The entity graph moves out of SurrealDB into four plain Postgres tables — `KbEntity`, `KbMention`, `KbRelation`, `KbGraphVersion` — with the traversal done in Rust over a CSR (`docs/architecture-target.md` §11, step L.3).
+
+- **Additive, and proven to be.** The migration creates four new tables and their indexes. It alters no existing table, column, index or constraint. `rust/scripts/mixed-fleet.sh` asserts this rather than assuming it: Prisma's own engine applies both migrations from an empty database, the four graph tables are counted inside the container, and the Rust runner must then apply none of them.
+- **Bun does not read them yet.** Nothing in `src/` touches these tables, so a Bun instance and a Rust instance write to the same Postgres without seeing each other's graph rows. `docs/eval-baseline.md` §"GraphStore (L.3a)" has the measurements.
+- **The scope rule is enforced in SQL, not in Rust.** Both graph reads carry `"documentId" = ANY(<scope>)`, so a relation extracted from a document the caller cannot see is never fetched and therefore cannot become a *path* through the graph. Filtering results instead of rows would still leak the existence and shape of an out-of-scope document: two visible entities joined only by an out-of-scope relation would become connected. `kb_ports::graph_contract` tests that case directly (`no_path_through_an_out_of_scope_document`) rather than inferring it.
+- **Ids are derived, not generated.** An entity id is `sha256("kb-entity", tenant, key)` and a relation id `sha256("kb-relation", tenant, src, dst, type, document)`, so re-ingesting a document replaces rows instead of adding a second set, and two runs of the same ingest write byte-identical rows. A `uuid()` default would make every re-ingest a different row set.
 
 ### SurrealDB DDL
 
