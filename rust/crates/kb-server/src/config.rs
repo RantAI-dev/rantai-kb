@@ -499,7 +499,7 @@ where
     match lookup(name) {
         None => default,
         Some(v) if v.trim().is_empty() => default,
-        Some(v) => v.trim() == "true",
+        Some(v) => matches!(v.trim().to_lowercase().as_str(), "true" | "1" | "yes" | "on"),
     }
 }
 

@@ -103,7 +103,7 @@ GRAPH_ENV
       exit 1
     fi
     cat >> "$STACK_ENV" <<GRAPH_ENV
-export KB_GRAPH_ARM="true"
+export KB_GRAPH_ARM="1"
 GRAPH_ENV
   fi
 }
