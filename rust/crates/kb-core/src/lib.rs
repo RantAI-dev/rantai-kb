@@ -9,6 +9,7 @@ mod context;
 pub mod figure_assets;
 pub mod figure_gate;
 mod fusion;
+pub mod graph;
 pub mod intelligence;
 pub mod page_map;
 pub mod policy;
