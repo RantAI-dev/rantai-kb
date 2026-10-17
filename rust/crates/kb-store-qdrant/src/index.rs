@@ -485,6 +485,70 @@ impl RetrievalIndex for QdrantIndex {
         Ok(out)
     }
 
+    async fn figures(
+        &self,
+        scope: &DocumentScope,
+        document_ids: &[DocumentId],
+    ) -> Result<Vec<Candidate>, PortError> {
+        let matching_docs: Vec<String> = document_ids
+            .iter()
+            .filter(|d| scope.document_ids().contains(d))
+            .map(|d| d.as_str().to_string())
+            .collect();
+        if matching_docs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let filter = crate::payload::figures_filter(scope.tenant(), &matching_docs);
+        let response = self
+            .client
+            .scroll(
+                ScrollPointsBuilder::new(&self.collection)
+                    .filter(filter)
+                    .limit(500)
+                    .with_payload(true),
+            )
+            .await
+            .map_err(map)?;
+        let mut out = Vec::new();
+        for p in response.result {
+            if let Some(c) = candidate_from(&p.payload, ArmScores::default(), ArmRanks::default()) {
+                out.push(c);
+            }
+        }
+        out.sort_by(|a, b| a.unit_id.as_str().cmp(b.unit_id.as_str()));
+        Ok(out)
+    }
+
+    async fn ordered_chunks(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+    ) -> Result<Vec<Candidate>, PortError> {
+        let filter = crate::payload::one_document_filter(tenant, document_id);
+        let response = self
+            .client
+            .scroll(
+                ScrollPointsBuilder::new(&self.collection)
+                    .filter(filter)
+                    .limit(2000)
+                    .with_payload(true),
+            )
+            .await
+            .map_err(map)?;
+        let mut out = Vec::new();
+        for p in response.result {
+            if let Some(c) = candidate_from(&p.payload, ArmScores::default(), ArmRanks::default()) {
+                out.push(c);
+            }
+        }
+        out.sort_by_key(|c| c.chunk_index);
+        Ok(out)
+    }
+
+    async fn health_check(&self) -> Result<(), PortError> {
+        self.client.health_check().await.map_err(map).map(|_| ())
+    }
+
     fn capabilities(&self) -> IndexCapabilities {
         IndexCapabilities {
             dense_dims: self.settings.dense_dims,

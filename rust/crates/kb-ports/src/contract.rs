@@ -113,6 +113,8 @@ pub const PROPERTIES: &[&str] = &[
     "deterministic_order",
     "fusion_merges_arms",
     "neighbours_are_adjacent_and_in_scope",
+    "figures_are_scoped_and_filtered_by_type",
+    "ordered_chunks_are_sorted_by_index",
 ];
 
 /// Expand to the whole dispatch expression: build a fresh index, run the
@@ -132,6 +134,12 @@ macro_rules! dispatch {
                 "fusion_merges_arms" => fusion_merges_arms(&index).await,
                 "neighbours_are_adjacent_and_in_scope" => {
                     neighbours_are_adjacent_and_in_scope(&index).await
+                }
+                "figures_are_scoped_and_filtered_by_type" => {
+                    figures_are_scoped_and_filtered_by_type(&index).await
+                }
+                "ordered_chunks_are_sorted_by_index" => {
+                    ordered_chunks_are_sorted_by_index(&index).await
                 }
                 other => Outcome::Failed(format!("no such property: {other}")),
             },
@@ -1094,6 +1102,176 @@ async fn neighbours_are_adjacent_and_in_scope(index: &impl RetrievalIndex) -> Ou
             none.len()
         ));
     }
+    Outcome::Pass
+}
+
+/// Property 9: figure co-retrieval retrieves figure units of the specified
+/// documents within scope, and filters out non-figure chunks and out-of-scope units.
+async fn figures_are_scoped_and_filtered_by_type(index: &impl RetrievalIndex) -> Outcome {
+    let mut units = fixture_units();
+    let fig_a1 = IndexUnit {
+        id: ChunkId::new_unchecked("doc-a1_fig1"),
+        document_id: DocumentId::new_unchecked("doc-a1"),
+        tenant: TenantId::new_unchecked("contract-tenant-a"),
+        knowledge_base_id: Some(KnowledgeBaseId::new_unchecked("kb-1")),
+        category: Some("kategori-1".to_string()),
+        chunk_index: 90,
+        page: Some(1),
+        chunk_type: ChunkType::Figure,
+        content: "Bagan sistematis aliran kerja".to_string(),
+        contextual_prefix: None,
+        metadata: serde_json::json!({
+            "assetKey": "fig_asset_001",
+            "section": "Gambar 1. Bagan Aliran",
+            "anchorChunkIndex": 0,
+        }),
+        dense: vec![0.1; DENSE_DIMS],
+        sparse: encode_document("Bagan sistematis aliran kerja"),
+    };
+    let fig_b1 = IndexUnit {
+        id: ChunkId::new_unchecked("doc-b1_fig1"),
+        document_id: DocumentId::new_unchecked("doc-b1"),
+        tenant: TenantId::new_unchecked("contract-tenant-b"),
+        knowledge_base_id: Some(KnowledgeBaseId::new_unchecked("kb-1")),
+        category: Some("kategori-1".to_string()),
+        chunk_index: 90,
+        page: Some(1),
+        chunk_type: ChunkType::Figure,
+        content: "Bagan tenant B".to_string(),
+        contextual_prefix: None,
+        metadata: serde_json::json!({
+            "assetKey": "fig_asset_002",
+            "section": "Gambar 2. Tenant B",
+        }),
+        dense: vec![0.1; DENSE_DIMS],
+        sparse: encode_document("Bagan tenant B"),
+    };
+    units.push(fig_a1);
+    units.push(fig_b1);
+    index.upsert(units).await.ok();
+
+    let scope_a = scope_tenant_a();
+    let doc_a1 = DocumentId::new_unchecked("doc-a1");
+    let doc_b1 = DocumentId::new_unchecked("doc-b1");
+
+    let figs = match index.figures(&scope_a, std::slice::from_ref(&doc_a1)).await {
+        Ok(f) => f,
+        Err(err) => return Outcome::Failed(format!("figures errored: {err}")),
+    };
+    if figs.is_empty() {
+        return Outcome::Failed(
+            "figures returned nothing for doc-a1; expected doc-a1_fig1".to_string(),
+        );
+    }
+    if figs.len() != 1 || figs[0].chunk_index != 90 || figs[0].document_id.as_str() != "doc-a1" {
+        let ids: Vec<&str> = figs.iter().map(|c| c.unit_id.as_str()).collect();
+        return Outcome::Failed(format!(
+            "figures returned {ids:?}, expected 1 figure chunk with chunk_index 90 from doc-a1"
+        ));
+    }
+    if figs[0].chunk_type != ChunkType::Figure {
+        return Outcome::Failed(format!(
+            "figures returned non-figure chunk: {:?}",
+            figs[0].chunk_type
+        ));
+    }
+
+    let cross_tenant = match index.figures(&scope_a, &[doc_b1]).await {
+        Ok(f) => f,
+        Err(err) => return Outcome::Failed(format!("figures cross-tenant errored: {err}")),
+    };
+    if !cross_tenant.is_empty() {
+        return Outcome::Failed(format!(
+            "figures leaked {} units from tenant B when queried with scope A",
+            cross_tenant.len()
+        ));
+    }
+
+    let empty = match index.figures(&scope_a, &[]).await {
+        Ok(f) => f,
+        Err(err) => return Outcome::Failed(format!("figures empty query errored: {err}")),
+    };
+    if !empty.is_empty() {
+        return Outcome::Failed("figures with empty document_ids must return empty".to_string());
+    }
+
+    Outcome::Pass
+}
+
+/// Property 10: ordered_chunks returns all chunks of a document ordered by chunk_index ascending.
+async fn ordered_chunks_are_sorted_by_index(index: &impl RetrievalIndex) -> Outcome {
+    let tenant = TenantId::new_unchecked("contract-tenant-order");
+    let doc = DocumentId::new_unchecked("doc-order");
+    let u1 = IndexUnit {
+        id: ChunkId::new_unchecked("doc-order_2"),
+        document_id: doc.clone(),
+        tenant: tenant.clone(),
+        knowledge_base_id: None,
+        category: None,
+        chunk_index: 2,
+        page: None,
+        chunk_type: ChunkType::Text,
+        content: "chunk two".to_string(),
+        contextual_prefix: None,
+        metadata: serde_json::json!({ "chunkIndex": 2 }),
+        dense: vec![0.1; DENSE_DIMS],
+        sparse: encode_document("chunk two"),
+    };
+    let u2 = IndexUnit {
+        id: ChunkId::new_unchecked("doc-order_0"),
+        document_id: doc.clone(),
+        tenant: tenant.clone(),
+        knowledge_base_id: None,
+        category: None,
+        chunk_index: 0,
+        page: None,
+        chunk_type: ChunkType::Text,
+        content: "chunk zero".to_string(),
+        contextual_prefix: None,
+        metadata: serde_json::json!({ "chunkIndex": 0 }),
+        dense: vec![0.1; DENSE_DIMS],
+        sparse: encode_document("chunk zero"),
+    };
+    let u3 = IndexUnit {
+        id: ChunkId::new_unchecked("doc-order_1"),
+        document_id: doc.clone(),
+        tenant: tenant.clone(),
+        knowledge_base_id: None,
+        category: None,
+        chunk_index: 1,
+        page: None,
+        chunk_type: ChunkType::Text,
+        content: "chunk one".to_string(),
+        contextual_prefix: None,
+        metadata: serde_json::json!({ "chunkIndex": 1 }),
+        dense: vec![0.1; DENSE_DIMS],
+        sparse: encode_document("chunk one"),
+    };
+    index.upsert(vec![u1, u2, u3]).await.ok();
+
+    let chunks = match index.ordered_chunks(&tenant, &doc).await {
+        Ok(c) => c,
+        Err(err) => return Outcome::Failed(format!("ordered_chunks errored: {err}")),
+    };
+    if chunks.len() != 3 {
+        return Outcome::Failed(format!("expected 3 chunks, got {}", chunks.len()));
+    }
+    let indices: Vec<u32> = chunks.iter().map(|c| c.chunk_index).collect();
+    if indices != [0, 1, 2] {
+        return Outcome::Failed(format!(
+            "chunks not ordered by index: got {indices:?}, expected [0, 1, 2]"
+        ));
+    }
+
+    let other_doc = DocumentId::new_unchecked("doc-nonexistent");
+    let other = match index.ordered_chunks(&tenant, &other_doc).await {
+        Ok(c) => c,
+        Err(err) => return Outcome::Failed(format!("ordered_chunks foreign doc errored: {err}")),
+    };
+    if !other.is_empty() {
+        return Outcome::Failed(format!("nonexistent doc returned {} chunks", other.len()));
+    }
+
     Outcome::Pass
 }
 

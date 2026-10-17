@@ -59,7 +59,7 @@ impl Harness {
         let state = AppState::from_parts(
             StateParts {
                 documents: Arc::new(documents.clone()),
-                chunks: Arc::new(chunks.clone()),
+                index: Arc::new(chunks.clone()),
                 entities: Arc::new(entities.clone()),
                 blob: Arc::new(blobs.clone()),
                 embedder: Arc::new(embedder),

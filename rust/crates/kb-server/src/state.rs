@@ -19,7 +19,7 @@ pub const DEFAULT_VERSION: &str = "dev";
 
 pub struct AppState {
     pub documents: Arc<dyn DocumentStore>,
-    pub chunks: Arc<dyn kb_ports::ChunkStore>,
+    pub index: Arc<dyn kb_ports::RetrievalIndex>,
     /// Entity and relation graph in SurrealDB, read by the intelligence route.
     pub entities: Arc<dyn EntityStore>,
     /// Object storage: the upload route writes, the raw/asset routes read, the
@@ -38,7 +38,7 @@ pub struct AppState {
 /// without naming every constructor argument.
 pub struct StateParts {
     pub documents: Arc<dyn DocumentStore>,
-    pub chunks: Arc<dyn kb_ports::ChunkStore>,
+    pub index: Arc<dyn kb_ports::RetrievalIndex>,
     pub entities: Arc<dyn EntityStore>,
     pub blob: Arc<dyn BlobStore>,
     pub embedder: Arc<dyn Embedder>,
@@ -57,10 +57,29 @@ impl AppState {
         let documents: Arc<dyn DocumentStore> =
             Arc::new(kb_store_pg::PgDocumentStore::from_pool(pool.clone()));
         let jobs: Arc<dyn JobStore> = Arc::new(kb_store_pg::PgJobStore::from_pool(pool));
-        let chunks: Arc<dyn kb_ports::ChunkStore> = Arc::new(
-            kb_store_surreal::SurrealChunkStore::new(config.surreal.clone())
-                .map_err(|e| anyhow::anyhow!("surreal: {e}"))?,
-        );
+        let index: Arc<dyn kb_ports::RetrievalIndex> = match config.chunk_store_choice {
+            crate::config::ChunkStoreChoice::Surreal => {
+                let store = kb_store_surreal::SurrealChunkStore::new(config.surreal.clone())
+                    .map_err(|e| anyhow::anyhow!("surreal: {e}"))?;
+                Arc::new(store)
+            }
+            crate::config::ChunkStoreChoice::Qdrant => {
+                let collection = config
+                    .qdrant_collection_override
+                    .unwrap_or_else(|| config.qdrant.collection_name());
+                let client = config
+                    .qdrant
+                    .client()
+                    .map_err(|e| anyhow::anyhow!("qdrant client: {e}"))?;
+                kb_store_qdrant::create_collection(&client, &config.qdrant, &collection)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("qdrant create collection: {e}"))?;
+                let q_index =
+                    kb_store_qdrant::QdrantIndex::new_with_collection(config.qdrant, collection)
+                        .map_err(|e| anyhow::anyhow!("qdrant index: {e}"))?;
+                Arc::new(q_index)
+            }
+        };
         let entities: Arc<dyn EntityStore> = Arc::new(
             kb_store_surreal::SurrealChunkStore::new(config.surreal.clone())
                 .map_err(|e| anyhow::anyhow!("surreal entities: {e}"))?,
@@ -84,7 +103,7 @@ impl AppState {
 
         let inputs = EngineInputs {
             embedder: embedder.clone(),
-            chunk_store: chunks.clone(),
+            index: index.clone(),
             reranker,
             document_store: documents.clone(),
             query_expander: expander,
@@ -93,7 +112,7 @@ impl AppState {
         let engine = Engine::new(config.engine, inputs);
         Ok(Self {
             documents,
-            chunks,
+            index,
             entities,
             blob,
             embedder,
@@ -114,7 +133,7 @@ impl AppState {
     ) -> Self {
         let inputs = EngineInputs {
             embedder: parts.embedder.clone(),
-            chunk_store: parts.chunks.clone(),
+            index: parts.index.clone(),
             reranker,
             document_store: parts.documents.clone(),
             query_expander: Arc::new(NoopExpander),
@@ -123,7 +142,7 @@ impl AppState {
         let engine = Engine::new(settings, inputs);
         Self {
             documents: parts.documents,
-            chunks: parts.chunks,
+            index: parts.index,
             entities: parts.entities,
             blob: parts.blob,
             embedder: parts.embedder,
@@ -154,7 +173,7 @@ impl AppState {
         Ok(kb_engine::IngestWorker::new(
             self.jobs.clone(),
             self.documents.clone(),
-            self.chunks.clone(),
+            self.index.clone(),
             self.blob.clone(),
             extractor,
             self.embedder.clone(),

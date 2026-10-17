@@ -22,9 +22,9 @@ use kb_core::{
     IngestStep, ProgressFlags, StepProgress, compute_eta_seconds, compute_overall_progress,
 };
 use kb_ports::{
-    BlobStore, ChunkStore, ChunkToStore, DocumentId, DocumentStore, Embedder, EntityExtractor,
-    EntityStore, ExtractedFigure, ExtractionOptions, Extractor, JobRecord, JobStore, PortError,
-    ProgressSink, asset_path,
+    BlobStore, ChunkId, ChunkType, DocumentId, DocumentStore, Embedder, EntityExtractor,
+    EntityStore, ExtractedFigure, ExtractionOptions, Extractor, IndexUnit, JobRecord, JobStore,
+    PortError, ProgressSink, RetrievalIndex, asset_path,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
@@ -141,7 +141,7 @@ impl Default for CancelToken {
 pub struct IngestWorker {
     jobs: Arc<dyn JobStore>,
     documents: Arc<dyn DocumentStore>,
-    chunks: Arc<dyn ChunkStore>,
+    index: Arc<dyn RetrievalIndex>,
     blobs: Arc<dyn BlobStore>,
     extractor: Arc<dyn Extractor>,
     embedder: Arc<dyn Embedder>,
@@ -162,7 +162,7 @@ impl IngestWorker {
     pub fn new(
         jobs: Arc<dyn JobStore>,
         documents: Arc<dyn DocumentStore>,
-        chunks: Arc<dyn ChunkStore>,
+        index: Arc<dyn RetrievalIndex>,
         blobs: Arc<dyn BlobStore>,
         extractor: Arc<dyn Extractor>,
         embedder: Arc<dyn Embedder>,
@@ -171,7 +171,7 @@ impl IngestWorker {
         Self {
             jobs,
             documents,
-            chunks,
+            index,
             blobs,
             extractor,
             embedder,
@@ -561,34 +561,46 @@ impl IngestWorker {
             &flags,
         )
         .await;
-        let to_store: Vec<ChunkToStore> = chunks
+        let units: Vec<IndexUnit> = chunks
             .iter()
             .zip(embeddings)
-            .map(|(chunk, embedding)| ChunkToStore {
-                content: chunk.content.clone(),
-                chunk_index: chunk.metadata.chunk_index,
-                embedding,
-                metadata: storage_metadata(&chunk.metadata),
-                contextual_prefix: chunk.metadata.contextual_prefix.clone(),
+            .map(|(chunk, dense)| {
+                let chunk_type = match chunk.metadata.chunk_type.as_deref() {
+                    Some("figure") => ChunkType::Figure,
+                    Some("table") => ChunkType::Table,
+                    _ => ChunkType::Text,
+                };
+                let sparse = kb_core::sparse::encode_document(&chunk.content);
+                IndexUnit {
+                    id: ChunkId(format!("{}_{}", document_id.0, chunk.metadata.chunk_index)),
+                    document_id: document_id.clone(),
+                    tenant: job.tenant_id.clone(),
+                    knowledge_base_id: None,
+                    category: Some(chunk.metadata.category.clone()),
+                    chunk_index: chunk.metadata.chunk_index,
+                    page: chunk.metadata.page,
+                    chunk_type,
+                    content: chunk.content.clone(),
+                    contextual_prefix: chunk.metadata.contextual_prefix.clone(),
+                    metadata: storage_metadata(&chunk.metadata),
+                    dense,
+                    sparse,
+                }
             })
             .collect();
 
-        // Clear first: `store_chunks` writes deterministic ids, so stale chunks
-        // from a killed attempt would otherwise sit next to the new ones.
-        self.chunks
-            .delete_by_document(document_id)
+        // Clear first: `delete_document` removes old units for this document within tenant.
+        self.index
+            .delete_document(&job.tenant_id, document_id)
             .await
             .map_err(|e| format!("clearing old chunks failed: {e}"))?;
-        self.chunks
-            .store_chunks(
-                document_id,
-                &to_store,
-                self.settings.embedding_model.as_deref(),
-            )
+        let written = units.len();
+        self.index
+            .upsert(units)
             .await
             .map_err(|e| format!("storing chunks failed: {e}"))?;
 
-        self.finish_ready(job, document_id, to_store.len(), started, &flags)
+        self.finish_ready(job, document_id, written, started, &flags)
             .await
     }
 

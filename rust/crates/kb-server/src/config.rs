@@ -11,11 +11,21 @@ use kb_store_pg::PgSettings;
 use kb_store_surreal::SurrealSettings;
 use serde::{Deserialize, Serialize};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ChunkStoreChoice {
+    #[default]
+    Surreal,
+    Qdrant,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind_addr: String,
+    pub chunk_store_choice: ChunkStoreChoice,
     pub pg: PgSettings,
     pub surreal: SurrealSettings,
+    pub qdrant: kb_store_qdrant::QdrantSettings,
+    pub qdrant_collection_override: Option<String>,
     pub s3: S3Settings,
     pub embedder: EmbedderConfig,
     pub reranker: RerankerConfig,
@@ -308,7 +318,7 @@ impl Config {
 
         let embedder = EmbedderConfig {
             base_url: embedding_base_url,
-            model: embedding_model,
+            model: embedding_model.clone(),
             api_key: embedding_api_key.clone(),
             dimension: embedding_dim,
             batch_size: int_var(&lookup, "KB_EMBEDDING_BATCH_SIZE", 32)?.max(1),
@@ -331,6 +341,28 @@ impl Config {
 
         let extract = ExtractConfig::from_lookup(&lookup);
 
+        let chunk_store_choice = match lookup("KB_CHUNK_STORE").as_deref() {
+            Some("qdrant") => ChunkStoreChoice::Qdrant,
+            _ => ChunkStoreChoice::Surreal,
+        };
+
+        let qdrant_url = lookup("QDRANT_GRPC_URL")
+            .or_else(|| lookup("QDRANT_URL"))
+            .unwrap_or_else(|| "http://127.0.0.1:16334".to_string());
+        let qdrant_api_key = lookup("QDRANT_API_KEY").filter(|s| !s.trim().is_empty());
+        let qdrant_collection_override =
+            lookup("QDRANT_COLLECTION").filter(|s| !s.trim().is_empty());
+        let qdrant = kb_store_qdrant::QdrantSettings {
+            url: qdrant_url,
+            api_key: qdrant_api_key,
+            model_slug: embedding_model.clone(),
+            dense_dims: Some(embedding_dim),
+            hnsw_m: 16,
+            hnsw_ef_construct: 100,
+            request_timeout: Duration::from_secs(30),
+            upsert_batch: 256,
+        };
+
         let entity = ExtractorSettings::from_lookup(&lookup);
         let worker = read_worker(&lookup);
         let version = lookup("KB_VERSION")
@@ -338,6 +370,9 @@ impl Config {
             .unwrap_or_else(|| crate::state::DEFAULT_VERSION.to_string());
 
         Ok(Config {
+            chunk_store_choice,
+            qdrant,
+            qdrant_collection_override,
             bind_addr,
             pg,
             surreal,

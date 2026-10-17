@@ -15,6 +15,7 @@ kb-core = { path = "../kb-core" }
 kb-inference = { path = "../kb-inference" }
 kb-store-pg = { path = "../kb-store-pg" }
 kb-store-surreal = { path = "../kb-store-surreal" }
+kb-store-qdrant = { path = "../kb-store-qdrant" }
 kb-store-blob = { path = "../kb-store-blob" }
 kb-extract = { path = "../kb-extract" }
 kb-engine = { path = "../kb-engine" }

@@ -165,6 +165,29 @@ impl RetrievalIndex for LeakyIndex {
             .neighbours(&everything, document_id, chunk_indices)
             .await
     }
+    async fn figures(
+        &self,
+        _scope: &kb_ports::DocumentScope,
+        document_ids: &[kb_ports::DocumentId],
+    ) -> Result<Vec<kb_ports::Candidate>, PortError> {
+        let everything = crate::fakes::make_fake_scope(
+            kb_ports::TenantId::new_unchecked("contract-tenant-a"),
+            vec![
+                kb_ports::DocumentId::new_unchecked("doc-a1"),
+                kb_ports::DocumentId::new_unchecked("doc-a2"),
+                kb_ports::DocumentId::new_unchecked("doc-a3"),
+                kb_ports::DocumentId::new_unchecked("doc-a4"),
+            ],
+        );
+        self.0.figures(&everything, document_ids).await
+    }
+    async fn ordered_chunks(
+        &self,
+        tenant: &kb_ports::TenantId,
+        document_id: &kb_ports::DocumentId,
+    ) -> Result<Vec<kb_ports::Candidate>, PortError> {
+        self.0.ordered_chunks(tenant, document_id).await
+    }
     fn capabilities(&self) -> kb_ports::IndexCapabilities {
         self.0.capabilities()
     }
@@ -227,6 +250,20 @@ impl RetrievalIndex for AndSemanticsClaimer {
         chunk_indices: &[u32],
     ) -> Result<Vec<kb_ports::Candidate>, PortError> {
         self.0.neighbours(scope, document_id, chunk_indices).await
+    }
+    async fn figures(
+        &self,
+        scope: &kb_ports::DocumentScope,
+        document_ids: &[kb_ports::DocumentId],
+    ) -> Result<Vec<kb_ports::Candidate>, PortError> {
+        self.0.figures(scope, document_ids).await
+    }
+    async fn ordered_chunks(
+        &self,
+        tenant: &kb_ports::TenantId,
+        document_id: &kb_ports::DocumentId,
+    ) -> Result<Vec<kb_ports::Candidate>, PortError> {
+        self.0.ordered_chunks(tenant, document_id).await
     }
     fn capabilities(&self) -> kb_ports::IndexCapabilities {
         kb_ports::IndexCapabilities {

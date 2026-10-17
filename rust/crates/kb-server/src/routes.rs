@@ -32,7 +32,7 @@ use axum::{Json, Router};
 use kb_core::policy::MimeRegistry;
 use kb_engine::timing::{Stopwatch, SystemClock};
 use kb_ports::{
-    AuthContext, DocumentFilter, DocumentId, DocumentMeta, KnowledgeBaseId, ScopeRequest,
+    AuthContext, DocumentFilter, DocumentId, DocumentMeta, KnowledgeBaseId, ScopeRequest, SearchHit,
 };
 use serde::{Deserialize, Serialize};
 
@@ -164,7 +164,7 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
     // liveness endpoint that fails the whole request tells an operator nothing
     // about which side is down.
     let postgres = state.documents.health_check().await.is_ok();
-    let vectors = state.chunks.health_check().await.is_ok();
+    let vectors = state.index.health_check().await.is_ok();
     let ok = postgres && vectors;
     let body = HealthResponse {
         ok,
@@ -277,11 +277,22 @@ async fn search(
         let query_vec = embedded.vector;
         let query_embed_ms = embed_sw.elapsed_ms();
         let vector_sw = Stopwatch::start(&SystemClock);
-        let mut hits = state
-            .chunks
-            .vector_search(&scope, &query_vec, max_chunks)
+        let query_hybrid = kb_ports::HybridQuery {
+            dense: Some(query_vec),
+            sparse: None,
+            per_arm_k: max_chunks as usize,
+            k: max_chunks as usize,
+            fusion: kb_ports::Fusion::None,
+        };
+        let cands = state
+            .index
+            .search(&query_hybrid, &scope)
             .await
             .map_err(ApiError::from)?;
+        let mut hits: Vec<SearchHit> = cands
+            .into_iter()
+            .map(kb_engine::retrieval::candidate_to_hit)
+            .collect();
         let vector_arm_ms = vector_sw.elapsed_ms();
         hits.retain(|h| h.similarity >= 0.30);
         hits.truncate(max_chunks as usize);
@@ -709,19 +720,23 @@ async fn get_document(
     }
     let meta = find_visible_document(&state, &auth, &id).await?;
     let chunks = state
-        .chunks
-        .ordered_chunks(&meta.id)
+        .index
+        .ordered_chunks(&auth.tenant_id, &meta.id)
         .await
         .map_err(ApiError::from)?;
     let chunk_views: Vec<DocumentChunkView> = chunks
         .iter()
         .map(|c| DocumentChunkView {
-            id: c.id.clone(),
+            id: c.unit_id.0.clone(),
             chunk_index: c.chunk_index,
             content: c.content.clone(),
-            chunk_type: c.chunk_type.clone(),
-            section: c.metadata.section.clone(),
-            page: c.metadata.page,
+            chunk_type: Some(c.chunk_type.as_storage().to_string()),
+            section: c
+                .metadata
+                .get("section")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            page: c.page,
         })
         .collect();
     let chunk_count = chunk_views.len() as u32;
@@ -892,7 +907,7 @@ async fn delete_document(
     // blob-delete failure is logged and does not stop the row delete: the row
     // is what makes the document invisible, and leaving it behind would keep a
     // document the user deleted in their list.
-    if let Err(err) = state.chunks.delete_by_document(&doc.id).await {
+    if let Err(err) = state.index.delete_document(&auth.tenant_id, &doc.id).await {
         tracing::warn!(error = %err, "chunk delete failed during hard delete");
     }
     if let Some(s3_key) = doc.s3_key.as_deref() {

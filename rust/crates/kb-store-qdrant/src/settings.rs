@@ -202,6 +202,7 @@ pub async fn create_collection(
         (crate::payload::KEY_KNOWLEDGE_BASE_ID, false),
         (crate::payload::KEY_CATEGORY, false),
         (crate::payload::KEY_UNIT_ID, false),
+        (crate::payload::KEY_CHUNK_TYPE, false),
     ] {
         let mut params = KeywordIndexParamsBuilder::default();
         if tenant {

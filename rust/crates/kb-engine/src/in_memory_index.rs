@@ -268,6 +268,49 @@ impl RetrievalIndex for InMemoryIndex {
         Ok(out)
     }
 
+    async fn figures(
+        &self,
+        scope: &DocumentScope,
+        document_ids: &[DocumentId],
+    ) -> Result<Vec<Candidate>, PortError> {
+        if document_ids.is_empty() || scope.document_ids().is_empty() {
+            return Ok(Vec::new());
+        }
+        let units = self.in_scope(scope);
+        let mut out = Vec::new();
+        for stored in units {
+            if stored.unit.chunk_type == kb_ports::ChunkType::Figure
+                && document_ids.contains(&stored.unit.document_id)
+            {
+                out.push(candidate_of(
+                    &stored.unit,
+                    (ArmScores::default(), ArmRanks::default()),
+                ));
+            }
+        }
+        out.sort_by(|a, b| a.unit_id.as_str().cmp(b.unit_id.as_str()));
+        Ok(out)
+    }
+
+    async fn ordered_chunks(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+    ) -> Result<Vec<Candidate>, PortError> {
+        let guard = self.read();
+        let mut out: Vec<Candidate> = guard
+            .values()
+            .filter(|s| s.unit.tenant == *tenant && s.unit.document_id == *document_id)
+            .map(|s| candidate_of(&s.unit, (ArmScores::default(), ArmRanks::default())))
+            .collect();
+        out.sort_by_key(|c| c.chunk_index);
+        Ok(out)
+    }
+
+    async fn health_check(&self) -> Result<(), PortError> {
+        Ok(())
+    }
+
     fn capabilities(&self) -> IndexCapabilities {
         IndexCapabilities {
             dense_dims: Some(self.dims),

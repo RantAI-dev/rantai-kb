@@ -7,9 +7,9 @@ use std::sync::Arc;
 
 use kb_core::{ContextItem, SourceEntry, build_context_and_sources, weave_neighbours_with};
 use kb_ports::{
-    ChunkStore, DocumentId, DocumentMeta, DocumentScope, DocumentStore, Embedder, EngineError,
-    FigureGate, FigureGateCandidate, NeighbourAnchor, RerankCandidate, Reranker, RetrievalDegrade,
-    SearchHit, TenantId,
+    Candidate, Chunk, ChunkId, ChunkMetadata, DocumentId, DocumentMeta, DocumentScope,
+    DocumentStore, Embedder, EngineError, FigureGate, FigureGateCandidate, Fusion, HybridQuery,
+    KeywordQuery, RerankCandidate, Reranker, RetrievalDegrade, RetrievalIndex, SearchHit, TenantId,
 };
 use tracing::Instrument;
 
@@ -88,17 +88,214 @@ pub struct RetrievalOutcome {
     pub timings: StageTimings,
 }
 
-/// What one arm cost, carried out of the `tokio::join!` that ran it.
-///
-/// The two arms run concurrently, so neither can be handed a `&mut` timings
-/// struct while the other is still running. Each returns its own numbers and
-/// the caller folds them into the report once both are back.
-#[derive(Debug, Clone, Copy, Default)]
-struct ArmTiming {
-    query_embed_ms: f64,
-    query_embed_cached: bool,
-    store_ms: f64,
-    scope_check_ms: f64,
+const FIG_CAPTION_STOPWORDS: &[&str] = &[
+    "yang", "untuk", "pada", "dan", "dengan", "dari", "atau", "adalah", "dalam", "serta", "oleh",
+    "hal", "ini", "itu", "para", "kepada", "gambar", "tabel", "raja", "dewa", "kitab", "hari",
+    "suci",
+];
+
+const FIG_LABELS: &[&str] = &[
+    "gambar",
+    "tabel",
+    "grafik",
+    "diagram",
+    "foto",
+    "bagan",
+    "ilustrasi",
+    "peta",
+];
+
+pub fn fig_caption_meaningful(caption: &str) -> bool {
+    let lower = caption.to_lowercase();
+    let trimmed = lower.trim_start();
+    FIG_LABELS.iter().any(|label| {
+        if let Some(rest) = trimmed.strip_prefix(label) {
+            rest.chars()
+                .next()
+                .map(|c| c.is_whitespace() || c == '.' || c == ':')
+                .unwrap_or(true)
+        } else {
+            false
+        }
+    })
+}
+
+pub fn fig_caption_keywords(caption: &str) -> Vec<String> {
+    let lower = caption.to_lowercase();
+    let mut body = caption.trim_start();
+
+    // Strip label and optional number/dot
+    for label in FIG_LABELS {
+        if let Some(pos) = lower.find(label) {
+            let mut end = pos + label.len();
+            let bytes = caption.as_bytes();
+            while end < bytes.len() {
+                let b = bytes[end];
+                if b.is_ascii_whitespace() || b.is_ascii_digit() || b == b'.' || b == b':' {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            body = &caption[end..];
+            break;
+        }
+    }
+
+    body.split(|c: char| !c.is_alphabetic())
+        .map(str::to_lowercase)
+        .filter(|w| w.len() >= 4 && !FIG_CAPTION_STOPWORDS.contains(&w.as_str()))
+        .collect()
+}
+
+pub fn candidate_to_hit(c: Candidate) -> SearchHit {
+    let section = c
+        .metadata
+        .get("section")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let asset_key = c
+        .metadata
+        .get("assetKey")
+        .or_else(|| c.metadata.get("asset_key"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let anchor_chunk_index = c
+        .metadata
+        .get("anchorChunkIndex")
+        .or_else(|| c.metadata.get("anchor_chunk_index"))
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    let chunk_index = Some(c.chunk_index);
+    let page = c.page.or_else(|| {
+        c.metadata
+            .get("page")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32)
+    });
+    let is_bm25 = c.scores.dense.is_none() && c.scores.sparse.is_some();
+    let similarity = if is_bm25 {
+        0.0
+    } else {
+        c.scores.dense.unwrap_or(c.scores.fused)
+    };
+    SearchHit {
+        chunk: Chunk {
+            id: c.unit_id,
+            document_id: c.document_id,
+            document_title: String::new(),
+            content: c.content,
+            chunk_type: c.chunk_type,
+            metadata: ChunkMetadata {
+                page,
+                section,
+                chunk_index,
+                asset_key,
+                anchor_chunk_index,
+                contextual_prefix: c.contextual_prefix,
+            },
+            categories: Vec::new(),
+            subcategory: None,
+        },
+        similarity,
+        rank: c.ranks.fused,
+        is_bm25,
+    }
+}
+
+pub fn select_figures(
+    candidates: Vec<Candidate>,
+    query: &str,
+    retrieved_text: &str,
+    anchored_chunks: &[(DocumentId, u32)],
+    limit: u32,
+) -> Vec<Candidate> {
+    let original_candidates = candidates.clone();
+    if limit == 0 || candidates.is_empty() {
+        return Vec::new();
+    }
+    let anchor_set: HashSet<(String, u32)> = anchored_chunks
+        .iter()
+        .map(|(d, idx)| (d.0.clone(), *idx))
+        .collect();
+
+    let q_lower = query.to_lowercase();
+    let text_lower = retrieved_text.to_lowercase();
+
+    let mut scored: Vec<(i32, Candidate)> = Vec::new();
+    let mut seen_caption: HashSet<String> = HashSet::new();
+
+    for c in candidates {
+        let asset_key = c
+            .metadata
+            .get("assetKey")
+            .or_else(|| c.metadata.get("asset_key"))
+            .and_then(|v| v.as_str());
+        let Some(asset_key) = asset_key else {
+            continue;
+        };
+        if asset_key.trim().is_empty() {
+            continue;
+        }
+
+        let caption = c
+            .metadata
+            .get("section")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&c.content)
+            .trim();
+        let cap_key = caption.to_lowercase();
+
+        let anchor_chunk_idx = c
+            .metadata
+            .get("anchorChunkIndex")
+            .or_else(|| c.metadata.get("anchor_chunk_index"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
+        let anchored = anchor_chunk_idx
+            .map(|idx| anchor_set.contains(&(c.document_id.0.clone(), idx)))
+            .unwrap_or(false);
+
+        if !seen_caption.insert(cap_key) {
+            continue;
+        }
+
+        let mut score = 0;
+        if anchored {
+            score = 3;
+        } else {
+            if !fig_caption_meaningful(caption) {
+                continue;
+            }
+            let keywords = fig_caption_keywords(caption);
+            let any_in_query = keywords.iter().any(|k| q_lower.contains(k.as_str()));
+            let any_in_text = keywords.iter().any(|k| text_lower.contains(k.as_str()));
+            if any_in_query {
+                score = 2;
+            } else if any_in_text {
+                score = 1;
+            }
+        }
+
+        if score > 0 {
+            scored.push((score, c));
+        }
+    }
+
+    scored.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.document_id.0.cmp(&b.1.document_id.0))
+            .then_with(|| a.1.chunk_index.cmp(&b.1.chunk_index))
+    });
+
+    if scored.is_empty() {
+        let mut out = original_candidates;
+        out.truncate(limit as usize);
+        return out;
+    }
+
+    scored.truncate(limit as usize);
+    scored.into_iter().map(|(_, c)| c).collect()
 }
 
 /// Enrich document titles, categories, and subcategory on hits via `DocumentStore::find_alive_meta_by_ids`.
@@ -117,7 +314,6 @@ pub async fn enrich_titles(
     if missing_ids.is_empty() {
         return;
     }
-
     if let Ok(metas) = doc_store.find_alive_meta_by_ids(tenant, &missing_ids).await {
         let meta_map: HashMap<DocumentId, DocumentMeta> =
             metas.into_iter().map(|m| (m.id.clone(), m)).collect();
@@ -136,12 +332,10 @@ pub async fn enrich_titles(
 /// Every collaborator is passed explicitly rather than behind a context
 /// object: the engine receives its stores as arguments, which is the whole
 /// point of the port boundary.
-// The argument list mirrors the pipeline's stages, so it is kept even though
-// the lint would rather it were bundled.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_pipeline(
     doc_store: &Arc<dyn DocumentStore>,
-    chunk_store: &Arc<dyn ChunkStore>,
+    index: &Arc<dyn RetrievalIndex>,
     embedder: &Arc<dyn Embedder>,
     reranker: &Arc<dyn Reranker>,
     expander: &Arc<dyn QueryExpander>,
@@ -155,8 +349,7 @@ pub async fn execute_pipeline(
     let mut degrades: Vec<RetrievalDegrade> = Vec::new();
     let pool_size = opts.candidate_pool_size.clamp(1, 100);
 
-    // 1. Query expansion. The original query is always first. A failed
-    //    expander records a degrade and the original query is used alone.
+    // 1. Query expansion.
     let expand_sw = Stopwatch::start(clock);
     let variants: Vec<String> = if opts.expansion_enabled {
         match expander.expand(query).await {
@@ -177,236 +370,213 @@ pub async fn execute_pipeline(
     };
     timings.expand_ms = expand_sw.elapsed_ms();
 
-    // 2. Vector arm (scoped to document IDs from KB/category if non-empty).
-    // Measured per arm, because the two arms run concurrently and only the
-    // phase's wall clock can be added to a total.
-    let vector_future = async {
-        if scope.document_ids().is_empty() {
-            return Ok((Vec::new(), ArmTiming::default()));
-        }
-        let embed_sw = Stopwatch::start(clock);
-        let embeds = variants.iter().map(|q| embedder.embed_query_detailed(q));
-        let vectors = futures::future::join_all(embeds).await;
-        let embed_ms = embed_sw.elapsed_ms();
-        // Own the vectors first: the search futures borrow them, so they must
-        // outlive the futures.
-        let mut query_vectors: Vec<Vec<f32>> = Vec::with_capacity(vectors.len());
-        // One query embedding per variant, and the reported cache flag is the
-        // conjunction across them: a report that says "cache hit" while one of
-        // the variants called the provider is a lie in the direction that
-        // flatters us. With expansion off there is exactly one variant, and the
-        // fold must pass it through rather than discard it.
-        let mut cached: Option<bool> = None;
-        for res in vectors {
-            let qe = res.map_err(|e| format!("vector embed: {e}"))?;
-            cached = Some(cached.map_or(qe.cached, |seen| seen && qe.cached));
-            query_vectors.push(qe.vector);
-        }
-        let store_sw = Stopwatch::start(clock);
-        let searches = query_vectors
-            .iter()
-            .map(|vec| chunk_store.vector_search(scope, vec, pool_size));
-        let lists = futures::future::join_all(searches).await;
-        let store_ms = store_sw.elapsed_ms();
+    // 2. Query embedding & sparse encoding
+    let embed_sw = Stopwatch::start(clock);
+    let embeds = variants.iter().map(|q| embedder.embed_query_detailed(q));
+    let vectors = futures::future::join_all(embeds).await;
+    timings.query_embed_ms = embed_sw.elapsed_ms();
 
-        let mut union: HashMap<String, SearchHit> = HashMap::new();
-        for list in lists {
-            let list = list.map_err(|e| format!("vector search: {e}"))?;
-            for hit in list {
-                let keep_new = union
-                    .get(&hit.chunk.id.0)
-                    .is_none_or(|prev| prev.similarity < hit.similarity);
-                if keep_new {
-                    union.insert(hit.chunk.id.0.clone(), hit);
+    let mut query_vectors: Vec<Vec<f32>> = Vec::with_capacity(vectors.len());
+    let mut cached: Option<bool> = None;
+    let mut embed_failed = false;
+    for res in vectors {
+        match res {
+            Ok(qe) => {
+                cached = Some(cached.map_or(qe.cached, |seen| seen && qe.cached));
+                query_vectors.push(qe.vector);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "query embed failed");
+                embed_failed = true;
+            }
+        }
+    }
+    timings.query_embed_cached = cached.unwrap_or(false);
+    if embed_failed || query_vectors.is_empty() {
+        degrades.push(RetrievalDegrade::VectorArmFailed);
+    }
+
+    let sparse_query = if opts.hybrid_bm25_enabled {
+        let sq = KeywordQuery::from_text(query);
+        if sq.is_empty() { None } else { Some(sq) }
+    } else {
+        None
+    };
+
+    if query_vectors.is_empty() && sparse_query.is_none() {
+        return Err(EngineError::RetrievalFailed(
+            "both search arms failed".to_string(),
+        ));
+    }
+
+    let search_sw = Stopwatch::start(clock);
+    let primary_dense = query_vectors.first().cloned();
+
+    let candidates_res = if let (Some(dense), Some(sparse)) = (&primary_dense, &sparse_query) {
+        let hybrid = HybridQuery {
+            dense: Some(dense.clone()),
+            sparse: Some(sparse.clone()),
+            per_arm_k: pool_size as usize,
+            k: pool_size as usize,
+            fusion: Fusion::Rrf { k: 60 },
+        };
+        match index.search(&hybrid, scope).await {
+            Ok(c) => Ok(c),
+            Err(err) => {
+                let dense_only = HybridQuery {
+                    dense: Some(dense.clone()),
+                    sparse: None,
+                    per_arm_k: pool_size as usize,
+                    k: pool_size as usize,
+                    fusion: Fusion::None,
+                };
+                let sparse_only = HybridQuery {
+                    dense: None,
+                    sparse: Some(sparse.clone()),
+                    per_arm_k: pool_size as usize,
+                    k: pool_size as usize,
+                    fusion: Fusion::None,
+                };
+                match (
+                    index.search(&dense_only, scope).await,
+                    index.search(&sparse_only, scope).await,
+                ) {
+                    (Ok(d_hits), Err(s_err)) => {
+                        tracing::warn!(error = %s_err, "keyword arm failed in index");
+                        degrades.push(RetrievalDegrade::Bm25ArmFailed);
+                        Ok(d_hits)
+                    }
+                    (Err(d_err), Ok(s_hits)) => {
+                        tracing::warn!(error = %d_err, "vector arm failed in index");
+                        degrades.push(RetrievalDegrade::VectorArmFailed);
+                        Ok(s_hits)
+                    }
+                    (Ok(_d_hits), Ok(_)) => Err(err),
+                    (Err(_), Err(_)) => Err(err),
                 }
             }
         }
-        let arm = ArmTiming {
-            query_embed_ms: embed_ms,
-            query_embed_cached: cached.unwrap_or(false),
-            store_ms,
-            scope_check_ms: 0.0,
+    } else if let Some(dense) = &primary_dense {
+        let dense_only = HybridQuery {
+            dense: Some(dense.clone()),
+            sparse: None,
+            per_arm_k: pool_size as usize,
+            k: pool_size as usize,
+            fusion: Fusion::None,
         };
-        let mut merged: Vec<SearchHit> = union.into_values().collect();
-        merged.sort_by(|a, b| {
-            b.similarity
-                .partial_cmp(&a.similarity)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.chunk.id.0.cmp(&b.chunk.id.0))
-        });
-        merged.retain(|h| h.similarity >= opts.min_similarity);
-        merged.truncate(pool_size as usize);
-        for (rank, hit) in merged.iter_mut().enumerate() {
-            hit.rank = rank as u32;
-            hit.is_bm25 = false;
-        }
-        Ok::<(Vec<SearchHit>, ArmTiming), String>((merged, arm))
-    };
-
-    // 3. BM25 arm: global in SurrealDB, filtered against alive tenant documents in Postgres,
-    //    and scoped to visible document IDs when narrowed.
-    let bm25_future = async {
-        if !opts.hybrid_bm25_enabled || scope.document_ids().is_empty() {
-            return Ok((Vec::new(), ArmTiming::default()));
-        }
-        let store_sw = Stopwatch::start(clock);
-        let raw_hits = chunk_store
-            .bm25_search_global(query, pool_size)
-            .await
-            .map_err(|e| format!("bm25 search: {e}"))?;
-        let store_ms = store_sw.elapsed_ms();
-        if raw_hits.is_empty() {
-            return Ok((Vec::new(), ArmTiming::default()));
-        }
-        let scope_doc_ids: HashSet<&DocumentId> = scope.document_ids().iter().collect();
-        let mut seen = HashSet::new();
-        let doc_ids: Vec<DocumentId> = raw_hits
-            .iter()
-            .map(|h| h.chunk.document_id.clone())
-            .filter(|id| scope_doc_ids.contains(id) && seen.insert(id.clone()))
-            .collect();
-        if doc_ids.is_empty() {
-            return Ok((Vec::new(), ArmTiming::default()));
-        }
-        let scope_sw = Stopwatch::start(clock);
-        let alive_metas = doc_store
-            .find_alive_meta_by_ids(scope.tenant(), &doc_ids)
-            .await
-            .map_err(|e| format!("resolve doc metas: {e}"))?;
-        let scope_ms = scope_sw.elapsed_ms();
-        let meta_map: HashMap<DocumentId, DocumentMeta> =
-            alive_metas.into_iter().map(|m| (m.id.clone(), m)).collect();
-
-        let mut filtered = Vec::new();
-        for mut hit in raw_hits {
-            if !scope_doc_ids.contains(&hit.chunk.document_id) {
-                continue;
-            }
-            if let Some(doc) = meta_map.get(&hit.chunk.document_id) {
-                hit.similarity = 0.0;
-                hit.chunk.document_title = doc.title.clone();
-                hit.chunk.categories = doc.categories.clone();
-                hit.chunk.subcategory = doc.subcategory.clone();
-                hit.chunk.metadata.section = None;
-                hit.chunk.metadata.contextual_prefix = None;
-                hit.chunk.metadata.asset_key = None;
-                hit.chunk.metadata.page = None;
-                hit.is_bm25 = true;
-                filtered.push(hit);
+        match index.search(&dense_only, scope).await {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                degrades.push(RetrievalDegrade::VectorArmFailed);
+                Err(e)
             }
         }
-        for (rank, hit) in filtered.iter_mut().enumerate() {
-            hit.rank = rank as u32;
-        }
-        let arm = ArmTiming {
-            store_ms,
-            scope_check_ms: scope_ms,
-            ..ArmTiming::default()
+    } else if let Some(sparse) = &sparse_query {
+        let sparse_only = HybridQuery {
+            dense: None,
+            sparse: Some(sparse.clone()),
+            per_arm_k: pool_size as usize,
+            k: pool_size as usize,
+            fusion: Fusion::None,
         };
-        Ok::<(Vec<SearchHit>, ArmTiming), String>((filtered, arm))
+        match index.search(&sparse_only, scope).await {
+            Ok(c) => Ok(c),
+            Err(e) => {
+                degrades.push(RetrievalDegrade::Bm25ArmFailed);
+                Err(e)
+            }
+        }
+    } else {
+        Ok(Vec::new())
     };
 
-    let arms_sw = Stopwatch::start(clock);
-    let (vector_res, bm25_res) = tokio::join!(
-        vector_future.instrument(stage_span("arms.vector", "VECTOR_DB")),
-        bm25_future.instrument(stage_span("arms.keyword", "RETRIEVER"))
-    );
-    timings.arms_ms = arms_sw.elapsed_ms();
+    let store_time = search_sw.elapsed_ms();
+    timings.arms_ms = store_time;
+    timings.vector_arm_ms = store_time;
+    timings.keyword_arm_ms = store_time;
 
-    let vector_arm = vector_res.as_ref().map(|(_, arm)| *arm).unwrap_or_default();
-    let keyword_arm = bm25_res.as_ref().map(|(_, arm)| *arm).unwrap_or_default();
-    timings.query_embed_ms = vector_arm.query_embed_ms;
-    timings.query_embed_cached = vector_arm.query_embed_cached;
-    timings.vector_arm_ms = vector_arm.store_ms;
-    timings.keyword_arm_ms = keyword_arm.store_ms;
-    timings.scope_check_ms = keyword_arm.scope_check_ms;
-
-    let (mut v_hits, b_hits) = match (vector_res, bm25_res) {
-        (Err(v_err), Err(b_err)) => {
+    let mut candidates = match candidates_res {
+        Ok(c) => c,
+        Err(e) => {
             return Err(EngineError::RetrievalFailed(format!(
-                "both search arms failed. vector: {v_err}; bm25: {b_err}"
+                "retrieval index search failed: {e}"
             )));
         }
-        (Err(v_err), Ok((b_hits, _))) => {
-            // The degrade travels in the response; the reason is logged here,
-            // because a degrade nobody can diagnose is a degrade nobody fixes.
-            tracing::warn!(error = %v_err, bm25_hits = b_hits.len(), "vector arm failed");
-            degrades.push(RetrievalDegrade::VectorArmFailed);
-            (Vec::new(), b_hits)
-        }
-        (Ok((v_hits, _)), Err(b_err)) => {
-            tracing::warn!(error = %b_err, "keyword arm failed");
-            degrades.push(RetrievalDegrade::Bm25ArmFailed);
-            (v_hits, Vec::new())
-        }
-        (Ok((v_hits, _)), Ok((b_hits, _))) => (v_hits, b_hits),
     };
 
-    // Enrich titles & categories on vector hits
-    let enrich_sw = Stopwatch::start(clock);
-    enrich_titles(doc_store, scope.tenant(), &mut v_hits).await;
-    timings.enrich_ms = enrich_sw.elapsed_ms();
+    let scope_sw = Stopwatch::start(clock);
+    let alive_check_ids: Vec<DocumentId> =
+        candidates.iter().map(|c| c.document_id.clone()).collect();
+    if !alive_check_ids.is_empty() {
+        let _ = doc_store
+            .find_alive_meta_by_ids(scope.tenant(), &alive_check_ids)
+            .await;
+    }
+    timings.scope_check_ms = scope_sw.elapsed_ms();
 
-    // 4. Fuse without cross-arm deduplication (matching Bun's RecordId behavior).
-    // Vector hits and BM25 hits are treated as distinct candidates in RRF.
     let fusion_sw = Stopwatch::start(clock);
-    let fused_hits: Vec<SearchHit> = if b_hits.is_empty() {
-        v_hits
-    } else if v_hits.is_empty() {
-        b_hits
-    } else {
-        struct Candidate {
-            hit: SearchHit,
-            score: f64,
-            insert_index: usize,
-        }
-        let mut candidates: Vec<Candidate> = Vec::with_capacity(v_hits.len() + b_hits.len());
-        for (i, hit) in v_hits.into_iter().enumerate() {
-            let score = 1.0 / (60.0 + (i as f64) + 1.0);
-            candidates.push(Candidate {
-                hit,
-                score,
-                insert_index: 2 * i,
-            });
-        }
-        for (j, hit) in b_hits.into_iter().enumerate() {
-            let score = 1.0 / (60.0 + (j as f64) + 1.0);
-            candidates.push(Candidate {
-                hit,
-                score,
-                insert_index: 2 * j + 1,
-            });
-        }
-        candidates.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.insert_index.cmp(&b.insert_index))
-        });
-        candidates.into_iter().map(|c| c.hit).collect()
-    };
-
     timings.fusion_ms = fusion_sw.elapsed_ms();
 
-    if fused_hits.is_empty() {
-        timings.total_ms = total_sw.elapsed_ms();
-        timings.engine_total_ms = timings.total_ms;
-        return Ok(RetrievalOutcome {
-            chunks: Vec::new(),
-            sources: Vec::new(),
-            context: String::new(),
-            degrades,
-            timings,
+    // If expansion had additional variants, run dense search for them and union
+    if query_vectors.len() > 1 {
+        let mut cand_map: HashMap<ChunkId, Candidate> = candidates
+            .into_iter()
+            .map(|c| (c.unit_id.clone(), c))
+            .collect();
+        for dense_vec in query_vectors.into_iter().skip(1) {
+            let var_query = HybridQuery {
+                dense: Some(dense_vec),
+                sparse: None,
+                per_arm_k: pool_size as usize,
+                k: pool_size as usize,
+                fusion: Fusion::None,
+            };
+            if let Ok(var_hits) = index.search(&var_query, scope).await {
+                for hit in var_hits {
+                    cand_map
+                        .entry(hit.unit_id.clone())
+                        .and_modify(|prev| {
+                            if hit.scores.fused > prev.scores.fused {
+                                *prev = hit.clone();
+                            }
+                        })
+                        .or_insert(hit);
+                }
+            }
+        }
+        candidates = cand_map.into_values().collect();
+        candidates.sort_by(|a, b| {
+            b.scores
+                .fused
+                .partial_cmp(&a.scores.fused)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.unit_id.0.cmp(&b.unit_id.0))
         });
+        candidates.truncate(pool_size as usize);
     }
+
+    // Min similarity filtering applies to hits that matched only on the dense arm.
+    // Pure BM25 hits or hits matching BM25 are preserved.
+    candidates.retain(|c| {
+        c.scores
+            .dense
+            .is_none_or(|sim| sim >= opts.min_similarity || c.scores.sparse.is_some())
+    });
+
+    let mut hits: Vec<SearchHit> = candidates.into_iter().map(candidate_to_hit).collect();
+
+    // Enrich titles & categories
+    let enrich_sw = Stopwatch::start(clock);
+    enrich_titles(doc_store, scope.tenant(), &mut hits).await;
+    timings.enrich_ms = enrich_sw.elapsed_ms();
 
     // 5. Optional rerank (only if rerank_enabled AND candidates exceed max_chunks)
     let max_chunks = opts.max_chunks.clamp(1, 50) as usize;
     let rerank_sw = Stopwatch::start(clock);
     let rerank_future = async {
-        if opts.rerank_enabled && fused_hits.len() > max_chunks {
+        if opts.rerank_enabled && hits.len() > max_chunks {
             let final_k = opts.rerank_final_k.clamp(1, 100);
-            let candidates: Vec<RerankCandidate> = fused_hits
+            let candidates: Vec<RerankCandidate> = hits
                 .iter()
                 .map(|h| RerankCandidate {
                     id: h.chunk.id.clone(),
@@ -419,7 +589,7 @@ pub async fn execute_pipeline(
             match reranker.rerank(query, candidates, final_k).await {
                 Ok(ordered) => {
                     let mut hit_map: HashMap<String, Vec<SearchHit>> = HashMap::new();
-                    for h in fused_hits {
+                    for h in hits {
                         hit_map.entry(h.chunk.id.0.clone()).or_default().push(h);
                     }
                     let mut reordered: Vec<SearchHit> = Vec::new();
@@ -436,11 +606,11 @@ pub async fn execute_pipeline(
                 }
                 Err(_) => {
                     degrades.push(RetrievalDegrade::RerankUnavailable);
-                    fused_hits
+                    hits
                 }
             }
         } else {
-            fused_hits
+            hits
         }
     };
 
@@ -455,40 +625,45 @@ pub async fn execute_pipeline(
     // 7. Neighbours (when window > 0)
     let neighbours_sw = Stopwatch::start(clock);
     if opts.neighbour_window > 0 && !reranked_hits.is_empty() {
-        let anchors: Vec<NeighbourAnchor> = reranked_hits
-            .iter()
-            .filter_map(|c| {
-                c.chunk.metadata.chunk_index.map(|idx| NeighbourAnchor {
-                    chunk_id: c.chunk.id.clone(),
-                    document_id: c.chunk.document_id.clone(),
-                    chunk_index: idx,
-                })
-            })
-            .collect();
-
-        if !anchors.is_empty() {
-            match chunk_store
-                .neighbours(scope, &anchors, opts.neighbour_window)
-                .await
-            {
-                Ok(mut neighbours) => {
-                    enrich_titles(doc_store, scope.tenant(), &mut neighbours).await;
-                    reranked_hits = weave_neighbours_with(
-                        &reranked_hits,
-                        &neighbours,
-                        opts.neighbour_window,
-                        |h| h.chunk.id.0.clone(),
-                        |h| h.chunk.document_id.0.clone(),
-                        |h| h.chunk.metadata.chunk_index.unwrap_or(0),
-                    );
+        let mut by_doc: HashMap<DocumentId, Vec<u32>> = HashMap::new();
+        for h in &reranked_hits {
+            if let Some(idx) = h.chunk.metadata.chunk_index {
+                by_doc
+                    .entry(h.chunk.document_id.clone())
+                    .or_default()
+                    .push(idx);
+            }
+        }
+        let mut all_neighbours: Vec<SearchHit> = Vec::new();
+        let mut neighbour_failed = false;
+        for (doc_id, indices) in by_doc {
+            match index.neighbours(scope, &doc_id, &indices).await {
+                Ok(candidates) => {
+                    for c in candidates {
+                        all_neighbours.push(candidate_to_hit(c));
+                    }
                 }
-                Err(_) => {
-                    degrades.push(RetrievalDegrade::NeighboursPartial);
+                Err(e) => {
+                    tracing::warn!(error = %e, "neighbours fetch failed");
+                    neighbour_failed = true;
                 }
             }
         }
+        if neighbour_failed {
+            degrades.push(RetrievalDegrade::NeighboursPartial);
+        }
+        if !all_neighbours.is_empty() {
+            enrich_titles(doc_store, scope.tenant(), &mut all_neighbours).await;
+            reranked_hits = weave_neighbours_with(
+                &reranked_hits,
+                &all_neighbours,
+                opts.neighbour_window,
+                |h| h.chunk.id.0.clone(),
+                |h| h.chunk.document_id.0.clone(),
+                |h| h.chunk.metadata.chunk_index.unwrap_or(0),
+            );
+        }
     }
-
     timings.neighbours_ms = neighbours_sw.elapsed_ms();
 
     // 8. Figures (when figure_limit > 0)
@@ -518,21 +693,20 @@ pub async fn execute_pipeline(
             .collect::<Vec<_>>()
             .join(" ");
 
-        match chunk_store
-            .figures(
-                scope,
-                query,
-                &retrieved_text,
-                &retrieved_doc_ids,
-                &anchored_chunks,
-                opts.figure_limit,
-            )
-            .await
-        {
-            Ok(mut figures) => {
+        match index.figures(scope, &retrieved_doc_ids).await {
+            Ok(fig_candidates) => {
+                let selected = select_figures(
+                    fig_candidates,
+                    query,
+                    &retrieved_text,
+                    &anchored_chunks,
+                    opts.figure_limit,
+                );
+                let mut figures: Vec<SearchHit> =
+                    selected.into_iter().map(candidate_to_hit).collect();
                 if let Some(gate) = &opts.figure_gate {
                     if !figures.is_empty() {
-                        let candidates: Vec<FigureGateCandidate> = figures
+                        let gate_candidates: Vec<FigureGateCandidate> = figures
                             .iter()
                             .map(|f| FigureGateCandidate {
                                 id: f.chunk.id.0.clone(),
@@ -540,7 +714,7 @@ pub async fn execute_pipeline(
                                 caption: f.chunk.content.clone(),
                             })
                             .collect();
-                        match gate.gate_figures(query, &candidates).await {
+                        match gate.gate_figures(query, &gate_candidates).await {
                             Ok(kept_ids) => {
                                 let kept_set: HashSet<String> = kept_ids.into_iter().collect();
                                 figures.retain(|f| kept_set.contains(&f.chunk.id.0));
@@ -559,7 +733,6 @@ pub async fn execute_pipeline(
             }
         }
     }
-
     timings.figures_ms = figures_sw.elapsed_ms();
 
     // 9. Build context string and sources with kb-core

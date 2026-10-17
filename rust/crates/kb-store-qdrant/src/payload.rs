@@ -82,6 +82,24 @@ pub fn scope_filter(scope: &DocumentScope) -> Filter {
     document_filter(scope.tenant(), &documents)
 }
 
+/// `tenant == t AND document_id in documents AND chunk_type == "figure"`.
+#[must_use]
+pub fn figures_filter(tenant: &TenantId, documents: &[String]) -> Filter {
+    Filter::must([
+        Condition::matches(
+            KEY_TENANT_ID,
+            MatchValue::Keyword(tenant.as_str().to_string()),
+        ),
+        Condition::matches(
+            KEY_DOCUMENT_ID,
+            MatchValue::Keywords(RepeatedStrings {
+                strings: documents.to_vec(),
+            }),
+        ),
+        Condition::matches(KEY_CHUNK_TYPE, MatchValue::Keyword("figure".to_string())),
+    ])
+}
+
 /// `tenant == t AND document_id in documents`.
 #[must_use]
 pub fn document_filter(tenant: &TenantId, documents: &[String]) -> Filter {

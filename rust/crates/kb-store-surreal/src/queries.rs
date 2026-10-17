@@ -1,8 +1,8 @@
-//! SurrealQL query templates and sanitisation helpers.
+//! Prepared SurrealQL statements used by `kb-store-surreal`.
 
 use kb_ports::PortError;
 
-/// Vector similarity search template.
+/// Vector search template using SurrealDB v2's `vector::similarity::cosine` operator.
 pub const VECTOR_SEARCH_QUERY: &str = "SELECT id, document_id, content, chunk_index, metadata, contextual_prefix, \
      vector::similarity::cosine(embedding, {embedding}) AS similarity \
      FROM document_chunk \
@@ -10,19 +10,11 @@ pub const VECTOR_SEARCH_QUERY: &str = "SELECT id, document_id, content, chunk_in
      ORDER BY similarity DESC \
      LIMIT {limit};";
 
-/// BM25 full-text search template. `$q` is bound via query parameter, never spliced.
+/// Scoped BM25 full-text search template using `@@` (matches full terms only).
 pub const BM25_SEARCH_QUERY: &str = "SELECT id, document_id, content, chunk_index, metadata, contextual_prefix, \
      search::score(0) AS score \
      FROM document_chunk \
      WHERE content @@ $q AND document_id IN {doc_ids} \
-     ORDER BY score DESC, id ASC \
-     LIMIT {limit};";
-
-/// Unscoped BM25 full-text search template matching TypeScript `bm25Search`.
-pub const BM25_SEARCH_QUERY_UNSCOPED: &str = "SELECT id, document_id, content, chunk_index, metadata, contextual_prefix, \
-     search::score(0) AS score \
-     FROM document_chunk \
-     WHERE content @@ $q \
      ORDER BY score DESC, id ASC \
      LIMIT {limit};";
 
@@ -39,22 +31,24 @@ pub const FIGURES_QUERY: &str = "SELECT id, document_id, content, chunk_index, m
 /// Validate that a document id strictly matches `^[A-Za-z0-9_-]{1,64}$`.
 pub fn validate_document_id(id: &str) -> Result<(), PortError> {
     if id.is_empty() || id.len() > 64 {
-        return Err(PortError::Malformed(format!(
-            "invalid document id length: {id}"
+        return Err(PortError::InvalidArgument(format!(
+            "invalid document id length: {}",
+            id.len()
         )));
     }
     if !id
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        return Err(PortError::Malformed(format!(
+        return Err(PortError::InvalidArgument(format!(
             "invalid document id characters: {id}"
         )));
     }
     Ok(())
 }
 
-/// Render a list of document ids as a SurrealQL array of string literals after validation.
+/// Format a slice of validated document ids into a SurrealQL array literal:
+/// `['doc-1', 'doc-2']`.
 pub fn surql_id_list(ids: &[String]) -> Result<String, PortError> {
     for id in ids {
         validate_document_id(id)?;
@@ -78,11 +72,6 @@ pub fn surql_f32_array(v: &[f32]) -> String {
 }
 
 /// Render a string as a SurrealQL double-quoted literal.
-///
-/// `serde_json` escaping is a superset of SurrealQL's inside a quoted string,
-/// and it is the only escaping in this module that has been reasoned about
-/// against arbitrary input: a `"` becomes `\"` and a newline becomes `\n`, so
-/// no caller-supplied text can terminate the literal and append a statement.
 #[must_use]
 pub fn surql_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())

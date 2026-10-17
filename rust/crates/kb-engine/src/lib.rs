@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use kb_ports::{
-    ChunkStore, DocumentScope, DocumentStore, Embedder, EngineError, FigureGate, PortError,
-    Reranker,
+    DocumentScope, DocumentStore, Embedder, EngineError, FigureGate, PortError, Reranker,
+    RetrievalIndex,
 };
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -112,7 +112,7 @@ impl QueryExpander for NoopExpander {
 #[derive(Clone)]
 pub struct EngineInputs {
     pub embedder: Arc<dyn Embedder>,
-    pub chunk_store: Arc<dyn ChunkStore>,
+    pub index: Arc<dyn RetrievalIndex>,
     pub reranker: Arc<dyn Reranker>,
     pub document_store: Arc<dyn DocumentStore>,
     pub query_expander: Arc<dyn QueryExpander>,
@@ -140,7 +140,7 @@ impl Engine {
         }
     }
 
-    /// Build an engine whose stages are measured against `clock`.
+    /// Build an engine whose stages are measured against `clock``.
     ///
     /// Production passes the real clock; a test passes a [`ManualClock`] and
     /// asserts the stage accounting without sleeping through it.
@@ -162,13 +162,13 @@ impl Engine {
     pub fn with_settings_and_inputs(
         settings: EngineSettings,
         embedder: Arc<dyn Embedder>,
-        chunk_store: Arc<dyn ChunkStore>,
+        index: Arc<dyn RetrievalIndex>,
         reranker: Arc<dyn Reranker>,
         document_store: Arc<dyn DocumentStore>,
     ) -> Self {
         let inputs = EngineInputs {
             embedder,
-            chunk_store,
+            index,
             reranker,
             document_store,
             query_expander: Arc::new(NoopExpander),
@@ -216,7 +216,7 @@ impl Engine {
 
         execute_pipeline(
             &self.inputs.document_store,
-            &self.inputs.chunk_store,
+            &self.inputs.index,
             &self.inputs.embedder,
             &self.inputs.reranker,
             &self.inputs.query_expander,

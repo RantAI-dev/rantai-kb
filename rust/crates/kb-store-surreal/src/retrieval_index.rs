@@ -236,6 +236,63 @@ impl RetrievalIndex for SurrealChunkStore {
         Ok(out)
     }
 
+    async fn figures(
+        &self,
+        scope: &DocumentScope,
+        document_ids: &[DocumentId],
+    ) -> Result<Vec<Candidate>, PortError> {
+        let matching_docs: Vec<String> = document_ids
+            .iter()
+            .filter(|d| scope.document_ids().contains(d))
+            .map(|d| d.as_str().to_string())
+            .collect();
+        if matching_docs.is_empty() {
+            return Ok(Vec::new());
+        }
+        for d in &matching_docs {
+            validate_document_id(d)?;
+        }
+        let doc_ids_sql = surql_id_list(&matching_docs)?;
+        let sql = crate::queries::FIGURES_QUERY.replace("{doc_ids}", &doc_ids_sql);
+        let envelope = self.query(&sql).await?;
+        let mut out: Vec<Candidate> = SurrealChunkStore::extract_rows(&envelope)
+            .into_iter()
+            .filter_map(|row| row_to_chunk(&row))
+            .map(|row| candidate(row, None, None, scope.tenant()))
+            .collect();
+        out.sort_by(|a, b| a.unit_id.as_str().cmp(b.unit_id.as_str()));
+        Ok(out)
+    }
+
+    async fn ordered_chunks(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+    ) -> Result<Vec<Candidate>, PortError> {
+        validate_document_id(document_id.as_str())?;
+        let chunks = crate::chunks_meta::execute_ordered_chunks(self, document_id).await?;
+        Ok(chunks
+            .into_iter()
+            .map(|c| Candidate {
+                unit_id: ChunkId::new_unchecked(c.id),
+                document_id: document_id.clone(),
+                tenant: tenant.clone(),
+                chunk_index: c.chunk_index,
+                page: c.metadata.page,
+                chunk_type: kb_ports::ChunkType::from_storage(c.chunk_type.as_deref()),
+                content: c.content,
+                contextual_prefix: c.metadata.contextual_prefix.clone(),
+                metadata: serde_json::to_value(&c.metadata).unwrap_or(serde_json::Value::Null),
+                scores: ArmScores::default(),
+                ranks: ArmRanks::default(),
+            })
+            .collect())
+    }
+
+    async fn health_check(&self) -> Result<(), PortError> {
+        kb_ports::ChunkStore::health_check(self).await
+    }
+
     fn capabilities(&self) -> IndexCapabilities {
         IndexCapabilities {
             // SurrealDB fixes the width at `DEFINE INDEX … DIMENSION` time and
@@ -378,6 +435,7 @@ fn create_statement(unit: &IndexUnit) -> Result<String, PortError> {
         format!("content = {}", surql_string(&unit.content)),
         format!("chunk_index = {}", unit.chunk_index),
         format!("embedding = {}", surql_f32_array(&unit.dense)),
+        "created_at = time::now()".to_string(),
     ];
     // SurrealDB rejects an explicit NULL for `option<T>`, so an absent value is
     // left out of the assignment list entirely rather than set to null.

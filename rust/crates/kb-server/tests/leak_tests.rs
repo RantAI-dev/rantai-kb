@@ -30,8 +30,9 @@ use kb_engine::fakes::{
 use kb_eval::leak::{Arm, LeakMatrix, ScopeKind, SeedDocument, Status, plan};
 use kb_eval::leak_http::{LeakConfig, canaries_for, probe};
 use kb_ports::{
-    Chunk, ChunkId, ChunkMetadata, ChunkStore, ChunkToStore, DocumentId, DocumentMeta,
-    DocumentScope, NeighbourAnchor, PortError, SearchHit, StoredChunk, TenantId,
+    ArmRanks, ArmScores, Candidate, Chunk, ChunkId, ChunkMetadata, DocumentId, DocumentMeta,
+    DocumentScope, HybridQuery, IndexCapabilities, IndexUnit, PortError, RetrievalIndex, SearchHit,
+    TenantId,
 };
 use kb_server::events::EventBus;
 use kb_server::state::{AppState, StateParts};
@@ -198,7 +199,7 @@ async fn serve(leaking: bool) -> (String, BTreeMap<String, String>) {
         }
     }
 
-    let chunk_store: Arc<dyn ChunkStore> = if leaking {
+    let index: Arc<dyn RetrievalIndex> = if leaking {
         Arc::new(LeakingChunkStore {
             inner: chunks.clone(),
         })
@@ -209,7 +210,7 @@ async fn serve(leaking: bool) -> (String, BTreeMap<String, String>) {
     let state = AppState::from_parts(
         StateParts {
             documents: Arc::new(documents),
-            chunks: chunk_store,
+            index,
             entities: Arc::new(entities),
             blob: Arc::new(blobs),
             embedder: Arc::new(embedder),
@@ -388,88 +389,100 @@ struct LeakingChunkStore {
 }
 
 #[async_trait]
-impl ChunkStore for LeakingChunkStore {
-    async fn delete_by_document(&self, document_id: &DocumentId) -> Result<u64, PortError> {
-        self.inner.delete_by_document(document_id).await
+impl RetrievalIndex for LeakingChunkStore {
+    async fn upsert(&self, units: Vec<IndexUnit>) -> Result<(), PortError> {
+        self.inner.upsert(units).await
     }
 
-    async fn store_chunks(
+    async fn delete_document(
         &self,
+        tenant: &TenantId,
         document_id: &DocumentId,
-        chunks: &[ChunkToStore],
-        embedding_model: Option<&str>,
-    ) -> Result<(), PortError> {
-        self.inner
-            .store_chunks(document_id, chunks, embedding_model)
-            .await
+    ) -> Result<u64, PortError> {
+        self.inner.delete_document(tenant, document_id).await
     }
 
-    async fn chunk_counts(&self, ids: &[DocumentId]) -> Result<Vec<(DocumentId, u32)>, PortError> {
-        self.inner.chunk_counts(ids).await
-    }
-
-    async fn ordered_chunks(
+    async fn search(
         &self,
-        document_id: &DocumentId,
-    ) -> Result<Vec<StoredChunk>, PortError> {
-        self.inner.ordered_chunks(document_id).await
-    }
-
-    /// The leak: no scope filter at all.
-    async fn vector_search(
-        &self,
+        query: &HybridQuery,
         _scope: &DocumentScope,
-        _embedding: &[f32],
-        limit: u32,
-    ) -> Result<Vec<SearchHit>, PortError> {
+    ) -> Result<Vec<Candidate>, PortError> {
+        // The leak: ignores scope and returns all vector hits!
         let list = self.inner.vector_hits.read().unwrap();
-        Ok(list.iter().take(limit as usize).cloned().collect())
+        let mut out = Vec::new();
+        for h in list.iter() {
+            out.push(Candidate {
+                unit_id: h.chunk.id.clone(),
+                document_id: h.chunk.document_id.clone(),
+                tenant: TenantId("fake".into()),
+                chunk_index: h.chunk.metadata.chunk_index.unwrap_or(0),
+                page: h.chunk.metadata.page,
+                chunk_type: h.chunk.chunk_type,
+                content: h.chunk.content.clone(),
+                contextual_prefix: h.chunk.metadata.contextual_prefix.clone(),
+                metadata: serde_json::json!({
+                    "section": h.chunk.metadata.section,
+                    "assetKey": h.chunk.metadata.asset_key,
+                    "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
+                    "chunkIndex": h.chunk.metadata.chunk_index,
+                    "page": h.chunk.metadata.page,
+                }),
+                scores: ArmScores {
+                    dense: Some(h.similarity),
+                    sparse: None,
+                    fused: h.similarity,
+                },
+                ranks: ArmRanks {
+                    dense: Some(h.rank),
+                    sparse: None,
+                    fused: h.rank,
+                },
+            });
+        }
+        out.truncate(query.k);
+        Ok(out)
     }
 
-    async fn bm25_search(
+    async fn fetch(
         &self,
         scope: &DocumentScope,
-        query: &str,
-        limit: u32,
-    ) -> Result<Vec<SearchHit>, PortError> {
-        self.inner.bm25_search(scope, query, limit).await
-    }
-
-    async fn bm25_search_global(
-        &self,
-        query: &str,
-        limit: u32,
-    ) -> Result<Vec<SearchHit>, PortError> {
-        self.inner.bm25_search_global(query, limit).await
+        ids: &[ChunkId],
+    ) -> Result<Vec<Candidate>, PortError> {
+        self.inner.fetch(scope, ids).await
     }
 
     async fn neighbours(
         &self,
         scope: &DocumentScope,
-        anchors: &[NeighbourAnchor],
-        window: u32,
-    ) -> Result<Vec<SearchHit>, PortError> {
-        self.inner.neighbours(scope, anchors, window).await
+        document_id: &DocumentId,
+        chunk_indices: &[u32],
+    ) -> Result<Vec<Candidate>, PortError> {
+        self.inner
+            .neighbours(scope, document_id, chunk_indices)
+            .await
     }
 
     async fn figures(
         &self,
         scope: &DocumentScope,
-        query: &str,
-        retrieved_text: &str,
-        doc_ids: &[DocumentId],
-        anchored_chunks: &[(DocumentId, u32)],
-        limit: u32,
-    ) -> Result<Vec<SearchHit>, PortError> {
-        self.inner
-            .figures(
-                scope,
-                query,
-                retrieved_text,
-                doc_ids,
-                anchored_chunks,
-                limit,
-            )
-            .await
+        document_ids: &[DocumentId],
+    ) -> Result<Vec<Candidate>, PortError> {
+        self.inner.figures(scope, document_ids).await
+    }
+
+    async fn ordered_chunks(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+    ) -> Result<Vec<Candidate>, PortError> {
+        self.inner.ordered_chunks(tenant, document_id).await
+    }
+
+    async fn health_check(&self) -> Result<(), PortError> {
+        self.inner.health_check().await
+    }
+
+    fn capabilities(&self) -> IndexCapabilities {
+        self.inner.capabilities()
     }
 }

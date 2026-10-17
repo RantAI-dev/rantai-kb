@@ -42,15 +42,16 @@ fn next_id() -> u64 {
 }
 
 use kb_ports::{
-    AuthContext, BlobStore, CategoryRecord, Chunk, ChunkId, ChunkMetadata, ChunkStore,
-    ChunkToStore, ChunkType, CreateCategory, CreateJobInput, CreateKnowledgeBase,
-    DocumentDownloadMeta, DocumentId, DocumentIntelligenceData, DocumentMeta, DocumentScope,
-    DocumentStore, Embedder, Entity, EntityExtractor, EntityStore, EntityView, ExtractionOptions,
-    ExtractionResult, Extractor, FigureGate, FigureGateCandidate, JobRecord, JobStore, JobView,
-    KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor, NewDocument,
-    PatchCategory, PatchDocument, PatchKnowledgeBase, PortError, ProgressSink, QueryEmbedding,
-    ReapableJob, Relation, RelationView, RerankCandidate, RerankResult, Reranker, RetryJobOutcome,
-    ScopeRequest, SearchHit, StoredChunk, TenantId, adapter::ScopeToken,
+    ArmRanks, ArmScores, AuthContext, BlobStore, Candidate, CategoryRecord, Chunk, ChunkId,
+    ChunkMetadata, ChunkStore, ChunkToStore, ChunkType, CreateCategory, CreateJobInput,
+    CreateKnowledgeBase, DocumentDownloadMeta, DocumentId, DocumentIntelligenceData, DocumentMeta,
+    DocumentScope, DocumentStore, Embedder, Entity, EntityExtractor, EntityStore, EntityView,
+    ExtractionOptions, ExtractionResult, Extractor, FigureGate, FigureGateCandidate, HybridQuery,
+    IndexCapabilities, IndexUnit, JobRecord, JobStore, JobView, KnowledgeBaseId,
+    KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor, NewDocument, PatchCategory,
+    PatchDocument, PatchKnowledgeBase, PortError, ProgressSink, QueryEmbedding, ReapableJob,
+    Relation, RelationView, RerankCandidate, RerankResult, Reranker, RetrievalIndex,
+    RetryJobOutcome, ScopeRequest, SearchHit, StoredChunk, TenantId, adapter::ScopeToken,
 };
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -775,19 +776,6 @@ impl ChunkStore for FakeChunkStore {
         Ok(filtered)
     }
 
-    async fn bm25_search_global(
-        &self,
-        _query: &str,
-        limit: u32,
-    ) -> Result<Vec<SearchHit>, PortError> {
-        if self.fail_bm25.load(Ordering::Relaxed) {
-            return Err(PortError::Unavailable("forced bm25 failure".to_string()));
-        }
-        let list = self.bm25_hits.read().unwrap();
-        let filtered: Vec<SearchHit> = list.iter().take(limit as usize).cloned().collect();
-        Ok(filtered)
-    }
-
     async fn neighbours(
         &self,
         scope: &DocumentScope,
@@ -830,6 +818,283 @@ impl ChunkStore for FakeChunkStore {
             .cloned()
             .collect();
         Ok(filtered)
+    }
+}
+
+#[async_trait]
+impl RetrievalIndex for FakeChunkStore {
+    async fn upsert(&self, units: Vec<IndexUnit>) -> Result<(), PortError> {
+        if self.fail_store.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable("forced store failure".to_string()));
+        }
+        let mut stored = self.stored_chunks.write().unwrap();
+        for unit in units {
+            let chunks = stored.entry(unit.document_id.clone()).or_default();
+            chunks.push(ChunkToStore {
+                content: unit.content,
+                chunk_index: unit.chunk_index,
+                embedding: unit.dense,
+                metadata: unit.metadata,
+                contextual_prefix: unit.contextual_prefix,
+            });
+        }
+        Ok(())
+    }
+
+    async fn delete_document(
+        &self,
+        _tenant: &TenantId,
+        document_id: &DocumentId,
+    ) -> Result<u64, PortError> {
+        let removed = self
+            .stored_chunks
+            .write()
+            .unwrap()
+            .remove(document_id)
+            .map(|v| v.len() as u64)
+            .unwrap_or(0);
+        Ok(removed)
+    }
+
+    async fn search(
+        &self,
+        query: &HybridQuery,
+        scope: &DocumentScope,
+    ) -> Result<Vec<Candidate>, PortError> {
+        let v_failed = self.fail_vector.load(Ordering::Relaxed);
+        let b_failed = self.fail_bm25.load(Ordering::Relaxed);
+
+        if v_failed && b_failed {
+            return Err(PortError::Unavailable(
+                "both search arms failed".to_string(),
+            ));
+        }
+
+        if query.dense.is_some() && v_failed {
+            return Err(PortError::Unavailable("forced vector failure".to_string()));
+        }
+
+        if query.sparse.is_some() && b_failed {
+            return Err(PortError::Unavailable("forced bm25 failure".to_string()));
+        }
+
+        let allowed = scope.document_ids();
+        let mut out: Vec<Candidate> = Vec::new();
+
+        if query.dense.is_some() && !v_failed {
+            let v_list = self.vector_hits.read().unwrap();
+            for h in v_list
+                .iter()
+                .filter(|h| allowed.contains(&h.chunk.document_id))
+            {
+                out.push(Candidate {
+                    unit_id: h.chunk.id.clone(),
+                    document_id: h.chunk.document_id.clone(),
+                    tenant: scope.tenant().clone(),
+                    chunk_index: h.chunk.metadata.chunk_index.unwrap_or(0),
+                    page: h.chunk.metadata.page,
+                    chunk_type: h.chunk.chunk_type,
+                    content: h.chunk.content.clone(),
+                    contextual_prefix: h.chunk.metadata.contextual_prefix.clone(),
+                    metadata: serde_json::json!({
+                        "section": h.chunk.metadata.section,
+                        "assetKey": h.chunk.metadata.asset_key,
+                        "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
+                        "chunkIndex": h.chunk.metadata.chunk_index,
+                        "page": h.chunk.metadata.page,
+                    }),
+                    scores: ArmScores {
+                        dense: Some(h.similarity),
+                        sparse: None,
+                        fused: h.similarity,
+                    },
+                    ranks: ArmRanks {
+                        dense: Some(h.rank),
+                        sparse: None,
+                        fused: h.rank,
+                    },
+                });
+            }
+        }
+
+        if query.sparse.is_some() && !b_failed {
+            let b_list = self.bm25_hits.read().unwrap();
+            for h in b_list
+                .iter()
+                .filter(|h| allowed.contains(&h.chunk.document_id))
+            {
+                out.push(Candidate {
+                    unit_id: h.chunk.id.clone(),
+                    document_id: h.chunk.document_id.clone(),
+                    tenant: scope.tenant().clone(),
+                    chunk_index: h.chunk.metadata.chunk_index.unwrap_or(0),
+                    page: h.chunk.metadata.page,
+                    chunk_type: h.chunk.chunk_type,
+                    content: h.chunk.content.clone(),
+                    contextual_prefix: h.chunk.metadata.contextual_prefix.clone(),
+                    metadata: serde_json::json!({
+                        "section": h.chunk.metadata.section,
+                        "assetKey": h.chunk.metadata.asset_key,
+                        "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
+                        "chunkIndex": h.chunk.metadata.chunk_index,
+                        "page": h.chunk.metadata.page,
+                    }),
+                    scores: ArmScores {
+                        dense: None,
+                        sparse: Some(h.similarity),
+                        fused: h.similarity,
+                    },
+                    ranks: ArmRanks {
+                        dense: None,
+                        sparse: Some(h.rank),
+                        fused: h.rank,
+                    },
+                });
+            }
+        }
+
+        out.truncate(query.k);
+        Ok(out)
+    }
+
+    async fn fetch(
+        &self,
+        _scope: &DocumentScope,
+        _ids: &[ChunkId],
+    ) -> Result<Vec<Candidate>, PortError> {
+        Ok(Vec::new())
+    }
+
+    async fn neighbours(
+        &self,
+        scope: &DocumentScope,
+        document_id: &DocumentId,
+        _chunk_indices: &[u32],
+    ) -> Result<Vec<Candidate>, PortError> {
+        if self.fail_neighbours.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable(
+                "forced neighbours failure".to_string(),
+            ));
+        }
+        let list = self.neighbour_hits.read().unwrap();
+        let allowed = scope.document_ids();
+        if !allowed.contains(document_id) {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for h in list.iter() {
+            if &h.chunk.document_id == document_id {
+                let idx = h.chunk.metadata.chunk_index.unwrap_or(0);
+                out.push(Candidate {
+                    unit_id: h.chunk.id.clone(),
+                    document_id: h.chunk.document_id.clone(),
+                    tenant: scope.tenant().clone(),
+                    chunk_index: idx,
+                    page: h.chunk.metadata.page,
+                    chunk_type: h.chunk.chunk_type,
+                    content: h.chunk.content.clone(),
+                    contextual_prefix: h.chunk.metadata.contextual_prefix.clone(),
+                    metadata: serde_json::json!({
+                        "section": h.chunk.metadata.section,
+                        "assetKey": h.chunk.metadata.asset_key,
+                        "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
+                        "chunkIndex": h.chunk.metadata.chunk_index,
+                        "page": h.chunk.metadata.page,
+                    }),
+                    scores: ArmScores::default(),
+                    ranks: ArmRanks::default(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    async fn figures(
+        &self,
+        scope: &DocumentScope,
+        document_ids: &[DocumentId],
+    ) -> Result<Vec<Candidate>, PortError> {
+        if self.fail_figures.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable("forced figures failure".to_string()));
+        }
+        let list = self.figure_hits.read().unwrap();
+        let allowed = scope.document_ids();
+        let mut out = Vec::new();
+        for h in list.iter() {
+            if allowed.contains(&h.chunk.document_id) && document_ids.contains(&h.chunk.document_id)
+            {
+                out.push(Candidate {
+                    unit_id: h.chunk.id.clone(),
+                    document_id: h.chunk.document_id.clone(),
+                    tenant: scope.tenant().clone(),
+                    chunk_index: h.chunk.metadata.chunk_index.unwrap_or(0),
+                    page: h.chunk.metadata.page,
+                    chunk_type: h.chunk.chunk_type,
+                    content: h.chunk.content.clone(),
+                    contextual_prefix: h.chunk.metadata.contextual_prefix.clone(),
+                    metadata: serde_json::json!({
+                        "section": h.chunk.metadata.section,
+                        "assetKey": h.chunk.metadata.asset_key,
+                        "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
+                        "chunkIndex": h.chunk.metadata.chunk_index,
+                        "page": h.chunk.metadata.page,
+                    }),
+                    scores: ArmScores::default(),
+                    ranks: ArmRanks::default(),
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    async fn ordered_chunks(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+    ) -> Result<Vec<Candidate>, PortError> {
+        let stored = self.stored_chunks.read().unwrap();
+        let Some(chunks) = stored.get(document_id) else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<Candidate> = chunks
+            .iter()
+            .map(|c| {
+                let meta = stored_chunk_metadata(&c.metadata);
+                Candidate {
+                    unit_id: ChunkId(format!("{document_id}_{}", meta.chunk_index.unwrap_or(0))),
+                    document_id: document_id.clone(),
+                    tenant: tenant.clone(),
+                    chunk_index: meta.chunk_index.unwrap_or(0),
+                    page: meta.page,
+                    chunk_type: ChunkType::from_storage(
+                        c.metadata
+                            .get("chunkType")
+                            .and_then(serde_json::Value::as_str),
+                    ),
+                    content: c.content.clone(),
+                    contextual_prefix: c.contextual_prefix.clone(),
+                    metadata: c.metadata.clone(),
+                    scores: ArmScores::default(),
+                    ranks: ArmRanks::default(),
+                }
+            })
+            .collect();
+        out.sort_by_key(|c| c.chunk_index);
+        Ok(out)
+    }
+
+    async fn health_check(&self) -> Result<(), PortError> {
+        Ok(())
+    }
+
+    fn capabilities(&self) -> IndexCapabilities {
+        IndexCapabilities {
+            dense_dims: Some(1024),
+            sparse: Some(kb_ports::KeywordSemantics::AnyTerm),
+            server_side_fusion: true,
+            multivector: false,
+            approximate_dense: false,
+        }
     }
 }
 

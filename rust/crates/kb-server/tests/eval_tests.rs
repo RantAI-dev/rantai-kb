@@ -134,7 +134,7 @@ async fn serve() -> String {
     let state = AppState::from_parts(
         StateParts {
             documents: Arc::new(documents),
-            chunks: Arc::new(chunks),
+            index: Arc::new(chunks),
             entities: Arc::new(entities),
             blob: Arc::new(blobs),
             embedder: Arc::new(embedder),

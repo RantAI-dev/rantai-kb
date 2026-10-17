@@ -304,6 +304,31 @@ pub trait RetrievalIndex: Send + Sync {
         chunk_indices: &[u32],
     ) -> Result<Vec<Candidate>, PortError>;
 
+    /// Retrieve figure units belonging to the specified documents within scope.
+    ///
+    /// Figure selection logic (matching anchors, captions, deduplication, gating)
+    /// lives in the engine (`kb-engine`), not in the adapter. This method provides
+    /// the port capability to retrieve all candidate figure units for the
+    /// requested documents within the tenant's visible scope.
+    async fn figures(
+        &self,
+        scope: &DocumentScope,
+        document_ids: &[DocumentId],
+    ) -> Result<Vec<Candidate>, PortError>;
+
+    /// Retrieve all stored units of a single document, ordered by `chunk_index` ascending.
+    /// Used by document inspection routes (`GET /v1/documents/:id`).
+    async fn ordered_chunks(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+    ) -> Result<Vec<Candidate>, PortError>;
+
+    /// Probe whether the index backend is healthy and responding.
+    async fn health_check(&self) -> Result<(), PortError> {
+        Ok(())
+    }
+
     /// What this adapter supports. Static, cheap, and safe to call per request.
     fn capabilities(&self) -> IndexCapabilities;
 }
