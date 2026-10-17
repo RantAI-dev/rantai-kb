@@ -16,8 +16,21 @@
 /// One entity, upserted by `(tenant, key)`.
 ///
 /// Aliases merge rather than replace: a re-ingest that happens not to know an alias
-/// must not delete it, so the new set is unioned with the stored one and sorted.
-/// `key` is the identity, which is what makes a re-ingest idempotent.
+/// must not delete it, so the new set is unioned with the stored one. `key` is the
+/// identity, which is what makes a re-ingest idempotent.
+///
+/// The union is `DISTINCT` and drops empty strings, and that is not decoration: the
+/// in-memory reference merges into a `BTreeSet`, so an adapter that kept duplicates
+/// or an empty alias would store a different alias list from the reference on the
+/// same input. The port does not expose aliases yet, so nothing observes the
+/// difference today — which is precisely why it has to be right now rather than when
+/// the alias surface lands.
+///
+/// `unnest` sits in a subquery rather than in the `SELECT DISTINCT` list itself
+/// because that spelling fails at runtime, not at parse time: a set-returning
+/// function in a `SELECT DISTINCT` list yields an anonymous composite, and Postgres
+/// rejects it with *"input of anonymous composite types is not implemented"*. The
+/// subquery names the unnested column, so `DISTINCT` applies to the text values.
 pub const UPSERT_ENTITY: &str = r#"
     INSERT INTO "KbEntity" ("id", "tenantId", "key", "name", "type", "aliases", "updatedAt")
     VALUES ($1, $2, $3, $4, $5, $6, now())
@@ -26,7 +39,10 @@ pub const UPSERT_ENTITY: &str = r#"
         "type" = EXCLUDED."type",
         "aliases" = COALESCE((
             SELECT array_agg(alias ORDER BY alias)
-              FROM unnest(EXCLUDED."aliases" || "KbEntity"."aliases") AS alias
+              FROM (
+                    SELECT DISTINCT u AS alias
+                      FROM unnest(EXCLUDED."aliases" || "KbEntity"."aliases") AS u
+                   ) merged
              WHERE alias <> ''
         ), '{}'),
         "updatedAt" = now()

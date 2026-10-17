@@ -187,6 +187,9 @@ impl GraphStore for InMemoryGraphStore {
                 });
             // Last writer wins on the display fields; aliases merge, because a
             // re-ingest that happens not to know an alias must not delete it.
+            // Deduplicated and empty-free, which is what the Postgres adapter's
+            // `array_agg(DISTINCT …) WHERE alias <> ''` produces on the same
+            // input — the two must not store different alias lists.
             slot.name = entity.name.clone();
             slot.entity_type = entity.entity_type.clone();
             let merged: BTreeSet<String> = slot
@@ -194,6 +197,7 @@ impl GraphStore for InMemoryGraphStore {
                 .iter()
                 .cloned()
                 .chain(entity.aliases.iter().cloned())
+                .filter(|alias| !alias.is_empty())
                 .collect();
             slot.aliases = merged.into_iter().collect();
 
@@ -256,6 +260,19 @@ impl GraphStore for InMemoryGraphStore {
     ) -> Result<(), PortError> {
         let mut guard = self.write()?;
         if let Some(data) = guard.get_mut(tenant) {
+            // Which entities this document mentioned, captured first: after the
+            // mentions are gone that question has no answer, and the orphan sweep
+            // below needs it to sweep only what this document orphaned. A blanket
+            // "delete every entity nothing mentions" would also delete entities
+            // that were never mentioned at all — an entity an extractor recorded
+            // from a summary, with no chunk to point at — and those belong to the
+            // tenant, not to the document being deleted.
+            let mentioned: BTreeSet<String> = data
+                .mentions
+                .iter()
+                .filter(|(_, chunks)| chunks.values().any(|owner| owner == document_id))
+                .map(|(key, _)| key.clone())
+                .collect();
             // Mentions first, so the orphan sweep below sees the truth.
             for mentions in data.mentions.values_mut() {
                 mentions.retain(|_, owner| owner != document_id);
@@ -266,7 +283,8 @@ impl GraphStore for InMemoryGraphStore {
             // An entity nothing mentions any more is an orphan: it is not a fact
             // any more, and leaving it would keep its relations alive as paths.
             let live: BTreeSet<String> = data.mentions.keys().cloned().collect();
-            data.entities.retain(|key, _| live.contains(key));
+            data.entities
+                .retain(|key, _| !mentioned.contains(key) || live.contains(key));
         }
         drop(guard);
         self.bump(tenant)

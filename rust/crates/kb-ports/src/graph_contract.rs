@@ -823,6 +823,20 @@ async fn delete_document_cascades(store: &impl GraphStore) -> Outcome {
     if let Err(err) = seed(store).await {
         return Outcome::Failed(format!("could not seed the fixture: {err}"));
     }
+    // An entity with no mention at all, extracted from a summary rather than a
+    // chunk. Deleting an unrelated document must not take it: it belongs to the
+    // tenant, not to that document, and a sweep that removes every mention-less
+    // entity would also remove the thing this port exists to preserve.
+    if let Err(err) = store
+        .upsert_entities(
+            &tenant_a(),
+            &doc(DOC_A1),
+            vec![entity("from-a-summary", "From A Summary", &[])],
+        )
+        .await
+    {
+        return Outcome::Failed(format!("could not write the mention-less entity: {err}"));
+    }
     let before = match store.load_tenant_graph(&scope_a()).await {
         Ok(graph) => graph,
         Err(err) => return Outcome::Failed(format!("load_tenant_graph: {err}")),
@@ -913,6 +927,25 @@ async fn delete_document_cascades(store: &impl GraphStore) -> Outcome {
             "deleting a document id under another tenant changed this tenant".to_string(),
         );
     }
+
+    // The mention-less entity survived. It has no mentions, so it is correctly
+    // absent from every scoped graph — the only thing the scope rule allows — and
+    // the way to observe it is the one read that addresses an entity by key
+    // rather than through the graph: a relation to it still resolves. A sweep that
+    // deleted it would reject the batch as an unknown endpoint.
+    if let Err(err) = store
+        .relate(
+            &tenant_a(),
+            &doc(DOC_A1),
+            vec![relation("from-a-summary", "candy", None)],
+        )
+        .await
+    {
+        return Outcome::Failed(format!(
+            "the mention-less entity did not survive the delete of an unrelated document, so a \
+             relation to it now fails: {err}"
+        ));
+    }
     Outcome::Pass
 }
 
@@ -998,6 +1031,39 @@ async fn version_bumps_on_every_write(store: &impl GraphStore) -> Outcome {
         ));
     }
 
+    // The empty batches. These store nothing, and an adapter that returns early on
+    // them looks harmless — until a document's extraction finds no relations, the
+    // caller's CSR cache is stale for that document, and nothing anywhere says so.
+    // The version is the only signal that a reload is due, so "the batch was
+    // empty" must not mean "the store did not change".
+    if let Err(err) = store
+        .upsert_entities(&tenant, &doc(DOC_A1), Vec::new())
+        .await
+    {
+        return Outcome::Failed(format!("empty upsert errored: {err}"));
+    }
+    let after_empty_upsert = match store.graph_version(&tenant).await {
+        Ok(version) => version,
+        Err(err) => return Outcome::Failed(format!("graph_version errored: {err}")),
+    };
+    if after_empty_upsert <= after_noop {
+        return Outcome::Failed(format!(
+            "an empty upsert did not bump the version: {after_noop} -> {after_empty_upsert}"
+        ));
+    }
+    if let Err(err) = store.relate(&tenant, &doc(DOC_A1), Vec::new()).await {
+        return Outcome::Failed(format!("empty relate errored: {err}"));
+    }
+    let after_empty_relate = match store.graph_version(&tenant).await {
+        Ok(version) => version,
+        Err(err) => return Outcome::Failed(format!("graph_version errored: {err}")),
+    };
+    if after_empty_relate <= after_empty_upsert {
+        return Outcome::Failed(format!(
+            "an empty relate did not bump the version: {after_empty_upsert} -> {after_empty_relate}"
+        ));
+    }
+
     // delete_document
     if let Err(err) = store.delete_document(&tenant, &doc(DOC_A1)).await {
         return Outcome::Failed(format!("delete_document errored: {err}"));
@@ -1006,9 +1072,9 @@ async fn version_bumps_on_every_write(store: &impl GraphStore) -> Outcome {
         Ok(version) => version,
         Err(err) => return Outcome::Failed(format!("graph_version errored: {err}")),
     };
-    if after_delete <= after_noop {
+    if after_delete <= after_empty_relate {
         return Outcome::Failed(format!(
-            "delete_document did not bump the version: {after_noop} -> {after_delete}"
+            "delete_document did not bump the version: {after_empty_relate} -> {after_delete}"
         ));
     }
 

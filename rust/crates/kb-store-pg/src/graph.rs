@@ -84,6 +84,35 @@ impl PgGraphStore {
     ///
     /// Three round trips at ~100k relations, not one: the alternative is a single
     /// joined query, and it is the one that was slow.
+    ///
+    /// # What it costs, measured
+    ///
+    /// 10,000 entities, 100,000 relations over 100 documents, on the `kb-smoke`
+    /// Postgres, p50 over 20 samples: **855 ms** (p95 992 ms). The split matters
+    /// more than the total, because it says where the time is not:
+    ///
+    /// | Stage | ms | Note |
+    /// |---|---:|---|
+    /// | Postgres executing and sending all three queries | ~71 | psql, same queries |
+    /// | sqlx building `PgRow`s for 120k rows | ~470 | the single largest cost |
+    /// | Resolving 200k relation endpoints to node ids | ~235 | |
+    /// | `Csr::from_edges` over 100k edges | ~65 | |
+    /// | Mentions, interning, owning the result | ~65 | |
+    ///
+    /// So the database is ~8% of this load and the driver is ~55%. Two consequences
+    /// for anyone reading this before optimising it again:
+    ///
+    /// * **This is a cache-miss cost, not a query cost.** `docs/architecture-target.md`
+    ///   §11 puts the CSR behind a per-tenant version counter, so this runs once per
+    ///   graph mutation and every read after it is free. A load that were on the
+    ///   per-query path would be unsalvageable; amortised, it pays for itself after
+    ///   one query. Making the *walk* fit in 10 ms is what matters, and it does.
+    /// * **The next lever is the driver, not the schema.** Decoding into positional
+    ///   tuples (`query_as`) or `COPY` would take the ~470 ms `PgRow` cost down
+    ///   without touching the tables. Nothing else in the profile is worth more.
+    ///     Skipping the `PgRow` layer is also why the columns are read by index
+    ///     below rather than by name: `try_get("src_id")` searches the row's column
+    ///     names on every call, which cost 240 ms of the load before it was fixed.
     async fn build_graph(
         pool: &PgPool,
         tenant: &TenantId,
@@ -111,36 +140,46 @@ impl PgGraphStore {
             tokio::try_join!(entities, mentions, relations)
                 .map_err(|e| PortError::Unavailable(format!("pg scoped graph read: {e}")))?;
 
-        // The entities this scope can see. Ids to keys, and nothing else: an
-        // entity missing from this map cannot appear in the graph at all.
-        let mut key_by_id: HashMap<String, String> = HashMap::with_capacity(entity_rows.len());
+        // Everything below borrows out of the fetched rows instead of decoding
+        // into owned `String`s. It is not a stylistic choice: at 100k relations
+        // the owned version allocated ~230k strings per load — two per relation
+        // endpoint, one per mention chunk, one per entity key — and that decode
+        // measured 670 ms against 480 ms for the fetch itself. The keys and chunk
+        // ids are copied once, at the end, into the [`TenantGraph`] that owns
+        // them; the id-to-key map, the mention sets and the edge list are all
+        // working state that dies with this function.
+        //
+        // The `&str`s borrow the `PgRow` buffers, which the three `Vec`s own for
+        // the rest of the function, so nothing dangles; the one thing that must not
+        // happen is a mutation of those vectors while a borrow is live, and
+        // nothing below does.
+        let mut key_by_id: HashMap<&str, &str> = HashMap::with_capacity(entity_rows.len());
         for row in &entity_rows {
-            let id: String = row
-                .try_get("id")
+            let id: &str = row
+                .try_get(0)
                 .map_err(|e| PortError::Unavailable(format!("pg entity id: {e}")))?;
-            let key: String = row
-                .try_get("entity_key")
+            let key: &str = row
+                .try_get(1)
                 .map_err(|e| PortError::Unavailable(format!("pg entity key: {e}")))?;
             key_by_id.insert(id, key);
         }
 
-        // 4. Mentions resolved to keys. Sorted insertion, so a node id is a
-        //    function of the scoped row set rather than of the order Postgres
-        //    returned rows in.
-        let mut scoped: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        // Mentions resolved to keys. A `BTreeMap`, so a node id is a function of the
+        // scoped row set rather than of the order Postgres returned rows in.
+        let mut scoped: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
         for row in &mention_rows {
-            let entity_id: String = row
-                .try_get("entity_id")
+            let entity_id: &str = row
+                .try_get(0)
                 .map_err(|e| PortError::Unavailable(format!("pg mention entity_id: {e}")))?;
             // A mention for an entity the scope cannot see is not in this graph.
             // That is the scope rule, applied before anything else looks at it.
-            let Some(key) = key_by_id.get(&entity_id) else {
+            let Some(&key) = key_by_id.get(entity_id) else {
                 continue;
             };
-            let chunk: String = row
-                .try_get("chunk_id")
+            let chunk: &str = row
+                .try_get(1)
                 .map_err(|e| PortError::Unavailable(format!("pg mention chunk_id: {e}")))?;
-            scoped.entry(key.clone()).or_default().insert(chunk);
+            scoped.entry(key).or_default().insert(chunk);
         }
 
         let mut map = NodeMap::new();
@@ -152,37 +191,60 @@ impl PgGraphStore {
             }
         }
 
-        // 5. Relations resolved to node ids. An endpoint the scope cannot see is
-        //    dropped rather than defaulted, so a row that points at a deleted
-        //    entity cannot invent a node.
+        // Relations resolved to node ids, through one lookup per endpoint.
+        //
+        // The obvious version of this loop resolves each endpoint twice: once
+        // from the relation's id to the entity key, once from the key to the node
+        // id. That measured 310 ms for 100k relations — the largest single Rust
+        // cost in the load — because each row paid four hash probes into two
+        // 10k-entry string-keyed maps, and every probe lands on a different cache
+        // line. Collapsing id → node into one `HashMap` built after interning
+        // halves the probes and makes the map a third of the size.
+        //
+        // `id_by_node` is also what the scope rule needs to be enforced on: it only
+        // holds ids the scope interned, so an endpoint the scope cannot see has no
+        // entry and its edge is dropped, rather than defaulted into a node.
+        let mut node_by_id: HashMap<&str, u32> = HashMap::with_capacity(entity_rows.len());
+        for row in &entity_rows {
+            let id: &str = row
+                .try_get(0)
+                .map_err(|e| PortError::Unavailable(format!("pg entity id: {e}")))?;
+            let key: &str = row
+                .try_get(1)
+                .map_err(|e| PortError::Unavailable(format!("pg entity key: {e}")))?;
+            if let Some(node) = map.id_of(key) {
+                node_by_id.insert(id, node);
+            }
+        }
+
+        // An endpoint the scope cannot see is dropped rather than defaulted, so a
+        // row that points at a deleted or out-of-scope entity cannot invent a node.
         let mut edges: Vec<Edge> = Vec::with_capacity(relation_rows.len());
         for row in &relation_rows {
-            let src_id: String = row
-                .try_get("src_id")
+            let src_id: &str = row
+                .try_get(0)
                 .map_err(|e| PortError::Unavailable(format!("pg relation src_id: {e}")))?;
-            let dst_id: String = row
-                .try_get("dst_id")
+            let dst_id: &str = row
+                .try_get(1)
                 .map_err(|e| PortError::Unavailable(format!("pg relation dst_id: {e}")))?;
             // `DOUBLE PRECISION` in the schema, so read `f64` and narrow: asking
             // sqlx for `f32` is a type error at runtime, not a conversion.
             let weight: f64 = row
-                .try_get("weight")
+                .try_get(2)
                 .map_err(|e| PortError::Unavailable(format!("pg relation weight: {e}")))?;
-            let (Some(src), Some(dst)) = (
-                key_by_id.get(&src_id).and_then(|key| map.id_of(key)),
-                key_by_id.get(&dst_id).and_then(|key| map.id_of(key)),
-            ) else {
+            let (Some(&src), Some(&dst)) = (node_by_id.get(src_id), node_by_id.get(dst_id)) else {
                 continue;
             };
             edges.push(Edge::new(src, dst, weight.max(0.0) as f32));
         }
         let csr = Csr::from_edges(map.len(), &edges);
 
+        // The one place the borrowed working state becomes owned data.
         let mentions: Vec<EntityMentions> = scoped
             .into_iter()
             .map(|(key, chunks)| EntityMentions {
-                key,
-                chunk_ids: chunks.into_iter().map(ChunkId).collect(),
+                key: key.to_string(),
+                chunk_ids: chunks.into_iter().map(|c| ChunkId(c.to_string())).collect(),
             })
             .collect();
         Ok(TenantGraph::new(map, csr, mentions))
@@ -308,9 +370,6 @@ impl GraphStore for PgGraphStore {
         document_id: &DocumentId,
         relations: Vec<RelationUpsert>,
     ) -> Result<(), PortError> {
-        if relations.is_empty() {
-            return Ok(());
-        }
         let mut tx = self
             .pool
             .begin()
@@ -320,6 +379,14 @@ impl GraphStore for PgGraphStore {
         // Whole-batch validation before any write: half a batch is a relation set
         // no extraction could explain, and it is far harder to notice than a
         // rejected request.
+        //
+        // Note the empty batch falls through to the version bump below rather than
+        // returning early. It stores nothing, but "nothing was stored" is not "no
+        // write happened": the caller's CSR cache is about to be invalidated by
+        // the ingest that produced this call, and an adapter that quietly skipped
+        // the bump on the empty case would leave a stale graph for exactly the
+        // documents whose extraction found no relations. The in-memory reference
+        // bumps here, and two adapters that disagree here are two adapters.
         let wanted: BTreeSet<String> = relations
             .iter()
             .flat_map(|r| [r.src_key.clone(), r.dst_key.clone()])
@@ -609,5 +676,43 @@ mod tests {
         // that were never mentioned at all, which is why the ids are captured first.
         assert!(DELETE_ORPHANED_ENTITIES.contains(r#"e."id" = ANY($2)"#));
         assert!(DELETE_ORPHANED_ENTITIES.contains("NOT EXISTS"));
+    }
+
+    /// `build_graph` reads the three scoped statements by column *index*, because
+    /// `try_get` by name searches the row's column names on every call and that
+    /// cost 240 ms of a load. That makes the select lists load-bearing, so they are
+    /// pinned here: reordering a column without updating the index would otherwise
+    /// decode the wrong field, or fail at runtime on the `f64` weight.
+    #[test]
+    fn the_scoped_statements_keep_the_column_order_the_indices_assume() {
+        for (statement, expected) in [
+            (SELECT_SCOPED_ENTITIES, vec!["id", "entity_key"]),
+            (SELECT_SCOPED_MENTION_ROWS, vec!["entity_id", "chunk_id"]),
+            (
+                SELECT_SCOPED_RELATION_ROWS,
+                vec!["src_id", "dst_id", "weight"],
+            ),
+        ] {
+            let columns: Vec<&str> = statement
+                .split_once("SELECT")
+                .expect("a select")
+                .1
+                .split_once("FROM")
+                .expect("a from")
+                .0
+                .split(',')
+                .enumerate()
+                .map(|(index, part)| {
+                    part.rsplit(" AS ")
+                        .next()
+                        .expect("an alias")
+                        .trim()
+                        .trim_matches('"')
+                })
+                .collect();
+            let named: Vec<String> = columns.iter().map(|c| (*c).to_string()).collect();
+            let named: Vec<&str> = named.iter().map(String::as_str).collect();
+            assert_eq!(named, expected, "column order changed in:\n{statement}");
+        }
     }
 }
