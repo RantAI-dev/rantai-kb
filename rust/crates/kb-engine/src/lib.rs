@@ -70,6 +70,12 @@ pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
 pub struct EngineSettings {
     /// Candidates fetched per arm before fusion (`KB_RERANK_INITIAL_K`).
     pub candidate_pool_size: u32,
+    /// Maximum candidates passed to the reranker (`KB_RERANK_CANDIDATE_LIMIT`).
+    pub rerank_candidate_limit: u32,
+    /// Character budget per candidate (`KB_RERANK_CHAR_BUDGET`).
+    pub rerank_char_budget: usize,
+    /// Per-request reranker timeout in ms (`KB_RERANK_TIMEOUT_MS`).
+    pub rerank_timeout_ms: u64,
     /// Chunks kept by the reranker (`KB_RERANK_FINAL_K`).
     pub rerank_final_k: u32,
     /// Default chunk cap when the request has none (`KB_DEFAULT_MAX_CHUNKS`).
@@ -95,6 +101,9 @@ impl Default for EngineSettings {
     fn default() -> Self {
         Self {
             candidate_pool_size: 20,
+            rerank_candidate_limit: 10,
+            rerank_char_budget: 350,
+            rerank_timeout_ms: 3000,
             rerank_final_k: 5,
             max_chunks: 8,
             min_similarity: 0.30,
@@ -225,6 +234,9 @@ impl Engine {
             max_chunks,
             min_similarity: self.settings.min_similarity,
             candidate_pool_size: self.settings.candidate_pool_size,
+            rerank_candidate_limit: self.settings.rerank_candidate_limit,
+            rerank_char_budget: self.settings.rerank_char_budget,
+            rerank_timeout_ms: self.settings.rerank_timeout_ms,
             rerank_final_k: self.settings.rerank_final_k,
             neighbour_window: self.settings.neighbour_window,
             figure_limit: self.settings.figure_limit,

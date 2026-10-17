@@ -27,6 +27,9 @@ pub struct RetrievalOptions {
     pub max_chunks: u32,
     pub min_similarity: f32,
     pub candidate_pool_size: u32,
+    pub rerank_candidate_limit: u32,
+    pub rerank_char_budget: usize,
+    pub rerank_timeout_ms: u64,
     pub rerank_final_k: u32,
     pub neighbour_window: u32,
     pub figure_limit: u32,
@@ -51,6 +54,9 @@ impl fmt::Debug for RetrievalOptions {
             .field("max_chunks", &self.max_chunks)
             .field("min_similarity", &self.min_similarity)
             .field("candidate_pool_size", &self.candidate_pool_size)
+            .field("rerank_candidate_limit", &self.rerank_candidate_limit)
+            .field("rerank_char_budget", &self.rerank_char_budget)
+            .field("rerank_timeout_ms", &self.rerank_timeout_ms)
             .field("rerank_final_k", &self.rerank_final_k)
             .field("neighbour_window", &self.neighbour_window)
             .field("figure_limit", &self.figure_limit)
@@ -72,6 +78,9 @@ impl Default for RetrievalOptions {
             max_chunks: 8,
             min_similarity: 0.30,
             candidate_pool_size: 20,
+            rerank_candidate_limit: 10,
+            rerank_char_budget: 350,
+            rerank_timeout_ms: 3000,
             rerank_final_k: 5,
             neighbour_window: 0,
             figure_limit: 0,
@@ -330,25 +339,35 @@ pub async fn enrich_titles(
     tenant: &TenantId,
     hits: &mut [SearchHit],
 ) {
+    let mut cache = HashMap::new();
+    enrich_titles_cached(doc_store, tenant, hits, &mut cache).await;
+}
+
+pub async fn enrich_titles_cached(
+    doc_store: &Arc<dyn DocumentStore>,
+    tenant: &TenantId,
+    hits: &mut [SearchHit],
+    cache: &mut HashMap<DocumentId, DocumentMeta>,
+) {
     let mut missing_ids: Vec<DocumentId> = Vec::new();
     let mut seen: HashSet<DocumentId> = HashSet::new();
     for h in hits.iter() {
-        if seen.insert(h.chunk.document_id.clone()) {
+        if !cache.contains_key(&h.chunk.document_id) && seen.insert(h.chunk.document_id.clone()) {
             missing_ids.push(h.chunk.document_id.clone());
         }
     }
-    if missing_ids.is_empty() {
-        return;
-    }
-    if let Ok(metas) = doc_store.find_alive_meta_by_ids(tenant, &missing_ids).await {
-        let meta_map: HashMap<DocumentId, DocumentMeta> =
-            metas.into_iter().map(|m| (m.id.clone(), m)).collect();
-        for h in hits.iter_mut() {
-            if let Some(meta) = meta_map.get(&h.chunk.document_id) {
-                h.chunk.document_title = meta.title.clone();
-                h.chunk.categories = meta.categories.clone();
-                h.chunk.subcategory = meta.subcategory.clone();
+    if !missing_ids.is_empty() {
+        if let Ok(metas) = doc_store.find_alive_meta_by_ids(tenant, &missing_ids).await {
+            for m in metas {
+                cache.insert(m.id.clone(), m);
             }
+        }
+    }
+    for h in hits.iter_mut() {
+        if let Some(meta) = cache.get(&h.chunk.document_id) {
+            h.chunk.document_title = meta.title.clone();
+            h.chunk.categories = meta.categories.clone();
+            h.chunk.subcategory = meta.subcategory.clone();
         }
     }
 }
@@ -617,10 +636,16 @@ pub async fn execute_pipeline(
     let scope_sw = Stopwatch::start(clock);
     let alive_check_ids: Vec<DocumentId> =
         candidates.iter().map(|c| c.document_id.clone()).collect();
+    let mut meta_cache: HashMap<DocumentId, DocumentMeta> = HashMap::new();
     if !alive_check_ids.is_empty() {
-        let _ = doc_store
+        if let Ok(metas) = doc_store
             .find_alive_meta_by_ids(scope.tenant(), &alive_check_ids)
-            .await;
+            .await
+        {
+            for m in metas {
+                meta_cache.insert(m.id.clone(), m);
+            }
+        }
     }
     timings.scope_check_ms = scope_sw.elapsed_ms();
 
@@ -736,7 +761,7 @@ pub async fn execute_pipeline(
 
     // Enrich titles & categories
     let enrich_sw = Stopwatch::start(clock);
-    enrich_titles(doc_store, scope.tenant(), &mut hits).await;
+    enrich_titles_cached(doc_store, scope.tenant(), &mut hits, &mut meta_cache).await;
     timings.enrich_ms = enrich_sw.elapsed_ms();
 
     // 5. Optional rerank (only if rerank_enabled AND candidates exceed max_chunks)
@@ -745,36 +770,87 @@ pub async fn execute_pipeline(
     let rerank_future = async {
         if opts.rerank_enabled && hits.len() > max_chunks {
             let final_k = opts.rerank_final_k.clamp(1, 100);
-            let candidates: Vec<RerankCandidate> = hits
+            let candidate_limit = (opts.rerank_candidate_limit as usize).clamp(1, hits.len());
+            let (to_rerank, tail) = if hits.len() > candidate_limit {
+                let tail = hits.split_off(candidate_limit);
+                (hits, tail)
+            } else {
+                (hits, Vec::new())
+            };
+            let candidates: Vec<RerankCandidate> = to_rerank
                 .iter()
-                .map(|h| RerankCandidate {
-                    id: h.chunk.id.clone(),
-                    text: h.chunk.content.clone(),
-                    original_rank: h.rank,
-                    original_score: h.similarity,
+                .map(|h| {
+                    let text = if opts.rerank_char_budget > 0
+                        && h.chunk.content.len() > opts.rerank_char_budget
+                    {
+                        match h
+                            .chunk
+                            .content
+                            .char_indices()
+                            .take_while(|&(idx, _)| idx <= opts.rerank_char_budget)
+                            .last()
+                        {
+                            Some((idx, ch)) => &h.chunk.content[..idx + ch.len_utf8()],
+                            None => &h.chunk.content,
+                        }
+                    } else {
+                        &h.chunk.content
+                    };
+                    RerankCandidate {
+                        id: h.chunk.id.clone(),
+                        text: text.to_string(),
+                        original_rank: h.rank,
+                        original_score: h.similarity,
+                    }
                 })
                 .collect();
 
-            match reranker.rerank(query, candidates, final_k).await {
-                Ok(ordered) => {
+            let rerank_timeout = std::time::Duration::from_millis(opts.rerank_timeout_ms.max(100));
+            match tokio::time::timeout(rerank_timeout, reranker.rerank(query, candidates, final_k))
+                .await
+            {
+                Ok(Ok(ordered)) => {
                     let mut hit_map: HashMap<String, Vec<SearchHit>> = HashMap::new();
-                    for h in hits {
+                    for h in to_rerank {
                         hit_map.entry(h.chunk.id.0.clone()).or_default().push(h);
                     }
                     let mut reordered: Vec<SearchHit> = Vec::new();
                     for (rank, item) in ordered.into_iter().enumerate() {
-                        if let Some(hits) = hit_map.get_mut(&item.id.0) {
-                            if !hits.is_empty() {
-                                let mut hit = hits.remove(0);
+                        if let Some(hits_for_id) = hit_map.get_mut(&item.id.0) {
+                            if !hits_for_id.is_empty() {
+                                let mut hit = hits_for_id.remove(0);
                                 hit.rank = rank as u32;
                                 reordered.push(hit);
                             }
                         }
                     }
+                    for (_, remaining_hits) in hit_map {
+                        for mut hit in remaining_hits {
+                            hit.rank = reordered.len() as u32;
+                            reordered.push(hit);
+                        }
+                    }
+                    for mut hit in tail {
+                        hit.rank = reordered.len() as u32;
+                        reordered.push(hit);
+                    }
                     reordered
                 }
-                Err(_) => {
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "rerank error; falling back to fused order");
                     degrades.push(RetrievalDegrade::RerankUnavailable);
+                    let mut hits = to_rerank;
+                    hits.extend(tail);
+                    hits
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_ms = opts.rerank_timeout_ms,
+                        "rerank timed out; falling back to fused order"
+                    );
+                    degrades.push(RetrievalDegrade::RerankUnavailable);
+                    let mut hits = to_rerank;
+                    hits.extend(tail);
                     hits
                 }
             }
@@ -805,8 +881,13 @@ pub async fn execute_pipeline(
         }
         let mut all_neighbours: Vec<SearchHit> = Vec::new();
         let mut neighbour_failed = false;
-        for (doc_id, indices) in by_doc {
-            match index.neighbours(scope, &doc_id, &indices).await {
+
+        let neighbour_futures = by_doc
+            .iter()
+            .map(|(doc_id, indices)| index.neighbours(scope, doc_id, indices));
+        let neighbour_results = futures::future::join_all(neighbour_futures).await;
+        for res in neighbour_results {
+            match res {
                 Ok(candidates) => {
                     for c in candidates {
                         all_neighbours.push(candidate_to_hit_from(c, ProvenanceArm::Neighbour));
@@ -822,7 +903,13 @@ pub async fn execute_pipeline(
             degrades.push(RetrievalDegrade::NeighboursPartial);
         }
         if !all_neighbours.is_empty() {
-            enrich_titles(doc_store, scope.tenant(), &mut all_neighbours).await;
+            enrich_titles_cached(
+                doc_store,
+                scope.tenant(),
+                &mut all_neighbours,
+                &mut meta_cache,
+            )
+            .await;
             reranked_hits = weave_neighbours_with(
                 &reranked_hits,
                 &all_neighbours,
@@ -896,7 +983,8 @@ pub async fn execute_pipeline(
                         }
                     }
                 }
-                enrich_titles(doc_store, scope.tenant(), &mut figures).await;
+                enrich_titles_cached(doc_store, scope.tenant(), &mut figures, &mut meta_cache)
+                    .await;
                 reranked_hits.extend(figures);
             }
             Err(_) => {

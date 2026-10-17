@@ -405,12 +405,20 @@ impl Embedder for EmbedderImpl {
 
     async fn embed_query_detailed(&self, text: &str) -> Result<QueryEmbedding, PortError> {
         let cache_key = self.cache_key(text);
-        let cached = {
+        if let Some(vector) = {
             let mut cache = self.query_cache.lock().await;
-            cache.get(&cache_key).is_some()
-        };
+            cache.get(&cache_key)
+        } {
+            return Ok(QueryEmbedding {
+                vector,
+                cached: true,
+            });
+        }
         let vector = self.embed_one(text, EmbedKind::Query).await?;
-        Ok(QueryEmbedding { vector, cached })
+        Ok(QueryEmbedding {
+            vector,
+            cached: false,
+        })
     }
 
     async fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, PortError> {

@@ -345,6 +345,10 @@ impl Config {
         let query_expansion_paraphrases = int_var(&lookup, "KB_QUERY_EXPANSION_PARAPHRASES", 3)?;
 
         let rerank_enabled = bool_flag(&lookup, "KB_RERANK_ENABLED", false);
+        let rerank_candidate_limit =
+            int_var(&lookup, "KB_RERANK_CANDIDATE_LIMIT", 10)?.clamp(1, 50);
+        let rerank_char_budget = int_var(&lookup, "KB_RERANK_CHAR_BUDGET", 350)? as usize;
+        let rerank_timeout_ms = int_var(&lookup, "KB_RERANK_TIMEOUT_MS", 3000)? as u64;
 
         // `KB_MIN_SIMILARITY` is not a documented variable. The minimum is the
         // constant used by the TypeScript retriever (`minSimilarity = 0.30`).
@@ -352,6 +356,9 @@ impl Config {
 
         let engine = EngineSettings {
             candidate_pool_size: rerank_initial_k,
+            rerank_candidate_limit,
+            rerank_char_budget,
+            rerank_timeout_ms,
             rerank_final_k,
             max_chunks: default_max_chunks,
             min_similarity,

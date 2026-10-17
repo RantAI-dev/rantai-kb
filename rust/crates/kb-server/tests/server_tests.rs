@@ -45,6 +45,9 @@ impl Harness {
 
         let settings = EngineSettings {
             candidate_pool_size: 20,
+            rerank_candidate_limit: 10,
+            rerank_char_budget: 350,
+            rerank_timeout_ms: 3000,
             rerank_final_k: 10,
             max_chunks: 10,
             min_similarity: 0.30,
