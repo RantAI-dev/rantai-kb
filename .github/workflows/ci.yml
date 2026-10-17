@@ -222,3 +222,26 @@ jobs:
             eval-out/tiny/report.md
             eval-out/tiny/metrics.json
             eval-out/leak/leak-report.md
+
+  rust-eval-gate-qdrant:
+    name: Rust retrieval eval & scope isolation gate (Qdrant)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # With stub embeddings these numbers are deterministic plumbing numbers.
+      - name: Fetch libpdfium
+        run: |
+          ./rust/scripts/fetch-pdfium.sh ./rust/.vendor/pdfium
+          echo "PDFIUM_DYNAMIC_LIB_PATH=$GITHUB_WORKSPACE/rust/.vendor/pdfium/lib/libpdfium.so" >> $GITHUB_ENV
+      - name: Run CI eval gate (Qdrant)
+        run: ./rust/scripts/ci-eval-gate-qdrant.sh
+      - name: Upload eval artifacts (Qdrant)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-artifacts-qdrant
+          path: |
+            eval-out/tiny/report.md
+            eval-out/tiny/metrics.json
+            eval-out/leak/leak-report.md
