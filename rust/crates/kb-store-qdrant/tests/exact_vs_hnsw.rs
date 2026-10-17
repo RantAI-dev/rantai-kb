@@ -180,3 +180,87 @@ async fn exact_and_hnsw_at_real_corpus_sizes() {
         let _ = client.delete_collection(&name).await;
     }
 }
+
+#[tokio::test]
+#[ignore = "scale benchmark: filtered top-50 at scale up to 1M chunks. Run with --ignored."]
+async fn vector_store_filtered_top50_scale() {
+    use kb_store_qdrant::{
+        DENSE_VECTOR, create_collection, drop_collection, payload::KEY_TENANT_ID,
+    };
+    use qdrant_client::qdrant::{Condition, Filter, r#match::MatchValue};
+
+    let mut settings = QdrantSettings::from_env();
+    settings.dense_dims = Some(DIM as u32);
+    let client = settings.client().expect("client");
+
+    let scale_sizes: [usize; 4] = [50_000, 100_000, 250_000, 500_000];
+    println!("\n=== Vector Store Filtered Top-50 Scale Check ===");
+    println!("| Points | Filter | Top-K | p50 ms | p95 ms | Queries |");
+    println!("|---:|---|---:|---:|---:|---:|");
+
+    let collection = format!("scale_test_{}", std::process::id());
+    let _ = drop_collection(&client, &collection).await;
+    create_collection(&client, &settings, &collection)
+        .await
+        .expect("create collection");
+
+    let mut current_size: usize = 0;
+    let mut rng = Rng(0xCAFE_BABE_DEAD_BEEF);
+    let queries: Vec<Vec<f32>> = (0..50).map(|_| vector(&mut rng)).collect();
+
+    for &target_size in &scale_sizes {
+        let to_add: usize = target_size - current_size;
+        let batch_size: usize = 1000;
+        for batch in 0..to_add.div_ceil(batch_size) {
+            let start = current_size + batch * batch_size;
+            let end = (start + batch_size).min(target_size);
+            let points: Vec<PointStruct> = (start..end)
+                .map(|i| {
+                    let tenant = if i % 5 == 0 {
+                        "tenant-target"
+                    } else {
+                        "tenant-other"
+                    };
+                    let mut payload = HashMap::new();
+                    payload.insert(KEY_TENANT_ID.to_string(), Value::from(tenant));
+                    let named = NamedVectors::default()
+                        .add_vector(DENSE_VECTOR, Vector::new_dense(vector(&mut rng)));
+                    PointStruct::new(PointId::from(i as u64), named, payload)
+                })
+                .collect();
+            client
+                .upsert_points(
+                    UpsertPointsBuilder::new(&collection, points)
+                        .wait(true)
+                        .build(),
+                )
+                .await
+                .expect("upsert batch");
+        }
+        current_size = target_size;
+
+        // Run 50 warm filtered top-50 queries
+        let filter = Filter::must([Condition::matches(
+            KEY_TENANT_ID,
+            MatchValue::Keyword("tenant-target".to_string()),
+        )]);
+
+        let mut latencies = Vec::with_capacity(queries.len());
+        for q in &queries {
+            let builder = QueryPointsBuilder::new(&collection)
+                .using(DENSE_VECTOR)
+                .query(Query::new_nearest(q.clone()))
+                .filter(filter.clone())
+                .limit(50)
+                .with_payload(false);
+            let started = Instant::now();
+            let _res = client.query(builder).await.expect("query");
+            latencies.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        let med = p50(&mut latencies);
+        let p95_val = p95(&mut latencies);
+        println!("| {current_size} | tenant=tenant-target | 50 | {med:.2} | {p95_val:.2} | 50 |");
+    }
+
+    let _ = drop_collection(&client, &collection).await;
+}
