@@ -997,7 +997,116 @@ Two of the five profile guesses were wrong and measurement replaced both:
   allocates ~30k times instead of ~230k, which matters at ten times the size — but it
   is not one of the wins.
 
-### 6.4 What this section does NOT prove
+### 6.4 Graph retrieval arm (L.3b)
+
+Step L.3b connects the Postgres entity graph built in L.3a to ingest and search,
+and measures whether an entity-graph retrieval arm (`KB_GRAPH_ARM=1`) improves
+multi-hop retrieval on a held-out test split without regressing single-fact lookup.
+
+#### 6.4.1 Configuration and setup
+
+- **Zero-spend extractor**: `KB_ENTITY_EXTRACTOR=heuristic` runs locally with no external APIs.
+  Entities are dual-written to Postgres (`KbEntity`, `KbMention`, `KbRelation`) during ingest.
+- **Retrieval arm**: Seeds from query entities via `match_entities`, runs personalized PageRank
+  plus 2-hop expansion over the cached scoped CSR, and fuses candidates into reciprocal rank
+  fusion alongside vector and keyword arms (k=60).
+- **Measurement procedure**: Corpus is ingested once into Postgres. The server is restarted
+  between arm-off and arm-on states using `KB_STACK_RESTART_SERVER=1`, and queries are evaluated
+  using `--skip-ingest` to guarantee identical corpus state and document IDs.
+
+#### 6.4.2 HotpotQA multi-hop test split (`hotpot-200-test`)
+
+Corpus: 1,038 documents (995 test split + distractors). 100 multi-hop queries. Evaluated
+at cutoff k=10 with linear gain nDCG. Paired deltas computed per query with 10,000 bootstrap resamples.
+
+```bash
+# Arm OFF
+kb-server eval --base-url http://127.0.0.1:18080 --api-key $KEY \
+  --dataset rust/crates/kb-eval/datasets/hotpot-200-test \
+  --out eval-out/graph/hotpot-test-off --label hotpot-test-arm-off
+
+# Restart with arm ON
+KB_STACK_GRAPH=1 KB_STACK_GRAPH_ARM=1 KB_STACK_RESTART_SERVER=1 rust/scripts/stack-up.sh
+
+# Arm ON (reusing corpus)
+kb-server eval --base-url http://127.0.0.1:18080 --api-key $KEY \
+  --dataset rust/crates/kb-eval/datasets/hotpot-200-test \
+  --out eval-out/graph/hotpot-test-on --label hotpot-test-arm-on --skip-ingest
+
+# Paired deltas
+python3 rust/crates/kb-eval/scripts/score_deltas.py \
+  --qrels rust/crates/kb-eval/datasets/hotpot-200-test/qrels/test.tsv \
+  --baseline eval-out/graph/hotpot-test-off/run.trec \
+  --treatment eval-out/graph/hotpot-test-on/run.trec
+```
+
+| Metric | Off (Baseline) | On (Treatment) | Delta | 95% Bootstrap CI | n |
+|---|---|---|---|---|---|
+| recall@5 | 0.7850 | 0.7000 | -0.0850 | [-0.1400, -0.0350] | 100 |
+| recall@10 | 0.8800 | 0.8600 | -0.0200 | [-0.0550, +0.0150] | 100 |
+| mrr@10 | 0.8360 | 0.7280 | -0.1080 | [-0.1696, -0.0459] | 100 |
+| ndcg@10 | 0.7741 | 0.6837 | -0.0904 | [-0.1270, -0.0520] | 100 |
+
+*Target: multi-hop recall@5 at least +5 points. Result: -8.5 points (FAILED).*
+
+#### 6.4.3 MIRACL control (`miracl-50-control`)
+
+Corpus: 551 documents (153 judged docs, 400 sampled distractors). 50 fact-lookup queries.
+Same procedure (arm off vs arm on, `--skip-ingest`).
+
+| Metric | Off (Baseline) | On (Treatment) | Delta | 95% Bootstrap CI | n |
+|---|---|---|---|---|---|
+| recall@5 | 0.8394 | 0.8288 | -0.0106 | [-0.0877, +0.0632] | 50 |
+| recall@10 | 0.9564 | 0.9485 | -0.0079 | [-0.0267, +0.0100] | 50 |
+| mrr@10 | 0.8173 | 0.7829 | -0.0345 | [-0.1111, +0.0399] | 50 |
+| ndcg@10 | 0.8337 | 0.8093 | -0.0244 | [-0.0694, +0.0193] | 50 |
+
+*Target: MIRACL nDCG@10 no worse than -1 point. Result: -2.4 points (FAILED).*
+
+#### 6.4.4 Latency and overhead
+
+Stage timing measured from server telemetry across all answered queries:
+
+- **Cold graph-arm latency**: 369.56 ms on the first query after server restart (loading scoped CSR).
+- **Warm graph-arm latency**:
+  - HotpotQA test: mean 410.7 ms, p50 408.3 ms, p95 444.4 ms, p99 451.3 ms.
+  - Overall search p95: 2788.5 ms (arm off) vs 3188.8 ms (arm on) (+400.3 ms).
+  - MIRACL control: overall search p95 1902.1 ms (arm off) vs 2147.5 ms (arm on) (+245.4 ms).
+
+*Target: warm graph-arm latency adds less than 15 ms p95. Result: adds ~400 ms p95 (FAILED).*
+
+#### 6.4.5 Tenant scope leak matrix
+
+Evaluated with `kb-server eval leak` on live stack with `KB_GRAPH_ARM=1`:
+288 probes across 8 documents, 12 scopes, 2 tenants. Zero cross-scope leaks.
+
+| arm | probes | leaks | positive | status | tenant | knowledge_base | category | document_ids |
+|---|---:|---:|---|---|---|---|---|---|
+| vector | 48 | 0 | 12/12 | PASS | PASS | PASS | PASS | PASS |
+| bm25 | 48 | 0 | 10/12 | PARTIAL | PASS | PASS | PASS | UNTESTED |
+| neighbour | 48 | 0 | 12/12 | PASS | PASS | PASS | PASS | PASS |
+| figure | 48 | 0 | 0/12 | UNTESTED | UNTESTED | UNTESTED | UNTESTED | UNTESTED |
+| graph | 48 | 0 | 10/12 | PARTIAL | PASS | PASS | PASS | UNTESTED |
+| entity | 48 | 0 | 12/12 | PASS | PASS | PASS | PASS | PASS |
+
+*Target: zero leaks including the graph row. Result: 0 leaks across all cells (PASSED).*
+
+#### 6.4.6 Failure diagnosis from raw data
+
+1. **Seed matching rate**: 100% (100/100 queries in HotpotQA matched at least one seed entity).
+2. **Extractor quality**: Inspection of sample paragraph pairs (e.g. *Cieli di Toscana* and *Andrea Bocelli*) revealed two severe flaws in `HeuristicExtractor`:
+   - Preposition splitting: "di" was treated as Indonesian "di" ("in"), causing Italian / Latin names such as "Cieli di Toscana" to be split into separate entities "Cieli" and "Toscana".
+   - Possessive suffixes: "Andrea Bocelli's" was extracted as entity `Andrea Bocelli's` (key `andrea bocelli s`), which failed to match `Andrea Bocelli` (key `andrea bocelli`). Consequently, multi-hop bridge edges across documents were missing from the graph; entities only linked to local within-document sub-entities (e.g. song tracks).
+3. **Fusion weight and candidates**: The graph arm returned 20 candidates per query and was fused into RRF at equal weight (k=60) alongside vector and BM25. Because PageRank propagated mass to intra-document sub-entities (e.g. album track distractors), these irrelevant documents were ranked 1st and 2nd in RRF, pushing the true supporting documents out of top-5 and top-10 positions.
+4. **Latency bottleneck**: Warm `graphArm` took >400 ms because `match_entities` executed `SELECT_SCOPED_ENTITY_LABELS` with `documentId = ANY($2)` across all 1,000+ documents on every search, scanning ~8,000 entity rows from Postgres into Rust, followed by chunk fetches in SurrealDB.
+
+#### 6.4.7 What this section does NOT prove
+
+* **It does not prove graph retrieval is useless in principle.** It proves that heuristic extraction without robust entity linking and cross-document co-reference cannot support multi-hop reasoning.
+* **It does not prove PageRank is flawed.** When graph edges connect to intra-document distractors rather than the multi-hop bridge, PageRank correctly concentrates mass on those distractors.
+* **It does not test LLM-based entity extraction.** Zero-spend constraints required the heuristic extractor; an LLM extractor with entity deduplication may produce higher-quality edges, but at significant monetary and computational ingest cost.
+
+### 6.5 What this section does NOT prove
 
 * **The load is a cache-miss cost, not a query cost.** `docs/architecture-target.md`
   §11 puts the CSR behind a per-tenant version counter, so §6.3's 855 ms runs once
