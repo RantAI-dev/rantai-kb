@@ -9,7 +9,8 @@ use kb_core::{ContextItem, SourceEntry, build_context_and_sources, weave_neighbo
 use kb_ports::{
     Candidate, Chunk, ChunkId, ChunkMetadata, DocumentId, DocumentMeta, DocumentScope,
     DocumentStore, Embedder, EngineError, FigureGate, FigureGateCandidate, Fusion, HybridQuery,
-    KeywordQuery, RerankCandidate, Reranker, RetrievalDegrade, RetrievalIndex, SearchHit, TenantId,
+    KeywordQuery, ProvenanceArm, RerankCandidate, Reranker, RetrievalDegrade, RetrievalIndex,
+    RetrievalProvenance, SearchHit, TenantId,
 };
 use tracing::Instrument;
 
@@ -149,6 +150,21 @@ pub fn fig_caption_keywords(caption: &str) -> Vec<String> {
 }
 
 pub fn candidate_to_hit(c: Candidate) -> SearchHit {
+    let retrieval = RetrievalProvenance::of(&c);
+    candidate_to_hit_with(c, retrieval)
+}
+
+/// [`candidate_to_hit`] for a phase the engine itself ran, which contributes an
+/// arm of its own and has no fused score of its own.
+///
+/// Used for the neighbour weave and the figure co-retrieval: both read
+/// candidates the arms never ranked, so `Candidate`'s scores are `0.0` defaults
+/// and saying `fusedScore: 0` would read like a score of zero.
+pub fn candidate_to_hit_from(c: Candidate, arm: ProvenanceArm) -> SearchHit {
+    candidate_to_hit_with(c, Some(RetrievalProvenance::unscored(arm)))
+}
+
+fn candidate_to_hit_with(c: Candidate, retrieval: Option<RetrievalProvenance>) -> SearchHit {
     let section = c
         .metadata
         .get("section")
@@ -200,6 +216,7 @@ pub fn candidate_to_hit(c: Candidate) -> SearchHit {
         similarity,
         rank: c.ranks.fused,
         is_bm25,
+        retrieval,
     }
 }
 
@@ -640,7 +657,7 @@ pub async fn execute_pipeline(
             match index.neighbours(scope, &doc_id, &indices).await {
                 Ok(candidates) => {
                     for c in candidates {
-                        all_neighbours.push(candidate_to_hit(c));
+                        all_neighbours.push(candidate_to_hit_from(c, ProvenanceArm::Neighbour));
                     }
                 }
                 Err(e) => {
@@ -702,8 +719,10 @@ pub async fn execute_pipeline(
                     &anchored_chunks,
                     opts.figure_limit,
                 );
-                let mut figures: Vec<SearchHit> =
-                    selected.into_iter().map(candidate_to_hit).collect();
+                let mut figures: Vec<SearchHit> = selected
+                    .into_iter()
+                    .map(|c| candidate_to_hit_from(c, ProvenanceArm::Figure))
+                    .collect();
                 if let Some(gate) = &opts.figure_gate {
                     if !figures.is_empty() {
                         let gate_candidates: Vec<FigureGateCandidate> = figures

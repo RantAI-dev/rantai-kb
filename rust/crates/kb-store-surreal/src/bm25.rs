@@ -1,6 +1,6 @@
 //! BM25 full-text search over SurrealDB.
 
-use kb_ports::{DocumentScope, PortError, SearchHit};
+use kb_ports::{DocumentScope, PortError, ProvenanceArm, SearchHit};
 
 use crate::client::{SurrealChunkStore, build_hit, row_to_chunk, safe_limit};
 use crate::queries::{BM25_SEARCH_QUERY, surql_id_list};
@@ -89,7 +89,7 @@ pub async fn execute_bm25_search(
     for (i, row) in rows.into_iter().enumerate() {
         if let Some(r) = row_to_chunk(&row) {
             let score = r.score.unwrap_or(0.0);
-            hits.push(build_hit(r, i as u32, score));
+            hits.push(build_hit(r, i as u32, score, ProvenanceArm::Sparse));
         }
     }
     Ok(hits)

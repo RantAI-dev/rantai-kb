@@ -4,7 +4,7 @@
 
 use kb_core::SourceEntry;
 use kb_engine::{RetrievalOutcome, timing::StageTimings};
-use kb_ports::SearchHit;
+use kb_ports::{ProvenanceArm, RetrievalProvenance, SearchHit};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -252,6 +252,41 @@ pub struct SourceDto {
     pub chunk_type: Option<String>,
 }
 
+/// Which retrieval arms produced a chunk, as the response reports it.
+///
+/// **Additive** (step S.1c): Bun does not emit `retrieval`, and every field Bun
+/// does emit is unchanged. `search-parity.sh` deletes `.chunks[].retrieval`
+/// before diffing a Bun answer against a Rust one, because a field only one
+/// implementation produces is not a divergence to fix — see
+/// `docs/rust-cutover.md`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetrievalDto {
+    /// The arms, in a canonical order: `dense`, `sparse`, `neighbour`, `figure`.
+    pub arms: Vec<ProvenanceArm>,
+    #[serde(rename = "denseRank", skip_serializing_if = "Option::is_none")]
+    pub dense_rank: Option<u32>,
+    #[serde(rename = "sparseRank", skip_serializing_if = "Option::is_none")]
+    pub sparse_rank: Option<u32>,
+    #[serde(rename = "fusedScore", skip_serializing_if = "Option::is_none")]
+    pub fused_score: Option<f32>,
+}
+
+impl From<RetrievalProvenance> for RetrievalDto {
+    fn from(mut p: RetrievalProvenance) -> Self {
+        // Last stop before the wire: sort and dedupe here rather than trust every
+        // constructor upstream, so two servers can never report the same arms in
+        // two orders. `ProvenanceArm`'s `Ord` *is* the canonical order.
+        p.arms.sort_unstable();
+        p.arms.dedup();
+        Self {
+            arms: p.arms,
+            dense_rank: p.dense_rank,
+            sparse_rank: p.sparse_rank,
+            fused_score: p.fused_score,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChunkDto {
     pub id: String,
@@ -272,6 +307,10 @@ pub struct ChunkDto {
     pub page: Option<Option<u32>>,
     #[serde(rename = "chunkType", skip_serializing_if = "Option::is_none")]
     pub chunk_type: Option<Option<String>>,
+    /// Present only when the engine knows which arms produced this chunk. Omitted
+    /// rather than null, so a caller can tell "no arms" from "old server".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retrieval: Option<RetrievalDto>,
 }
 
 impl SearchResponseDto {
@@ -370,6 +409,7 @@ impl From<SearchHit> for ChunkDto {
             asset_key,
             page,
             chunk_type,
+            retrieval: hit.retrieval.map(RetrievalDto::from),
         }
     }
 }
@@ -434,6 +474,154 @@ pub fn splice_json_member(mut body: Vec<u8>, key: &str, value: &[u8]) -> Vec<u8>
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    /// A `SearchHit` as the engine produces it, with `bm25` deciding whether the
+    /// Bun "keyword hit" shape applies.
+    fn hit(bm25: bool, retrieval: Option<RetrievalProvenance>) -> SearchHit {
+        SearchHit {
+            chunk: kb_ports::Chunk {
+                id: kb_ports::ChunkId("c-1".to_string()),
+                document_id: kb_ports::DocumentId("d-1".to_string()),
+                document_title: "Doc".to_string(),
+                content: "body".to_string(),
+                chunk_type: kb_ports::ChunkType::Text,
+                metadata: kb_ports::ChunkMetadata {
+                    page: Some(4),
+                    section: Some("Intro".to_string()),
+                    chunk_index: Some(2),
+                    contextual_prefix: None,
+                    ..Default::default()
+                },
+                categories: vec!["guides".to_string()],
+                subcategory: None,
+            },
+            similarity: if bm25 { 0.0 } else { 0.81f32 },
+            rank: 0,
+            is_bm25: bm25,
+            retrieval,
+        }
+    }
+
+    #[test]
+    fn a_vector_hit_keeps_every_bun_key_and_adds_only_retrieval() {
+        let dto = ChunkDto::from(hit(
+            false,
+            Some(RetrievalProvenance {
+                arms: vec![ProvenanceArm::Dense],
+                dense_rank: Some(0),
+                sparse_rank: None,
+                fused_score: Some(0.81f32),
+            }),
+        ));
+        let value = serde_json::to_value(&dto).unwrap();
+        let mut keys: Vec<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "assetKey",
+                "categories",
+                "chunkType",
+                "content",
+                "documentId",
+                "documentTitle",
+                "id",
+                "page",
+                "retrieval",
+                "section",
+                "similarity",
+                "subcategory",
+            ],
+            "{value}"
+        );
+        // Bun's exact values, one for one.
+        assert_eq!(value["chunkType"], "text");
+        assert_eq!(value["page"], 4);
+        assert_eq!(value["assetKey"], serde_json::Value::Null);
+        assert_eq!(value["section"], "Intro");
+        // f32 all the way out: 0.81 is not representable, and the wire value is
+        // what the server computes, not the decimal a test happens to write.
+        assert_eq!(value["similarity"], 0.81f32);
+        assert_eq!(value["categories"], serde_json::json!(["guides"]));
+        assert_eq!(
+            value["retrieval"],
+            serde_json::json!({"arms": ["dense"], "denseRank": 0, "fusedScore": 0.81f32})
+        );
+    }
+
+    #[test]
+    fn a_keyword_hit_keeps_its_bun_omissions_and_gains_retrieval() {
+        // The shape `search-parity.sh` and the Bun client both rely on: no
+        // chunkType, no page, no assetKey, and an explicit `contextualPrefix: null`.
+        let value = serde_json::to_value(ChunkDto::from(hit(
+            true,
+            Some(RetrievalProvenance {
+                arms: vec![ProvenanceArm::Sparse],
+                dense_rank: None,
+                sparse_rank: Some(2),
+                fused_score: Some(0.5),
+            }),
+        )))
+        .unwrap();
+        assert!(value.get("chunkType").is_none(), "{value}");
+        assert!(value.get("page").is_none(), "{value}");
+        assert!(value.get("assetKey").is_none(), "{value}");
+        assert_eq!(value["contextualPrefix"], serde_json::Value::Null);
+        assert_eq!(value["similarity"], 0.0);
+        assert_eq!(
+            value["retrieval"],
+            serde_json::json!({"arms": ["sparse"], "sparseRank": 2, "fusedScore": 0.5})
+        );
+    }
+
+    #[test]
+    fn no_provenance_means_the_key_is_absent_not_null() {
+        // A caller has to be able to tell "this server reported no arm" from "an
+        // old server that does not report arms at all".
+        let value = serde_json::to_value(ChunkDto::from(hit(false, None))).unwrap();
+        assert!(value.get("retrieval").is_none(), "{value}");
+        assert_eq!(
+            value.as_object().map(serde_json::Map::len),
+            Some(11),
+            "without provenance a chunk is exactly the Bun object: {value}"
+        );
+    }
+
+    #[test]
+    fn an_unscored_phase_reports_no_score_at_all() {
+        let value = serde_json::to_value(ChunkDto::from(hit(
+            false,
+            Some(RetrievalProvenance::unscored(ProvenanceArm::Neighbour)),
+        )))
+        .unwrap();
+        assert_eq!(
+            value["retrieval"],
+            serde_json::json!({"arms": ["neighbour"]})
+        );
+    }
+
+    #[test]
+    fn arms_serialise_in_the_canonical_order() {
+        let dto = RetrievalDto::from(RetrievalProvenance {
+            arms: vec![
+                ProvenanceArm::Figure,
+                ProvenanceArm::Dense,
+                ProvenanceArm::Neighbour,
+            ],
+            dense_rank: None,
+            sparse_rank: None,
+            fused_score: None,
+        });
+        assert_eq!(
+            serde_json::to_value(dto).unwrap(),
+            serde_json::json!({"arms": ["dense", "neighbour", "figure"]})
+        );
+    }
 
     #[test]
     fn a_member_is_added_to_a_serialised_object() {

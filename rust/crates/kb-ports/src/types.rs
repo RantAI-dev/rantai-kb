@@ -245,6 +245,112 @@ pub struct FigureGateCandidate {
     pub caption: String,
 }
 
+/// One way a chunk can reach a search answer.
+///
+/// The wire vocabulary, not the store's: Qdrant's dense and sparse vectors,
+/// SurrealDB's `vector::similarity` and `@@`, and the two engine phases that add
+/// a chunk the arms never scored. Ordered by how early in the pipeline the arm
+/// runs, because [`RetrievalProvenance::arms`] is emitted in this order and a
+/// caller must not have to sort before comparing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvenanceArm {
+    /// The dense/vector arm.
+    Dense,
+    /// The sparse/keyword arm (BM25).
+    Sparse,
+    /// Woven in by the neighbour expansion: adjacent chunks of a hit's document,
+    /// index ±1. Scored by nothing.
+    Neighbour,
+    /// Retrieved as a figure co-retrieval of a hit's document.
+    Figure,
+}
+
+/// Which arms produced a chunk, and what each of them said about it.
+///
+/// This is what makes a fused answer auditable: without it, a keyword hit and a
+/// vector hit are both "a chunk with content", the red-team matrix cannot tell
+/// which arm it just exercised, and a ranking regression cannot be attributed.
+/// It is derived from what the adapter reported in
+/// [`crate::retrieval::ArmScores`]/[`crate::retrieval::ArmRanks`] plus the engine
+/// phase that read the candidate — never guessed from the payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetrievalProvenance {
+    /// The arms, deduplicated, in [`ProvenanceArm`] order.
+    pub arms: Vec<ProvenanceArm>,
+    /// 0-based rank inside the dense arm's own candidate list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dense_rank: Option<u32>,
+    /// 0-based rank inside the sparse arm's own candidate list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sparse_rank: Option<u32>,
+    /// The score the answer was ordered by. With RRF this is the fused score and
+    /// is not comparable across queries. `None` for a phase that does not score
+    /// (a neighbour or a figure the engine added), because reporting `0.0` there
+    /// would look like a score of zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fused_score: Option<f32>,
+}
+
+impl RetrievalProvenance {
+    /// What a [`crate::retrieval::Candidate`] says about itself, or `None` when
+    /// the adapter reported no arm at all for it.
+    ///
+    /// A `Candidate` carries an arm's rank when that arm ranked it and its score
+    /// when that arm scored it; either is enough, and asking for both would make
+    /// an adapter that fills one look like it filled neither.
+    #[must_use]
+    pub fn of(candidate: &crate::retrieval::Candidate) -> Option<Self> {
+        let dense = candidate.ranks.dense.is_some() || candidate.scores.dense.is_some();
+        let sparse = candidate.ranks.sparse.is_some() || candidate.scores.sparse.is_some();
+        if !dense && !sparse {
+            return None;
+        }
+        let mut arms = Vec::with_capacity(2);
+        if dense {
+            arms.push(ProvenanceArm::Dense);
+        }
+        if sparse {
+            arms.push(ProvenanceArm::Sparse);
+        }
+        Some(Self {
+            arms,
+            dense_rank: candidate.ranks.dense,
+            sparse_rank: candidate.ranks.sparse,
+            fused_score: Some(candidate.scores.fused),
+        })
+    }
+
+    /// Add an arm the engine itself contributed, keeping the canonical order.
+    #[must_use]
+    pub fn with_arm(mut self, arm: ProvenanceArm) -> Self {
+        if !self.arms.contains(&arm) {
+            self.arms.push(arm);
+            self.arms.sort_unstable();
+        }
+        self
+    }
+
+    /// Mark a candidate as coming from `arm` whatever the adapter reported.
+    /// A neighbour or figure phase does not score, so it drops the fused score
+    /// rather than reporting the `0.0` a default `ArmScores` carries.
+    #[must_use]
+    pub fn unscored(arm: ProvenanceArm) -> Self {
+        Self {
+            arms: vec![arm],
+            dense_rank: None,
+            sparse_rank: None,
+            fused_score: None,
+        }
+    }
+
+    /// Whether this provenance lists `arm`.
+    #[must_use]
+    pub fn has(&self, arm: ProvenanceArm) -> bool {
+        self.arms.contains(&arm)
+    }
+}
+
 /// A single hit from one retrieval arm. Multiple arms are fused upstream into a
 /// ranked list; this is the raw material that goes in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -260,6 +366,10 @@ pub struct SearchHit {
     /// Whether this hit originated from the BM25 arm.
     #[serde(default)]
     pub is_bm25: bool,
+    /// Which arms produced this hit. `None` when nothing reported one, which is
+    /// the honest answer for a hit an adapter fetched rather than ranked.
+    #[serde(default)]
+    pub retrieval: Option<RetrievalProvenance>,
 }
 
 impl SearchHit {
@@ -529,4 +639,111 @@ pub enum RetryJobOutcome {
     NotFailed,
     /// No job with that id is visible to the tenant (404 in the API).
     NotFound,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod provenance_tests {
+    use super::*;
+    use crate::retrieval::{ArmRanks, ArmScores, Candidate};
+
+    fn candidate(dense: Option<(f32, u32)>, sparse: Option<(f32, u32)>) -> Candidate {
+        Candidate {
+            unit_id: ChunkId("d1_0".to_string()),
+            document_id: DocumentId("d1".to_string()),
+            tenant: TenantId("t1".to_string()),
+            chunk_index: 0,
+            page: None,
+            chunk_type: ChunkType::Text,
+            content: String::new(),
+            contextual_prefix: None,
+            metadata: serde_json::Value::Null,
+            scores: ArmScores {
+                dense: dense.map(|(s, _)| s),
+                sparse: sparse.map(|(s, _)| s),
+                fused: 1.0 / 63.0,
+            },
+            ranks: ArmRanks {
+                dense: dense.map(|(_, r)| r),
+                sparse: sparse.map(|(_, r)| r),
+                fused: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn a_candidate_with_no_arm_has_no_provenance() {
+        // `fetch`, `neighbours` and `figures` all hand back candidates the arms
+        // never ranked. Reporting an empty arm list would be a claim, not a fact.
+        assert!(RetrievalProvenance::of(&candidate(None, None)).is_none());
+    }
+
+    #[test]
+    fn a_dense_only_candidate_reports_the_dense_arm_and_its_rank() {
+        let p = RetrievalProvenance::of(&candidate(Some((0.9, 4)), None)).expect("provenance");
+        assert_eq!(p.arms, vec![ProvenanceArm::Dense]);
+        assert_eq!(p.dense_rank, Some(4));
+        assert_eq!(p.sparse_rank, None);
+        assert_eq!(p.fused_score, Some(1.0 / 63.0));
+        assert!(p.has(ProvenanceArm::Dense));
+        assert!(!p.has(ProvenanceArm::Sparse));
+    }
+
+    #[test]
+    fn a_keyword_only_candidate_reports_the_sparse_arm() {
+        let p = RetrievalProvenance::of(&candidate(None, Some((12.0, 0)))).expect("provenance");
+        assert_eq!(p.arms, vec![ProvenanceArm::Sparse]);
+        assert_eq!(p.sparse_rank, Some(0));
+        assert_eq!(p.dense_rank, None);
+    }
+
+    #[test]
+    fn both_arms_report_both_in_canonical_order() {
+        let p = RetrievalProvenance::of(&candidate(Some((0.9, 3)), Some((12.0, 1))))
+            .expect("provenance");
+        assert_eq!(p.arms, vec![ProvenanceArm::Dense, ProvenanceArm::Sparse]);
+        assert_eq!(p.dense_rank, Some(3));
+        assert_eq!(p.sparse_rank, Some(1));
+    }
+
+    #[test]
+    fn an_engine_phase_arm_sorts_into_place_without_duplicating() {
+        let p = RetrievalProvenance::of(&candidate(Some((0.9, 0)), None))
+            .expect("provenance")
+            .with_arm(ProvenanceArm::Neighbour);
+        assert_eq!(p.arms, vec![ProvenanceArm::Dense, ProvenanceArm::Neighbour]);
+        let again = p.clone().with_arm(ProvenanceArm::Neighbour);
+        assert_eq!(again.arms, p.arms);
+    }
+
+    #[test]
+    fn an_unscored_arm_reports_no_rank_and_no_score() {
+        let p = RetrievalProvenance::unscored(ProvenanceArm::Figure);
+        assert_eq!(p.arms, vec![ProvenanceArm::Figure]);
+        assert_eq!(p.dense_rank, None);
+        assert_eq!(p.sparse_rank, None);
+        assert_eq!(p.fused_score, None);
+        let value = serde_json::to_value(&p).unwrap();
+        assert_eq!(value, serde_json::json!({"arms": ["figure"]}));
+    }
+
+    #[test]
+    fn the_wire_vocabulary_is_the_store_agnostic_one() {
+        // Qdrant calls its arms "dense" and "sparse"; SurrealDB calls them
+        // `vector::similarity` and `@@`. The response must not leak either
+        // store's naming into a contract two runtimes share.
+        assert_eq!(serde_json::to_value(ProvenanceArm::Dense).unwrap(), "dense");
+        assert_eq!(
+            serde_json::to_value(ProvenanceArm::Sparse).unwrap(),
+            "sparse"
+        );
+        assert_eq!(
+            serde_json::to_value(ProvenanceArm::Neighbour).unwrap(),
+            "neighbour"
+        );
+        assert_eq!(
+            serde_json::to_value(ProvenanceArm::Figure).unwrap(),
+            "figure"
+        );
+    }
 }

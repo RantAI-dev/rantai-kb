@@ -2,7 +2,10 @@
 
 use std::time::Duration;
 
-use kb_ports::{ChunkId, ChunkMetadata, ChunkType, DocumentId, PortError, SearchHit};
+use kb_ports::{
+    ChunkId, ChunkMetadata, ChunkType, DocumentId, PortError, ProvenanceArm, RetrievalProvenance,
+    SearchHit,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -215,7 +218,11 @@ pub fn row_chunk_type(meta: Option<&Value>) -> ChunkType {
     ChunkType::from_storage(s)
 }
 
-pub fn build_hit(row: ChunkRow, rank: u32, score: f32) -> SearchHit {
+/// `arm` is the retrieval phase this row came out of, recorded as provenance so
+/// a caller of the legacy [`ChunkStore`] path can still tell which arm produced a
+/// hit. The port path (`RetrievalIndex`) reports per-arm ranks natively and does
+/// not come through here.
+pub fn build_hit(row: ChunkRow, rank: u32, score: f32, arm: ProvenanceArm) -> SearchHit {
     let meta = row_meta(row.metadata.as_ref());
     let chunk_type = row_chunk_type(row.metadata.as_ref());
     let id = ChunkId::new_unchecked(normalize_surreal_id(&row.id));
@@ -244,6 +251,12 @@ pub fn build_hit(row: ChunkRow, rank: u32, score: f32) -> SearchHit {
         similarity: score,
         rank,
         is_bm25: false,
+        retrieval: Some(RetrievalProvenance {
+            arms: vec![arm],
+            dense_rank: (arm == ProvenanceArm::Dense).then_some(rank),
+            sparse_rank: (arm == ProvenanceArm::Sparse).then_some(rank),
+            fused_score: Some(score),
+        }),
     }
 }
 

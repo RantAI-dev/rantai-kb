@@ -16,7 +16,7 @@ pub mod state;
 pub use boundary::{ADAPTER_CRATES, INNER_CRATES};
 pub use cli::{CliError, dispatch};
 pub use config::{Config, WorkerConfig};
-pub use dto::{ChunkDto, SearchRequestDto, SearchResponseDto, SourceDto};
+pub use dto::{ChunkDto, RetrievalDto, SearchRequestDto, SearchResponseDto, SourceDto};
 pub use events::EventBus;
 pub use state::AppState;
 

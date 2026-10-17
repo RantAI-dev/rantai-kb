@@ -92,6 +92,7 @@ fn hit(id: &str, doc_id: &str, content: &str, chunk_index: u32, similarity: f32)
         similarity,
         rank: 0,
         is_bm25: false,
+        retrieval: None,
     }
 }
 

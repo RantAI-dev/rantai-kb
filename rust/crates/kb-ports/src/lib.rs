@@ -36,6 +36,6 @@ pub use types::{
     DocumentMeta, Entity, EntityView, ExtractedFigure, ExtractionOptions, ExtractionResult,
     FigureGateCandidate, JobRecord, JobView, KnowledgeBaseRecord, KnowledgeBaseSummary,
     NewDocument, PageBlock, PageBlockKind, PageText, PatchCategory, PatchDocument,
-    PatchKnowledgeBase, ReapableJob, Relation, RelationView, RerankCandidate, RerankResult,
-    RerankScore, RetryJobOutcome, SearchHit, StoredChunk,
+    PatchKnowledgeBase, ProvenanceArm, ReapableJob, Relation, RelationView, RerankCandidate,
+    RerankResult, RerankScore, RetrievalProvenance, RetryJobOutcome, SearchHit, StoredChunk,
 };

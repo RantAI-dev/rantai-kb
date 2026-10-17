@@ -2,7 +2,7 @@
 //!
 //! Mirrors `fetchMatchingFigures` in `src/lib/rag/hybrid-search.ts`.
 
-use kb_ports::{DocumentId, DocumentScope, PortError, SearchHit};
+use kb_ports::{DocumentId, DocumentScope, PortError, ProvenanceArm, SearchHit};
 use std::collections::HashSet;
 
 use crate::client::{SurrealChunkStore, build_hit, row_meta, row_to_chunk, safe_limit};
@@ -172,7 +172,7 @@ pub async fn execute_figures(
     let limit = safe_limit(limit) as usize;
     let mut hits = Vec::with_capacity(limit.min(scored_rows.len()));
     for (_, r) in scored_rows.into_iter().take(limit) {
-        hits.push(build_hit(r, u32::MAX, 0.0));
+        hits.push(build_hit(r, u32::MAX, 0.0, ProvenanceArm::Figure));
     }
     Ok(hits)
 }

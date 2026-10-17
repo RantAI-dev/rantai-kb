@@ -319,8 +319,15 @@ PASSED_CASES=0
 FAILED_CASES=0
 
 # jq normalization filter:
-# Sorts keys, rounds numbers to 4 decimal places
-NORMALIZE_JQ='walk(if type == "object" and has("totalTimeMs") then (.embeddingTimeMs = 0 | .vectorSearchTimeMs = 0 | .entitySearchTimeMs = 0 | .graphSearchTimeMs = 0 | .fusionTimeMs = 0 | .totalTimeMs = 0) elif type == "number" then ((. * 10000 | round) / 10000) else . end)'
+# Sorts keys, rounds numbers to 4 decimal places, and drops `chunks[].retrieval`.
+#
+# `retrieval` is the additive per-arm provenance block Rust added in S.1c and Bun
+# does not produce. This script exists to prove the two runtimes answer the same
+# question identically on every field they *share*; a field only one of them emits
+# is not a divergence to fix, so it is removed before the diff. Deleting it from
+# Bun's answer is a no-op. `docs/rust-cutover.md` records the deliberate
+# difference.
+NORMALIZE_JQ='walk(if type == "object" and has("totalTimeMs") then (.embeddingTimeMs = 0 | .vectorSearchTimeMs = 0 | .entitySearchTimeMs = 0 | .graphSearchTimeMs = 0 | .fusionTimeMs = 0 | .totalTimeMs = 0) elif type == "number" then ((. * 10000 | round) / 10000) else . end) | del(.chunks[]?.retrieval)'
 
 for idx in "${!TEST_CASES[@]}"; do
   BODY="${TEST_CASES[$idx]}"

@@ -117,7 +117,39 @@ In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.d
 - **Additive Delete Response**:
   - `DELETE /v1/documents/:id` in Rust returns additive fields (`chunks_removed` and `blob_key_pending`) in addition to `{ "ok": true }`.
 
-### 5. Deliberate Differences: BM25 Scope Isolation & Access-Control Leak Fix
+### 5. Additive `retrieval` Provenance on Search Chunks
+
+- **What changed**: every chunk in a `POST /v1/search` response may now carry one
+  extra key:
+
+  ```json
+  "retrieval": { "arms": ["dense", "sparse"], "denseRank": 3, "sparseRank": 1, "fusedScore": 0.0325 }
+  ```
+
+  `arms` is the store-agnostic vocabulary: `dense` (vector), `sparse` (BM25 /
+  keyword), `neighbour` (a chunk the engine wove in from an adjacent chunk of a
+  hit's document), `figure` (a figure co-retrieved with a hit). `denseRank` /
+  `sparseRank` are the 0-based ranks inside each arm's own candidate list, and
+  `fusedScore` is the score the answer was ordered by (an RRF score with hybrid
+  search, which is not comparable across queries). A phase that does not score —
+  `neighbour`, `figure` — reports no score at all rather than `0`.
+- **Why**: before this, a caller (and the red-team matrix in `kb-eval`) could not
+  tell a keyword-only hit from a vector hit: both were "a chunk with content".
+  Attribute a ranking change or a leak to an arm requires knowing which arm
+  produced the hit. See step S.1c in `docs/eval-baseline.md` §7.
+- **Additive, not a change**: every field Bun emits is byte-for-byte unchanged,
+  including the keyword-hit shape (`chunkType`, `page` and `assetKey` omitted,
+  `contextualPrefix: null`). The key is **omitted** when the engine could not
+  attribute the hit, so `retrieval` absent means "this server reported no arm" and
+  never means `null`.
+- **`search-parity.sh`**: the parity diff now deletes `.chunks[].retrieval` from
+  both answers before comparing (a no-op for Bun, which has no such key). The
+  script exists to prove the two runtimes agree on every field they share; a field
+  only one of them emits is not a divergence to fix.
+- **`mixed-fleet.sh`** is unaffected: it asserts chunk counts and ingest
+  interoperability, not response text.
+
+### 6. Deliberate Differences: BM25 Scope Isolation & Access-Control Leak Fix
 - **TypeScript Reference Bug**: In `src/lib/rag/retriever.ts` (~lines 160–195), the BM25 arm queries the entire `document_chunk` table unscoped in SurrealDB and resolves candidates through `DocumentStore.findAliveMetaByIds(docIds)`. Because `findAliveMetaByIds` only checks tenant ownership and non-deleted status, the BM25 arm completely ignores `knowledgeBaseIds` (including API key restrictions via `restrictKnowledgeBases`), `category`, and `documentIds` filters. When a query is narrowed to Knowledge Base A, BM25 can leak chunks from Knowledge Base B or other categories of the same tenant.
 - **Rust Implementation (Deliberate Divergence)**: In `rust/crates/kb-engine/src/retrieval.rs`, the BM25 arm keeps a candidate hit only if its parent document is visible to the tenant AND present within the resolved `scope.document_ids()`. When a search is narrowed by knowledge base, category, or document IDs, out-of-scope BM25 hits are safely dropped.
 - **Parity Preservation**: Unnarrowed searches retain 100% exact parity with TypeScript, verified across the 33-case search parity matrix (`rust/scripts/search-parity.sh`), which explicitly tests and reports the leak divergence on restricted queries while asserting exact match on all other cases.

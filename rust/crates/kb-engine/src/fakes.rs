@@ -46,12 +46,13 @@ use kb_ports::{
     ChunkMetadata, ChunkStore, ChunkToStore, ChunkType, CreateCategory, CreateJobInput,
     CreateKnowledgeBase, DocumentDownloadMeta, DocumentId, DocumentIntelligenceData, DocumentMeta,
     DocumentScope, DocumentStore, Embedder, Entity, EntityExtractor, EntityStore, EntityView,
-    ExtractionOptions, ExtractionResult, Extractor, FigureGate, FigureGateCandidate, HybridQuery,
-    IndexCapabilities, IndexUnit, JobRecord, JobStore, JobView, KnowledgeBaseId,
+    ExtractionOptions, ExtractionResult, Extractor, FigureGate, FigureGateCandidate, Fusion,
+    HybridQuery, IndexCapabilities, IndexUnit, JobRecord, JobStore, JobView, KnowledgeBaseId,
     KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor, NewDocument, PatchCategory,
     PatchDocument, PatchKnowledgeBase, PortError, ProgressSink, QueryEmbedding, ReapableJob,
     Relation, RelationView, RerankCandidate, RerankResult, Reranker, RetrievalIndex,
     RetryJobOutcome, ScopeRequest, SearchHit, StoredChunk, TenantId, adapter::ScopeToken,
+    sort_candidates,
 };
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -110,6 +111,7 @@ pub fn make_fake_hit(
         similarity,
         rank: 0,
         is_bm25: false,
+        retrieval: None,
     }
 }
 
@@ -821,6 +823,48 @@ impl ChunkStore for FakeChunkStore {
     }
 }
 
+/// Merge one candidate list from both arms into the fused answer `search` must
+/// return: one entry per unit, both arm scores kept, RRF when asked for it.
+///
+/// A test fake that concatenates instead of fusing is not a smaller version of
+/// the real thing, it is a different thing: the engine and every downstream
+/// consumer assume `search` yields one candidate per unit.
+pub fn fuse_candidates(candidates: Vec<Candidate>, fusion: Fusion, k: usize) -> Vec<Candidate> {
+    let mut merged: Vec<Candidate> = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        match merged
+            .iter()
+            .position(|existing| existing.unit_id == candidate.unit_id)
+        {
+            Some(position) => {
+                let previous = merged[position].clone();
+                let entry = &mut merged[position];
+                match fusion {
+                    Fusion::Rrf { k: rrf_k } => {
+                        entry.scores.fused +=
+                            1.0 / (rrf_k.max(1) as f32 + previous.ranks.fused as f32 + 1.0);
+                        entry.scores.fused +=
+                            1.0 / (rrf_k.max(1) as f32 + candidate.ranks.fused as f32 + 1.0);
+                    }
+                    Fusion::None => {
+                        if candidate.scores.dense.is_some() {
+                            entry.scores.fused = candidate.scores.fused;
+                        }
+                    }
+                }
+                entry.scores.dense = candidate.scores.dense.or(entry.scores.dense);
+                entry.scores.sparse = candidate.scores.sparse.or(entry.scores.sparse);
+                entry.ranks.dense = candidate.ranks.dense.or(entry.ranks.dense);
+                entry.ranks.sparse = candidate.ranks.sparse.or(entry.ranks.sparse);
+            }
+            None => merged.push(candidate),
+        }
+    }
+    sort_candidates(&mut merged);
+    merged.truncate(k);
+    merged
+}
+
 #[async_trait]
 impl RetrievalIndex for FakeChunkStore {
     async fn upsert(&self, units: Vec<IndexUnit>) -> Result<(), PortError> {
@@ -879,6 +923,11 @@ impl RetrievalIndex for FakeChunkStore {
         }
 
         let allowed = scope.document_ids();
+        // Fused by unit id, as both real adapters do: a unit both arms rank is
+        // one candidate with two arm scores, not two candidates. The fake used
+        // to concatenate, which hid the difference between "the keyword arm
+        // found this" and "both arms found this" — the distinction the `retrieval`
+        // provenance field exists to report.
         let mut out: Vec<Candidate> = Vec::new();
 
         if query.dense.is_some() && !v_failed {
@@ -953,8 +1002,7 @@ impl RetrievalIndex for FakeChunkStore {
             }
         }
 
-        out.truncate(query.k);
-        Ok(out)
+        Ok(fuse_candidates(out, query.fusion, query.k))
     }
 
     async fn fetch(

@@ -68,6 +68,7 @@ fn hit(
         similarity,
         rank: 0,
         is_bm25: false,
+        retrieval: None,
     }
 }
 

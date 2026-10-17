@@ -13,7 +13,7 @@ mod pipeline_tests {
     use crate::timing::{ManualClock, SystemClock};
     use kb_ports::{
         ChunkType, DocumentFilter, DocumentId, DocumentMeta, DocumentStore, EngineError,
-        KnowledgeBaseId, RetrievalDegrade, ScopeRequest, TenantId,
+        KnowledgeBaseId, ProvenanceArm, RetrievalDegrade, ScopeRequest, TenantId,
     };
 
     fn setup() -> (
@@ -585,6 +585,101 @@ mod pipeline_tests {
             .map(|c| c.chunk.id.0.as_str())
             .collect();
         assert_eq!(fig_ids, vec!["fig_1"]);
+    }
+
+    #[tokio::test]
+    async fn every_phase_says_which_arm_produced_its_chunk() {
+        // The engine is what contributes the neighbour and figure arms, so this
+        // is where they are proven: the search arms come back on the candidate,
+        // the weave and the co-retrieval are the engine's own.
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(
+            TenantId::new_unchecked("t1"),
+            vec![DocumentId::new_unchecked("d1")],
+        );
+
+        chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+            "c-vector",
+            "d1",
+            "Title",
+            "dense passage",
+            0,
+            0.9,
+        ));
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "c-keyword",
+            "d1",
+            "Title",
+            "keyword passage",
+            4,
+            0.7,
+        ));
+        chunk_store
+            .neighbour_hits
+            .write()
+            .unwrap()
+            .push(make_fake_hit(
+                "c-neighbour",
+                "d1",
+                "Title",
+                "adjacent passage",
+                5,
+                0.0,
+            ));
+        let mut fig = make_fake_hit("fig_1", "d1", "Title", "[Gambar] Figure 1", 6, 0.5);
+        fig.chunk.chunk_type = ChunkType::Figure;
+        fig.chunk.metadata.asset_key = Some("assets/fig1.png".to_string());
+        chunk_store.figure_hits.write().unwrap().push(fig);
+
+        let opts = RetrievalOptions {
+            neighbour_window: 1,
+            figure_limit: 1,
+            ..Default::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        let arms_of = |id: &str| {
+            outcome
+                .chunks
+                .iter()
+                .find(|c| c.chunk.id.0 == id)
+                .unwrap_or_else(|| panic!("no chunk {id}"))
+                .retrieval
+                .as_ref()
+                .map(|p| p.arms.clone())
+        };
+        assert_eq!(
+            arms_of("c-vector"),
+            Some(vec![ProvenanceArm::Dense]),
+            "a dense hit says so"
+        );
+        assert_eq!(
+            arms_of("c-keyword"),
+            Some(vec![ProvenanceArm::Sparse]),
+            "a keyword hit says so"
+        );
+        assert_eq!(
+            arms_of("c-neighbour"),
+            Some(vec![ProvenanceArm::Neighbour]),
+            "a woven neighbour says so"
+        );
+        assert_eq!(
+            arms_of("fig_1"),
+            Some(vec![ProvenanceArm::Figure]),
+            "a co-retrieved figure says so"
+        );
     }
 
     fn setup_two_kb_docs(doc_store: &FakeDocumentStore, tenant: &TenantId) {

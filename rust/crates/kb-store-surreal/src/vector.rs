@@ -1,6 +1,6 @@
 //! Vector similarity search over SurrealDB.
 
-use kb_ports::{DocumentScope, PortError, SearchHit};
+use kb_ports::{DocumentScope, PortError, ProvenanceArm, SearchHit};
 
 use crate::client::{SurrealChunkStore, build_hit, row_to_chunk, safe_limit};
 use crate::queries::{VECTOR_SEARCH_QUERY, surql_f32_array, surql_id_list};
@@ -34,7 +34,7 @@ pub async fn execute_vector_search(
     for (i, row) in rows.into_iter().enumerate() {
         if let Some(r) = row_to_chunk(&row) {
             let sim = r.similarity.unwrap_or(0.0);
-            hits.push(build_hit(r, i as u32, sim));
+            hits.push(build_hit(r, i as u32, sim, ProvenanceArm::Dense));
         }
     }
     Ok(hits)

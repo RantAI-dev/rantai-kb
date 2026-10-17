@@ -1,6 +1,6 @@
 //! Neighbour chunk retrieval over SurrealDB.
 
-use kb_ports::{DocumentScope, NeighbourAnchor, PortError, SearchHit};
+use kb_ports::{DocumentScope, NeighbourAnchor, PortError, ProvenanceArm, SearchHit};
 use std::collections::HashSet;
 
 use crate::client::{SurrealChunkStore, build_hit, row_to_chunk};
@@ -76,7 +76,7 @@ pub async fn execute_neighbours(
         if anchor_ids.contains(&r.id) || !seen.insert(r.id.clone()) {
             continue;
         }
-        hits.push(build_hit(r, u32::MAX, 0.0));
+        hits.push(build_hit(r, u32::MAX, 0.0, ProvenanceArm::Neighbour));
     }
 
     Ok(hits)
