@@ -839,5 +839,5 @@ After, five fresh stacks:
 and all five `run.trec` files are byte-identical (one hash), as are the five
 `run.page.trec`. `tiny-stub-qdrant.metrics.json` was re-baselined on that run
 (nDCG@10 0.7544907651, MRR@10 0.6736111) and the gate now reports +0.000 on
-every metric. Latency did not move: p50 29–34 ms across the five runs, against
-the 28.6 ms the gate reported before the change.
+every metric. Latency did not move either: document latency p50 was 28.0–36.4 ms
+across the five runs before the change and 28.8–33.7 ms across the five after.
