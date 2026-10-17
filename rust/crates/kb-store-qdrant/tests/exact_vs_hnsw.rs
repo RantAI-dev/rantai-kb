@@ -11,10 +11,14 @@
 //! `recall@20` of HNSW against the exact ranking, which is the ground truth by
 //! definition.
 //!
+//! A benchmark, not a pass/fail check, so it is `#[ignore]`d rather than gated on
+//! an environment variable: it builds 66,500 points and takes about half a
+//! minute, which is not something `--features integration` should do to anyone.
+//!
 //! ```sh
 //! KB_STACK_QDRANT=1 rust/scripts/stack-up.sh
-//! KB_QDRANT_EXACT_BENCH=1 cargo test -p kb-store-qdrant --features integration \
-//!   --test exact_vs_hnsw -- --nocapture
+//! cargo test -p kb-store-qdrant --features integration \
+//!   --test exact_vs_hnsw -- --ignored --nocapture
 //! rust/scripts/stack-down.sh
 //! ```
 
@@ -141,13 +145,8 @@ fn p95(values: &mut [f64]) -> f64 {
 }
 
 #[tokio::test]
+#[ignore = "benchmark: builds 66,500 points. Run with --ignored."]
 async fn exact_and_hnsw_at_real_corpus_sizes() {
-    if std::env::var("KB_QDRANT_EXACT_BENCH").as_deref() != Ok("1") {
-        panic!(
-            "set KB_QDRANT_EXACT_BENCH=1 with a live Qdrant (KB_STACK_QDRANT=1 \
-             rust/scripts/stack-up.sh) to run this benchmark"
-        );
-    }
     let mut settings = QdrantSettings::from_env();
     settings.dense_dims = Some(DIM as u32);
     let client = settings.client().expect("client");

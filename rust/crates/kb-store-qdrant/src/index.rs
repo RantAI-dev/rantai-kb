@@ -27,8 +27,9 @@ use crate::settings::{DENSE_VECTOR, QdrantSettings, SPARSE_VECTOR, map};
 /// graph, and how long that count is believed for.
 ///
 /// Measured on this box (Qdrant v1.19.2, 1024-dim cosine vectors, k=20, 50
-/// queries; reproduce with `KB_QDRANT_EXACT_BENCH=1 cargo test -p
-/// kb-store-qdrant --features integration --test exact_vs_hnsw -- --nocapture`):
+/// queries; reproduce with `cargo test -p kb-store-qdrant --features
+/// integration --test exact_vs_hnsw -- --ignored --nocapture` against a live
+/// Qdrant):
 ///
 /// | points | exact p50 | HNSW p50 | HNSW recall@20 vs exact |
 /// |---:|---:|---:|---:|
