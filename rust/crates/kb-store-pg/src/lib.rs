@@ -10,6 +10,8 @@
 pub mod api_keys;
 mod auth;
 mod documents;
+mod graph;
+pub(crate) mod graph_queries;
 mod jobs;
 pub mod migrate;
 mod queries;
@@ -18,6 +20,7 @@ mod store;
 pub use api_keys::{MintedApiKey, NewApiKey, generate_api_key, insert_api_key};
 pub use auth::hash_api_key;
 pub use documents::row_to_doc_meta;
+pub use graph::PgGraphStore;
 pub use jobs::PgJobStore;
 pub use migrate::{Migration, MigrationReport};
 pub use store::{PgDocumentStore, PgSettings, connect_pool};

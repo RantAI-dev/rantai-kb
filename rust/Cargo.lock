@@ -1385,6 +1385,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "hex",
+ "kb-core",
  "kb-ports",
  "serde",
  "serde_json",

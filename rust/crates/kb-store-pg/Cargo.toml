@@ -10,6 +10,9 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# The graph adapter builds the CSR the entity arm walks, so it links the pure
+# graph module and no other crate.
+kb-core = { path = "../kb-core" }
 kb-ports = { path = "../kb-ports", features = ["scope-adapter"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -23,3 +26,14 @@ tokio = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+
+[features]
+default = []
+# The GraphStore contract suite and the load timing, against a live Postgres.
+# Off by default so `cargo test --workspace` needs no database; the tests also
+# refuse to report a pass unless KB_PG_GRAPH_CONTRACT=1, so turning the feature on
+# without a running Postgres cannot look like coverage.
+integration = ["kb-ports/contract"]
+
+[dev-dependencies]
+tokio = { workspace = true }

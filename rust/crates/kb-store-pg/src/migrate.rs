@@ -195,12 +195,21 @@ async fn applied_checksum(
         .await
         .map_err(|e| PortError::Unavailable(format!("pg read _prisma_migrations: {e}")))?;
     let Some(row) = row else { return Ok(None) };
-    let finished: Option<chrono::DateTime<chrono::Utc>> = row.try_get("finished_at").ok();
-    let rolled_back: Option<chrono::DateTime<chrono::Utc>> = row.try_get("rolled_back_at").ok();
+    // Prisma's `_prisma_migrations` timestamps are `TIMESTAMP(3)` — without a time
+    // zone — which sqlx decodes as `NaiveDateTime`. Asking for `DateTime<Utc>`
+    // fails, and the `.ok()` used to swallow that into "not applied", so every run
+    // re-applied every migration and the second run of `kb-server migrate` against
+    // a migrated database died on `relation "Document" already exists`. The
+    // failure was invisible on a fresh container, which is why it survived.
+    let finished: Option<chrono::NaiveDateTime> = row.try_get("finished_at").ok();
+    let rolled_back: Option<chrono::NaiveDateTime> = row.try_get("rolled_back_at").ok();
     if finished.is_none() || rolled_back.is_some() {
         return Ok(None);
     }
-    Ok(row.try_get("checksum").ok())
+    // A row we cannot read a checksum from is not a row we can trust to have been
+    // applied, so this one reports the error instead of guessing.
+    row.try_get("checksum")
+        .map_err(|e| PortError::Unavailable(format!("pg migration checksum for {name}: {e}")))
 }
 
 /// Apply one migration and record it, atomically.

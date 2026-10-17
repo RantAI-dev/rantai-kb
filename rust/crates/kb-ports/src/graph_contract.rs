@@ -54,13 +54,17 @@ use crate::scope::adapter::ScopeToken;
 /// Tenant A's documents. `doc-a1` and `doc-a2` are in A's visible scope;
 /// `doc-a3` exists in the tenant but is not in that scope (a knowledge-base or
 /// category filter excluded it), and `doc-b1` belongs to tenant B.
-const TENANT_A: &str = "contract-tenant-a";
-const TENANT_B: &str = "contract-tenant-b";
-const DOC_A1: &str = "doc-a1";
-const DOC_A2: &str = "doc-a2";
+pub const TENANT_A: &str = "contract-tenant-a";
+pub const TENANT_B: &str = "contract-tenant-b";
+
+/// The two tenants the fixture uses, for an adapter that cannot hand out a fresh
+/// store per property and has to isolate by tenant instead.
+pub const CONTRACT_TENANTS: [&str; 2] = [TENANT_A, TENANT_B];
+pub const DOC_A1: &str = "doc-a1";
+pub const DOC_A2: &str = "doc-a2";
 /// In the tenant, deliberately outside `scope_a`.
-const DOC_A3: &str = "doc-a3";
-const DOC_B1: &str = "doc-b1";
+pub const DOC_A3: &str = "doc-a3";
+pub const DOC_B1: &str = "doc-b1";
 
 /// Every property in the suite, in order. Public so an adapter can run a subset
 /// and so the names are stable enough to grep for.

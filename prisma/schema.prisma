@@ -1,7 +1,10 @@
 // RantAI KB — relational metadata.
 //
-// The vector/graph side lives in SurrealDB (see src/lib/rag/store/schema.surql);
-// this schema owns documents, their grouping, and ingest jobs.
+// Chunks, vectors and BM25 still live in SurrealDB (see
+// src/lib/rag/store/schema.surql). This schema owns documents, their grouping,
+// ingest jobs, and — since `20261017120000_graph_tables` — the entity graph
+// (`KbEntity`, `KbMention`, `KbRelation`), which is moving off SurrealDB too
+// (`docs/architecture-target.md` §11). Nothing in `src/` reads those three yet.
 //
 // Every row is scoped by `tenantId`, a plain string the caller supplies — NOT a
 // foreign key. That is deliberate: the service knows nothing about the calling
@@ -147,4 +150,82 @@ model ApiKey {
   createdAt  DateTime  @default(now())
 
   @@index([tenantId])
+}
+
+/// Entity graph, moving off SurrealDB (`docs/architecture-target.md` §11,
+/// `docs/plan-best-multimodal-kb.md` step L.3).
+///
+/// Plain Postgres tables, indexed by `(tenantId, …)`, with the traversal done in
+/// Rust over a compressed adjacency array. Bun does not read these tables yet —
+/// nothing in `src/` touches them — so adding them is additive for the mixed
+/// fleet; the Rust `GraphStore` moves ingest and the entity/graph arm onto them.
+///
+/// LightRAG replaced its Apache AGE backend with exactly these tables because
+/// they were faster and smaller, and every dedicated graph database that was
+/// screened out is copyleft (FalkorDB SSPL, Memgraph BSL, HelixDB AGPL). Postgres
+/// is already running and already the source of truth for documents and jobs.
+model KbEntity {
+  id       String   @id @default(uuid())
+  tenantId String
+  /// Canonical key. The dedupe identity: two extractions that resolve to the same
+  /// key are one entity in the tenant, across every document.
+  key      String
+  name     String
+  type     String   @default("")
+  aliases  String[] @default([])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now())
+
+  mentions     KbMention[]
+  outRelations KbRelation[] @relation("KbRelation_src")
+  inRelations  KbRelation[] @relation("KbRelation_dst")
+
+  @@unique([tenantId, key])
+  @@index([tenantId, name])
+}
+
+/// One entity in one chunk of one document. `documentId` is what makes the scope
+/// rule enforceable: a mention from a document the caller cannot see does not
+/// exist, and cannot be a path through the graph.
+model KbMention {
+  id         String @id @default(uuid())
+  tenantId   String
+  entityId   String
+  chunkId    String
+  documentId String
+
+  entity KbEntity @relation(fields: [entityId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, entityId, chunkId])
+  @@index([tenantId, chunkId])
+  @@index([tenantId, documentId])
+}
+
+/// One relation between two entities, extracted from one document. `documentId`
+/// again: the edge belongs to the document it was read out of, so deleting the
+/// document deletes the edge and no stale path survives.
+model KbRelation {
+  id           String  @id @default(uuid())
+  tenantId     String
+  srcEntityId  String
+  dstEntityId  String
+  type         String  @default("")
+  weight       Float   @default(1)
+  chunkId      String?
+  documentId   String
+
+  src KbEntity @relation("KbRelation_src", fields: [srcEntityId], references: [id], onDelete: Cascade)
+  dst KbEntity @relation("KbRelation_dst", fields: [dstEntityId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, documentId])
+  @@index([tenantId, srcEntityId])
+  @@index([tenantId, dstEntityId])
+}
+
+/// Per-tenant version counter for the in-memory CSR cache: bumped by every write,
+/// compared before serving a cached graph. Absent means "never written", which is
+/// why it is its own row rather than a column on `KbEntity`.
+model KbGraphVersion {
+  tenantId String @id
+  version  BigInt @default(0)
 }
