@@ -6,6 +6,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 pub mod embedder;
+pub mod heuristic_extractor;
 pub mod llm_extractor;
 pub mod llm_reranker;
 pub mod query_cache;
@@ -14,6 +15,7 @@ pub mod rerankers;
 pub mod vlm_gate;
 
 pub use embedder::{EmbedderImpl, EmbedderSettings};
+pub use heuristic_extractor::{HeuristicExtractor, HeuristicExtractorSettings};
 pub use llm_extractor::{ExtractorSettings, LlmCombinedExtractor};
 /// Type alias for ExtractorSettings.
 pub type ExtractorConfig = ExtractorSettings;

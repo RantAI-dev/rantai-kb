@@ -36,8 +36,8 @@ pub use fusion::{
     IdRef, RrfItem, RrfOptions, RrfResult, reciprocal_rank_fusion, reciprocal_rank_fusion_with,
 };
 pub use intelligence::{
-    Entity, PatternEntityExtractor, PatternExtractionConfig, PatternRelationConfig,
-    PatternRelationExtractor, Relation,
+    Entity, HeuristicConfig, PatternEntityExtractor, PatternExtractionConfig,
+    PatternRelationConfig, PatternRelationExtractor, Relation, key_of, query_terms,
 };
 pub use page_map::{PageBlock, assign_chunk_pages};
 pub use policy::{
