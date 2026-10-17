@@ -273,7 +273,15 @@ async fn the_matrix_passes_against_a_server_that_scopes_every_arm() {
             .iter()
             .find(|a| a.arm == arm)
             .unwrap_or_else(|| panic!("{arm:?} was never probed"));
-        if report.status == Status::Untested {
+        // The graph arm is off in this server (`KB_GRAPH_ARM` unset), so it has
+        // nothing to find. Every other arm must still prove it can find its target.
+        if arm == Arm::Graph {
+            assert_eq!(
+                report.status,
+                Status::Untested,
+                "the graph arm is off here, so it must report UNTESTED, not {:?}",
+                report.status
+            );
             continue;
         }
         assert!(
