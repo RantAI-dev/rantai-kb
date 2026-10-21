@@ -1252,6 +1252,13 @@ Evaluated with `kb-eval score` and `score_deltas.py` comparing retrieval on `mir
 
 *Finding*: The 95% bootstrap confidence interval includes zero (`[-0.063, +0.036]`), demonstrating that truncating candidates to 5 items of 200 characters preserves retrieval recall and ranking quality while preventing the 22.5s timeouts of unbudgeted reranking.
 
+> **Reviewer correction (2026-10-21).** These absolute scores are **not comparable** with §4 or
+> §7.1. The runs' own reports (`docs/l4-bench-results/miracl-rerank-*/report.md`) say
+> `documents known: 564`. Only 564 of the 1,485 corpus documents were indexed, so there were about
+> 60% fewer distractors, and `--max-chunks` was 10 instead of 50. The 0.904 is inflated by the
+> smaller corpus. The paired OFF-vs-ON delta still holds as a comparison on the same 564-document
+> corpus, but the full-corpus quality number is still §7.1 (Qdrant hybrid, nDCG@10 0.799).
+
 ---
 
 ### 8.7 Vector Store Scale Check (Filtered Top-50)
