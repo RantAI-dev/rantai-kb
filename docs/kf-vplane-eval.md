@@ -16,6 +16,26 @@ KF's governance stays in KF. The router, the OPA selection gate, citations, the 
 scope and traces don't move. rantai-kb would sit below the `VectorPlane` protocol
 (`plane_protocol.py`), which already exists so the engine behind it can be swapped.
 
+## Embeddings come from OpenRouter (decided 2026-10-21)
+
+So the evaluation does not tie up this box's CPU, every dense embedding is fetched from
+OpenRouter, for both engines. KF's own model is on OpenRouter (`intfloat/multilingual-e5-large`),
+and so is production's (`qwen/qwen3-embedding-8b`). Both cost $0.01 per million tokens. One
+pass over the 2,933 passages is about 0.4M tokens, so the whole evaluation costs **under
+$0.05**. KF's sparse side (`Qdrant/bm25`) stays local: it is a tokenizer + stemmer, not a model.
+
+What this changes:
+- KF in production embeds in-process with fastembed (ONNX). Here, KF's dense half is the same
+  model behind an HTTP call. Pooling may differ slightly between fastembed and OpenRouter's
+  host. The test compares engines, so both sides use the same served model.
+- A call to OpenRouter takes about 1 s and dominates end-to-end time on both sides. So the
+  latency rule below compares **search time without the embedding call**, and reports the
+  end-to-end total beside it.
+- moco-kf is evaluated at `origin/main` `e7f4d0b` (pulled 2026-10-21), from a separate
+  worktree. Its V-plane code and collection spec are used unchanged.
+- rantai-kb runs as a **release** build. The stack script used to start a debug build, which
+  would have penalised it.
+
 ## Target (decision rule, fixed before any number is seen)
 
 Replace the V-plane **only if both hold** on `miracl-id-200`, against the **better** of
@@ -23,8 +43,9 @@ KF-as-is and KF-with-e5-prefixes:
 
 1. **Quality:** rantai-kb nDCG@10 is non-inferior. The paired-bootstrap 95% CI lower bound of
    (rantai-kb − KF) is ≥ −0.02. Recall@10 and Hit@1 are reported beside it.
-2. **Latency:** the plane-level p95 (query embedding + search, warm process, cold query cache)
-   at concurrency 1 is under KF's own target of **150 ms** and not worse than KF's.
+2. **Latency:** the search-only p95 (embedding call excluded, warm process) at concurrency 1
+   is not worse than KF's, and the end-to-end p95 stays under KF's 150 ms target once the
+   embedding call is subtracted.
 
 If quality wins and latency loses (or the reverse), the result is a partial swap, recorded with
 the numbers. **Stretch:** nDCG@10 +0.03 over the better KF variant, with the CI excluding zero.
@@ -71,8 +92,9 @@ the numbers. **Stretch:** nDCG@10 +0.03 over the better KF variant, with the CI 
 
    No KF source is modified for the evaluation.
 3. **rantai-kb arm:** `kb-server` on Qdrant, ingesting the same passages:
-   - rantai-kb + Qwen3-Embedding-0.6B (current);
-   - rantai-kb + e5-large via TEI (the ablation for assumption 2).
+   - rantai-kb + e5-large, with prefixes. The same embedder as KF, so this compares engines;
+   - rantai-kb + qwen3-embedding-8b (production's model);
+   - KF + qwen3-embedding-8b, so a better embedder alone is not credited to the engine.
 4. **Score:** `kb-eval score` + `ranx` per run, plus paired deltas against the better KF
    variant.
 5. **Latency:** each arm's plane-level timings at concurrency 1 and 8, cold and warm query

@@ -11,6 +11,11 @@
 #
 # Opt-in modes:
 #   KB_STACK_EMBEDDINGS=tei         # starts kb-smoke-tei-embed (Qwen3-Embedding-0.6B, dim 1024)
+#   KB_STACK_EMBEDDINGS=openrouter  # no local model: embeddings come from OpenRouter (PAID,
+#                                   # needs OPENROUTER_API_KEY). KB_STACK_OR_MODEL (default
+#                                   # qwen/qwen3-embedding-8b), KB_STACK_OR_DIM (4096),
+#                                   # KB_STACK_OR_QUERY_PREFIX / KB_STACK_OR_PASSAGE_PREFIX.
+#   KB_SERVER_BIN=.../release/kb-server  # a prebuilt binary (e.g. release, for latency runs)
 #   KB_STACK_RERANK=tei             # starts kb-smoke-tei-rerank (bge-reranker-v2-m3)
 #   KB_STACK_QDRANT=1               # starts kb-smoke-qdrant (Qdrant v1.19.2; HTTP 6333, gRPC 6334)
 #   KB_STACK_GRAPH=1                # ingest writes the Postgres entity graph, with the free
@@ -79,7 +84,7 @@ SERVER_PID_FILE="$STACK_DIR/server.pid"
 STUB_LOG="$STACK_DIR/stub.log"
 SERVER_LOG="$STACK_DIR/server.log"
 
-KB_SERVER_BIN="$WORKSPACE_ROOT/target/debug/kb-server"
+KB_SERVER_BIN="${KB_SERVER_BIN:-$WORKSPACE_ROOT/target/debug/kb-server}"
 STUB_BIN="$WORKSPACE_ROOT/target/debug/examples/stub_embeddings"
 
 # Apply the entity-graph options to stack.env.
@@ -224,7 +229,7 @@ if [ "$KB_STACK_QDRANT" = "1" ]; then
 fi
 
 echo "=== 2. Building binaries (before memory-heavy models start) ==="
-if [ "$KB_STACK_EMBEDDINGS" != "tei" ]; then
+if [ "$KB_STACK_EMBEDDINGS" = "stub" ]; then
   [ -f "$STUB_BIN" ] || cargo build -p kb-server --example stub_embeddings --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
 fi
 [ -f "$KB_SERVER_BIN" ] || cargo build -p kb-server --bin kb-server --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
@@ -252,6 +257,12 @@ if [ "$KB_STACK_EMBEDDINGS" = "tei" ]; then
     exit 1
   fi
   echo "TEI embedding server ready on 127.0.0.1:${TEI_EMBED_PORT}"
+elif [ "$KB_STACK_EMBEDDINGS" = "openrouter" ]; then
+  if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    echo "KB_STACK_EMBEDDINGS=openrouter needs OPENROUTER_API_KEY in the environment" >&2
+    exit 1
+  fi
+  echo "Embeddings from OpenRouter (${KB_STACK_OR_MODEL:-qwen/qwen3-embedding-8b}); no local model started."
 else
   echo "Starting stub embedding server on port ${STUB_PORT}..."
   if command -v tmux >/dev/null 2>&1; then
@@ -347,6 +358,16 @@ export KB_EMBEDDING_DIM="1024"
 export KB_EMBEDDING_QUERY_PREFIX="Instruct: Given a question, retrieve passages that answer it
 Query: "
 export KB_EMBEDDING_PASSAGE_PREFIX=""
+EOF
+elif [ "$KB_STACK_EMBEDDINGS" = "openrouter" ]; then
+  chmod 600 "$STACK_ENV"
+  cat >> "$STACK_ENV" <<EOF
+export KB_EMBEDDING_BASE_URL="https://openrouter.ai/api/v1/embeddings"
+export KB_EMBEDDING_API_KEY="${OPENROUTER_API_KEY:-}"
+export KB_EMBEDDING_MODEL="${KB_STACK_OR_MODEL:-qwen/qwen3-embedding-8b}"
+export KB_EMBEDDING_DIM="${KB_STACK_OR_DIM:-4096}"
+export KB_EMBEDDING_QUERY_PREFIX="${KB_STACK_OR_QUERY_PREFIX:-}"
+export KB_EMBEDDING_PASSAGE_PREFIX="${KB_STACK_OR_PASSAGE_PREFIX:-}"
 EOF
 else
   cat >> "$STACK_ENV" <<EOF
