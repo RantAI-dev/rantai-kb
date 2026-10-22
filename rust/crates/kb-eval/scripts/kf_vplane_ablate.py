@@ -13,6 +13,11 @@ difference can be switched on alone:
 - fusion: Qdrant's server RRF (k=2, 0-based ranks) or rantai-kb's re-sort of
   Qdrant's fused list with k=60.
 
+After the 2026-10-22 engine change there is a third dense text, "emb": the
+exact text the engine embeds now (title, the chunk's heading path, content),
+produced by kb_core::title::embedding_text in the dump helper. Nothing here
+re-implements it.
+
 The two reproduction rows must match the measured runs (0.813 and 0.796) before
 any ablation row is trusted.
 
@@ -231,15 +236,14 @@ async def main() -> int:
     rk_q = {json.loads(l)["id"]: json.loads(l) for l in Path(f"{args.chunks}.queries").open(encoding="utf-8")}
 
     passages = {p.stem: p.read_text(encoding="utf-8") for p in sorted((args.dataset / "corpus").glob("*"))}
-    titles = {}
-    for stem, text in passages.items():
-        first = text.lstrip().splitlines()[0] if text.strip() else ""
-        titles[stem] = first.lstrip("#").strip() if first.startswith("#") else ""
+    chunks = [json.loads(l) for l in args.chunks.open(encoding="utf-8")]
+    # The title comes from the dump, which got it from kb_core::title — the
+    # same code the engine runs. Nothing here re-implements it.
+    titles = {c["doc"]: c["title"] for c in chunks}
     kf = {}
     for line in args.kf_cache.open(encoding="utf-8"):
         row = json.loads(line)
         kf[row["id"]] = row
-    chunks = [json.loads(l) for l in args.chunks.open(encoding="utf-8")]
 
     dc = DenseCache(args.cache, key)
     q_texts = ["query: " + q["text"] for q in queries]
@@ -247,10 +251,25 @@ async def main() -> int:
         "stem": [f"passage: {c['doc']}\n\n{c['content']}" for c in chunks],
         "none": [f"passage: {c['content']}" for c in chunks],
         "title": [f"passage: {titles[c['doc']]}\n\n{c['content']}" for c in chunks],
+        # The text the engine embeds after the 2026-10-22 change: the title,
+        # the chunk's heading path, the content. "emb" comes from the dump,
+        # which called kb_core::title::embedding_text.
+        "emb": [f"passage: {c['emb']}" for c in chunks],
     }
     whole_stem = [f"passage: {s}\n\n{t}" for s, t in passages.items()]
     await dc.fill(q_texts + [t for v in dense_variants.values() for t in v] + whole_stem)
     Q = dc.matrix(q_texts)
+
+    # How different is the new embedding text from the old "title" one? For a
+    # corpus whose only heading is the document's own H1 the two are the same
+    # string, which is why the measured "k=2 + real title" row is the right
+    # prediction for this dataset. Say so out loud rather than assume it.
+    same = sum(1 for a, b in zip(dense_variants["emb"], dense_variants["title"], strict=True) if a == b)
+    print(
+        f"embedding text: {same}/{len(chunks)} chunks have the same text as the "
+        f"'title' variant",
+        file=sys.stderr,
+    )
 
     # Units: whole passages or rantai-kb chunks, each with dense and sparse options.
     p_ids = list(passages)
@@ -349,6 +368,17 @@ async def main() -> int:
         ("rk: k=2 + real title + pool 50, ties by dense", "chunk", "title", "rk", 50, "qdrant", "dense"),
         ("rk: k=2 + title (dense+sparse) + pool 50", "chunk", "title", "rk+title", 50, "qdrant"),
         ("rk: k=2 + pool 50 + whole passages, no stem", "passage", "none", "rk", 50, "qdrant"),
+        # What the engine does after 2026-10-22: Qdrant's own RRF (k=2) and the
+        # embedding text with the title and the chunk's heading path. The pool
+        # is the engine's default (20 candidates per arm); the live tie-break
+        # is by document UUID, which the "uuid" rows use.
+        ("new: k=2 + emb text (pool 20)", "chunk", "emb", "rk", 20, "qdrant"),
+        ("new: k=2 + emb text + pool 50", "chunk", "emb", "rk", 50, "qdrant"),
+        ("new: k=2 + emb text (pool 20), live tie-break", "chunk", "emb", "rk", 20, "qdrant", "uuid"),
+        ("new: k=2 + emb text + pool 50, live tie-break", "chunk", "emb", "rk", 50, "qdrant", "uuid"),
+        ("new: k=2 + emb text (pool 20), ties by dense", "chunk", "emb", "rk", 20, "qdrant", "dense"),
+        # The same change with the old re-sort, to separate the two effects.
+        ("new: emb text, k=60 re-sort (pool 20)", "chunk", "emb", "rk", 20, "rk60"),
     ]
     results = {}
     for name, *cfg in configs:
