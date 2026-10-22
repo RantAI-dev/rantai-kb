@@ -420,7 +420,7 @@ impl RetrievalIndex for QdrantIndex {
         );
 
         let per_arm_k = (query.per_arm_k.max(1) as u64).max(k);
-        let is_rrf = matches!(query.fusion, PortFusion::Rrf { .. });
+        let is_rrf = matches!(query.fusion, PortFusion::Rrf);
 
         if is_rrf {
             let dense_q = with_params(
@@ -485,11 +485,6 @@ impl RetrievalIndex for QdrantIndex {
                 .map(|sparse_res| rank_map(&scored_points(&sparse_res.result)))
                 .unwrap_or_default();
 
-            let rrf_k = match query.fusion {
-                PortFusion::Rrf { k } => k,
-                PortFusion::None => 60,
-            };
-
             let mut candidates = Vec::new();
             if let Some(rrf_res) = batch_resp.result.get(2) {
                 for p in &rrf_res.result {
@@ -504,21 +499,28 @@ impl RetrievalIndex for QdrantIndex {
                             .map(|(s, r)| (Some(*s), Some(*r)))
                             .unwrap_or((None, None));
 
-                    let mut fused = 0.0f32;
-                    if let Some(r) = dense_rank {
-                        fused += 1.0 / (rrf_k as f32 + r as f32 + 1.0);
-                    }
-                    if let Some(r) = sparse_rank {
-                        fused += 1.0 / (rrf_k as f32 + r as f32 + 1.0);
-                    }
-                    if dense_rank.is_none() && sparse_rank.is_none() {
-                        fused = p.score;
-                    }
-
+                    // The fused score is **Qdrant's own RRF score**, used as it
+                    // comes back, and the order is the order Qdrant fused.
+                    //
+                    // The adapter used to re-sort that list with a k=60 RRF of
+                    // its own (`1/(60 + rank + 1)` summed over the arms). A
+                    // large k flattens the difference between rank 1 and rank
+                    // 3, so a passage both arms put near the top no longer
+                    // clearly beats one only a single arm liked. Measured on
+                    // `miracl-id-200`, that re-sort cost 0.01 nDCG@10 and
+                    // 0.017 MRR@10 — in this engine and in moco-kf's — and
+                    // accounted for the whole significant MRR gap against it
+                    // (`docs/kf-vplane-eval.md`). Qdrant's server-side RRF is
+                    // `sum over arms of 1/(2 + rank)`, and it is the ranking
+                    // that was measured.
+                    //
+                    // The per-arm scores and ranks stay: they are the
+                    // provenance (`retrieval.denseRank`, `sparseRank`) and the
+                    // only way to audit which arm liked what.
                     let scores = ArmScores {
                         dense: dense_score,
                         sparse: sparse_score,
-                        fused,
+                        fused: p.score,
                     };
                     let ranks = ArmRanks {
                         dense: dense_rank,
@@ -531,6 +533,10 @@ impl RetrievalIndex for QdrantIndex {
                 }
             }
 
+            // `sort_candidates` orders by the fused score, so Qdrant's order
+            // survives, and breaks the structural RRF ties (ranks (0,1) and
+            // (1,0) sum to the same score) on the document id and chunk index
+            // instead of on whatever order the store happened to answer in.
             sort_candidates(&mut candidates);
             candidates.truncate(query.k);
             Ok(candidates)

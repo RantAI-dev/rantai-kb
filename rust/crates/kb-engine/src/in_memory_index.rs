@@ -12,8 +12,10 @@
 //!   Qdrant does the same with its `idf` corpus filter (v1.19+); the point of
 //!   computing it here is that another tenant's vocabulary cannot skew a score.
 //! * **RRF is fused in process**, because there is no server side to fuse in.
-//!   The arithmetic matches Qdrant's: `sum over arms of 1 / (k + rank)`, rank
-//!   1-based.
+//!   The arithmetic is Qdrant's, exactly: `sum over arms of 1 / (2 + rank)`,
+//!   rank 0-based ([`kb_core::rrf_contribution`]). The reference index
+//!   and the store that fuses server-side have to agree on the numbers, not
+//!   merely on the order, or the contract suite proves nothing.
 //! * **`Fusion::None`** is honest rather than clever: with one arm the fused
 //!   score is that arm's score. With two arms of different scales there is no
 //!   meaningful "unfused" order, so the dense score is used as the ranking key
@@ -187,7 +189,7 @@ impl RetrievalIndex for InMemoryIndex {
             .map(|q| self.sparse_arm(&units, q, query.per_arm_k));
 
         let fused = match query.fusion {
-            Fusion::Rrf { k } => fuse(dense_list, sparse_list, k),
+            Fusion::Rrf => fuse(dense_list, sparse_list),
             Fusion::None => unfuse(dense_list, sparse_list),
         };
 
@@ -435,10 +437,13 @@ impl HasSparse for IndexUnit {
 }
 
 /// Reciprocal Rank Fusion, Qdrant's arithmetic.
+///
+/// One contribution per arm, `1 / (2 + rank)` with the rank 0-based inside
+/// that arm's list — the same number the store computes server-side, so a
+/// candidate's fused score here is the score it would get there.
 fn fuse(
     dense: Option<Vec<(ChunkId, f32)>>,
     sparse: Option<Vec<(ChunkId, f32)>>,
-    k: u32,
 ) -> Vec<(ChunkId, (ArmScores, ArmRanks))> {
     // An index of every candidate, keyed by id, in arm order so the tie-break
     // never depends on a hash map's iteration order.
@@ -447,8 +452,7 @@ fn fuse(
     let insert = |order: &mut Vec<ChunkId>,
                   scores: &mut HashMap<ChunkId, (ArmScores, ArmRanks)>,
                   list: Vec<(ChunkId, f32)>,
-                  is_dense: bool,
-                  k: u32| {
+                  is_dense: bool| {
         for (rank, (id, score)) in list.into_iter().enumerate() {
             let entry = scores.entry(id.clone()).or_insert_with(|| {
                 order.push(id.clone());
@@ -460,9 +464,7 @@ fn fuse(
                     ArmRanks::default(),
                 )
             });
-            // rank is 0-based here; RRF wants 1-based ranks, so rank+1.
-            let contribution = 1.0 / (k.max(1) as f32 + (rank as f32) + 1.0);
-            entry.0.fused += contribution;
+            entry.0.fused += kb_core::rrf_contribution(rank as u32);
             if is_dense {
                 entry.0.dense = Some(score);
                 entry.1.dense = Some(rank as u32);
@@ -473,10 +475,10 @@ fn fuse(
         }
     };
     if let Some(list) = dense {
-        insert(&mut order, &mut scores, list, true, k);
+        insert(&mut order, &mut scores, list, true);
     }
     if let Some(list) = sparse {
-        insert(&mut order, &mut scores, list, false, k);
+        insert(&mut order, &mut scores, list, false);
     }
     order
         .into_iter()

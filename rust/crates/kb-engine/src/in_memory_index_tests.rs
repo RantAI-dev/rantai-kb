@@ -93,6 +93,89 @@ async fn an_empty_scope_returns_nothing_even_with_a_matching_query() {
         .unwrap_or_else(|e| unreachable!("an empty scope must not error, got: {e}"));
     assert!(out.is_empty(), "an empty scope returned {} rows", out.len());
 }
+
+/// The fused score is Qdrant's RRF sum — `1/(2 + rank)` per arm, rank
+/// 0-based — not the RRF paper's `k = 60` re-sort.
+///
+/// The contract suite (property 7) pins the number too, but it is about the
+/// *merge*; this one is about the constant, so it is spelled out: a candidate
+/// both arms rank first scores `1/2 + 1/2 = 1.0`, one only the dense arm
+/// ranks first scores `1/2`, and the both-arms candidate wins. Under the old
+/// `k = 60` re-sort the same two candidates scored `2/61 = 0.0328` and
+/// `1/61 = 0.0164`: the same order, a different scale — and the scale is
+/// what every adapter now has to reproduce exactly
+/// (`docs/kf-vplane-eval.md`).
+#[tokio::test]
+async fn the_fused_score_is_qdrants_rrf_sum() {
+    use kb_ports::{ChunkId, ChunkType, DocumentId, HybridQuery, IndexUnit, KeywordQuery};
+
+    let index = InMemoryIndex::new(2);
+    let tenant = kb_ports::TenantId::new_unchecked("t");
+    let doc_a = DocumentId::new_unchecked("doc-a");
+    let doc_b = DocumentId::new_unchecked("doc-b");
+
+    let unit = |doc: &DocumentId, content: &str, dense: Vec<f32>| IndexUnit {
+        id: ChunkId::new_unchecked(format!("{}_0", doc.as_str())),
+        document_id: doc.clone(),
+        tenant: tenant.clone(),
+        knowledge_base_id: None,
+        category: None,
+        chunk_index: 0,
+        page: None,
+        chunk_type: ChunkType::Text,
+        content: content.to_string(),
+        contextual_prefix: None,
+        metadata: serde_json::json!({}),
+        dense,
+        sparse: kb_core::sparse::encode_document(content),
+    };
+
+    // The dense arm's best hit is doc-a (the query is its own vector); the
+    // keyword arm's best hit is doc-b, the only unit with the term in it.
+    index
+        .upsert(vec![
+            unit(&doc_a, "alpha", vec![1.0, 0.0]),
+            unit(&doc_b, "candi", vec![0.0, 1.0]),
+        ])
+        .await
+        .unwrap_or_else(|e| unreachable!("upsert failed: {e}"));
+
+    let scope = crate::fakes::make_fake_scope(tenant, vec![doc_a, doc_b]);
+    let rows = index
+        .search(
+            &HybridQuery {
+                dense: Some(vec![1.0, 0.0]),
+                sparse: Some(KeywordQuery::from_text("candi")),
+                per_arm_k: 10,
+                k: 10,
+                fusion: kb_ports::Fusion::Rrf,
+            },
+            &scope,
+        )
+        .await
+        .unwrap_or_else(|e| unreachable!("search failed: {e}"));
+
+    assert_eq!(rows.len(), 2, "both units must come back");
+    // Both arms found doc-b (dense rank 1, keyword rank 0): it outranks the
+    // dense arm's own top hit, even though its dense score is 0.
+    assert_eq!(rows[0].unit_id.as_str(), "doc-b_0");
+    assert!(
+        (rows[0].scores.fused - (1.0 / 3.0 + 0.5)).abs() < 1e-6,
+        "{:?}",
+        rows[0].scores
+    );
+    assert_eq!(rows[0].ranks.dense, Some(1));
+    assert_eq!(rows[0].ranks.sparse, Some(0));
+    // Only the dense arm found doc-a: one contribution.
+    assert_eq!(rows[1].unit_id.as_str(), "doc-a_0");
+    assert!(
+        (rows[1].scores.fused - 0.5).abs() < 1e-6,
+        "{:?}",
+        rows[1].scores
+    );
+    assert_eq!(rows[1].ranks.sparse, None);
+}
+
 /// A deliberately broken adapter: it answers every read from the whole index,
 /// ignoring the scope. This is the `bm25_search_global` bug wearing a new trait.
 ///

@@ -381,6 +381,14 @@ pub async fn enrich_titles_cached(
 /// graph arm's — split back out of the adapter's own fused list by their
 /// per-arm ranks, which is the only record of which arm produced what.
 ///
+/// The `k` here is the engine-level constant (60, the RRF paper's), **not** the
+/// store-level one (`kb_core::RRF_K = 2`, Qdrant's). The two agreed
+/// until the store's fusion was measured (`docs/kf-vplane-eval.md`); they no
+/// longer do, and that is deliberate and unfinished: the store's `k = 2` was
+/// measured on `miracl-id-200` and this arm's `k = 60` was not, so the graph
+/// arm keeps what it had until it is measured on its own. The graph arm is off
+/// by default (`KB_GRAPH_ARM`), so the default path does not depend on it.
+///
 /// Returns the fused candidates and, alongside them, each graph-ranked chunk's
 /// position in the graph arm's own list. The position is provenance; the fused
 /// score is not comparable to it.
@@ -547,7 +555,7 @@ pub async fn execute_pipeline(
             sparse: Some(sparse.clone()),
             per_arm_k: pool_size as usize,
             k: pool_size as usize,
-            fusion: Fusion::Rrf { k: 60 },
+            fusion: Fusion::Rrf,
         };
         match index.search(&hybrid, scope).await {
             Ok(c) => Ok(c),
