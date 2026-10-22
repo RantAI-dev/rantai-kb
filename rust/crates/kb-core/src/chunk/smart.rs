@@ -286,8 +286,12 @@ impl SmartChunker {
     }
 
     fn update_hierarchy(current: &[String], heading: &str, level: u32) -> Vec<String> {
-        let clean = HEADING_LINE.replace_all(heading.trim(), "$1").to_string();
-        let clean = clean.trim_start_matches(|c: char| c == '#' || c.is_whitespace());
+        // The heading's *text*, which is capture group 2. Group 1 is the `#`
+        // run; reading it and then stripping the hashes left every heading
+        // name empty, so the hierarchy path was " > " for every chunk under a
+        // heading — and the embedding text inherited that.
+        let clean = HEADING_LINE.replace_all(heading.trim(), "$2").to_string();
+        let clean = clean.trim();
         let mut out: Vec<String> = current
             .iter()
             .take((level as usize).saturating_sub(1))

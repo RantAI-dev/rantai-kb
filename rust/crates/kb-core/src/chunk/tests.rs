@@ -237,6 +237,40 @@ fn smart_chunk_document_emits_storage_shape() {
 }
 
 #[test]
+fn smart_chunk_document_carries_the_heading_path() {
+    // The heading path is what the embedding text puts after the title, so a
+    // chunk from under a subsection still says where it came from.
+    let out = smart_chunk_document(
+        "# Judul\n\n## Bagian\n\nIsi bagian.\n\n## Lain\n\nIsi lain.",
+        "Judul",
+        "general",
+        None,
+        SmartChunkingOptions::default(),
+    );
+    let paths: Vec<Option<&str>> = out
+        .iter()
+        .map(|c| c.metadata.heading_path.as_deref())
+        .collect();
+    assert!(
+        paths.contains(&Some("Judul > Bagian")),
+        "no chunk carried the heading path: {paths:?}"
+    );
+    assert!(
+        paths.contains(&Some("Judul > Lain")),
+        "no chunk carried the second heading path: {paths:?}"
+    );
+    // A document with no headings has no path, and the title alone is used.
+    let flat = smart_chunk_document(
+        "Just a paragraph.",
+        "Doc",
+        "general",
+        None,
+        SmartChunkingOptions::default(),
+    );
+    assert!(flat.iter().all(|c| c.metadata.heading_path.is_none()));
+}
+
+#[test]
 fn smart_chunk_document_filters_empty() {
     let out = smart_chunk_document(
         "Some content.",

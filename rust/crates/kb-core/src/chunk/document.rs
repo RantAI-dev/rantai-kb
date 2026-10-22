@@ -22,6 +22,14 @@ pub struct ChunkMetadata {
     pub category: String,
     pub subcategory: Option<String>,
     pub section: Option<String>,
+    /// The chunk's heading path: the headings above it, outermost first,
+    /// joined with " > ". `None` for a document with no headings.
+    ///
+    /// This is what the embedding text puts after the title
+    /// ([`crate::title::embedding_text`]), so a chunk from the middle of a
+    /// document still says where it came from.
+    #[serde(default)]
+    pub heading_path: Option<String>,
     pub chunk_index: u32,
     pub contextual_prefix: Option<String>,
     pub chunk_type: Option<String>,
@@ -213,6 +221,10 @@ pub fn smart_chunk_document(
                     .section
                     .clone()
                     .or_else(|| sc.metadata.hierarchy_path.as_ref().map(|h| h.join(" > "))),
+                heading_path: sc.metadata.hierarchy_path.as_ref().and_then(|path| {
+                    let joined = path.join(" > ");
+                    (!joined.trim().is_empty()).then_some(joined)
+                }),
                 chunk_index: sc.chunk_index,
                 chunk_type: Some(sc.metadata.chunk_type),
                 page: sc.metadata.page_number,

@@ -453,7 +453,13 @@ async fn ingest_one(
         .file_name()
         .map_or_else(|| file.key.clone(), |n| n.to_string_lossy().into_owned());
     let part = reqwest::multipart::Part::bytes(bytes).file_name(file_name);
-    let form = reqwest::multipart::Form::new().part("file", part);
+    let mut form = reqwest::multipart::Form::new().part("file", part);
+    // The title, when the dataset has one. Without it the server falls back
+    // to the file stem, and the stem is a docid (`1000580_1`), which the
+    // engine would then embed in front of every chunk of the passage.
+    if let Some(title) = &file.title {
+        form = form.text("title", title.clone());
+    }
     let response = client
         .post(endpoint(&config.base_url, "/v1/documents"))
         .header(reqwest::header::AUTHORIZATION, bearer(&config.api_key))

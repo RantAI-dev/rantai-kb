@@ -432,9 +432,18 @@ impl IngestWorker {
             return Err(reason.clone());
         }
 
-        let title = job_title(&params, &job.filename);
         // NUL bytes survive some extractors and break Postgres text columns.
         let content: String = extraction.content.chars().filter(|c| *c != '\0').collect();
+
+        // The title: the job's explicit one, else the document's own H1 (a
+        // markdown or text file usually starts with one), else the filename
+        // stem.
+        let title = job_title(
+            &params,
+            &job.filename,
+            &content,
+            is_markdown_text(&extraction.file_type),
+        );
 
         let file_size = i32::try_from(bytes.len()).unwrap_or(i32::MAX);
         self.documents
@@ -540,9 +549,25 @@ impl IngestWorker {
         }
 
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
+        // The text embedded for a chunk: the document's title, the chunk's
+        // heading path when the chunker found one, and the chunk's content.
+        //
+        // The title used to be the filename stem when the upload had no
+        // title, which for a corpus of `1000580_1.md` files meant every
+        // chunk was embedded as "1000580_1\n\n<text>" — the same useless
+        // prefix on every passage of the collection. And a chunk after the
+        // first lost the document's heading entirely, because the title was
+        // only ever the file's name. Both are fixed here
+        // (`docs/kf-vplane-eval.md`).
         let texts: Vec<String> = chunks
             .iter()
-            .map(|c| format!("{title}\n\n{}", c.content))
+            .map(|c| {
+                kb_core::title::embedding_text(
+                    &title,
+                    c.metadata.heading_path.as_deref(),
+                    &c.content,
+                )
+            })
             .collect();
         self.progress(
             job,
@@ -1046,6 +1071,7 @@ impl IngestWorker {
                     category: category.to_string(),
                     subcategory: subcategory.map(str::to_string),
                     section: Some(caption),
+                    heading_path: None,
                     chunk_index: 0, // will be reassigned below
                     chunk_type: Some("figure".to_string()),
                     page: Some(fig.page),
@@ -1450,17 +1476,24 @@ fn relation_name(relation: &kb_core::Relation, field: &str) -> Option<String> {
 }
 
 /// Title for the embedding prefix and the chunk metadata: the job's explicit
-/// title, else the filename without its extension.
-fn job_title(params: &Value, filename: &str) -> String {
-    if let Some(t) = params.get("title").and_then(Value::as_str) {
-        if !t.trim().is_empty() {
-            return t.to_string();
-        }
-    }
-    match filename.rfind('.') {
-        Some(0) | None => filename.to_string(),
-        Some(i) => filename[..i].to_string(),
-    }
+/// title, else the document's own H1 (markdown and text files usually start
+/// with one), else the filename without its extension.
+fn job_title(params: &Value, filename: &str, content: &str, markdown: bool) -> String {
+    kb_core::title::document_title(
+        params.get("title").and_then(Value::as_str),
+        filename,
+        content,
+        markdown,
+    )
+}
+
+/// Whether an extracted document's text is markdown (or plain text read as
+/// markdown), which is what may carry an H1 to use as the title.
+///
+/// The extractors report `"markdown"` for `.md`, `.txt` and the other text
+/// formats, and `"pdf"`/`"image"` for the rest.
+fn is_markdown_text(file_type: &str) -> bool {
+    file_type.eq_ignore_ascii_case("markdown")
 }
 
 fn category_of(params: &Value) -> &str {
@@ -1522,6 +1555,7 @@ mod tests {
             category: "finance".to_string(),
             subcategory: Some("q3".to_string()),
             section: Some("Intro".to_string()),
+            heading_path: None,
             chunk_index: 4,
             contextual_prefix: None,
             chunk_type: Some("text".to_string()),
@@ -1533,11 +1567,37 @@ mod tests {
 
     #[test]
     fn title_falls_back_to_the_filename_stem() {
-        assert_eq!(job_title(&json!({}), "report.pdf"), "report");
-        assert_eq!(job_title(&json!({}), "archive.tar.gz"), "archive.tar");
-        assert_eq!(job_title(&json!({}), "noextension"), "noextension");
-        assert_eq!(job_title(&json!({"title": "Given"}), "report.pdf"), "Given");
-        assert_eq!(job_title(&json!({"title": "  "}), "report.pdf"), "report");
+        assert_eq!(job_title(&json!({}), "report.pdf", "", false), "report");
+        assert_eq!(
+            job_title(&json!({}), "archive.tar.gz", "", false),
+            "archive.tar"
+        );
+        assert_eq!(
+            job_title(&json!({}), "noextension", "", false),
+            "noextension"
+        );
+        assert_eq!(
+            job_title(&json!({"title": "Given"}), "report.pdf", "", false),
+            "Given"
+        );
+        assert_eq!(
+            job_title(&json!({"title": "  "}), "report.pdf", "", false),
+            "report"
+        );
+    }
+
+    #[test]
+    fn a_markdown_document_without_a_title_lends_its_h1_to_the_title() {
+        // The case that made every MIRACL passage embed as "1000580_1\n\n…".
+        assert_eq!(
+            job_title(&json!({}), "1000580_1.md", "# DPTools\n\nbody", true),
+            "DPTools"
+        );
+        // A PDF's extracted text is not markdown, so it keeps the stem.
+        assert_eq!(
+            job_title(&json!({}), "report.pdf", "# Heading\n\nbody", false),
+            "report"
+        );
     }
 
     #[test]

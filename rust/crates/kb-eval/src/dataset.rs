@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -48,6 +49,15 @@ pub struct Answer {
 pub struct CorpusFile {
     pub key: String,
     pub path: PathBuf,
+    /// The document's own title, when the file names itself in its first
+    /// line (a `# Heading`). `None` when it does not.
+    ///
+    /// MIRACL's corpus files are Wikipedia passages that start with
+    /// `# Title`. The title belongs in the upload: a document called
+    /// `1000580_1` is not findable by anything a reader would type, and
+    /// without a title the engine embeds the file stem in front of every one
+    /// of its chunks.
+    pub title: Option<String>,
 }
 
 /// A loaded dataset.
@@ -154,7 +164,11 @@ fn load_corpus(dir: &Path) -> Result<Vec<CorpusFile>, DatasetError> {
         if key.starts_with('.') {
             continue;
         }
-        files.push(CorpusFile { key, path });
+        files.push(CorpusFile {
+            title: title_of(&path),
+            key,
+            path,
+        });
     }
     if files.is_empty() {
         return Err(DatasetError::EmptyCorpus(dir.to_path_buf()));
@@ -176,13 +190,36 @@ fn load_corpus(dir: &Path) -> Result<Vec<CorpusFile>, DatasetError> {
     Ok(files)
 }
 
+/// The document's title, when the corpus file names itself in its first
+/// non-empty line.
+///
+/// `# Judul` → `Judul`. A file that does not start with a heading has no
+/// title, and the upload then says nothing about one — the engine falls back
+/// to the file stem, exactly as it did before.
+///
+/// This is deliberately a local five-line read rather than a call into
+/// `kb-core`: this crate is a black-box client and may not link the engine's
+/// own code (see `kb_server::boundary`).
+fn title_of(path: &Path) -> Option<String> {
+    let file = fs::File::open(path).ok()?;
+    for line in BufReader::new(file).lines() {
+        let line = line.ok()?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let title = trimmed.strip_prefix("# ")?.trim();
+        return (!title.is_empty()).then(|| title.to_string());
+    }
+    None
+}
+
 #[derive(Debug, Deserialize)]
 struct RawQuery {
     _id: String,
     #[serde(default)]
     text: String,
 }
-
 #[derive(Debug, Deserialize)]
 struct RawAnswer {
     _id: String,
@@ -548,6 +585,27 @@ mod tests {
     fn a_missing_dataset_is_an_error() {
         let err = Dataset::load("/nonexistent/kb-eval-dataset").unwrap_err();
         assert!(matches!(err, DatasetError::NotFound(_)), "{err:?}");
+    }
+
+    #[test]
+    fn a_corpus_file_that_names_itself_in_the_first_line_has_a_title() {
+        let dir = std::env::temp_dir().join(format!("kb-eval-title-{}", std::process::id()));
+        let corpus = dir.join("corpus");
+        fs::create_dir_all(&corpus).unwrap();
+        fs::write(corpus.join("1000580_1.md"), "# DPTools\n\nbody").unwrap();
+        fs::write(corpus.join("plain.txt"), "no heading here").unwrap();
+        fs::write(corpus.join("sub.md"), "\n\n## Sub\n\nbody").unwrap();
+        let files = load_corpus(&corpus).unwrap();
+        let title = |key: &str| {
+            files
+                .iter()
+                .find(|f| f.key == key)
+                .and_then(|f| f.title.clone())
+        };
+        assert_eq!(title("1000580_1").as_deref(), Some("DPTools"));
+        assert_eq!(title("plain"), None);
+        assert_eq!(title("sub"), None, "an H2 does not name the document");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

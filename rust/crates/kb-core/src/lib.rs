@@ -16,6 +16,7 @@ pub mod policy;
 mod progress;
 pub mod signals;
 pub mod sparse;
+pub mod title;
 mod weave;
 
 pub use chunk::{
