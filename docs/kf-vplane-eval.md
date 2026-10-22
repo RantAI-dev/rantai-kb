@@ -165,13 +165,52 @@ So KF's V-plane stays. Two findings carry over regardless:
   re-index, since a modifier can't be added to an existing collection.
 - The e5 prefixes and the larger qwen3-8b embedder do not move KF's score on this set.
 
-**Why rantai-kb loses at the top (hypotheses, not yet tested):**
-- It splits the 215 passages over 800 chars into overlapping chunks, where KF indexes each
-  passage whole.
-- It runs two Qdrant queries plus client-side RRF, where KF does one server-side fused query.
-- Its own sparse tokenizer differs from `Qdrant/bm25`.
+**Why rantai-kb loses at the top: an ablation (2026-10-22).** Both engines' rankings were
+rebuilt offline from the same vectors, so each design difference could be switched on alone
+(`rust/crates/kb-eval/scripts/kf_vplane_ablate.py`).
+- rantai-kb's chunks and keyword vectors come from `kb_core` itself, through the
+  `scripts/rkdump` helper; nothing is re-implemented.
+- Dense vectors come from OpenRouter e5-large and cost about $0.02 in total.
+- Keyword scores use Qdrant's IDF formula.
+- The model reproduces KF fixed exactly (nDCG 0.813). It puts rantai-kb at 0.802 with the
+  live tie-break, against 0.796 measured live, so 0.006 is left unexplained (see below).
+- `ranx` agrees with every number.
+- Full table and runs: `docs/kf-vplane-eval/ablation/`.
 
-Each can be tested on the same runs before rantai-kb is proposed again.
+| Change, one at a time | nDCG@10 | MRR@10 | Hit@1 |
+|---|---:|---:|---:|
+| KF fixed (reproduced) | 0.813 | 0.821 | 0.720 |
+| **KF, fused the way rantai-kb fuses (k=60 re-sort)** | **0.803** | **0.804** | **0.700** |
+| KF on rantai-kb's chunks | 0.813 | 0.821 | 0.720 |
+| KF with rantai-kb's keyword encoder | 0.814 | 0.824 | 0.725 |
+| KF with the file stem in the dense text | 0.811 | 0.818 | 0.715 |
+| KF with 20 candidates per arm instead of 50 | 0.811 | 0.821 | 0.720 |
+| rantai-kb (reproduced, live tie-break) | 0.802 | 0.801 | 0.690 |
+| **rantai-kb, fused the way Qdrant fuses (k=2)** | **0.809** | **0.817** | **0.715** |
+| rantai-kb + k=2 + the article title instead of the file stem + 50 per arm | 0.817 | 0.830 | 0.740 |
+
+What this shows:
+1. **The cause is fusion.** `kb-store-qdrant` asks Qdrant for its fused list (RRF, k=2), then
+   re-sorts it with k=60. A large k flattens the difference between rank 1 and rank 3, so a
+   passage both arms put near the top no longer clearly beats one only a single arm liked.
+   That costs about 0.01 nDCG and 0.017 MRR, in either engine. It also accounts for the whole
+   significant MRR gap.
+2. **The other suspects are innocent:**
+   - chunking (KF on our chunks scores the same);
+   - our keyword encoder (it is slightly better than `Qdrant/bm25`);
+   - the candidate pool size;
+   - the tie-break.
+3. **A second, smaller issue:** the eval uploaded passages without a title, so rantai-kb
+   embedded the file stem (`1000580_1`) before every chunk. It also drops the article title
+   from every chunk after the first. 639 of 2,933 passages are split. Replacing the stem with
+   the real title helps only once fusion is fixed. Together the two changes reach 0.817 / Hit@1
+   0.740. That is above KF fixed, but not significantly: +0.005 [−0.004, +0.014].
+4. **0.006 is still unexplained** between the offline model (0.802) and the live run (0.796).
+   It comes from something only the live engine does. Candidates are approximate HNSW search
+   and extraction of the `.md` file. The fix has to be re-measured live.
+
+So rantai-kb with k=2 fusion and real titles would plausibly tie KF on quality. It would still
+lose on latency, which this ablation does not address.
 
 **Not measured:** rantai-kb with `qwen3-embedding-8b`. KF's engine gained nothing from it here,
 and a rantai-kb ingest takes about 2.5 hours through the job pipeline (about 22 passages/min),
