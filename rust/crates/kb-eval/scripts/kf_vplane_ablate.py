@@ -49,6 +49,11 @@ import numpy as np
 
 MODEL = "intfloat/multilingual-e5-large"
 
+# The config whose candidate list the reranker bake-off reranks: the best
+# measured one after the 2026-10-22 change (Qdrant's own RRF, the engine's
+# embedding text, 50 candidates per arm, the live tie-break).
+BEST_CONFIG = "new: k=2 + emb text + pool 50, live tie-break"
+
 
 # ---------- embeddings (OpenRouter, disk cache keyed by model + text hash) ----------
 
@@ -206,12 +211,21 @@ async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", type=Path, required=True)
     ap.add_argument("--chunks", type=Path, required=True)
-    ap.add_argument("--kf-cache", type=Path, required=True)
+    ap.add_argument("--kf-cache", type=Path, default=None,
+                    help="the KF arm's embedding cache (whole passages, 'passage: ' prefix, "
+                         "Qdrant/bm25 sparse); optional — without it the same vectors are "
+                         "fetched and computed here")
     ap.add_argument("--cache", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--only", default="",
+                    help="run only the configs whose name contains this (default: all)")
     ap.add_argument(
         "--ingest-map", type=Path, required=True,
         help="docid -> document UUID from the live run, for the live tie-break",
+    )
+    ap.add_argument(
+        "--candidates", type=int, default=30,
+        help="chunks per query to write for the reranker bake-off (default 30)",
     )
     args = ap.parse_args()
     key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -240,110 +254,20 @@ async def main() -> int:
     # The title comes from the dump, which got it from kb_core::title — the
     # same code the engine runs. Nothing here re-implements it.
     titles = {c["doc"]: c["title"] for c in chunks}
+    # The KF arm's own cache (whole passages, "passage: " prefix, Qdrant/bm25
+    # sparse) is optional: when it is there it is used, and when it is not the
+    # passage vectors are fetched from the same model here and the BM25 sparse
+    # is computed here, so the harness stands on its own. The numbers are the
+    # same either way — same model, same text.
     kf = {}
-    for line in args.kf_cache.open(encoding="utf-8"):
-        row = json.loads(line)
-        kf[row["id"]] = row
+    if args.kf_cache and args.kf_cache.exists():
+        for line in args.kf_cache.open(encoding="utf-8"):
+            row = json.loads(line)
+            kf[row["id"]] = row
 
-    dc = DenseCache(args.cache, key)
-    q_texts = ["query: " + q["text"] for q in queries]
-    dense_variants = {
-        "stem": [f"passage: {c['doc']}\n\n{c['content']}" for c in chunks],
-        "none": [f"passage: {c['content']}" for c in chunks],
-        "title": [f"passage: {titles[c['doc']]}\n\n{c['content']}" for c in chunks],
-        # The text the engine embeds after the 2026-10-22 change: the title,
-        # the chunk's heading path, the content. "emb" comes from the dump,
-        # which called kb_core::title::embedding_text.
-        "emb": [f"passage: {c['emb']}" for c in chunks],
-    }
-    whole_stem = [f"passage: {s}\n\n{t}" for s, t in passages.items()]
-    await dc.fill(q_texts + [t for v in dense_variants.values() for t in v] + whole_stem)
-    Q = dc.matrix(q_texts)
-
-    # How different is the new embedding text from the old "title" one? For a
-    # corpus whose only heading is the document's own H1 the two are the same
-    # string, which is why the measured "k=2 + real title" row is the right
-    # prediction for this dataset. Say so out loud rather than assume it.
-    same = sum(1 for a, b in zip(dense_variants["emb"], dense_variants["title"], strict=True) if a == b)
-    print(
-        f"embedding text: {same}/{len(chunks)} chunks have the same text as the "
-        f"'title' variant",
-        file=sys.stderr,
-    )
-
-    # Units: whole passages or rantai-kb chunks, each with dense and sparse options.
-    p_ids = list(passages)
-    units = {
-        "passage": {
-            "doc": p_ids,
-            "dense": {
-                "none": (lambda m: m / np.linalg.norm(m, axis=1, keepdims=True))(
-                    np.array([kf[i]["d"] for i in p_ids], dtype=np.float32)
-                ),
-                "stem": dc.matrix(whole_stem),
-            },
-            "sparse": {
-                "bm25": SparseIndex([(kf[i]["si"], kf[i]["sv"]) for i in p_ids]),
-                "rk": SparseIndex([(c["fsi"], c["fsv"]) for c in chunks if c["i"] == 0]),
-            },
-        },
-        "chunk": {
-            "doc": [c["doc"] for c in chunks],
-            "dense": {k: dc.matrix(v) for k, v in dense_variants.items()},
-            "sparse": {
-                "rk": SparseIndex([(c["si"], c["sv"]) for c in chunks]),
-                "bm25": SparseIndex(
-                    [
-                        ([int(i) for i in e.indices], [float(v) for v in e.values])
-                        for e in bm25.embed([c["content"] for c in chunks])
-                    ]
-                ),
-                "rk+title": SparseIndex([(c["tsi"], c["tsv"]) for c in chunks]),
-            },
-        },
-    }
-    # Guard: the passage-level rk sparse list must be in passage order.
-    assert [c["doc"] for c in chunks if c["i"] == 0] == p_ids
-    bm25_q = {
-        q["_id"]: ([int(i) for i in e.indices], [float(v) for v in e.values])
-        for q, e in zip(queries, bm25.query_embed([q["text"] for q in queries]), strict=True)
-    }
-
-    doc_uuid = json.loads(args.ingest_map.read_text(encoding="utf-8"))
-    chunk_idx = {"passage": [0] * len(p_ids), "chunk": [c["i"] for c in chunks]}
-
-    def run(
-        unit: str, dense: str, sparse: str, pool: int, fusion: str, tie: str = "order"
-    ) -> dict[str, list[str]]:
-        u = units[unit]
-        D = u["dense"][dense]
-        S = u["sparse"][sparse]
-        out: dict[str, list[str]] = {}
-        for qi, q in enumerate(queries):
-            qid = q["_id"]
-            ds = D @ Q[qi]
-            if sparse.startswith("rk"):
-                qs = S.scores(rk_q[qid]["si"], rk_q[qid]["sv"])
-            else:
-                qs = S.scores(*bm25_q[qid])
-            if tie == "uuid":
-                tk = lambda ui: (doc_uuid[u["doc"][ui]], chunk_idx[unit][ui])  # noqa: E731
-            elif tie == "dense":
-                tk = lambda ui: -float(ds[ui])  # noqa: E731
-            else:
-                tk = None
-            fused = fuse(
-                top(ds, pool, False), top(qs, pool, True), pool, fusion,
-                "key" if tk else "order", tk,
-            )
-            seen: list[str] = []
-            for ui in fused:
-                d = u["doc"][ui]
-                if d not in seen:
-                    seen.append(d)
-            out[qid] = seen
-        return out
-
+    # Which configs to run, and therefore which dense texts to embed. Filling
+    # only what a config uses is what keeps a run of one row from paying for
+    # every row.
     configs = [
         # name, unit, dense text, sparse, pool, fusion
         ("KF fixed (repro)", "passage", "none", "bm25", 50, "qdrant"),
@@ -380,23 +304,202 @@ async def main() -> int:
         # The same change with the old re-sort, to separate the two effects.
         ("new: emb text, k=60 re-sort (pool 20)", "chunk", "emb", "rk", 20, "rk60"),
     ]
+    if args.only:
+        configs = [c for c in configs if args.only in c[0]]
+        if not configs:
+            print(f"no config matches --only {args.only!r}", file=sys.stderr)
+            return 1
+    # The config tuple is (name, unit, dense, sparse, pool, fusion, ...).
+    needed_dense = {c[2] for c in configs}
+    needed_sparse = {c[3] for c in configs}
+
+    dc = DenseCache(args.cache, key)
+    q_texts = ["query: " + q["text"] for q in queries]
+    all_dense_variants = {
+        "stem": [f"passage: {c['doc']}\n\n{c['content']}" for c in chunks],
+        "none": [f"passage: {c['content']}" for c in chunks],
+        "title": [f"passage: {titles[c['doc']]}\n\n{c['content']}" for c in chunks],
+        # The text the engine embeds after the 2026-10-22 change: the title,
+        # the chunk's heading path, the content. "emb" comes from the dump,
+        # which called kb_core::title::embedding_text.
+        "emb": [f"passage: {c['emb']}" for c in chunks],
+    }
+    dense_variants = {k: v for k, v in all_dense_variants.items() if k in needed_dense}
+    whole_stem = [f"passage: {s}\n\n{t}" for s, t in passages.items()]
+    whole_none = [f"passage: {t}" for t in passages.values()]
+    p_ids = list(passages)
+
+    to_embed = list(q_texts)
+    for texts in dense_variants.values():
+        to_embed.extend(texts)
+    if any(c[1] == "passage" and c[2] == "stem" for c in configs):
+        to_embed.extend(whole_stem)
+    if any(c[1] == "passage" and c[2] == "none" for c in configs) and not kf:
+        to_embed.extend(whole_none)
+    await dc.fill(to_embed)
+    Q = dc.matrix(q_texts)
+
+    # How different is the new embedding text from the old "title" one? For a
+    # corpus whose only heading is the document's own H1 the two are the same
+    # string, which is why the measured "k=2 + real title" row is the right
+    # prediction for this dataset. Say so out loud rather than assume it.
+    if "emb" in dense_variants:
+        same = sum(
+            1
+            for a, b in zip(dense_variants["emb"], all_dense_variants["title"], strict=True)
+            if a == b
+        )
+        print(
+            f"embedding text: {same}/{len(chunks)} chunks have the same text as the "
+            f"'title' variant",
+            file=sys.stderr,
+        )
+
+    # The passage-level BM25 sparse: the KF arm's cache when it is there, and
+    # the same tokenizer here when it is not.
+    if "bm25" in needed_sparse:
+        if kf:
+            passage_bm25 = [(kf[i]["si"], kf[i]["sv"]) for i in p_ids]
+        else:
+            passage_bm25 = [
+                ([int(i) for i in e.indices], [float(v) for v in e.values])
+                for e in bm25.embed([passages[i] for i in p_ids])
+            ]
+    else:
+        passage_bm25 = []
+
+    # Units: whole passages or rantai-kb chunks, each with dense and sparse options.
+    passage_dense = {}
+    if any(c[1] == "passage" and c[2] == "stem" for c in configs):
+        passage_dense["stem"] = dc.matrix(whole_stem)
+    if any(c[1] == "passage" and c[2] == "none" for c in configs):
+        if kf:
+            passage_dense["none"] = (lambda m: m / np.linalg.norm(m, axis=1, keepdims=True))(
+                np.array([kf[i]["d"] for i in p_ids], dtype=np.float32)
+            )
+        else:
+            passage_dense["none"] = dc.matrix(whole_none)
+    units = {
+        "passage": {
+            "doc": p_ids,
+            "dense": passage_dense,
+            "sparse": {
+                "bm25": SparseIndex(passage_bm25),
+                "rk": SparseIndex([(c["fsi"], c["fsv"]) for c in chunks if c["i"] == 0]),
+            },
+        },
+        "chunk": {
+            "doc": [c["doc"] for c in chunks],
+            "dense": {k: dc.matrix(v) for k, v in dense_variants.items()},
+            "sparse": {
+                "rk": SparseIndex([(c["si"], c["sv"]) for c in chunks]),
+                "bm25": SparseIndex(
+                    [
+                        ([int(i) for i in e.indices], [float(v) for v in e.values])
+                        for e in bm25.embed([c["content"] for c in chunks])
+                    ]
+                ),
+                "rk+title": SparseIndex([(c["tsi"], c["tsv"]) for c in chunks]),
+            },
+        },
+    }
+    # Guard: the passage-level rk sparse list must be in passage order.
+    assert [c["doc"] for c in chunks if c["i"] == 0] == p_ids
+    bm25_q = {
+        q["_id"]: ([int(i) for i in e.indices], [float(v) for v in e.values])
+        for q, e in zip(queries, bm25.query_embed([q["text"] for q in queries]), strict=True)
+    }
+
+    doc_uuid = json.loads(args.ingest_map.read_text(encoding="utf-8"))
+    chunk_idx = {"passage": [0] * len(p_ids), "chunk": [c["i"] for c in chunks]}
+
+    def run(
+        unit: str,
+        dense: str,
+        sparse: str,
+        pool: int,
+        fusion: str,
+        tie: str = "order",
+        keep_chunks: dict | None = None,
+    ) -> dict[str, list[str]]:
+        u = units[unit]
+        D = u["dense"][dense]
+        S = u["sparse"][sparse]
+        out: dict[str, list[str]] = {}
+        for qi, q in enumerate(queries):
+            qid = q["_id"]
+            ds = D @ Q[qi]
+            if sparse.startswith("rk"):
+                qs = S.scores(rk_q[qid]["si"], rk_q[qid]["sv"])
+            else:
+                qs = S.scores(*bm25_q[qid])
+            if tie == "uuid":
+                tk = lambda ui: (doc_uuid[u["doc"][ui]], chunk_idx[unit][ui])  # noqa: E731
+            elif tie == "dense":
+                tk = lambda ui: -float(ds[ui])  # noqa: E731
+            else:
+                tk = None
+            fused = fuse(
+                top(ds, pool, False), top(qs, pool, True), pool, fusion,
+                "key" if tk else "order", tk,
+            )
+            if keep_chunks is not None:
+                keep_chunks[qid] = list(fused)
+            seen: list[str] = []
+            for ui in fused:
+                d = u["doc"][ui]
+                if d not in seen:
+                    seen.append(d)
+            out[qid] = seen
+        return out
+
     results = {}
+    configs_by_name = {}
     for name, *cfg in configs:
         r = run(*cfg)
         results[name] = (metrics(r, qrels), r)
+        configs_by_name[name] = cfg
         tag = name.replace(" ", "_").replace(":", "").replace("(", "").replace(")", "").replace("+", "p").replace(",", "").replace("=", "")
         with (args.out / f"{tag}.trec").open("w", encoding="utf-8") as fh:
             for qid, docs in r.items():
                 for i, d in enumerate(docs[:50]):
                     fh.write(f"{qid} Q0 {d} {i + 1} {1 / (i + 1):.6f} {tag}\n")
 
-    base = results["KF fixed (repro)"][0]
-    rkb = results["rantai-kb (repro, live tie-break)"][0]
+    # The candidate list the reranker bake-off reranks: the best config's
+    # fused list, at chunk granularity, with the chunk's own text. The engine
+    # hands the reranker `chunk.content` (not the embedding text), so that is
+    # what a reranker would see.
+    if BEST_CONFIG in configs_by_name:
+        cand_cfg = configs_by_name[BEST_CONFIG]
+        chunk_lists: dict[str, list[int]] = {}
+        run(*cand_cfg, keep_chunks=chunk_lists)
+        with (args.out / "candidates.jsonl").open("w", encoding="utf-8") as fh:
+            for qid, uis in chunk_lists.items():
+                items = [
+                    {
+                        "doc": chunks[ui]["doc"],
+                        "i": chunks[ui]["i"],
+                        "text": chunks[ui]["content"],
+                    }
+                    for ui in uis[: args.candidates]
+                ]
+                fh.write(json.dumps({"qid": qid, "candidates": items}) + "\n")
+        print(
+            f"candidates: {BEST_CONFIG} -> {args.candidates} chunks per query "
+            f"({len(chunk_lists)} queries) in {args.out / 'candidates.jsonl'}",
+            file=sys.stderr,
+        )
+
+    # The two reference rows the CI columns are measured against. A run that
+    # selects one config does not have them, and says so rather than
+    # inventing a baseline.
+    base = results.get("KF fixed (repro)", (None,))[0]
+    rkb = results.get("rantai-kb (repro, live tie-break)", (None,))[0]
     lines = ["| config | nDCG@10 | MRR@10 | Hit@1 | Recall@10 | ΔnDCG vs rk live-tie repro [95% CI] | ΔnDCG vs KF fixed [95% CI] |",
              "|---|---:|---:|---:|---:|---|---|"]
     for name, (m, _) in results.items():
-        d1 = paired_ci(m["ndcg"], rkb["ndcg"])
-        d2 = paired_ci(m["ndcg"], base["ndcg"])
+        d1 = paired_ci(m["ndcg"], rkb["ndcg"]) if rkb else (float("nan"),) * 3
+        d2 = paired_ci(m["ndcg"], base["ndcg"]) if base else (float("nan"),) * 3
         lines.append(
             f"| {name} | {m['ndcg'].mean():.3f} | {m['mrr'].mean():.3f} | {m['hit1'].mean():.3f} | "
             f"{m['recall'].mean():.3f} | {d1[0]:+.3f} [{d1[1]:+.3f}, {d1[2]:+.3f}] | "

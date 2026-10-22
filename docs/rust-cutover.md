@@ -171,6 +171,54 @@ In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.d
   0 hits over 240 probes, with the `documentIds` branch (vector-only in both
   runtimes) and the figure arm reported UNTESTED rather than passing.
 
+### 7. Deliberate Differences: Rank Fusion (RRF) and the Embedded Text
+Two changes on 2026-10-22 make the Rust engine's ranking *different* from
+Bun's on purpose. Both were measured on `miracl-id-200` (see
+`docs/kf-vplane-eval.md` and `docs/accuracy-rerank.md`).
+
+**a. The fused order is Qdrant's own RRF, not a re-sort with k=60.**
+- **Bun**: `src/lib/rag/hybrid-merge.ts` fuses with the RRF paper's constant
+  `k = 60`, 1-based ranks: `1/(60 + rank)`.
+- **Rust (deliberate)**: the port has one fusion, `kb_core::fusion::RRF_K = 2`
+  with 0-based ranks — `1/(2 + rank)` — which is what Qdrant computes
+  server-side. `kb-store-qdrant` uses the score Qdrant returns and the order
+  Qdrant returns; the in-memory reference index, the SurrealDB adapter and the
+  test fakes compute the same arithmetic.
+- **Why**: a large `k` flattens the difference between rank 1 and rank 3, so a
+  passage both arms put near the top no longer clearly beats one only a single
+  arm liked. Measured on `miracl-id-200`, the `k = 60` re-sort cost **0.01
+  nDCG@10 and 0.017 MRR@10** in *both* engines, and it accounted for the whole
+  significant MRR gap against moco-kf's V-plane. Qdrant's own `k = 2` is
+  better.
+- **What it changes in the API**: the *order* of the chunks in a
+  `/v1/search` response can differ from Bun's, and `retrieval.fusedScore` is
+  on a different scale (`1/(2+rank)` per arm instead of `1/(61+rank)`). The
+  per-arm `similarity` and the per-arm ranks are unchanged.
+- **Parity**: `rust/scripts/search-parity.sh` compares Bun's and Rust's
+  `/v1/search` answers case by case. The fusion difference is a *ranking*
+  difference, so the script now compares the two answers by **set of chunk
+  ids** for the hybrid cases and keeps the exact comparison for the cases
+  where the order is not affected by the fusion (single-arm searches and
+  searches that return one chunk). See the comment in the script.
+
+**b. The embedded text carries the document's title and the chunk's heading
+path.**
+- **Bun**: `src/lib/rag/chunker.ts` embeds
+  `"Category: …\nTopic: …\nSection: …\nContext: …\n\n<content>"`.
+- **Rust (deliberate)**: `kb-engine/src/ingest.rs` embeds
+  `"{title}\n\n{content}"`, where the title is the upload's title, else the
+  document's own H1 (a markdown or text file that starts with `# Heading`),
+  else the filename stem; and the chunk's heading path follows the title when
+  the chunker found one (`"{title} > {heading path}\n\n{content}"`).
+- **Why**: the retrieval quality of the corpus depends on the text that is
+  embedded, and the title is what says *which document* a chunk belongs to.
+  On `miracl-id-200` (2,933 passages whose file names are docids) the title
+  was worth about 0.008 nDCG@10 on top of the fusion fix.
+- **What it changes in the API**: nothing in the response shape. It changes
+  the *vectors*, so **an existing corpus has to be re-indexed** for the gain —
+  the old vectors were made from the old text. The keyword arm's text is
+  unchanged (the ablation showed a title in the keyword arm did not help).
+
 ---
 
 ## 6. Shared Known Issues

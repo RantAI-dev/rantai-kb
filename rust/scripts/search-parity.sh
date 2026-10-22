@@ -317,9 +317,12 @@ declare -a DIVERGENCE_CASES=(
 TOTAL_CASES=$((${#TEST_CASES[@]} + ${#DIVERGENCE_CASES[@]}))
 PASSED_CASES=0
 FAILED_CASES=0
+ORDER_DIFFERENCES=0
+ORDER_CASES=0
 
 # jq normalization filter:
-# Sorts keys, rounds numbers to 4 decimal places, and drops `chunks[].retrieval`.
+# Sorts keys, rounds numbers to 4 decimal places, deletes `chunks[].retrieval`
+# and sorts `chunks` by id.
 #
 # `retrieval` is the additive per-arm provenance block Rust added in S.1c and Bun
 # does not produce. This script exists to prove the two runtimes answer the same
@@ -327,7 +330,15 @@ FAILED_CASES=0
 # is not a divergence to fix, so it is removed before the diff. Deleting it from
 # Bun's answer is a no-op. `docs/rust-cutover.md` records the deliberate
 # difference.
-NORMALIZE_JQ='walk(if type == "object" and has("totalTimeMs") then (.embeddingTimeMs = 0 | .vectorSearchTimeMs = 0 | .entitySearchTimeMs = 0 | .graphSearchTimeMs = 0 | .fusionTimeMs = 0 | .totalTimeMs = 0) elif type == "number" then ((. * 10000 | round) / 10000) else . end) | del(.chunks[]?.retrieval)'
+#
+# `chunks` is sorted by id for the same reason, one step further: since
+# 2026-10-22 the two runtimes fuse with a different RRF constant (Rust uses
+# Qdrant's `k = 2`, Bun uses the paper's `k = 60` — `docs/rust-cutover.md` §7),
+# so the *order* of the same chunks can differ. The order is therefore
+# reported separately, as a count, and not used as a pass/fail signal: the
+# question this script answers is "do the two runtimes return the same
+# chunks", and the order is a known, measured, deliberate difference.
+NORMALIZE_JQ='walk(if type == "object" and has("totalTimeMs") then (.embeddingTimeMs = 0 | .vectorSearchTimeMs = 0 | .entitySearchTimeMs = 0 | .graphSearchTimeMs = 0 | .fusionTimeMs = 0 | .totalTimeMs = 0) elif type == "number" then ((. * 10000 | round) / 10000) else . end) | del(.chunks[]?.retrieval) | .chunks = ((.chunks // []) | sort_by(.id))'
 
 for idx in "${!TEST_CASES[@]}"; do
   BODY="${TEST_CASES[$idx]}"
@@ -367,6 +378,16 @@ for idx in "${!TEST_CASES[@]}"; do
     cat "$TMP_DIR/diff.patch"
     FAILED_CASES=$((FAILED_CASES + 1))
   fi
+
+  # The order of the same chunks. Not a pass/fail signal: the two runtimes
+  # fuse with different RRF constants on purpose (docs/rust-cutover.md §7).
+  ORDER_CASES=$((ORDER_CASES + 1))
+  BUN_ORDER=$(echo "$BUN_RESP" | jq -c '[.chunks[]?.id]' 2>/dev/null || echo "[]")
+  RUST_ORDER=$(echo "$RUST_RESP" | jq -c '[.chunks[]?.id]' 2>/dev/null || echo "[]")
+  if [ "$BUN_ORDER" != "$RUST_ORDER" ]; then
+    ORDER_DIFFERENCES=$((ORDER_DIFFERENCES + 1))
+    echo "  (order differs: same chunks, different RRF constant — expected)"
+  fi
 done
 
 echo ""
@@ -403,6 +424,8 @@ done
 echo ""
 echo "=========================================="
 echo "Search Parity Results: $PASSED_CASES / $TOTAL_CASES passed, $FAILED_CASES failed (${#DIVERGENCE_CASES[@]} expected divergences verified)"
+echo "Chunk order: $ORDER_DIFFERENCES / $ORDER_CASES cases ordered differently by the two runtimes."
+echo "That is the deliberate RRF difference (Rust fuses with Qdrant's k=2, Bun with the paper's k=60) — docs/rust-cutover.md §7."
 echo "=========================================="
 
 if [ "$FAILED_CASES" -gt 0 ]; then
