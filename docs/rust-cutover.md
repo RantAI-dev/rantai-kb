@@ -246,6 +246,18 @@ path.**
   right far more often; chunk boundaries (and so chunk ids' content) differ
   from Bun's for PDFs, so **re-index PDFs** for the gain.
 
+### 10. Deliberate Difference: Keyword Hits Carry Their Page
+- **Bun**: a chunk found only by the keyword (BM25) arm is serialised without
+  `page`, `chunkType` or `assetKey`; the keyword index had no page.
+- **Rust (deliberate, 2026-10-23)**: the store holds the page of every chunk,
+  so a keyword-only hit now carries `page` when it is known (omitted, as
+  before, when it is not). `chunkType`, `assetKey` and `contextualPrefix: null`
+  keep Bun's shape.
+- **Why**: in a sampled ViDoRe v3 HR query, 9 of the 20 chunks returned were
+  keyword-only; without a page they cannot be cited, and a client ranking
+  pages silently loses them. The context text and `sources` already carried the page.
+- **Parity**: `search-parity.sh` drops `page` from keyword hits before diffing.
+
 ---
 
 ## 6. Shared Known Issues

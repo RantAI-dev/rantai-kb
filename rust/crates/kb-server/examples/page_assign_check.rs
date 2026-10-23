@@ -36,6 +36,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Exactly ingest's path: page by page when the content is its pages,
         // else the whole document, then tag pages.
         let texts: Vec<(u32, String)> = pages.iter().map(|p| (p.page, p.text.clone())).collect();
+        let paged = smart_chunk_pages(
+            &out.content,
+            &texts,
+            &name,
+            "",
+            None,
+            kb_engine::ingest::INGEST_CHUNKING,
+        );
+        let whole = smart_chunk_document(
+            &out.content,
+            &name,
+            "",
+            None,
+            kb_engine::ingest::INGEST_CHUNKING,
+        );
+        eprintln!(
+            "{name}: page-by-page {:?}, whole-document {}",
+            paged.as_ref().map(Vec::len),
+            whole.len()
+        );
         let chunks = smart_chunk_pages(
             &out.content,
             &texts,

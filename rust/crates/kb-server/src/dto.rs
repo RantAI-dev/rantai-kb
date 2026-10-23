@@ -390,8 +390,12 @@ impl From<SearchHit> for ChunkDto {
             (
                 Some(None), // BM25 hit serializes contextualPrefix: null
                 None,       // BM25 hit omits assetKey
-                None,       // BM25 hit omits page
-                None,       // BM25 hit omits chunkType
+                // A keyword hit carries its page when the store knows it. Bun's
+                // keyword arm had none, so its shape omitted the key; dropping a
+                // known page left every keyword-only hit uncitable
+                // (docs/rust-cutover.md §10). Still omitted when unknown.
+                hit.chunk.metadata.page.map(Some),
+                None, // BM25 hit omits chunkType
             )
         } else {
             (
@@ -561,9 +565,18 @@ mod tests {
     }
 
     #[test]
+    fn a_keyword_hit_without_a_known_page_still_omits_the_key() {
+        let mut h = hit(true, None);
+        h.chunk.metadata.page = None;
+        let value = serde_json::to_value(ChunkDto::from(h)).unwrap();
+        assert!(value.get("page").is_none(), "{value}");
+    }
+
+    #[test]
     fn a_keyword_hit_keeps_its_bun_omissions_and_gains_retrieval() {
         // The shape `search-parity.sh` and the Bun client both rely on: no
-        // chunkType, no page, no assetKey, and an explicit `contextualPrefix: null`.
+        // chunkType, no assetKey, and an explicit `contextualPrefix: null`; the
+        // page is kept when known (docs/rust-cutover.md §10).
         let value = serde_json::to_value(ChunkDto::from(hit(
             true,
             Some(RetrievalProvenance {
@@ -576,7 +589,7 @@ mod tests {
         )))
         .unwrap();
         assert!(value.get("chunkType").is_none(), "{value}");
-        assert!(value.get("page").is_none(), "{value}");
+        assert_eq!(value["page"], 4, "a known page is kept: {value}");
         assert!(value.get("assetKey").is_none(), "{value}");
         assert_eq!(value["contextualPrefix"], serde_json::Value::Null);
         assert_eq!(value["similarity"], 0.0);

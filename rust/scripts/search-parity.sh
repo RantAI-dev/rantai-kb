@@ -331,6 +331,11 @@ ORDER_CASES=0
 # Bun's answer is a no-op. `docs/rust-cutover.md` records the deliberate
 # difference.
 #
+# A keyword hit (no `chunkType`) also loses its `page` here: Rust reports the
+# page of keyword hits when it knows it, and Bun's keyword arm never had one
+# (`docs/rust-cutover.md` §10). Vector hits keep `page`, so a page difference
+# there is still a failure.
+#
 # `chunks` is sorted by id for the same reason, one step further: both runtimes
 # order by k=60 RRF, but Rust takes its candidate pool from the top of Qdrant's
 # own fused list (`docs/rust-cutover.md` §7), and with the reranker on Rust
@@ -339,7 +344,7 @@ ORDER_CASES=0
 # reported separately, as a count, and not used as a pass/fail signal: the
 # question this script answers is "do the two runtimes return the same
 # chunks", and the order is a known, measured, deliberate difference.
-NORMALIZE_JQ='walk(if type == "object" and has("totalTimeMs") then (.embeddingTimeMs = 0 | .vectorSearchTimeMs = 0 | .entitySearchTimeMs = 0 | .graphSearchTimeMs = 0 | .fusionTimeMs = 0 | .totalTimeMs = 0) elif type == "number" then ((. * 10000 | round) / 10000) else . end) | del(.chunks[]?.retrieval) | .chunks = ((.chunks // []) | sort_by(.id))'
+NORMALIZE_JQ='walk(if type == "object" and has("totalTimeMs") then (.embeddingTimeMs = 0 | .vectorSearchTimeMs = 0 | .entitySearchTimeMs = 0 | .graphSearchTimeMs = 0 | .fusionTimeMs = 0 | .totalTimeMs = 0) elif type == "number" then ((. * 10000 | round) / 10000) else . end) | del(.chunks[]?.retrieval) | (.chunks[]? |= (if has("chunkType") then . else del(.page) end)) | .chunks = ((.chunks // []) | sort_by(.id))'
 
 for idx in "${!TEST_CASES[@]}"; do
   BODY="${TEST_CASES[$idx]}"
