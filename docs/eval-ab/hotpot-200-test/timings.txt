@@ -2,3 +2,5 @@ k60: 170 s wall (ingest + queries)
 k60-bge10: 84 s for 100 queries
 k60-bge20: 152 s for 100 queries
 k60-qwen20: 269 s for 100 queries
+final: 173 s wall (ingest + queries)
+final-bge20: 152 s for 100 queries
