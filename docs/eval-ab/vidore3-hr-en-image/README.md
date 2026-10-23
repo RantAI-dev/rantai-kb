@@ -54,3 +54,30 @@ By content type (bge top 20 text runs):
   `docs/kb-tiers.md`.
 - The fused list is not reranked. A text reranker over fused page candidates, or a
   multimodal reranker, is untested.
+
+## Update, 2026-10-23 night: text + image pages, then a page-level reranker
+
+**Text + image page vectors.** Each page embedded as its own text layer followed by its image
+(`page_image_arm.py --page-text-dir`, $0.69 for 1,110 pages):
+
+| Page embedding | Pages alone | + 8B text (CV) | + local text + bge (CV) | + 8B text + bge (CV) |
+|---|---:|---:|---:|---:|
+| image only | 0.575 | 0.625 | 0.629 | 0.648 |
+| **text + image** | **0.605** | **0.642** | **0.636** | **0.655** |
+
+(The 8B text runs here are same-session runs: `../vidore3-hr-en-furniture/base` without a
+reranker and `../vidore3-hr-en-night/e8b-bge` with bge on the top 20.)
+
+**Page-level reranking.** The fused list (8B text + bge, fused with text+image pages at w=0.5,
+k=5 → 0.655, `fused-8bbge-textimage.page.trec`) reranked on each page's whole text (top 30
+pages, 3,000 characters), blended with the fused order by weighted RRF; blend weight and k
+chosen by 2-fold CV (`page_rerank.py`):
+
+| Page reranker | Rerank only | CV blend (held-out) | Δ vs 0.655 [95% CI] | Cost |
+|---|---:|---:|---|---:|
+| nvidia/nemotron-3.5-rerank-8b:free | 0.697 | **0.705** | +0.049 [+0.031, +0.069] | $0 |
+| voyageai/rerank-2.5 | 0.697 | **0.704** | +0.049 [+0.032, +0.066] | $0.29 |
+
+Two independent rerankers agree. For reference: the best published retriever on this set
+(ColEmbed-3B-v2) scores 0.654, and the paper's best pipeline with a reranker (Jina-v4 text +
+zerank-2, Table 2, multilingual setting) 0.665. Live confirmation is in `../vidore3-hr-en-night`.
