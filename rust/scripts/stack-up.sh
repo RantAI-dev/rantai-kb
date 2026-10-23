@@ -15,6 +15,12 @@
 #                                   # needs OPENROUTER_API_KEY). KB_STACK_OR_MODEL (default
 #                                   # qwen/qwen3-embedding-8b), KB_STACK_OR_DIM (4096),
 #                                   # KB_STACK_OR_QUERY_PREFIX / KB_STACK_OR_PASSAGE_PREFIX.
+#   KB_STACK_EMBEDDINGS=remote      # no local model: an OpenAI-compatible embeddings server
+#                                   # already running elsewhere (e.g. llama.cpp on a LAN GPU
+#                                   # box). Needs KB_STACK_REMOTE_EMBED_URL (base URL, e.g.
+#                                   # http://host:8081) and KB_STACK_REMOTE_EMBED_KEY. Defaults
+#                                   # to Qwen3-Embedding-0.6B (dim 1024, Qwen3 query
+#                                   # instruction); KB_STACK_REMOTE_EMBED_MODEL / _DIM override.
 #   KB_SERVER_BIN=.../release/kb-server  # a prebuilt binary (e.g. release, for latency runs)
 #   KB_STACK_RERANK=tei             # starts kb-smoke-tei-rerank (bge-reranker-v2-m3)
 #   KB_STACK_QDRANT=1               # starts kb-smoke-qdrant (Qdrant v1.19.2; HTTP 6333, gRPC 6334)
@@ -257,6 +263,16 @@ if [ "$KB_STACK_EMBEDDINGS" = "tei" ]; then
     exit 1
   fi
   echo "TEI embedding server ready on 127.0.0.1:${TEI_EMBED_PORT}"
+elif [ "$KB_STACK_EMBEDDINGS" = "remote" ]; then
+  if [ -z "${KB_STACK_REMOTE_EMBED_URL:-}" ] || [ -z "${KB_STACK_REMOTE_EMBED_KEY:-}" ]; then
+    echo "KB_STACK_EMBEDDINGS=remote needs KB_STACK_REMOTE_EMBED_URL and KB_STACK_REMOTE_EMBED_KEY" >&2
+    exit 1
+  fi
+  if ! curl -s -m 5 "${KB_STACK_REMOTE_EMBED_URL%/}/health" >/dev/null 2>&1; then
+    echo "remote embedder ${KB_STACK_REMOTE_EMBED_URL} does not answer /health" >&2
+    exit 1
+  fi
+  echo "Embeddings from ${KB_STACK_REMOTE_EMBED_URL}; no local model started."
 elif [ "$KB_STACK_EMBEDDINGS" = "openrouter" ]; then
   if [ -z "${OPENROUTER_API_KEY:-}" ]; then
     echo "KB_STACK_EMBEDDINGS=openrouter needs OPENROUTER_API_KEY in the environment" >&2
@@ -359,6 +375,17 @@ export KB_EMBEDDING_QUERY_PREFIX="Instruct: Given a question, retrieve passages 
 Query: "
 export KB_EMBEDDING_PASSAGE_PREFIX=""
 EOF
+elif [ "$KB_STACK_EMBEDDINGS" = "remote" ]; then
+  chmod 600 "$STACK_ENV"
+  cat >> "$STACK_ENV" <<EOF
+export KB_EMBEDDING_BASE_URL="${KB_STACK_REMOTE_EMBED_URL%/}/v1/embeddings"
+export KB_EMBEDDING_API_KEY="${KB_STACK_REMOTE_EMBED_KEY}"
+export KB_EMBEDDING_MODEL="${KB_STACK_REMOTE_EMBED_MODEL:-Qwen/Qwen3-Embedding-0.6B}"
+export KB_EMBEDDING_DIM="${KB_STACK_REMOTE_EMBED_DIM:-1024}"
+export KB_EMBEDDING_QUERY_PREFIX="Instruct: Given a question, retrieve passages that answer it
+Query: "
+export KB_EMBEDDING_PASSAGE_PREFIX=""
+EOF
 elif [ "$KB_STACK_EMBEDDINGS" = "openrouter" ]; then
   chmod 600 "$STACK_ENV"
   cat >> "$STACK_ENV" <<EOF
@@ -429,6 +456,8 @@ echo "  kb-server   http://127.0.0.1:${SERVER_PORT}  (pid $(cat "$SERVER_PID_FIL
 echo "  postgres    127.0.0.1:${PG_PORT}   surreal 127.0.0.1:${SURREAL_PORT}   s3 127.0.0.1:${S3_PORT}"
 if [ "$KB_STACK_EMBEDDINGS" = "tei" ]; then
   echo "  tei-embed   http://127.0.0.1:${TEI_EMBED_PORT} (dim 1024, Qwen3-Embedding-0.6B)"
+elif [ "$KB_STACK_EMBEDDINGS" = "remote" ]; then
+  echo "  remote-embed ${KB_STACK_REMOTE_EMBED_URL}"
 else
   echo "  stub-embed  http://127.0.0.1:${STUB_PORT} (dim 8)"
 fi
