@@ -108,6 +108,18 @@ pub struct Config {
     /// Content-addressed disk cache for embeddings and extraction
     /// (`KB_CACHE_DIR`). `None` turns caching off.
     pub cache: Option<CacheConfig>,
+    /// The page-image arm (`KB_PAGE_EMBEDDING_MODEL`). `None` turns it off.
+    pub pages: Option<PageArmSettings>,
+}
+
+/// Page-image arm wiring: which multimodal embedder, how pages are rendered,
+/// and how the arm is fused (`docs/eval-ab/vidore3-hr-en-image`).
+#[derive(Clone, Debug)]
+pub struct PageArmSettings {
+    pub embedder: kb_inference::PageEmbedderSettings,
+    pub dpi: u32,
+    pub max_pages: u32,
+    pub arm: kb_engine::PageArmConfig,
 }
 
 /// Where the disk caches live and how their keys are scoped.
@@ -522,7 +534,51 @@ impl Config {
                 embedding_tag: lookup("KB_EMBEDDING_CACHE_TAG").unwrap_or_default(),
             });
 
+        let pages = match lookup("KB_PAGE_EMBEDDING_MODEL")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        {
+            None => None,
+            Some(model) => {
+                if chunk_store_choice != ChunkStoreChoice::Qdrant {
+                    bail!("KB_PAGE_EMBEDDING_MODEL needs KB_CHUNK_STORE=qdrant");
+                }
+                let api_key = lookup("KB_PAGE_EMBEDDING_API_KEY")
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| lookup("OPENROUTER_API_KEY").filter(|s| !s.trim().is_empty()));
+                Some(PageArmSettings {
+                    embedder: kb_inference::PageEmbedderSettings {
+                        base_url: lookup("KB_PAGE_EMBEDDING_BASE_URL")
+                            .unwrap_or_else(|| "https://openrouter.ai/api/v1/embeddings".into()),
+                        model,
+                        api_key,
+                        dimension: int_var(&lookup, "KB_PAGE_EMBEDDING_DIM", 1024u32)?.max(1),
+                        batch_size: int_var(&lookup, "KB_PAGE_EMBEDDING_BATCH_SIZE", 4u32)?
+                            .clamp(1, 64),
+                        concurrency: int_var(&lookup, "KB_PAGE_EMBEDDING_CONCURRENCY", 4u32)?
+                            .clamp(1, 32),
+                        request_timeout: Duration::from_millis(
+                            int_var(&lookup, "KB_PAGE_EMBEDDING_TIMEOUT_MS", 60_000u64)?.max(1_000),
+                        ),
+                    },
+                    dpi: int_var(&lookup, "KB_PAGE_IMAGE_DPI", 96u32)?.clamp(36, 300),
+                    max_pages: int_var(&lookup, "KB_PAGE_IMAGE_MAX_PAGES", 500u32)?,
+                    arm: kb_engine::PageArmConfig {
+                        image_weight: float_var(&lookup, "KB_PAGE_ARM_WEIGHT", 0.5)?
+                            .clamp(0.0, 1.0),
+                        rrf_k: int_var(&lookup, "KB_PAGE_ARM_RRF_K", 5u32)?.max(1),
+                        candidates: int_var(&lookup, "KB_PAGE_ARM_CANDIDATES", 100usize)?
+                            .clamp(1, 500),
+                        timeout: Duration::from_millis(
+                            int_var(&lookup, "KB_PAGE_ARM_TIMEOUT_MS", 10_000u64)?.max(100),
+                        ),
+                    },
+                })
+            }
+        };
+
         Ok(Config {
+            pages,
             cache,
             chunk_store_choice,
             qdrant,

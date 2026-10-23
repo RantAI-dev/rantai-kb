@@ -27,6 +27,7 @@ use kb_ports::{
 pub mod fakes;
 pub mod graph_arm;
 pub mod ingest;
+pub mod page_arm;
 pub mod retrieval;
 pub mod timing;
 
@@ -58,10 +59,13 @@ mod in_memory_index_tests;
 #[cfg(test)]
 mod ingest_tests;
 #[cfg(test)]
+mod page_arm_tests;
+#[cfg(test)]
 mod tests;
 
 pub use graph_arm::{GraphArm, GraphArmConfig, GraphCache, GraphRanking};
 pub use ingest::{CancelToken, IngestSettings, IngestWorker, JobOutcome, reap_failed_job_uploads};
+pub use page_arm::{PageArm, PageArmConfig, PageIngest, RankedPage};
 pub use retrieval::{RetrievalOptions, RetrievalOutcome, enrich_titles, execute_pipeline};
 pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
 
@@ -146,6 +150,8 @@ pub struct EngineInputs {
     /// scoped-graph cache, so the cache is per-process state rather than engine
     /// settings.
     pub graph_arm: Option<Arc<GraphArm>>,
+    /// The page-image arm, or `None` when it is off.
+    pub page_arm: Option<Arc<PageArm>>,
 }
 
 /// Engine handle — cheap to clone (all state behind `Arc`s).
@@ -203,6 +209,7 @@ impl Engine {
             query_expander: Arc::new(NoopExpander),
             figure_gate: None,
             graph_arm: None,
+            page_arm: None,
         };
         Self::new(settings, inputs)
     }
@@ -246,6 +253,7 @@ impl Engine {
             figure_gate: self.inputs.figure_gate.clone(),
             rerank_enabled: self.settings.rerank_enabled,
             graph_arm: self.inputs.graph_arm.clone(),
+            page_arm: self.inputs.page_arm.clone(),
         };
 
         execute_pipeline(

@@ -19,6 +19,7 @@ use tracing::Instrument;
 
 use crate::QueryExpander;
 use crate::graph_arm::{GraphArm, GraphRanking};
+use crate::page_arm::PageArm;
 use crate::timing::{Clock, StageTimings, Stopwatch, stage_span};
 
 /// Parameters for one retrieval execution.
@@ -46,6 +47,8 @@ pub struct RetrievalOptions {
     /// The entity-graph arm, when `KB_GRAPH_ARM` is on. `None` leaves the
     /// pipeline byte-identical to the two-arm version it has always been.
     pub graph_arm: Option<std::sync::Arc<GraphArm>>,
+    /// The page-image arm, when configured. `None` leaves the pipeline as it was.
+    pub page_arm: Option<std::sync::Arc<PageArm>>,
 }
 
 impl fmt::Debug for RetrievalOptions {
@@ -64,6 +67,7 @@ impl fmt::Debug for RetrievalOptions {
             .field("expansion_paraphrases", &self.expansion_paraphrases)
             .field("hybrid_bm25_enabled", &self.hybrid_bm25_enabled)
             .field("graph_arm", &self.graph_arm.as_ref().map(|_| "<GraphArm>"))
+            .field("page_arm", &self.page_arm.as_ref().map(|a| a.config))
             .field(
                 "figure_gate",
                 &self.figure_gate.as_ref().map(|_| "<FigureGate>"),
@@ -90,6 +94,7 @@ impl Default for RetrievalOptions {
             figure_gate: None,
             rerank_enabled: false,
             graph_arm: None,
+            page_arm: None,
         }
     }
 }
@@ -477,6 +482,19 @@ pub async fn execute_pipeline(
     let mut timings = StageTimings::default();
     let mut degrades: Vec<RetrievalDegrade> = Vec::new();
     let pool_size = opts.candidate_pool_size.clamp(1, 100);
+
+    // 0. The page-image arm runs alongside everything below: its query embedding
+    // is a second round trip to a different model, and it must not add to the
+    // text arms' latency. Joined after the rerank, where it is fused.
+    let page_task = opts.page_arm.clone().map(|arm| {
+        let scope = scope.clone();
+        let query = query.to_string();
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let res = tokio::time::timeout(arm.config.timeout, arm.rank(&scope, &query)).await;
+            (res, started.elapsed())
+        })
+    });
 
     // 1. Query expansion.
     let expand_sw = Stopwatch::start(clock);
@@ -880,6 +898,66 @@ pub async fn execute_pipeline(
         .instrument(stage_span("rerank", "RERANKER"))
         .await;
     timings.rerank_ms = rerank_sw.elapsed_ms();
+
+    // 5b. Fuse the page-image arm's pages with the ranked text hits, at page
+    // level. A failed or slow arm degrades the search; it never empties it.
+    if let (Some(task), Some(arm)) = (page_task, opts.page_arm.as_ref()) {
+        match task.await {
+            Ok((Ok(Ok(pages)), elapsed)) => {
+                timings.page_arm_ms = elapsed.as_secs_f64() * 1000.0;
+                let (merged, partial) = crate::page_arm::merge_pages(
+                    index,
+                    scope,
+                    reranked_hits,
+                    &pages,
+                    &arm.config,
+                    max_chunks,
+                )
+                .await;
+                reranked_hits = merged;
+                if partial {
+                    degrades.push(RetrievalDegrade::PageArmUnavailable);
+                } else {
+                    let mut page_only: Vec<SearchHit> = reranked_hits
+                        .iter()
+                        .filter(|h| h.chunk.document_title.is_empty())
+                        .cloned()
+                        .collect();
+                    if !page_only.is_empty() {
+                        enrich_titles_cached(
+                            doc_store,
+                            scope.tenant(),
+                            &mut page_only,
+                            &mut meta_cache,
+                        )
+                        .await;
+                        let titled: HashMap<ChunkId, SearchHit> = page_only
+                            .into_iter()
+                            .map(|h| (h.chunk.id.clone(), h))
+                            .collect();
+                        for h in &mut reranked_hits {
+                            if let Some(t) = titled.get(&h.chunk.id) {
+                                h.chunk.document_title.clone_from(&t.chunk.document_title);
+                                h.chunk.categories.clone_from(&t.chunk.categories);
+                            }
+                        }
+                    }
+                }
+            }
+            Ok((Ok(Err(e)), _)) => {
+                tracing::warn!(error = %e, "page arm failed (non-fatal)");
+                degrades.push(RetrievalDegrade::PageArmUnavailable);
+            }
+            Ok((Err(_), _)) => {
+                tracing::warn!("page arm timed out (non-fatal)");
+                degrades.push(RetrievalDegrade::PageArmUnavailable);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "page arm task failed (non-fatal)");
+                degrades.push(RetrievalDegrade::PageArmUnavailable);
+            }
+        }
+    }
 
     // 6. Cut to max_chunks (1..=50)
     reranked_hits.truncate(max_chunks);

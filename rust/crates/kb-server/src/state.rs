@@ -89,6 +89,12 @@ impl AppState {
             }
             (false, _) => None,
         };
+        let page_arm = match config.pages.as_ref() {
+            None => None,
+            Some(pages) => Some(Arc::new(
+                build_page_arm(&config.qdrant, pages, config.cache.as_ref()).await?,
+            )),
+        };
         let documents: Arc<dyn DocumentStore> =
             Arc::new(kb_store_pg::PgDocumentStore::from_pool(pool.clone()));
         let jobs: Arc<dyn JobStore> = Arc::new(kb_store_pg::PgJobStore::from_pool(pool));
@@ -153,6 +159,7 @@ impl AppState {
             query_expander: expander,
             figure_gate: None,
             graph_arm: graph_arm.clone(),
+            page_arm,
         };
         let engine = Engine::new(config.engine, inputs);
         Ok(Self {
@@ -186,6 +193,7 @@ impl AppState {
             query_expander: Arc::new(NoopExpander),
             figure_gate: None,
             graph_arm: parts.graph_arm.clone(),
+            page_arm: None,
         };
         let engine = Engine::new(settings, inputs);
         Self {
@@ -251,8 +259,68 @@ impl AppState {
         if let Some(graph) = self.graph.as_ref() {
             worker = worker.with_graph_store(Arc::clone(graph));
         }
+        if let (Some(arm), Some(pages)) =
+            (self.engine.inputs.page_arm.as_ref(), config.pages.as_ref())
+        {
+            worker = worker.with_page_ingest(Arc::new(kb_engine::PageIngest {
+                renderer: Arc::new(kb_extract::PdfiumPageRenderer {
+                    dpi: pages.dpi,
+                    jpeg_quality: 80,
+                }),
+                embedder: Arc::clone(&arm.embedder),
+                index: Arc::clone(&arm.index),
+                max_pages: pages.max_pages,
+            }));
+        }
         Ok(worker)
     }
+}
+
+/// The page-image arm: its own Qdrant collection (one per page-embedding
+/// model, so vector spaces never mix) and its embedder, disk-cached when
+/// `KB_CACHE_DIR` is set.
+async fn build_page_arm(
+    qdrant: &kb_store_qdrant::QdrantSettings,
+    pages: &crate::config::PageArmSettings,
+    cache: Option<&crate::config::CacheConfig>,
+) -> anyhow::Result<kb_engine::PageArm> {
+    let settings = kb_store_qdrant::QdrantSettings {
+        model_slug: pages.embedder.model.clone(),
+        dense_dims: Some(pages.embedder.dimension),
+        ..qdrant.clone()
+    };
+    let collection = format!("pages__{}", settings.collection_name());
+    let client = settings
+        .client()
+        .map_err(|e| anyhow::anyhow!("qdrant client: {e}"))?;
+    kb_store_qdrant::create_collection(&client, &settings, &collection)
+        .await
+        .map_err(|e| anyhow::anyhow!("qdrant create page collection: {e}"))?;
+    let index: Arc<dyn kb_ports::RetrievalIndex> = Arc::new(
+        kb_store_qdrant::QdrantIndex::new_with_collection(settings, collection.clone())
+            .map_err(|e| anyhow::anyhow!("qdrant page index: {e}"))?,
+    );
+    let mut embedder: Arc<dyn kb_ports::PageEmbedder> = Arc::new(
+        kb_inference::HttpPageEmbedder::new(pages.embedder.clone())
+            .map_err(|e| anyhow::anyhow!("page embedder: {e}"))?,
+    );
+    if let Some(cache) = cache {
+        let fingerprint = format!(
+            "model={}|dim={}|tag={}",
+            pages.embedder.model, pages.embedder.dimension, cache.embedding_tag
+        );
+        embedder = Arc::new(kb_cache::CachedPageEmbedder::new(
+            embedder,
+            kb_cache::DiskCache::new(&cache.dir),
+            fingerprint,
+        ));
+    }
+    tracing::info!(%collection, model = %pages.embedder.model, "page-image arm on");
+    Ok(kb_engine::PageArm {
+        embedder,
+        index,
+        config: pages.arm,
+    })
 }
 
 fn embedder_settings_from(c: EmbedderConfig) -> EmbedderSettings {

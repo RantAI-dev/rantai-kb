@@ -158,6 +158,8 @@ pub struct IngestWorker {
     /// keeps its rows because Bun and `/v1/documents/:id/intelligence` read
     /// them, and the graph tables exist so the graph arm has something to walk.
     graph: Option<Arc<dyn GraphStore>>,
+    /// The page-image arm's ingest side, when configured.
+    page_ingest: Option<Arc<crate::page_arm::PageIngest>>,
     progress_sink: Option<Arc<dyn ProgressSink>>,
     /// Per-job throttle state for progress emits, mirroring `lastEmit` in
     /// `src/lib/ingest/job.ts`: always emit on a step change, otherwise at most
@@ -189,6 +191,7 @@ impl IngestWorker {
             entities: None,
             entity_extractor: None,
             graph: None,
+            page_ingest: None,
             progress_sink: None,
             emit_state: Mutex::new(HashMap::new()),
             settings,
@@ -230,6 +233,13 @@ impl IngestWorker {
     #[must_use]
     pub fn with_graph_store(mut self, graph: Arc<dyn GraphStore>) -> Self {
         self.graph = Some(graph);
+        self
+    }
+
+    /// Also render, embed and index every page as an image (the page-image arm).
+    #[must_use]
+    pub fn with_page_ingest(mut self, page_ingest: Arc<crate::page_arm::PageIngest>) -> Self {
+        self.page_ingest = Some(page_ingest);
         self
     }
 
@@ -699,10 +709,38 @@ impl IngestWorker {
             .await
             .map_err(|e| format!("clearing old chunks failed: {e}"))?;
         let written = units.len();
+        let mut chunks_by_page: HashMap<u32, Vec<ChunkId>> = HashMap::new();
+        for u in units.iter().filter(|u| u.chunk_type != ChunkType::Figure) {
+            if let Some(p) = u.page {
+                chunks_by_page.entry(p).or_default().push(u.id.clone());
+            }
+        }
         self.index
             .upsert(units)
             .await
             .map_err(|e| format!("storing chunks failed: {e}"))?;
+
+        // Page images: best-effort. A document whose pages could not be embedded
+        // is still searchable by text; it just has no image arm, and the log says
+        // so rather than the document failing.
+        if let Some(pages) = &self.page_ingest {
+            let category = chunks.first().map(|c| c.metadata.category.clone());
+            match pages
+                .index_document(
+                    &job.tenant_id,
+                    document_id,
+                    category,
+                    mime,
+                    &bytes,
+                    &chunks_by_page,
+                )
+                .await
+            {
+                Ok(n) if n > 0 => tracing::info!(pages = n, "page images indexed"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "page images not indexed (non-fatal)"),
+            }
+        }
 
         self.finish_ready(job, document_id, written, started, &flags)
             .await

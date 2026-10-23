@@ -207,6 +207,9 @@ pub struct StageTimings {
     /// Cold it is the `load_tenant_graph` cost; warm it is microseconds. The two
     /// are reported apart in `docs/eval-baseline.md` §6.4 for exactly that reason.
     pub graph_arm_ms: f64,
+    /// The page-image arm: query embedding and page search. It runs concurrently
+    /// with the text arms, so it is not one of the partitioning stages.
+    pub page_arm_ms: f64,
     /// `find_alive_meta_by_ids` inside the keyword arm (Postgres).
     pub scope_check_ms: f64,
 }

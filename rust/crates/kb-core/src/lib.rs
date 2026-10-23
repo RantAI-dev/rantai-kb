@@ -12,6 +12,7 @@ pub mod furniture;
 mod fusion;
 pub mod graph;
 pub mod intelligence;
+pub mod page_fusion;
 pub mod page_map;
 pub mod policy;
 mod progress;

@@ -915,6 +915,11 @@ async fn delete_document(
     if let Err(err) = state.index.delete_document(&auth.tenant_id, &doc.id).await {
         tracing::warn!(error = %err, "chunk delete failed during hard delete");
     }
+    if let Some(arm) = state.engine.inputs.page_arm.as_ref()
+        && let Err(err) = arm.index.delete_document(&auth.tenant_id, &doc.id).await
+    {
+        tracing::warn!(error = %err, "page-image delete failed during hard delete");
+    }
     if let Some(graph) = state.graph.as_ref()
         && let Err(err) = graph.delete_document(&auth.tenant_id, &doc_id).await
     {
