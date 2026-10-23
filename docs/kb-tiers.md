@@ -175,7 +175,10 @@ Status as of 2026-10-23 (evening):
    best published retriever 0.654, best published pipeline with a reranker 0.665),
    `docs/eval-ab/vidore3-hr-en-night`. Leak-matrix `page` row: 0 leaks.
    - Cloud tier, measured: `voyageai/voyage-multimodal-3.5` pages + `qwen/qwen3-embedding-8b`
-     text + `voyageai/rerank-2.5` for chunks and pages. ~$0.0006 per page to index.
+     text (with Qwen's query instruction in `KB_EMBEDDING_QUERY_PREFIX`) + `voyageai/rerank-2.5`
+     for chunks and pages: **0.708** live on HR. ~$0.0006 per page to index.
+   - ViDoRe v3 computer science, text stack only: 0.785 (best published 0.786); the page arm
+     was not run there (budget).
    - Local tiers: `KB_PAGE_EMBEDDING_FORMAT=vllm` with Qwen3-VL-Embedding-2B/8B under vLLM
      (`3111e16`, mock-tested only; no NVIDIA box yet). The local page reranker is bge-reranker
      on page text (measured offline only with bge on chunks); Qwen3-VL-Reranker is untested.

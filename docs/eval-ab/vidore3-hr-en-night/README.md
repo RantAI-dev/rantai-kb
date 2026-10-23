@@ -22,6 +22,20 @@ Published on the same queries (ViDoRe v3 paper, arXiv 2601.08620):
 Caveats on the comparison: Table 9 rows are retrievers without rerankers; Table 2's reranker
 row is the multilingual setting, not English-only; our unit is a chunk scored by its page.
 
+## With Qwen3's query instruction (`voy-qp-*`)
+
+Qwen3-Embedding expects an instruction on the query side. Setting
+`KB_EMBEDDING_QUERY_PREFIX="Instruct: Given a web search query, retrieve relevant passages that
+answer the query<newline>Query: "` (passage vectors unchanged, reused from the cache):
+
+| Arm | Page nDCG@10 | Δ [95% CI] |
+|---|---:|---|
+| `voy-qp-text` (text only) | 0.657 | +0.012 [+0.001, +0.024] vs `voy-text` |
+| **`voy-qp-ti-pr`** (full stack) | **0.708** | +0.003 [+0.000, +0.006] vs `voy-ti-pr`; +0.051 [+0.032, +0.069] vs `voy-qp-text` |
+
+`voy-qp-ti-pr` by type: Table 0.713, Chart 0.664; 0 degraded. **Best live score: 0.708.**
+Cost of the two `voy-qp` arms: $0.49.
+
 ## Configuration of `voy-ti-pr`
 
 - Text: `qwen/qwen3-embedding-8b` (OpenRouter, dim 4096) + BM25, k=60 fusion, 20 chunks,
