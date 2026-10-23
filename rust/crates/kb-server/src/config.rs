@@ -547,6 +547,18 @@ impl Config {
                 let api_key = lookup("KB_PAGE_EMBEDDING_API_KEY")
                     .filter(|s| !s.trim().is_empty())
                     .or_else(|| lookup("OPENROUTER_API_KEY").filter(|s| !s.trim().is_empty()));
+                let format = match lookup("KB_PAGE_EMBEDDING_FORMAT")
+                    .map(|v| v.trim().to_lowercase())
+                    .as_deref()
+                {
+                    None | Some("") | Some("openrouter") => {
+                        kb_inference::PageEmbedFormat::OpenRouter
+                    }
+                    Some("vllm") => kb_inference::PageEmbedFormat::VllmChat,
+                    Some(other) => bail!(
+                        "KB_PAGE_EMBEDDING_FORMAT must be \"openrouter\" or \"vllm\", got {other:?}"
+                    ),
+                };
                 Some(PageArmSettings {
                     embedder: kb_inference::PageEmbedderSettings {
                         base_url: lookup("KB_PAGE_EMBEDDING_BASE_URL")
@@ -554,6 +566,7 @@ impl Config {
                         model,
                         api_key,
                         dimension: int_var(&lookup, "KB_PAGE_EMBEDDING_DIM", 1024u32)?.max(1),
+                        format,
                         batch_size: int_var(&lookup, "KB_PAGE_EMBEDDING_BATCH_SIZE", 4u32)?
                             .clamp(1, 64),
                         concurrency: int_var(&lookup, "KB_PAGE_EMBEDDING_CONCURRENCY", 4u32)?
@@ -1034,5 +1047,46 @@ mod tests {
         map.insert("KB_DEFAULT_MAX_CHUNKS", "many");
         let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
         assert!(err.to_string().contains("KB_DEFAULT_MAX_CHUNKS"));
+    }
+
+    fn page_arm_map() -> HashMap<&'static str, &'static str> {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("SURREAL_DB_URL", "http://localhost:8000");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_CHUNK_STORE", "qdrant");
+        map.insert("KB_PAGE_EMBEDDING_MODEL", "Qwen/Qwen3-VL-Embedding-2B");
+        map
+    }
+
+    fn page_format(map: &HashMap<&'static str, &'static str>) -> kb_inference::PageEmbedFormat {
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        cfg.pages.expect("page arm configured").embedder.format
+    }
+
+    #[test]
+    fn test_page_embedding_format_defaults_to_openrouter_and_reads_vllm() {
+        let mut map = page_arm_map();
+        assert_eq!(page_format(&map), kb_inference::PageEmbedFormat::OpenRouter);
+        map.insert("KB_PAGE_EMBEDDING_FORMAT", "openrouter");
+        assert_eq!(page_format(&map), kb_inference::PageEmbedFormat::OpenRouter);
+        map.insert("KB_PAGE_EMBEDDING_FORMAT", "vllm");
+        assert_eq!(
+            page_format(&map),
+            kb_inference::PageEmbedFormat::VllmChat,
+            "the local vLLM shape is selected by name"
+        );
+    }
+
+    #[test]
+    fn test_unknown_page_embedding_format_names_the_variable() {
+        let mut map = page_arm_map();
+        map.insert("KB_PAGE_EMBEDDING_FORMAT", "chat");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        assert!(
+            err.to_string().contains("KB_PAGE_EMBEDDING_FORMAT"),
+            "{err}"
+        );
     }
 }

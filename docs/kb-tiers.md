@@ -64,6 +64,45 @@ On 1–2 cores no model is fast enough to run on every page, so ingest routes **
 If it doesn't fit when measured: reranker at 6-bit first, then fewer rerank candidates. The
 parser does not stay resident unless the operator asks for it.
 
+## Local page embedder (vLLM)
+
+The page-image arm talks to vLLM's **Chat Embeddings API** when
+`KB_PAGE_EMBEDDING_FORMAT=vllm`. The shape is a chat conversation per page, not OpenAI's
+`input` array: a page is `messages: [{"role":"user","content":[{"type":"text",...}, {"type":
+"image_url","image_url":{"url":"data:image/jpeg;base64,..."}}]}]`, and vLLM returns one
+vector for the whole conversation. Pages cannot be batched in this shape, so kb-server sends
+one request per page and runs `KB_PAGE_EMBEDDING_CONCURRENCY` of them at a time; queries are
+one text-only message. No `input_type` is sent — the model's chat template carries the
+instruction.
+
+Serve the 2B model (the model card's command; `--max-model-len 8192` leaves room for the
+image tokens of a 96 dpi page):
+
+```sh
+vllm serve Qwen/Qwen3-VL-Embedding-2B --runner pooling --max-model-len 8192
+```
+
+Point kb-server at it:
+
+```sh
+KB_PAGE_EMBEDDING_FORMAT=vllm
+KB_PAGE_EMBEDDING_BASE_URL=http://host:8000/v1/embeddings
+KB_PAGE_EMBEDDING_MODEL=Qwen/Qwen3-VL-Embedding-2B
+KB_PAGE_EMBEDDING_DIM=2048
+```
+
+`2048` is the 2B model's output width (the Hugging Face model card lists "Embedding
+Dimension: Up to 2048", MRL down to 64, and its examples return `(n, 2048)`). The 8B model on
+Station is `4096`. The dimension must match what the server returns or every page is an
+error; if you pass `dimensions` to vLLM, set `KB_PAGE_EMBEDDING_DIM` to the same value.
+The same variables without `_FORMAT=vllm` are the OpenRouter path (`voyage-multimodal-3.5`).
+
+**Status: tested against a mock server only, not a real vLLM.** This machine has no NVIDIA
+GPU, so the request shape and ordering are covered by unit tests in
+`rust/crates/kb-inference/src/page_embedder.rs`, but end-to-end embedding quality and
+throughput with Qwen3-VL-Embedding-2B on vLLM are unverified. Do not quote a local-tier
+page-retrieval number from this path until it has run on Desk/Studio hardware.
+
 ## The one-model-per-role rule
 
 One multimodal embedder puts text chunks, page images and the query in **one vector space**:

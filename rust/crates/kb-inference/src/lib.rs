@@ -21,7 +21,7 @@ pub use llm_extractor::{ExtractorSettings, LlmCombinedExtractor};
 /// Type alias for ExtractorSettings.
 pub type ExtractorConfig = ExtractorSettings;
 pub use llm_reranker::LlmReranker;
-pub use page_embedder::{HttpPageEmbedder, PageEmbedderSettings};
+pub use page_embedder::{HttpPageEmbedder, PageEmbedFormat, PageEmbedderSettings};
 pub use query_expansion::{ExpansionSettings, QueryExpander};
 pub use rerankers::{CohereReranker, TeiReranker, VllmReranker};
 pub use vlm_gate::VlmFigureGate;
