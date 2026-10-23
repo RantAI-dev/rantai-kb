@@ -1,0 +1,135 @@
+# Deployment tiers
+
+Decided with the user, 2026-10-23. Model licences are in `docs/model-licences.md`; only 🟢
+(Apache-2.0 / MIT) models are defaults, and a 🟡 model needs an explicit opt-in.
+**Every VRAM and speed figure below is an estimate from model sizes unless marked
+"measured".** Each tier's numbers have to be measured on its real hardware before it ships.
+
+## Why tiers
+
+The same kb-server binary runs on a 2-core VPS and on a DGX Spark. What changes is which
+model serves each *role* (parse, embed, rerank, caption), where it runs, and whether it stays
+loaded. On every local tier the GPU is **shared with the app's chat LLM, and chat comes
+first.**
+
+## The tiers
+
+| Tier | For | Hardware | OS |
+|---|---|---|---|
+| **Lite** | tiny servers | CPU only, 1–2 cores, no GPU | Linux |
+| **Desk** | small office, ~5 users | NVIDIA 8 GB, or Apple silicon 16 GB | Linux / macOS |
+| **Studio** | serious single GPU | NVIDIA 24 GB, or Apple silicon 32–36 GB | Linux / macOS |
+| **Station** | team server | NVIDIA 48 GB, or 128 GB unified (DGX Spark, Mac Studio) | Linux / macOS |
+| **Cloud** | no local hardware | API keys (OpenRouter, Mistral, Voyage, Cohere) | any |
+
+No Windows on any tier. NVIDIA is served by **vLLM**, Apple by MLX / llama.cpp Metal. The
+chat LLM on Desk and Studio is Bonsai, which needs **PrismML's llama.cpp fork** (CUDA /
+Metal); that is accepted for the chat model only.
+
+## What each tier runs
+
+| Role | Lite | Desk (8 GB) | Studio (24 GB) | Station | Cloud |
+|---|---|---|---|---|---|
+| Chat LLM (the app's) | elsewhere | Bonsai-2-9B (2.0–2.6 GB + 0.6 GB vision), 5 users | Bonsai-2-27B (6.0–7.2 GB + 0.6 GB vision), 5 users | 32–35B × 5 users, or 8–9B × 20 users | API |
+| Embedding (text + page images, one space) | small multilingual text model on CPU | Qwen3-VL-Embedding-2B, 8-bit | Qwen3-VL-Embedding-2B, full precision | Qwen3-VL-Embedding-8B | voyage-multimodal-3.5 or gemini-embedding-2 |
+| Reranker | tiny text reranker, or none | Qwen3-VL-Reranker-2B, 8-bit | Qwen3-VL-Reranker-2B, full precision | Qwen3-VL-Reranker-8B | voyage rerank-2.5 / cohere rerank-4 / qwen3-reranker-8b |
+| Digital PDF text | pdfium text layer | text layer | text layer | text layer | text layer |
+| Scans / complex pages | PP-OCRv6 (ONNX, CPU) | PaddleOCR-VL-1.6, loaded during ingest | PaddleOCR-VL-1.6, resident | MinerU2.5-Pro / PaddleOCR-VL | Mistral OCR |
+| Charts / figures | small VLM on figure crops, background queue | chat LLM's vision, idle time | chat LLM's vision | chat LLM's vision | Gemini Flash |
+| Page-image search | optional tiny model (colSmol-256M), off by default | yes (same embedder) | yes | yes | yes |
+| Est. VRAM chat / KB | — | ~3.5 / ~4.5 GB (tight) | ~9 / ~10 GB | ~26 / ~20 GB on 48 GB | — |
+
+### Lite: cheapest tool per page
+
+On 1–2 cores no model is fast enough to run on every page, so ingest routes **each page**:
+
+1. Text layer present → pdfium text. Free.
+2. No text layer (scan) → PP-OCRv6 (1.5–34.5M params; vendor: 0.20–1.40 s per image on Xeon).
+3. Tables in digital PDFs → rebuilt from the text layer's word positions. No model.
+4. Figures → a small VLM on the crop, in a low-priority background queue, capped per
+   document. The document is searchable before its captions arrive.
+5. Page images → thumbnails for display. Embedding them is optional; the 0.25B page models
+   score ~0.46–0.47 on ViDoRe HR, about our text level, so they only stay if fusion helps.
+
+### Desk: the tier with no slack
+
+| Item | VRAM (estimate) |
+|---|---:|
+| Bonsai-2-9B + vision | 2.6–3.2 GB |
+| KV cache, 5 users (hybrid attention, 8 of 32 layers keep KV) | ~0.5–1 GB |
+| Qwen3-VL-Embedding-2B Q8 | ~2.2 GB |
+| Qwen3-VL-Reranker-2B Q8 | ~2.2 GB |
+| **Total** | **~7.5–8.6 GB** |
+
+If it doesn't fit when measured: reranker at 6-bit first, then fewer rerank candidates. The
+parser does not stay resident unless the operator asks for it.
+
+## The one-model-per-role rule
+
+One multimodal embedder puts text chunks, page images and the query in **one vector space**:
+one index, one query embedding. One multimodal reranker scores (query, text) and
+(query, page image) pairs alike, so a chart-only page is judged on what it shows.
+
+Must be measured before this replaces today's text-only models:
+
+1. Qwen3-VL-Embedding-2B on plain text (MIRACL-id) vs Qwen3-Embedding-0.6B. If it loses
+   clearly on text, keep both embedders.
+2. The 8-bit vision models against full precision on the same pages (llama.cpp's vision path
+   has a known accuracy bug, #29251).
+3. Reranker latency: a 2B reranker is ~3.5× bge's size; bge on the top 20 is ~1.4 s per
+   query on the RX 590 (measured).
+
+Evidence so far (ViDoRe v3 paper, Table 2): a text reranker added +13.7 nDCG on HR; the
+image reranker jina-reranker-m0 added +0.2 on average. So the multimodal reranker is
+A/B-tested against a text reranker on page text, not assumed.
+
+## The document parser stays a separate model
+
+Specialised parsers beat general vision models at OCR and tables: PaddleOCR-VL-1.6 scores
+96.34 on OmniDocBench, Gemini 3 Flash 92.62 (published). The parser is also where page
+numbers and bounding boxes come from. Desk and Studio run the same parser; only residency
+differs.
+
+## Settings
+
+| Setting | Values | Default |
+|---|---|---|
+| `KB_TIER` | `lite`, `desk`, `studio`, `station`, `cloud` | unset: today's explicit per-role settings |
+| `KB_PARSE_RESIDENCY` | `on-demand`, `always` | Desk `on-demand`, Studio and up `always` |
+| `KB_PARSE_IDLE_UNLOAD_S` | seconds | 300 |
+| `KB_CAPTION_RESIDENCY` | `on-demand`, `always` | same as parse |
+| `KB_CAPTION_*` | endpoint of the chat LLM used as the captioner | — |
+| `KB_CACHE_DIR` | directory for content-addressed caches | unset: no cache |
+
+A tier is a **preset**: it fills in role defaults; any explicit `KB_*` setting wins. Server
+start and `kb-server setup` check the VRAM budget and warn, or refuse, when a combination
+can't fit next to the chat LLM.
+
+The caption role points at the app's chat LLM with a **priority queue**: it writes
+descriptions when the LLM is idle and backs off while users are chatting.
+
+## `kb-server setup --tier …`
+
+1. Detect the hardware (CUDA, Metal, or none) and suggest a tier.
+2. Download only 🟢/🟡 models from `docs/model-licences.md`.
+3. Start them (vLLM on CUDA, llama.cpp / MLX on Apple, the parser sidecar included).
+4. Health checks and a small smoke eval.
+5. Write the config kb-server needs.
+
+## Build order
+
+1. Content-addressed disk cache for embeddings, extraction and captions (AGENTS.md rule 7).
+2. `KB_TIER` preset and role config, including residency and the captioner role.
+3. Page cleanup and tables: repeated header/footer removal, table rebuild from word positions.
+   Target: ViDoRe HR table questions 0.50 → ≥ 0.60.
+4. Page-image arm, proven in the cloud first (voyage-multimodal-3.5), then locally with
+   Qwen3-VL-Embedding-2B. Target: HR ≥ 0.65.
+5. Lite on exactly 2 cores (`taskset`): PP-OCRv6 via ONNX, small-embedder bake-off.
+6. Desk / Studio / Station on real hardware; `kb-server setup`.
+
+## Open risks
+
+- No NVIDIA or Apple box to measure Desk and up yet; the LAN GPUs are AMD on Windows.
+- Bonsai's 98.2%-of-full-precision figure is PrismML's own; Indonesian chat quality unchecked.
+- Throughput for 5 users on the PrismML fork vs vLLM batching is unmeasured.
+- DGX Spark bandwidth (~273 GB/s) may make a 32B chat model slow for 5 users.
