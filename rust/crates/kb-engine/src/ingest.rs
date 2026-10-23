@@ -242,17 +242,23 @@ impl IngestWorker {
     /// stale reclaim exists to clean up.
     pub async fn run(&self, cancel: CancelToken) {
         let mut cancelled = cancel.subscribe();
-        let mut since_reclaim = Duration::ZERO;
+        let mut last_reclaim = Instant::now();
         self.reclaim().await;
         loop {
             if *cancelled.borrow() {
                 return;
             }
-            self.tick().await;
-            since_reclaim = since_reclaim.saturating_add(self.settings.poll_interval);
-            if since_reclaim >= self.settings.reclaim_interval {
+            let queue_may_have_more = self.tick().await;
+            if last_reclaim.elapsed() >= self.settings.reclaim_interval {
                 self.reclaim().await;
-                since_reclaim = Duration::ZERO;
+                last_reclaim = Instant::now();
+            }
+            // A full tick means the queue may still hold work: claim again at
+            // once. Sleeping here put a whole poll interval between every
+            // `claims_per_tick` jobs, so a 3,000-file upload at the default 3 s
+            // poll spent hours asleep with work waiting.
+            if queue_may_have_more {
+                continue;
             }
             tokio::select! {
                 () = tokio::time::sleep(self.settings.poll_interval) => {}
@@ -268,20 +274,22 @@ impl IngestWorker {
         }
     }
 
-    /// Claim up to `claims_per_tick` jobs and run them.
-    async fn tick(&self) {
+    /// Claim up to `claims_per_tick` jobs and run them. Returns `true` when
+    /// every claim found a job, so the queue may hold more.
+    async fn tick(&self) -> bool {
         for _ in 0..self.settings.claims_per_tick.max(1) {
             match self.jobs.claim_next_pending().await {
                 Ok(Some(job)) => {
                     self.run_job(job).await;
                 }
-                Ok(None) => return,
+                Ok(None) => return false,
                 Err(err) => {
                     tracing::warn!(error = %err, "ingest claim failed");
-                    return;
+                    return false;
                 }
             }
         }
+        true
     }
 
     /// Claim and run one job. Returns `false` when the queue was empty.

@@ -459,6 +459,44 @@ async fn cancellation_stops_the_poll_loop() {
     handle.await.unwrap();
 }
 
+/// A backlog drains without a poll interval between jobs. Before the fix the
+/// loop slept `poll_interval` after every tick, so three queued jobs at a 3 s
+/// poll and one claim per tick took six seconds of sleep to finish.
+#[tokio::test]
+async fn a_backlog_drains_without_sleeping_between_jobs() {
+    let h = harness(extractor()).await;
+    for i in 0..3 {
+        h.jobs.push(JobRecord {
+            id: format!("job_{i}"),
+            ..job()
+        });
+    }
+    assert_eq!(
+        IngestSettings::default().poll_interval,
+        Duration::from_secs(3)
+    );
+    assert_eq!(IngestSettings::default().claims_per_tick, 1);
+
+    let cancel = CancelToken::new();
+    let token = cancel.clone();
+    let jobs = h.jobs.clone();
+    let worker = h.worker;
+    let handle = tokio::spawn(async move { worker.run(token).await });
+
+    let drained = tokio::time::timeout(Duration::from_secs(2), async {
+        while jobs.pending_len() > 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    cancel.cancel();
+    handle.await.unwrap();
+    assert!(
+        drained.is_ok(),
+        "3 queued jobs were still pending after 2 s"
+    );
+}
+
 #[test]
 fn blob_key_layout_matches_the_helper_the_api_uses() {
     assert_eq!(document_path(Some(TENANT), DOC, "report.pdf"), BLOB_KEY);
