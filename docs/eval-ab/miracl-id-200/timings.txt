@@ -1,0 +1,3 @@
+old: 670 s wall (ingest + queries)
+new: 722 s wall (ingest + queries)
+fusion-only: 693 s wall (ingest + queries)
