@@ -24,6 +24,7 @@ pub mod dataset;
 pub mod leak;
 pub mod leak_http;
 pub mod metrics;
+pub mod pdf;
 pub mod report;
 pub mod runner;
 pub mod stages;

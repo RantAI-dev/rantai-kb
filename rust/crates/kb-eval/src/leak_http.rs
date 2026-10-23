@@ -48,6 +48,9 @@ pub struct LeakConfig {
     pub keep: bool,
     /// Also exit non-zero when an arm is UNTESTED.
     pub strict: bool,
+    /// Seed the corpus as PDFs instead of markdown. The page-image arm renders
+    /// only PDFs, so its row has nothing to find without this.
+    pub pdf_corpus: bool,
 }
 
 impl LeakConfig {
@@ -64,6 +67,7 @@ impl LeakConfig {
             canary_seed: 0x1EA4_C0DE_2026_0001,
             keep: false,
             strict: false,
+            pdf_corpus: false,
         }
     }
 }
@@ -181,6 +185,31 @@ pub fn document_body(index: usize, canaries: &Canaries, seed: u64) -> String {
         f4 = filler[4],
         f5 = filler[5],
     )
+}
+
+/// The same document as [`document_body`], as a two-page PDF with a real text
+/// layer: sections 1–2 on the first page, the annex on the second.
+///
+/// Two pages, so the page arm has more than one page per document to rank and
+/// the canaries are spread over both: the vector and figure canaries on page 1,
+/// the neighbour and entity canaries on page 2.
+#[must_use]
+pub fn document_pdf(index: usize, canaries: &Canaries, seed: u64) -> Vec<u8> {
+    let body = document_body(index, canaries, seed);
+    let (first, second) = body
+        .split_once("## 3. Annex")
+        .map_or((body.as_str(), ""), |(a, b)| (a, b));
+    let lines = |text: &str, heading: Option<&str>| -> Vec<String> {
+        heading
+            .map(str::to_string)
+            .into_iter()
+            .chain(
+                text.lines()
+                    .map(|l| l.trim_start_matches('#').trim().to_string()),
+            )
+            .collect()
+    };
+    crate::pdf::text_pdf(&[lines(first, None), lines(second, Some("3. Annex"))])
 }
 
 // ─── HTTP plumbing ───────────────────────────────────────────────────────────
@@ -365,8 +394,18 @@ async fn upload_and_wait(
     canaries: &Canaries,
     body: &str,
 ) -> Result<SeedDocument, LeakError> {
-    let file_name = format!("leak-{index:02}.md");
-    let part = reqwest::multipart::Part::text(body.to_string()).file_name(file_name.clone());
+    let (file_name, part) = if config.pdf_corpus {
+        let file_name = format!("leak-{index:02}.pdf");
+        let part =
+            reqwest::multipart::Part::bytes(document_pdf(index, canaries, config.canary_seed))
+                .file_name(file_name.clone())
+                .mime_str("application/pdf")?;
+        (file_name, part)
+    } else {
+        let file_name = format!("leak-{index:02}.md");
+        let part = reqwest::multipart::Part::text(body.to_string()).file_name(file_name.clone());
+        (file_name, part)
+    };
     let form = reqwest::multipart::Form::new()
         .part("file", part)
         .text("title", format!("Leak canary {index:02}"))
@@ -931,6 +970,14 @@ pub async fn run(config: LeakConfig) -> Result<LeakRun, LeakError> {
              stack does not run. The figure arm therefore has nothing to retrieve and is \
              reported UNTESTED rather than passing; the asset route is probed only once a \
              figure exists."
+                .to_string(),
+        );
+    }
+    if !config.pdf_corpus {
+        matrix.notes.push(
+            "the corpus was seeded as markdown, and the page-image arm renders only PDFs: \
+             its row has no page to find and is UNTESTED whether or not the server runs the \
+             arm. Pass --pdf to seed PDFs."
                 .to_string(),
         );
     }

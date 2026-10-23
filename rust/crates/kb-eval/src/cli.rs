@@ -98,6 +98,8 @@ LEAK FLAGS
     --poll-ms MS        job poll interval (default 400)
     --keep              leave the seeded corpus behind
     --strict            also exit non-zero when an arm is UNTESTED
+    --pdf               seed the corpus as two-page PDFs instead of markdown;
+                        the page-image arm only sees PDFs, so its row needs it
 
 OUTPUTS (in --out)
     metrics.json  every metric with a 95% bootstrap CI, plus latency
@@ -231,6 +233,7 @@ async fn leak(args: &[String]) -> Result<(), EvalError> {
     config.poll_interval = Duration::from_millis(parse_uint_u64(args, "--poll-ms", 400)?);
     config.keep = has_flag(args, "--keep");
     config.strict = has_flag(args, "--strict");
+    config.pdf_corpus = has_flag(args, "--pdf");
 
     let run = leak_http::run(config)
         .await

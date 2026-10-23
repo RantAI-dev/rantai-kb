@@ -55,16 +55,26 @@ pub enum Arm {
     /// are then fetched — so it is the only one with a second place for a scope
     /// bug to hide in.
     Graph,
+    /// The page-image arm: each PDF page embedded as an image, matched against
+    /// the query, and fused with the text hits. A page only this arm found
+    /// brings its first text chunk into the answer.
+    ///
+    /// Like the graph arm its candidates are not chunks: a page hit names chunk
+    /// ids, which are fetched afterwards. So a scope hole has two places to hide
+    /// (the page index search and the chunk fetch), and the row reads the chunks
+    /// the server tagged `page` in `retrieval.arms`. It only ever sees PDFs.
+    Page,
 }
 
 impl Arm {
     /// Every arm, in the order the report lists them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Vector,
         Self::Bm25,
         Self::Neighbour,
         Self::Figure,
         Self::Graph,
+        Self::Page,
         Self::Entity,
     ];
 
@@ -76,6 +86,7 @@ impl Arm {
             Self::Neighbour => "neighbour",
             Self::Figure => "figure",
             Self::Graph => "graph",
+            Self::Page => "page",
             Self::Entity => "entity",
         }
     }
@@ -91,6 +102,7 @@ impl Arm {
             Self::Neighbour => Some("neighbour"),
             Self::Figure => Some("figure"),
             Self::Graph => Some("graph"),
+            Self::Page => Some("page"),
             Self::Entity => None,
         }
     }
@@ -108,6 +120,7 @@ impl Arm {
             "neighbour" => Some(Self::Neighbour),
             "figure" => Some(Self::Figure),
             "graph" => Some(Self::Graph),
+            "page" => Some(Self::Page),
             _ => None,
         }
     }
@@ -118,7 +131,9 @@ impl Arm {
         match self {
             Self::Entity => ProbeKind::DocumentIntelligence,
             Self::Figure => ProbeKind::SearchOrAsset,
-            Self::Vector | Self::Bm25 | Self::Neighbour | Self::Graph => ProbeKind::Search,
+            Self::Vector | Self::Bm25 | Self::Neighbour | Self::Graph | Self::Page => {
+                ProbeKind::Search
+            }
         }
     }
 }
@@ -196,6 +211,19 @@ impl ScopeKind {
     /// which it is instead of leaving "this probe cannot find its own target".
     #[must_use]
     pub fn reaches_keyword_arm(self) -> bool {
+        !matches!(self, Self::DocumentIds)
+    }
+
+    /// Whether a search scoped this way runs the hybrid pipeline, where the
+    /// arms that are fused after the rerank (graph, page) live.
+    ///
+    /// `documentIds` does not: the Rust route answers it from "Branch 1", one
+    /// dense search over the named documents and nothing else
+    /// (`rust/crates/kb-server/src/routes.rs`). A graph or page probe scoped by
+    /// `documentIds` therefore cannot reach its arm, for the same reason a
+    /// keyword probe cannot.
+    #[must_use]
+    pub fn reaches_pipeline_arms(self) -> bool {
         !matches!(self, Self::DocumentIds)
     }
 }
@@ -442,6 +470,13 @@ pub fn canary_query(document: &SeedDocument, arm: Arm) -> String {
         // the one canary that an extractor turns into an entity, so a graph arm
         // that is on has something to seed from.
         Arm::Graph => document.canaries.entity.clone(),
+        // The page arm embeds the query and compares it with page *images*, so
+        // no canary is better than another to an image model; the vector
+        // sentence is the one that names this document's page most fully. What
+        // makes the probe able to leak is the page embedder, not the query: see
+        // `stub_embeddings`' `/page-embeddings`, which puts every page at the
+        // top of every query.
+        Arm::Page => document.canaries.vector.clone(),
         Arm::Entity => document.id.clone(),
     }
 }
@@ -931,18 +966,23 @@ impl LeakMatrix {
 /// read as a retrieval defect where there is none.
 #[must_use]
 pub fn unreachable_arm_reason(arm: Arm, cell: &Cell) -> Option<String> {
-    if arm != Arm::Bm25
-        || cell.status != Status::Untested
-        || cell.positive_probes == 0
-        || cell.scope.reaches_keyword_arm()
-    {
+    if cell.status != Status::Untested || cell.positive_probes == 0 {
         return None;
     }
-    Some(format!(
-        "a `{}`-scoped search runs no keyword arm in either runtime, so this cell's \
-         positive control is unreachable by construction: it measures the route, not the arm",
-        cell.scope.as_str()
-    ))
+    match arm {
+        Arm::Bm25 if !cell.scope.reaches_keyword_arm() => Some(format!(
+            "a `{}`-scoped search runs no keyword arm in either runtime, so this cell's \
+             positive control is unreachable by construction: it measures the route, not the arm",
+            cell.scope.as_str()
+        )),
+        Arm::Page if !cell.scope.reaches_pipeline_arms() => Some(format!(
+            "a `{}`-scoped search is answered by one dense search and never reaches the \
+             page-image arm, so this cell's positive control is unreachable by construction: \
+             it measures the route, not the arm",
+            cell.scope.as_str()
+        )),
+        _ => None,
+    }
 }
 
 /// What "this arm" can actually be observed to do, in one sentence.
@@ -963,6 +1003,11 @@ pub fn coverage_note(arm: Arm) -> &'static str {
         Arm::Graph => {
             "chunks whose retrieval.arms include `graph`, from POST /v1/search: the chunks a \
              walk over the caller's scoped entity graph ranked, fetched by id"
+        }
+        Arm::Page => {
+            "chunks whose retrieval.arms include `page`, from POST /v1/search: chunks on the \
+             PDF pages the page-image arm ranked inside the caller's scope, fetched by id. \
+             Only PDFs have pages, so the row needs a PDF corpus (`eval leak --pdf`)"
         }
         Arm::Entity => "GET /v1/documents/:id/intelligence for a document id",
     }
@@ -1720,6 +1765,45 @@ mod tests {
         assert!(
             Arm::ALL.contains(&Arm::Graph),
             "an arm outside ALL is never probed"
+        );
+    }
+
+    /// Same for the page arm: a chunk the server tagged `page` must land in the
+    /// page row, and the row must be in ALL or it is never probed at all.
+    #[test]
+    fn the_page_arm_is_named_on_the_wire_and_read_back() {
+        assert_eq!(Arm::Page.as_str(), "page");
+        assert_eq!(Arm::Page.wire_label(), Some("page"));
+        assert_eq!(Arm::from_wire("page"), Some(Arm::Page));
+        assert!(Arm::ALL.contains(&Arm::Page));
+        assert_eq!(Arm::Page.probe_kind(), ProbeKind::Search);
+    }
+
+    /// `documentIds` never reaches the page arm, and the report has to say that
+    /// is the route's doing rather than "the probe cannot find its target".
+    #[test]
+    fn a_page_cell_scoped_by_document_ids_names_the_route_as_the_reason() {
+        let cell = Cell {
+            scope: ScopeKind::DocumentIds,
+            probes: 4,
+            positive_probes: 1,
+            positive_hits: 0,
+            status: Status::Untested,
+            ..Cell::default()
+        };
+        let reason = unreachable_arm_reason(Arm::Page, &cell).expect("a reason");
+        assert!(
+            reason.contains("never reaches the page-image arm"),
+            "{reason}"
+        );
+        let tenant = Cell {
+            scope: ScopeKind::Tenant,
+            ..cell.clone()
+        };
+        assert_eq!(
+            unreachable_arm_reason(Arm::Page, &tenant),
+            None,
+            "a tenant-scoped page cell that misses is a real hole, not the route's"
         );
     }
 
