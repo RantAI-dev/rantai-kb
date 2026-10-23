@@ -16,7 +16,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let name = std::path::Path::new(&path)
         .file_name()
         .map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
-    let mime = kb_extract::ext_to_mime(&kb_extract::extension_of(&name)).unwrap_or("application/octet-stream");
+    let mime = kb_extract::ext_to_mime(&kb_extract::extension_of(&name))
+        .unwrap_or("application/octet-stream");
     let cfg = kb_extract::ExtractConfig::from_lookup(|k| std::env::var(k).ok());
     let extractor = kb_extract::build_production_extractor(&cfg)?;
     let out = extractor.extract(&name, mime, &bytes).await?;
