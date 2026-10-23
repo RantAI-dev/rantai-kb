@@ -9,3 +9,6 @@ pages20-nn0: 35 s for 318 queries
 fixed20: 849 s wall (ingest + queries)
 fixed20-bge20: 757 s for 318 queries
 fixed20-nn0: 31 s for 318 queries
+fixed20-nn0-bge20: 744 s for 318 queries
+final20: 41 s for 318 queries
+final20-bge20: 749 s for 318 queries
