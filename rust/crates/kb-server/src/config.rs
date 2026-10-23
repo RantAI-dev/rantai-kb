@@ -574,6 +574,23 @@ impl Config {
                         timeout: Duration::from_millis(
                             int_var(&lookup, "KB_PAGE_ARM_TIMEOUT_MS", 10_000u64)?.max(100),
                         ),
+                        rerank: if bool_flag(&lookup, "KB_PAGE_RERANK", true) {
+                            Some(kb_engine::PageRerankConfig {
+                                depth: int_var(&lookup, "KB_PAGE_RERANK_DEPTH", 30usize)?
+                                    .clamp(2, 100),
+                                weight: float_var(&lookup, "KB_PAGE_RERANK_WEIGHT", 0.7)?
+                                    .clamp(0.0, 1.0),
+                                rrf_k: int_var(&lookup, "KB_PAGE_RERANK_RRF_K", 1u32)?.max(1),
+                                chars: int_var(&lookup, "KB_PAGE_RERANK_CHARS", 3000usize)?
+                                    .max(100),
+                                timeout: Duration::from_millis(
+                                    int_var(&lookup, "KB_PAGE_RERANK_TIMEOUT_MS", 20_000u64)?
+                                        .max(100),
+                                ),
+                            })
+                        } else {
+                            None
+                        },
                     },
                 })
             }

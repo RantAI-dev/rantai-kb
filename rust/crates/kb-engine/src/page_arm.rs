@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use kb_ports::{
     Candidate, ChunkId, ChunkType, DocumentId, DocumentScope, Fusion, HybridQuery, IndexUnit,
-    PageEmbedder, PageRenderer, PortError, ProvenanceArm, RetrievalIndex, RetrievalProvenance,
-    SearchHit, TenantId,
+    PageEmbedder, PageRenderer, PortError, ProvenanceArm, RerankCandidate, Reranker,
+    RetrievalIndex, RetrievalProvenance, SearchHit, TenantId,
 };
 
 use crate::retrieval::candidate_to_hit_from;
@@ -37,6 +37,8 @@ pub struct PageArmConfig {
     pub candidates: usize,
     /// Budget for query embedding + page search. Past it the search degrades.
     pub timeout: Duration,
+    /// Rerank the fused pages on their text, or `None` to keep the fused order.
+    pub rerank: Option<PageRerankConfig>,
 }
 
 impl Default for PageArmConfig {
@@ -46,8 +48,62 @@ impl Default for PageArmConfig {
             rrf_k: 5,
             candidates: 100,
             timeout: Duration::from_secs(10),
+            rerank: None,
         }
     }
+}
+
+/// Page-level reranking: after fusion, the top `depth` pages are scored by the
+/// reranker on each page's whole text (not on one chunk), and that order is
+/// blended with the fused order by weighted RRF.
+///
+/// Why pages and not chunks: a page the image arm found has no ranked text
+/// chunk at all, so a chunk reranker never sees it. Offline on ViDoRe v3 HR,
+/// reranking the fused top 30 pages on their text lifted page nDCG@10 from
+/// 0.655 to 0.705 held-out (+0.049 [+0.031, +0.069]) with Nemotron-rerank-8B;
+/// 2-fold CV chose weight 0.7 and k = 1 in both folds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageRerankConfig {
+    /// Fused pages reranked.
+    pub depth: usize,
+    /// Weight of the reranker's order in the blend (fused order gets `1 - w`).
+    pub weight: f32,
+    /// RRF constant of the blend.
+    pub rrf_k: u32,
+    /// Characters of page text the reranker reads.
+    pub chars: usize,
+    /// Budget for the rerank call. Past it the fused order stands, degraded.
+    pub timeout: Duration,
+}
+
+impl Default for PageRerankConfig {
+    fn default() -> Self {
+        Self {
+            depth: 30,
+            weight: 0.7,
+            rrf_k: 1,
+            chars: 3000,
+            timeout: Duration::from_secs(20),
+        }
+    }
+}
+
+/// What page-level reranking needs at search time.
+pub struct PageRerankContext<'a> {
+    /// The page index, read for each page's stored text.
+    pub page_index: &'a Arc<dyn RetrievalIndex>,
+    pub reranker: &'a Arc<dyn Reranker>,
+    pub query: &'a str,
+}
+
+/// The result of [`merge_pages`].
+#[derive(Debug)]
+pub struct MergeOutcome {
+    pub hits: Vec<SearchHit>,
+    /// Fetching the chunks of image-only pages failed; some pages are missing.
+    pub fetch_partial: bool,
+    /// Page reranking was asked for and failed or timed out; the fused order stands.
+    pub rerank_failed: bool,
 }
 
 /// One page the image arm ranked.
@@ -147,9 +203,14 @@ pub async fn merge_pages(
     pages: &[RankedPage],
     config: &PageArmConfig,
     limit: usize,
-) -> (Vec<SearchHit>, bool) {
+    rerank: Option<PageRerankContext<'_>>,
+) -> MergeOutcome {
     if pages.is_empty() {
-        return (text_hits, false);
+        return MergeOutcome {
+            hits: text_hits,
+            fetch_partial: false,
+            rerank_failed: false,
+        };
     }
     let mut text_slots: Vec<Slot> = Vec::new();
     let mut by_slot: HashMap<Slot, Vec<SearchHit>> = HashMap::new();
@@ -165,12 +226,22 @@ pub async fn merge_pages(
         .map(|p| Slot::Page(p.document_id.clone(), p.page))
         .collect();
     let page_of: HashMap<Slot, &RankedPage> = image_slots.iter().cloned().zip(pages).collect();
-    let fused = kb_core::page_fusion::fuse_page_rankings(
+    let mut fused = kb_core::page_fusion::fuse_page_rankings(
         &text_slots,
         &image_slots,
         config.image_weight,
         config.rrf_k,
     );
+    let mut rerank_failed = false;
+    if let (Some(cfg), Some(ctx)) = (config.rerank, rerank) {
+        match rerank_slots(&fused, &by_slot, scope, &cfg, &ctx).await {
+            Ok(order) => fused = order,
+            Err(e) => {
+                tracing::warn!(error = %e, "page rerank failed (non-fatal); keeping fused order");
+                rerank_failed = true;
+            }
+        }
+    }
 
     // First chunk of each image-only page that can still make the cut.
     let wanted: Vec<ChunkId> = fused
@@ -221,8 +292,95 @@ pub async fn merge_pages(
     for (i, hit) in out.iter_mut().enumerate() {
         hit.rank = u32::try_from(i).unwrap_or(u32::MAX);
     }
-    (out, partial)
+    MergeOutcome {
+        hits: out,
+        fetch_partial: partial,
+        rerank_failed,
+    }
 }
+
+/// Rerank the top `cfg.depth` fused slots on their text and blend that order
+/// with the fused one. A page's text is the text stored on its page unit; a
+/// slot with no stored text falls back to its ranked chunks' text, and a slot
+/// with neither keeps its fused position by being scored last.
+async fn rerank_slots(
+    fused: &[Slot],
+    by_slot: &HashMap<Slot, Vec<SearchHit>>,
+    scope: &DocumentScope,
+    cfg: &PageRerankConfig,
+    ctx: &PageRerankContext<'_>,
+) -> Result<Vec<Slot>, PortError> {
+    let depth = cfg.depth.min(fused.len());
+    if depth < 2 {
+        return Ok(fused.to_vec());
+    }
+    let head = &fused[..depth];
+    let page_ids: Vec<ChunkId> = head
+        .iter()
+        .filter_map(|s| match s {
+            Slot::Page(doc, page) => Some(page_unit_id(doc, *page)),
+            Slot::Chunk(_) => None,
+        })
+        .collect();
+    let stored: HashMap<ChunkId, String> = ctx
+        .page_index
+        .fetch(scope, &page_ids)
+        .await?
+        .into_iter()
+        .map(|c| (c.unit_id, c.content))
+        .collect();
+    let candidates: Vec<RerankCandidate> = head
+        .iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            let from_page = match slot {
+                Slot::Page(doc, page) => stored
+                    .get(&page_unit_id(doc, *page))
+                    .filter(|t| !t.trim().is_empty())
+                    .cloned(),
+                Slot::Chunk(_) => None,
+            };
+            let text = from_page.unwrap_or_else(|| {
+                by_slot
+                    .get(slot)
+                    .map(|hits| {
+                        hits.iter()
+                            .map(|h| h.chunk.content.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default()
+            });
+            RerankCandidate {
+                id: ChunkId(i.to_string()),
+                text: text.chars().take(cfg.chars).collect(),
+                original_rank: u32::try_from(i).unwrap_or(u32::MAX),
+                original_score: 0.0,
+            }
+        })
+        .collect();
+    let final_k = u32::try_from(depth).unwrap_or(u32::MAX);
+    let ranked = tokio::time::timeout(
+        cfg.timeout,
+        ctx.reranker.rerank(ctx.query, candidates, final_k),
+    )
+    .await
+    .map_err(|_| PortError::Unavailable("page rerank timed out".into()))??;
+    let reranked: Vec<Slot> = ranked
+        .iter()
+        .filter_map(|r| r.id.0.parse::<usize>().ok())
+        .filter_map(|i| head.get(i).cloned())
+        .collect();
+    // Fused order first so ties break on it, as in `page_rerank.py`; the
+    // reranker's order is the weighted "second" list.
+    let mut order =
+        kb_core::page_fusion::fuse_page_rankings(head, &reranked, cfg.weight, cfg.rrf_k);
+    order.extend(fused[depth..].iter().cloned());
+    Ok(order)
+}
+
+/// Characters of page text stored on a page unit (what a page reranker reads).
+pub const PAGE_TEXT_STORED_CHARS: usize = 8000;
 
 /// The ingest side of the arm.
 pub struct PageIngest {
@@ -301,7 +459,11 @@ impl PageIngest {
                     chunk_index: p.page,
                     page: Some(p.page),
                     chunk_type: ChunkType::Page,
-                    content: String::new(),
+                    // The page's text, for page-level reranking at search time.
+                    content: page_texts
+                        .get(&p.page)
+                        .map(|t| t.trim().chars().take(PAGE_TEXT_STORED_CHARS).collect())
+                        .unwrap_or_default(),
                     contextual_prefix: None,
                     metadata: serde_json::json!({ "chunkIds": chunk_ids, "page": p.page }),
                     dense,

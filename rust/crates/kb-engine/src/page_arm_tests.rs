@@ -165,16 +165,18 @@ async fn merging_fuses_at_page_level_and_brings_in_image_only_pages() {
             chunk_ids: vec![ChunkId("d1_1".into())],
         },
     ];
-    let (merged, partial) = merge_pages(
+    let outcome = merge_pages(
         &text,
         &scope,
         text_hits,
         &pages,
         &PageArmConfig::default(),
         10,
+        None,
     )
     .await;
-    assert!(!partial);
+    assert!(!outcome.fetch_partial);
+    let merged = outcome.hits;
     let ids: Vec<&str> = merged.iter().map(|h| h.chunk.id.0.as_str()).collect();
     // Page 1 is in both lists and wins; page 0 (text #1) and page 2 (image #1)
     // tie, and text order breaks the tie. Page 2 brings only its first chunk.
@@ -211,15 +213,17 @@ async fn an_image_page_cannot_fetch_chunks_outside_the_scope() {
         score: 0.9,
         chunk_ids: vec![ChunkId("d2_0".into())],
     }];
-    let (merged, _) = merge_pages(
+    let merged = merge_pages(
         &text,
         &scope,
         Vec::new(),
         &pages,
         &PageArmConfig::default(),
         10,
+        None,
     )
-    .await;
+    .await
+    .hits;
     assert!(merged.is_empty(), "{merged:?}");
 }
 
@@ -362,4 +366,120 @@ async fn page_ingest_stores_one_unit_per_page_and_a_reingest_replaces_them() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// Scores a candidate 1.0 when its text mentions "answer", else 0.0, or fails.
+struct KeywordReranker {
+    fail: bool,
+}
+
+#[async_trait]
+impl kb_ports::Reranker for KeywordReranker {
+    async fn rerank(
+        &self,
+        _query: &str,
+        candidates: Vec<kb_ports::RerankCandidate>,
+        final_k: u32,
+    ) -> Result<Vec<kb_ports::RerankResult>, PortError> {
+        if self.fail {
+            return Err(PortError::Unavailable("reranker down".into()));
+        }
+        let mut scored: Vec<(f32, kb_ports::RerankCandidate)> = candidates
+            .into_iter()
+            .map(|c| (if c.text.contains("answer") { 1.0 } else { 0.0 }, c))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap()
+                .then(a.1.original_rank.cmp(&b.1.original_rank))
+        });
+        Ok(scored
+            .into_iter()
+            .take(final_k as usize)
+            .enumerate()
+            .map(|(i, (score, c))| kb_ports::RerankResult {
+                id: c.id,
+                final_rank: i as u32,
+                score,
+            })
+            .collect())
+    }
+}
+
+/// Page 2's stored text holds the answer, but the fused order puts it last.
+/// The page reranker reads each page's stored text (not one chunk) and lifts it.
+#[tokio::test]
+async fn page_rerank_reads_page_text_and_lifts_the_answer_page() {
+    let text: Arc<dyn RetrievalIndex> = Arc::new(InMemoryIndex::new(2));
+    text.upsert(vec![
+        text_unit("t1", "d1", 0, 0, "intro chunk"),
+        text_unit("t1", "d1", 1, 1, "methods chunk"),
+        text_unit("t1", "d1", 2, 2, "a table header only"),
+    ])
+    .await
+    .unwrap();
+    let page_index: Arc<dyn RetrievalIndex> = Arc::new(InMemoryIndex::new(3));
+    let mut p2 = page_unit("t1", "d1", 2, vec![1.0, 0.0, 0.0], &["d1_2"]);
+    p2.content = "full page text with the answer in a table row".into();
+    let mut p0 = page_unit("t1", "d1", 0, vec![0.0, 1.0, 0.0], &["d1_0"]);
+    p0.content = "intro page".into();
+    page_index.upsert(vec![p0, p2]).await.unwrap();
+    let scope = make_fake_scope(t("t1"), vec![d("d1")]);
+    let text_hits: Vec<_> = {
+        let mut v: Vec<_> = text
+            .fetch(&scope, &[ChunkId("d1_0".into()), ChunkId("d1_1".into())])
+            .await
+            .unwrap()
+            .into_iter()
+            .map(candidate_to_hit)
+            .collect();
+        v.sort_by_key(|h| h.chunk.metadata.chunk_index);
+        v
+    };
+    let pages = vec![crate::page_arm::RankedPage {
+        document_id: d("d1"),
+        page: 2,
+        score: 0.1,
+        chunk_ids: vec![ChunkId("d1_2".into())],
+    }];
+    let config = PageArmConfig {
+        image_weight: 0.1,
+        rerank: Some(crate::page_arm::PageRerankConfig::default()),
+        ..PageArmConfig::default()
+    };
+    let ids = |hits: &[kb_ports::SearchHit]| -> Vec<String> {
+        hits.iter().map(|h| h.chunk.id.0.clone()).collect()
+    };
+
+    let plain = merge_pages(&text, &scope, text_hits.clone(), &pages, &config, 10, None).await;
+    assert_eq!(ids(&plain.hits).last().map(String::as_str), Some("d1_2"));
+
+    let reranker: Arc<dyn kb_ports::Reranker> = Arc::new(KeywordReranker { fail: false });
+    let ctx = crate::page_arm::PageRerankContext {
+        page_index: &page_index,
+        reranker: &reranker,
+        query: "q",
+    };
+    let reranked = merge_pages(
+        &text,
+        &scope,
+        text_hits.clone(),
+        &pages,
+        &config,
+        10,
+        Some(ctx),
+    )
+    .await;
+    assert!(!reranked.rerank_failed);
+    assert_eq!(ids(&reranked.hits)[0], "d1_2", "{:?}", ids(&reranked.hits));
+
+    let failing: Arc<dyn kb_ports::Reranker> = Arc::new(KeywordReranker { fail: true });
+    let ctx = crate::page_arm::PageRerankContext {
+        page_index: &page_index,
+        reranker: &failing,
+        query: "q",
+    };
+    let degraded = merge_pages(&text, &scope, text_hits, &pages, &config, 10, Some(ctx)).await;
+    assert!(degraded.rerank_failed);
+    assert_eq!(ids(&degraded.hits), ids(&plain.hits), "fused order stands");
 }

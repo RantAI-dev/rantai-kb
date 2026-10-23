@@ -65,7 +65,10 @@ mod tests;
 
 pub use graph_arm::{GraphArm, GraphArmConfig, GraphCache, GraphRanking};
 pub use ingest::{CancelToken, IngestSettings, IngestWorker, JobOutcome, reap_failed_job_uploads};
-pub use page_arm::{PageArm, PageArmConfig, PageIngest, RankedPage};
+pub use page_arm::{
+    MergeOutcome, PageArm, PageArmConfig, PageIngest, PageRerankConfig, PageRerankContext,
+    RankedPage,
+};
 pub use retrieval::{RetrievalOptions, RetrievalOutcome, enrich_titles, execute_pipeline};
 pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
 

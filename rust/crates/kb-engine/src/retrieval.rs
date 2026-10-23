@@ -905,19 +905,33 @@ pub async fn execute_pipeline(
         match task.await {
             Ok((Ok(Ok(pages)), elapsed)) => {
                 timings.page_arm_ms = elapsed.as_secs_f64() * 1000.0;
-                let (merged, partial) = crate::page_arm::merge_pages(
+                // Page-level reranking uses the same reranker as the chunks, and
+                // only when reranking is on for this search.
+                let rerank_ctx = (opts.rerank_enabled && arm.config.rerank.is_some()).then(|| {
+                    crate::page_arm::PageRerankContext {
+                        page_index: &arm.index,
+                        reranker,
+                        query,
+                    }
+                });
+                let outcome = crate::page_arm::merge_pages(
                     index,
                     scope,
                     reranked_hits,
                     &pages,
                     &arm.config,
                     max_chunks,
+                    rerank_ctx,
                 )
                 .await;
-                reranked_hits = merged;
-                if partial {
+                reranked_hits = outcome.hits;
+                if outcome.rerank_failed {
+                    degrades.push(RetrievalDegrade::RerankUnavailable);
+                }
+                if outcome.fetch_partial {
                     degrades.push(RetrievalDegrade::PageArmUnavailable);
-                } else {
+                }
+                {
                     let mut page_only: Vec<SearchHit> = reranked_hits
                         .iter()
                         .filter(|h| h.chunk.document_title.is_empty())

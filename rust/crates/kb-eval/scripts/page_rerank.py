@@ -70,7 +70,15 @@ def rerank(q, docs):
         body = {"model": a.model, "query": q, "documents": [docs[i] or " " for i in idx]}
         req = urllib.request.Request(a.url, data=json.dumps(body).encode(),
                                      headers={"Content-Type": "application/json", "Authorization": "Bearer " + a.key})
-        r = json.load(urllib.request.urlopen(req, timeout=300))
+        for attempt in range(8):
+            try:
+                r = json.load(urllib.request.urlopen(req, timeout=300))
+                break
+            except Exception as e:  # 429s and transient 5xx on hosted rerankers
+                if attempt == 7:
+                    raise
+                import time
+                time.sleep(min(60, 2 ** attempt))
         for res in r["results"]:
             i = idx[res["index"]]
             out[i] = res["relevance_score"]
