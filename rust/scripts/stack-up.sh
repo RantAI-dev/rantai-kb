@@ -31,6 +31,8 @@
 #   KB_STACK_GRAPH=1                # ingest writes the Postgres entity graph, with the free
 #                                   # heuristic extractor instead of the OpenRouter one
 #   KB_STACK_GRAPH_ARM=1            # the graph retrieval arm runs on /v1/search
+#   KB_STACK_CACHE_DIR=~/.cache/kb-cache  # disk cache for embeddings + extraction (KB_CACHE_DIR);
+#                                   # KB_STACK_EMBED_CACHE_TAG scopes it (e.g. "q8-rx590")
 #   KB_STACK_RESTART_SERVER=1       # with the stack already up, re-apply the
 #                                   # options and restart kb-server only. The
 #                                   # containers and their data are untouched.
@@ -436,6 +438,17 @@ EOF
 else
   cat >> "$STACK_ENV" <<EOF
 export KB_RERANK_ENABLED="false"
+EOF
+fi
+
+# KB_STACK_CACHE_DIR: the server's content-addressed disk cache (KB_CACHE_DIR).
+# It lives outside the stack dir, so it survives stack-down and every eval arm
+# reuses embeddings and extractions it has already paid for.
+if [ -n "${KB_STACK_CACHE_DIR:-}" ]; then
+  mkdir -p "$KB_STACK_CACHE_DIR"
+  cat >> "$STACK_ENV" <<EOF
+export KB_CACHE_DIR="$KB_STACK_CACHE_DIR"
+export KB_EMBEDDING_CACHE_TAG="${KB_STACK_EMBED_CACHE_TAG:-}"
 EOF
 fi
 

@@ -112,3 +112,26 @@ The RX 590 has no fp16 or int-dot support (llama bench pp512: 1,407 tokens/s on 
 217 on its CPU). A newer card cuts the reranker time several-fold. Qwen3-Reranker-0.6B
 (`ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF`) is better on Indonesian and worse on English
 than bge, and 2.4× slower, so it is not the default.
+
+## Disk cache (`KB_CACHE_DIR`), 2026-10-23
+
+`KB_CACHE_DIR=<dir>` wraps the embedder and the extractor in `kb-cache`: every passage
+vector, query vector and successful extraction is stored under
+`<dir>/<namespace>/<aa>/<sha256>`, keyed by the model or extractor-chain fingerprint plus the
+content hash. Re-ingesting a corpus, or a second eval arm with the same embedder, costs
+nothing. `KB_EMBEDDING_CACHE_TAG` separates vectors when the same model name is served at
+a different quantisation. In the eval stack: `KB_STACK_CACHE_DIR=~/.cache/kb-cache`.
+
+Live check (stub embedder, ViDoRe v3 HR, 14 PDFs, 318 queries, two fresh stacks):
+
+| Run | Embedder | Wall time | Cache files |
+|---|---|---:|---:|
+| 1 | stub running | 27 s | 5,255 written |
+| 2 | **stub killed** (HTTP 000) | 16 s | 5,255 (none new) |
+
+Run 2 ingested every document and answered all 318 queries with no embedder reachable, so
+every vector came from disk. Its scores differ from run 1, but two runs **without** the cache
+differ as much (page nDCG@10 0.363 vs 0.389; document 0.726 vs 0.791): the stub's 8-d
+vectors make many ties, and the order of parallel ingest changes the result. That
+run-to-run noise on the stub stack is a separate problem, and likely why the stub CI gate is
+flaky.
