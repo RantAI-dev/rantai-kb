@@ -208,7 +208,7 @@ struct CohereShapeItem {
 }
 
 /// Attempts per rerank call for 429 / 5xx answers.
-const RERANK_MAX_ATTEMPTS: u32 = 5;
+const RERANK_MAX_ATTEMPTS: u32 = 7;
 
 async fn rerank_cohere_shape(
     client: &reqwest::Client,
