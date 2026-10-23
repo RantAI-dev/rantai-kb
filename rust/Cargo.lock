@@ -1244,6 +1244,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kb-cache"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hex",
+ "kb-ports",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "kb-core"
 version = "0.1.0"
 dependencies = [
@@ -1342,6 +1357,7 @@ dependencies = [
  "axum 0.7.9",
  "futures",
  "hex",
+ "kb-cache",
  "kb-core",
  "kb-engine",
  "kb-eval",

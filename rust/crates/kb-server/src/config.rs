@@ -105,6 +105,19 @@ pub struct Config {
     /// Reported by `GET /health` (`KB_VERSION`).
     pub version: String,
     pub request_timeout: Duration,
+    /// Content-addressed disk cache for embeddings and extraction
+    /// (`KB_CACHE_DIR`). `None` turns caching off.
+    pub cache: Option<CacheConfig>,
+}
+
+/// Where the disk caches live and how their keys are scoped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CacheConfig {
+    pub dir: std::path::PathBuf,
+    /// Extra text folded into the embedding fingerprint
+    /// (`KB_EMBEDDING_CACHE_TAG`), for when the same model name is served at a
+    /// different quantisation and its vectors must not be mixed.
+    pub embedding_tag: String,
 }
 
 /// Ingest worker wiring and tunables, ported from `src/lib/ingest/worker.ts`.
@@ -191,6 +204,20 @@ pub struct EmbedderConfig {
     pub query_prefix: String,
     pub passage_prefix: String,
     pub request_timeout: Duration,
+}
+
+impl EmbedderConfig {
+    /// What a cached vector depends on: the model, its dimension and the
+    /// prefixes wrapped around every text. Not the URL: the same model served
+    /// from another host yields the same vectors. A different quantisation
+    /// behind the same model name is what `KB_EMBEDDING_CACHE_TAG` is for.
+    #[must_use]
+    pub fn cache_fingerprint(&self, tag: &str) -> String {
+        format!(
+            "model={}|dim={}|qp={}|pp={}|tag={tag}",
+            self.model, self.dimension, self.query_prefix, self.passage_prefix
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -482,7 +509,16 @@ impl Config {
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| crate::state::DEFAULT_VERSION.to_string());
 
+        let cache = lookup("KB_CACHE_DIR")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .map(|dir| CacheConfig {
+                dir: dir.into(),
+                embedding_tag: lookup("KB_EMBEDDING_CACHE_TAG").unwrap_or_default(),
+            });
+
         Ok(Config {
+            cache,
             chunk_store_choice,
             qdrant,
             qdrant_collection_override,
@@ -843,6 +879,35 @@ mod tests {
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
         assert!(cfg.worker.enabled);
+    }
+
+    #[test]
+    fn test_cache_dir_is_off_by_default_and_scopes_the_embedding_fingerprint() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("SURREAL_DB_URL", "http://localhost:8000");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.cache, None);
+
+        map.insert("KB_CACHE_DIR", "/var/cache/kb");
+        map.insert("KB_EMBEDDING_CACHE_TAG", "q8");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        let cache = cfg.cache.expect("cache configured");
+        assert_eq!(cache.dir, std::path::PathBuf::from("/var/cache/kb"));
+        let a = cfg.embedder.cache_fingerprint(&cache.embedding_tag);
+        let b = cfg.embedder.cache_fingerprint("");
+        assert_ne!(a, b, "the tag must change the fingerprint");
+        assert!(a.contains("dim=4096"));
+
+        // An extraction fingerprint never carries a secret.
+        let mut extract = cfg.extract.clone();
+        extract.mistral_ocr_key = "sk-secret-value".into();
+        let fp = extract.cache_fingerprint();
+        assert!(!fp.contains("sk-secret-value"));
+        assert_ne!(fp, cfg.extract.cache_fingerprint(), "key presence matters");
     }
 
     #[test]

@@ -122,10 +122,19 @@ impl AppState {
         let blob: Arc<dyn BlobStore> = Arc::new(
             kb_store_blob::S3BlobStore::new(config.s3).map_err(|e| anyhow::anyhow!("s3: {e}"))?,
         );
-        let embedder: Arc<dyn Embedder> = Arc::new(
+        let mut embedder: Arc<dyn Embedder> = Arc::new(
             kb_inference::EmbedderImpl::new(embedder_settings_from(config.embedder.clone()))
                 .map_err(|e| anyhow::anyhow!("embedder: {e}"))?,
         );
+        if let Some(cache) = config.cache.as_ref() {
+            let fingerprint = config.embedder.cache_fingerprint(&cache.embedding_tag);
+            tracing::info!(dir = %cache.dir.display(), %fingerprint, "embedding disk cache on");
+            embedder = Arc::new(kb_cache::CachedEmbedder::new(
+                embedder,
+                kb_cache::DiskCache::new(&cache.dir),
+                fingerprint,
+            ));
+        }
         let reranker: Arc<dyn kb_ports::Reranker> =
             build_reranker(&config.reranker).map_err(|e| anyhow::anyhow!("reranker: {e}"))?;
         let expander: Arc<dyn QueryExpander> = if config.expansion.enabled {
@@ -206,9 +215,18 @@ impl AppState {
         config: &crate::Config,
         settings: kb_engine::IngestSettings,
     ) -> anyhow::Result<kb_engine::IngestWorker> {
-        let extractor = kb_extract::build_production_extractor(&config.extract)
+        let mut extractor = kb_extract::build_production_extractor(&config.extract)
             .map_err(|e| anyhow::anyhow!("extractor: {e}"))?
             .shared();
+        if let Some(cache) = config.cache.as_ref() {
+            let fingerprint = config.extract.cache_fingerprint();
+            tracing::info!(dir = %cache.dir.display(), "extraction disk cache on");
+            extractor = Arc::new(kb_cache::CachedExtractor::new(
+                extractor,
+                kb_cache::DiskCache::new(&cache.dir),
+                fingerprint,
+            ));
+        }
         let entity_extractor: Arc<dyn kb_ports::EntityExtractor> = match config.entity_extractor {
             crate::config::EntityExtractorChoice::Heuristic => {
                 Arc::new(kb_inference::HeuristicExtractor::default())

@@ -49,6 +49,40 @@ pub struct ExtractConfig {
     pub pdfium_dynamic_lib_path: Option<String>,
 }
 
+/// Bump when a change to this crate alters extraction output for the same
+/// file and configuration, so `KB_CACHE_DIR` entries from before are not reused.
+pub const EXTRACT_CACHE_EPOCH: u32 = 1;
+
+impl ExtractConfig {
+    /// What a cached extraction depends on: which parsers run, in which order,
+    /// with which models, and which of them are reachable at all (a missing key
+    /// drops a parser from the chain). Secrets are reduced to "set / not set";
+    /// rotating a key does not invalidate the cache.
+    #[must_use]
+    pub fn cache_fingerprint(&self) -> String {
+        let set = |s: &str| if s.trim().is_empty() { 0 } else { 1 };
+        format!(
+            "epoch={EXTRACT_CACHE_EPOCH}|ver={}|primary={}|fallback={}|smart={}|\
+             mineru_url={}|mineru_api={}:{}:{}|mistral={}:{}|order={}|vision={}:{}:{}|ocr={}",
+            env!("CARGO_PKG_VERSION"),
+            self.primary,
+            self.fallback,
+            self.smart_fallback,
+            self.mineru_base_url,
+            set(&self.mineru_api_key),
+            self.mineru_api_base,
+            self.mineru_api_lang,
+            set(&self.mistral_ocr_key),
+            self.mistral_ocr_model,
+            self.layout_extractor_order.join(","),
+            self.vision_base_url,
+            set(&self.vision_api_key),
+            set(&self.openrouter_api_key),
+            self.ocr_fallback_model,
+        )
+    }
+}
+
 impl Default for ExtractConfig {
     fn default() -> Self {
         Self {

@@ -6,7 +6,7 @@
 //! a manifest, so this check reads `cargo metadata` and fails if one ever is.
 //!
 //! ```text
-//! kb-core  ←  kb-ports  ←  kb-inference · kb-store-pg · kb-store-surreal · kb-store-blob · kb-store-qdrant
+//! kb-core  ←  kb-ports  ←  kb-inference · kb-store-pg · kb-store-surreal · kb-store-blob · kb-store-qdrant · kb-cache
 //!                       ←  kb-extract
 //!                       ←  kb-engine  ←  kb-server (composition root)
 //! ```
@@ -35,6 +35,7 @@ pub const ADAPTER_CRATES: &[&str] = &[
     "kb-store-surreal",
     "kb-store-blob",
     "kb-store-qdrant",
+    "kb-cache",
     "kb-eval",
     "kb-server",
 ];
@@ -60,6 +61,7 @@ pub const BLACK_BOX_FORBIDDEN: &[&str] = &[
     "kb-store-surreal",
     "kb-store-blob",
     "kb-store-qdrant",
+    "kb-cache",
 ];
 
 /// One forbidden edge, with the manifest it appears in.

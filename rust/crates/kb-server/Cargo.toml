@@ -18,6 +18,7 @@ kb-store-surreal = { path = "../kb-store-surreal" }
 kb-store-qdrant = { path = "../kb-store-qdrant" }
 kb-store-blob = { path = "../kb-store-blob" }
 kb-extract = { path = "../kb-extract" }
+kb-cache = { path = "../kb-cache" }
 kb-engine = { path = "../kb-engine" }
 kb-eval = { path = "../kb-eval" }
 serde = { workspace = true }
