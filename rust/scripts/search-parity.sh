@@ -331,10 +331,11 @@ ORDER_CASES=0
 # Bun's answer is a no-op. `docs/rust-cutover.md` records the deliberate
 # difference.
 #
-# `chunks` is sorted by id for the same reason, one step further: since
-# 2026-10-22 the two runtimes fuse with a different RRF constant (Rust uses
-# Qdrant's `k = 2`, Bun uses the paper's `k = 60` — `docs/rust-cutover.md` §7),
-# so the *order* of the same chunks can differ. The order is therefore
+# `chunks` is sorted by id for the same reason, one step further: both runtimes
+# order by k=60 RRF, but Rust takes its candidate pool from the top of Qdrant's
+# own fused list (`docs/rust-cutover.md` §7), and with the reranker on Rust
+# reranks requests Bun leaves in fused order (§8), so the *order* of the same
+# chunks can differ. The order is therefore
 # reported separately, as a count, and not used as a pass/fail signal: the
 # question this script answers is "do the two runtimes return the same
 # chunks", and the order is a known, measured, deliberate difference.
@@ -379,14 +380,14 @@ for idx in "${!TEST_CASES[@]}"; do
     FAILED_CASES=$((FAILED_CASES + 1))
   fi
 
-  # The order of the same chunks. Not a pass/fail signal: the two runtimes
-  # fuse with different RRF constants on purpose (docs/rust-cutover.md §7).
+  # The order of the same chunks. Not a pass/fail signal: the candidate pool
+  # and the reranker rule differ on purpose (docs/rust-cutover.md §7, §8).
   ORDER_CASES=$((ORDER_CASES + 1))
   BUN_ORDER=$(echo "$BUN_RESP" | jq -c '[.chunks[]?.id]' 2>/dev/null || echo "[]")
   RUST_ORDER=$(echo "$RUST_RESP" | jq -c '[.chunks[]?.id]' 2>/dev/null || echo "[]")
   if [ "$BUN_ORDER" != "$RUST_ORDER" ]; then
     ORDER_DIFFERENCES=$((ORDER_DIFFERENCES + 1))
-    echo "  (order differs: same chunks, different RRF constant — expected)"
+    echo "  (order differs: same chunks — expected, docs/rust-cutover.md §7/§8)"
   fi
 done
 
@@ -425,7 +426,7 @@ echo ""
 echo "=========================================="
 echo "Search Parity Results: $PASSED_CASES / $TOTAL_CASES passed, $FAILED_CASES failed (${#DIVERGENCE_CASES[@]} expected divergences verified)"
 echo "Chunk order: $ORDER_DIFFERENCES / $ORDER_CASES cases ordered differently by the two runtimes."
-echo "That is the deliberate RRF difference (Rust fuses with Qdrant's k=2, Bun with the paper's k=60) — docs/rust-cutover.md §7."
+echo "Expected: Rust's candidate pool and reranker rule differ on purpose — docs/rust-cutover.md §7, §8."
 echo "=========================================="
 
 if [ "$FAILED_CASES" -gt 0 ]; then

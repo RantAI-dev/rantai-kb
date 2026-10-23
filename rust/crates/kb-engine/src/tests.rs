@@ -1226,6 +1226,52 @@ mod pipeline_tests {
         assert_eq!(outcome.chunks.len(), 3);
     }
 
+    /// A caller asking for as many chunks as the pool holds still gets them
+    /// reranked. Before 2026-10-23 the reranker ran only when the pool was
+    /// larger than `max_chunks`, so asking for 10 of 5 candidates returned the
+    /// fused order untouched.
+    #[tokio::test]
+    async fn the_reranker_runs_when_the_caller_asks_for_every_candidate() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        five_hits(&chunk_store);
+        reranker.only_last.store(true, Ordering::Relaxed);
+        let opts = RetrievalOptions {
+            max_chunks: 10,
+            rerank_enabled: true,
+            ..RetrievalOptions::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker.clone() as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            reranker.seen.read().unwrap().len(),
+            5,
+            "every candidate was reranked"
+        );
+        let ids: Vec<&str> = outcome
+            .chunks
+            .iter()
+            .map(|c| c.chunk.id.0.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            ["c5", "c1", "c2", "c3", "c4"],
+            "the reranker's pick comes first"
+        );
+    }
+
     #[tokio::test]
     async fn hits_the_reranker_drops_keep_their_fused_order() {
         let (doc_store, chunk_store, embedder, reranker) = setup();

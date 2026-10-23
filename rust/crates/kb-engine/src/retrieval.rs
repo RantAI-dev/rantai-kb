@@ -764,11 +764,18 @@ pub async fn execute_pipeline(
     enrich_titles_cached(doc_store, scope.tenant(), &mut hits, &mut meta_cache).await;
     timings.enrich_ms = enrich_sw.elapsed_ms();
 
-    // 5. Optional rerank (only if rerank_enabled AND candidates exceed max_chunks)
+    // 5. Optional rerank, whenever there are at least two candidates to order.
+    //
+    // Bun (and this engine before 2026-10-23) reranked only when the pool held
+    // more candidates than the caller asked for, so a caller asking for 20+
+    // chunks silently got the fused order: the reranker is worth +0.037 nDCG@10
+    // on miracl-id-200 and +0.108 on hotpot (docs/eval-ab/README.md), and the
+    // number of chunks requested says nothing about whether their order
+    // matters. Deliberate difference from Bun: docs/rust-cutover.md §8.
     let max_chunks = opts.max_chunks.clamp(1, 50) as usize;
     let rerank_sw = Stopwatch::start(clock);
     let rerank_future = async {
-        if opts.rerank_enabled && hits.len() > max_chunks {
+        if opts.rerank_enabled && hits.len() > 1 {
             let final_k = opts.rerank_final_k.clamp(1, 100);
             // 0 means no limit: every candidate goes to the reranker, as before L.4.
             let candidate_limit = match opts.rerank_candidate_limit {

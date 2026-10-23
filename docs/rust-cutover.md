@@ -171,35 +171,26 @@ In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.d
   0 hits over 240 probes, with the `documentIds` branch (vector-only in both
   runtimes) and the figure arm reported UNTESTED rather than passing.
 
-### 7. Deliberate Differences: Rank Fusion (RRF) and the Embedded Text
-Two changes on 2026-10-22 make the Rust engine's ranking *different* from
-Bun's on purpose. Both were measured on `miracl-id-200` (see
-`docs/kf-vplane-eval.md` and `docs/accuracy-rerank.md`).
+### 7. Rank Fusion (RRF) and the Embedded Text
 
-**a. The fused order is Qdrant's own RRF, not a re-sort with k=60.**
+**a. Fusion: the same k=60 as Bun (the k=2 change was reverted).**
 - **Bun**: `src/lib/rag/hybrid-merge.ts` fuses with the RRF paper's constant
   `k = 60`, 1-based ranks: `1/(60 + rank)`.
-- **Rust (deliberate)**: the port has one fusion, `kb_core::fusion::RRF_K = 2`
-  with 0-based ranks — `1/(2 + rank)` — which is what Qdrant computes
-  server-side. `kb-store-qdrant` uses the score Qdrant returns and the order
-  Qdrant returns; the in-memory reference index, the SurrealDB adapter and the
-  test fakes compute the same arithmetic.
-- **Why**: a large `k` flattens the difference between rank 1 and rank 3, so a
-  passage both arms put near the top no longer clearly beats one only a single
-  arm liked. Measured on `miracl-id-200`, the `k = 60` re-sort cost **0.01
-  nDCG@10 and 0.017 MRR@10** in *both* engines, and it accounted for the whole
-  significant MRR gap against moco-kf's V-plane. Qdrant's own `k = 2` is
-  better.
-- **What it changes in the API**: the *order* of the chunks in a
-  `/v1/search` response can differ from Bun's, and `retrieval.fusedScore` is
-  on a different scale (`1/(2+rank)` per arm instead of `1/(61+rank)`). The
-  per-arm `similarity` and the per-arm ranks are unchanged.
-- **Parity**: `rust/scripts/search-parity.sh` compares Bun's and Rust's
-  `/v1/search` answers case by case. The fusion difference is a *ranking*
-  difference, so the script now compares the two answers by **set of chunk
-  ids** for the hybrid cases and keeps the exact comparison for the cases
-  where the order is not affected by the fusion (single-arm searches and
-  searches that return one chunk). See the comment in the script.
+- **Rust**: `kb-store-qdrant` takes Qdrant's server-side fused list (its own
+  k=2) as the candidate set and orders it by `1/(60 + rank)` per arm, the same
+  arithmetic as Bun. The in-memory index, SurrealDB adapter and fakes compute
+  the same.
+- **History**: on 2026-10-22 Rust switched to Qdrant's k=2 order (`f8c0639`),
+  on the strength of an offline replay with e5-large vectors. Measured live on
+  `miracl-id-200` with the local embedder (Qwen3-Embedding-0.6B) it lost
+  **0.021 nDCG@10 [−0.038, −0.003] and 0.031 MRR@10**
+  (`docs/eval-ab/miracl-id-200/README.md`), and it was reverted (`4c01a7d`).
+  An offline sweep puts every RRF k from 20 to 60 within 0.002 of each other
+  (`docs/eval-tune/miracl-id-200`).
+- **Parity**: the candidate set comes from Qdrant's top of the k=2 list, so a
+  chunk at the edge of the pool can differ from Bun's; the order of the shared
+  chunks follows the same k=60. `search-parity.sh` compares by set of chunk
+  ids and counts order differences without failing on them.
 
 **b. The embedded text carries the document's title and the chunk's heading
 path.**
@@ -212,12 +203,29 @@ path.**
   the chunker found one (`"{title} > {heading path}\n\n{content}"`).
 - **Why**: the retrieval quality of the corpus depends on the text that is
   embedded, and the title is what says *which document* a chunk belongs to.
-  On `miracl-id-200` (2,933 passages whose file names are docids) the title
-  was worth about 0.008 nDCG@10 on top of the fusion fix.
+  Measured live on `miracl-id-200` it is worth +0.003 nDCG@10
+  [−0.001, +0.008], i.e. nothing measurable on Wikipedia passages that
+  already start with their title. It is kept because it costs nothing and
+  matters for chunks of long documents whose text never names the document.
 - **What it changes in the API**: nothing in the response shape. It changes
   the *vectors*, so **an existing corpus has to be re-indexed** for the gain —
   the old vectors were made from the old text. The keyword arm's text is
   unchanged (the ablation showed a title in the keyword arm did not help).
+
+### 8. Deliberate Difference: The Reranker Runs Whatever the Caller Asks For
+- **Bun**: `src/lib/rag/retriever.ts` reranks only when the pool holds more
+  chunks than `maxChunks`; a caller asking for at least as many chunks as the
+  pool holds gets the fused order.
+- **Rust (deliberate, 2026-10-23)**: when the reranker is enabled it orders
+  the head of the pool (`KB_RERANK_CANDIDATE_LIMIT`, 0 = all) whenever there
+  are at least two candidates, then the result is cut to `maxChunks`.
+- **Why**: the reranker is the largest measured gain in the engine
+  (`docs/eval-ab/README.md`: +0.037 nDCG@10 on `miracl-id-200`, +0.108 on
+  `hotpot-200-test` with bge-reranker-v2-m3 on the top 20), and the number of
+  chunks a caller asks for says nothing about whether their order matters.
+- **What it changes in the API**: with the reranker enabled, a request for
+  many chunks comes back in reranked order instead of fused order, and takes
+  the reranker's latency. Shape unchanged.
 
 ---
 
