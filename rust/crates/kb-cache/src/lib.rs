@@ -1,4 +1,5 @@
-//! Content-addressed disk caches for the expensive model calls.
+//! Content-addressed disk caches for the expensive model calls: embeddings,
+//! extraction, page vectors and rerank results.
 //!
 //! AGENTS.md rule 7: every embedding, OCR and caption result is cached on disk,
 //! keyed by model and content hash, so no input is paid for twice. The wrappers
@@ -8,12 +9,14 @@
 mod embedder;
 mod extractor;
 mod page_embedder;
+mod reranker;
 mod store;
 mod vectors;
 
 pub use embedder::CachedEmbedder;
 pub use extractor::CachedExtractor;
 pub use page_embedder::CachedPageEmbedder;
+pub use reranker::CachedReranker;
 pub use store::{CacheKey, CacheStats, DiskCache};
 
 #[cfg(test)]

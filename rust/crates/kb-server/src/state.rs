@@ -147,8 +147,20 @@ impl AppState {
                 ),
             );
         }
-        let reranker: Arc<dyn kb_ports::Reranker> =
+        let mut reranker: Arc<dyn kb_ports::Reranker> =
             build_reranker(&config.reranker).map_err(|e| anyhow::anyhow!("reranker: {e}"))?;
+        if let (Some(cache), Some(fingerprint)) = (
+            config.cache.as_ref(),
+            reranker_fingerprint(&config.reranker),
+        ) {
+            let fingerprint = format!("{fingerprint}|tag={}", cache.embedding_tag);
+            tracing::info!(%fingerprint, "rerank disk cache on");
+            reranker = Arc::new(kb_cache::CachedReranker::new(
+                reranker,
+                kb_cache::DiskCache::new(&cache.dir),
+                fingerprint,
+            ));
+        }
         let expander: Arc<dyn QueryExpander> = if config.expansion.enabled {
             let bridge = QueryExpanderBridge::new(config.expansion.clone())
                 .map_err(|e| anyhow::anyhow!("expander: {e}"))?;
@@ -328,6 +340,24 @@ async fn build_page_arm(
         index,
         config: pages.arm,
     })
+}
+
+/// What a rerank score depends on: provider, model and (for a hosted
+/// endpoint) which service answers. Never an API key. `None` for a disabled
+/// reranker, which has nothing worth caching.
+fn reranker_fingerprint(cfg: &RerankerConfig) -> Option<String> {
+    match cfg {
+        RerankerConfig::Disabled => None,
+        RerankerConfig::Llm { model, .. } => Some(format!("llm|{model}")),
+        RerankerConfig::Tei { model, .. } => Some(format!("tei|{model}")),
+        RerankerConfig::Vllm { model, .. } => Some(format!("vllm|{model}")),
+        RerankerConfig::Cohere {
+            model, endpoint, ..
+        } => Some(format!(
+            "cohere|{model}|{}",
+            endpoint.as_deref().unwrap_or("default")
+        )),
+    }
 }
 
 fn embedder_settings_from(c: EmbedderConfig) -> EmbedderSettings {

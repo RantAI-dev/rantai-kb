@@ -365,3 +365,98 @@ async fn a_new_query_prefix_keeps_the_passage_vectors() {
     assert_eq!(inner.passages.load(Ordering::SeqCst), 3);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Orders candidates by text length, longest first, and counts calls.
+#[derive(Default)]
+struct LengthReranker {
+    calls: AtomicUsize,
+}
+
+#[async_trait]
+impl kb_ports::Reranker for LengthReranker {
+    async fn rerank(
+        &self,
+        _q: &str,
+        c: Vec<kb_ports::RerankCandidate>,
+        final_k: u32,
+    ) -> Result<Vec<kb_ports::RerankResult>, PortError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut v: Vec<_> = c.into_iter().collect();
+        v.sort_by_key(|x| std::cmp::Reverse(x.text.len()));
+        Ok(v.into_iter()
+            .take(final_k as usize)
+            .enumerate()
+            .map(|(i, x)| kb_ports::RerankResult {
+                id: x.id,
+                final_rank: i as u32,
+                score: x.text.len() as f32,
+            })
+            .collect())
+    }
+}
+
+fn rc(id: &str, text: &str, rank: u32) -> kb_ports::RerankCandidate {
+    kb_ports::RerankCandidate {
+        id: kb_ports::ChunkId(id.into()),
+        text: text.into(),
+        original_rank: rank,
+        original_score: 0.0,
+    }
+}
+
+#[tokio::test]
+async fn a_repeated_rerank_is_served_from_disk_with_the_callers_ids() {
+    use kb_ports::Reranker;
+    let root = temp_root();
+    let inner = Arc::new(LengthReranker::default());
+    let r = crate::CachedReranker::new(inner.clone(), DiskCache::new(&root), "cohere|voyage");
+    let first = r
+        .rerank(
+            "q",
+            vec![rc("a", "xx", 0), rc("b", "xxxx", 1), rc("c", "x", 2)],
+            2,
+        )
+        .await
+        .unwrap();
+    // Same question, same texts, different ids (a new ingest): a hit, mapped
+    // onto the ids of this call.
+    let second = r
+        .rerank(
+            "q",
+            vec![rc("a2", "xx", 0), rc("b2", "xxxx", 1), rc("c2", "x", 2)],
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        first.iter().map(|x| x.id.0.as_str()).collect::<Vec<_>>(),
+        ["b", "a"]
+    );
+    assert_eq!(
+        second.iter().map(|x| x.id.0.as_str()).collect::<Vec<_>>(),
+        ["b2", "a2"]
+    );
+    assert_eq!(second[0].score, 4.0);
+
+    // Another query, another final_k or another order of texts: a new call.
+    r.rerank("q2", vec![rc("a", "xx", 0), rc("b", "xxxx", 1)], 2)
+        .await
+        .unwrap();
+    r.rerank(
+        "q",
+        vec![rc("a", "xx", 0), rc("b", "xxxx", 1), rc("c", "x", 2)],
+        3,
+    )
+    .await
+    .unwrap();
+    r.rerank(
+        "q",
+        vec![rc("b", "xxxx", 0), rc("a", "xx", 1), rc("c", "x", 2)],
+        2,
+    )
+    .await
+    .unwrap();
+    assert_eq!(inner.calls.load(Ordering::SeqCst), 4);
+    let _ = std::fs::remove_dir_all(root);
+}
