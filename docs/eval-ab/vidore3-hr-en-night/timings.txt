@@ -1,0 +1,3 @@
+e8b-bge: 1124 s wall (ingest + queries)
+voy-text: 422 s wall (ingest + queries)
+voy-ti-pr: 688 s wall (ingest + queries)
