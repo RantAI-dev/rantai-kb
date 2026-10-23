@@ -91,6 +91,7 @@ KB_EMBEDDING_API_KEY=<key>
 KB_EMBEDDING_MODEL=Qwen/Qwen3-Embedding-0.6B
 KB_EMBEDDING_DIM=1024
 KB_EMBEDDING_QUERY_PREFIX="Instruct: Given a question, retrieve passages that answer it\nQuery: "
+KB_EMBEDDING_TIMEOUT_MS=120000     # the 15 s default times out on long PDFs: batches queue on one GPU
 KB_RERANK_ENABLED=true
 KB_RERANK_PROVIDER=cohere          # llama.cpp's /v1/rerank takes the Cohere request shape
 KB_RERANK_BASE_URL=http://<gpu-host>:8082/v1/rerank

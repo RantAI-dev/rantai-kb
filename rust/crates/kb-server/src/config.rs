@@ -397,10 +397,15 @@ impl Config {
             api_key: embedding_api_key.clone(),
             dimension: embedding_dim,
             batch_size: int_var(&lookup, "KB_EMBEDDING_BATCH_SIZE", 32)?.max(1),
-            embed_concurrency: 4,
+            // Both tunable for slow local backends: a consumer GPU embedding
+            // a long PDF needs more than 15 s per batch once several batches
+            // queue on it (docs/local-models.md).
+            embed_concurrency: int_var(&lookup, "KB_EMBEDDING_CONCURRENCY", 4u32)?.clamp(1, 32),
             query_prefix: lookup("KB_EMBEDDING_QUERY_PREFIX").unwrap_or_default(),
             passage_prefix: lookup("KB_EMBEDDING_PASSAGE_PREFIX").unwrap_or_default(),
-            request_timeout: Duration::from_secs(15),
+            request_timeout: Duration::from_millis(
+                int_var(&lookup, "KB_EMBEDDING_TIMEOUT_MS", 15_000u64)?.max(1_000),
+            ),
         };
 
         let reranker = read_reranker(&lookup)?;
@@ -838,6 +843,29 @@ mod tests {
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
         assert!(cfg.worker.enabled);
+    }
+
+    #[test]
+    fn test_embedder_timeout_and_concurrency_are_tunable() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("SURREAL_DB_URL", "http://localhost:8000");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.embedder.request_timeout, Duration::from_secs(15));
+        assert_eq!(cfg.embedder.embed_concurrency, 4);
+        map.insert("KB_EMBEDDING_TIMEOUT_MS", "120000");
+        map.insert("KB_EMBEDDING_CONCURRENCY", "1");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.embedder.request_timeout, Duration::from_secs(120));
+        assert_eq!(cfg.embedder.embed_concurrency, 1);
+        // A timeout too short to ever succeed is raised to 1 s.
+        map.insert("KB_EMBEDDING_TIMEOUT_MS", "5");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.embedder.request_timeout, Duration::from_secs(1));
     }
 
     #[test]
