@@ -883,6 +883,8 @@ pub async fn execute_pipeline(
 
     // 6. Cut to max_chunks (1..=50)
     reranked_hits.truncate(max_chunks);
+    // The ranking, before neighbours and figures are woven in for context.
+    let ranked_ids: Vec<ChunkId> = reranked_hits.iter().map(|h| h.chunk.id.clone()).collect();
 
     // 7. Neighbours (when window > 0)
     let neighbours_sw = Stopwatch::start(clock);
@@ -1038,10 +1040,32 @@ pub async fn execute_pipeline(
     timings.engine_total_ms = timings.total_ms;
 
     Ok(RetrievalOutcome {
-        chunks: reranked_hits,
+        chunks: ranked_first(reranked_hits, &ranked_ids),
         sources,
         context,
         degrades,
         timings,
     })
+}
+
+/// The ranked hits first, in rank order; then everything added for context
+/// (neighbours, figures), in the order it was woven.
+///
+/// The context text keeps the woven reading order, where a neighbour sits next
+/// to its hit (and a preceding neighbour before it). The `chunks` list is what
+/// a client ranks and cites, so a neighbour must not displace a hit: woven in,
+/// neighbours cost 0.033 page nDCG@10 on vidore3-hr-en (0.435 against 0.468
+/// with neighbours off), and could move the top hit to second place.
+fn ranked_first(woven: Vec<SearchHit>, ranked_ids: &[ChunkId]) -> Vec<SearchHit> {
+    let position: HashMap<&ChunkId, usize> = ranked_ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id, i))
+        .collect();
+    let (mut ranked, rest): (Vec<SearchHit>, Vec<SearchHit>) = woven
+        .into_iter()
+        .partition(|h| position.contains_key(&h.chunk.id));
+    ranked.sort_by_key(|h| position.get(&h.chunk.id).copied().unwrap_or(usize::MAX));
+    ranked.extend(rest);
+    ranked
 }

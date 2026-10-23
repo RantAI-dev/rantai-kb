@@ -350,6 +350,75 @@ mod pipeline_tests {
         assert_eq!(outcome.chunks.len(), 4);
     }
 
+    /// Neighbours are context, not ranking: the ranked hits come first in rank
+    /// order, the neighbours after them, and the context text still reads
+    /// each neighbour next to its hit.
+    #[tokio::test]
+    async fn neighbours_follow_the_ranked_hits_but_stay_woven_in_the_context() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        for (id, idx, sim) in [("hit_a", 10, 0.9), ("hit_b", 20, 0.8), ("hit_c", 30, 0.7)] {
+            chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+                id,
+                "d1",
+                "Title 1",
+                &format!("text of {id}"),
+                idx,
+                sim,
+            ));
+        }
+        for (id, idx) in [("before_a", 9), ("after_a", 11), ("before_b", 19)] {
+            chunk_store
+                .neighbour_hits
+                .write()
+                .unwrap()
+                .push(make_fake_hit(
+                    id,
+                    "d1",
+                    "Title 1",
+                    &format!("text of {id}"),
+                    idx,
+                    0.5,
+                ));
+        }
+        let opts = RetrievalOptions {
+            max_chunks: 3,
+            neighbour_window: 1,
+            ..Default::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        let ids: Vec<&str> = outcome
+            .chunks
+            .iter()
+            .map(|c| c.chunk.id.0.as_str())
+            .collect();
+        assert_eq!(
+            &ids[..3],
+            ["hit_a", "hit_b", "hit_c"],
+            "the ranking comes first: {ids:?}"
+        );
+        assert_eq!(ids.len(), 6, "and the three neighbours follow: {ids:?}");
+        let at = |s: &str| outcome.context.find(s).unwrap_or(usize::MAX);
+        assert!(
+            at("text of before_a") < at("text of hit_a")
+                && at("text of hit_a") < at("text of after_a"),
+            "the context reads a neighbour next to its hit"
+        );
+    }
+
     /// Expander that returns fixed paraphrases, or fails.
     struct FixedExpander {
         paraphrases: Vec<String>,

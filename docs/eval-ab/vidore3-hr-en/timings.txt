@@ -6,3 +6,6 @@ pdf20-bge20: 799 s for 318 queries
 pages20: 855 s wall (ingest + queries)
 pages20-bge20: 759 s for 318 queries
 pages20-nn0: 35 s for 318 queries
+fixed20: 849 s wall (ingest + queries)
+fixed20-bge20: 757 s for 318 queries
+fixed20-nn0: 31 s for 318 queries

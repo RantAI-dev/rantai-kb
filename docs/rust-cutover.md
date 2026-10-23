@@ -258,6 +258,18 @@ path.**
   pages silently loses them. The context text and `sources` already carried the page.
 - **Parity**: `search-parity.sh` drops `page` from keyword hits before diffing.
 
+### 11. Deliberate Difference: Neighbour Chunks Follow the Ranked Hits
+- **Bun**: neighbour chunks (`KB_NEIGHBOR_WINDOW`, default 1) are woven into
+  the `chunks` list next to their hit, in chunk order, so a preceding
+  neighbour can come before the hit it belongs to, even the top one.
+- **Rust (deliberate, 2026-10-23)**: `chunks` lists the ranked hits first,
+  in rank order, then the neighbours and figures. The `context` text keeps
+  the woven reading order, so the LLM still reads a neighbour next to its hit.
+- **Why**: a client ranks and cites `chunks` in order. Woven in, neighbours
+  cost 0.033 page nDCG@10 on `vidore3-hr-en` (0.435, against 0.468 with
+  neighbours off), and the top-ranked hit could be returned second.
+- **Parity**: chunk order is already compared as a set (§7).
+
 ---
 
 ## 6. Shared Known Issues
