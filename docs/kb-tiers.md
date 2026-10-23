@@ -169,12 +169,16 @@ Status as of 2026-10-23 (evening):
    ❌ dropped for retrieval: rebuilding tables in text. ViDoRe's own markdown, with real
    tables, scores no better on table questions than our flat text (0.500 vs 0.506). Tables
    still matter for computing answers (`docs/architecture-target.md` §10), a separate goal.
-4. 🟡 Page-image arm. Offline on ViDoRe HR it lifts page nDCG@10 by +0.068 (local text) and
-   +0.050 (8B text), held-out; images alone win table questions (0.589 vs 0.495). Built in
-   Rust behind `KB_PAGE_EMBEDDING_MODEL`, with a leak-matrix row (0 leaks honest, 224 when
-   scope is deliberately broken). Live measurement in `docs/eval-ab/vidore3-hr-en-pages-live`.
-   Cloud tier: voyage-multimodal-3.5 (~$0.0005 per page at 96 dpi). Local tiers:
-   Qwen3-VL-Embedding-2B, not yet measured.
+4. ✅ Page-image arm, live (`KB_PAGE_EMBEDDING_MODEL`), with text+image page vectors
+   (`KB_PAGE_TEXT_CHARS`) and page-level reranking (`KB_PAGE_RERANK`, on by default when the
+   arm is on). **ViDoRe v3 HR, live: 0.705 page nDCG@10** (text-only same stack 0.645;
+   best published retriever 0.654, best published pipeline with a reranker 0.665),
+   `docs/eval-ab/vidore3-hr-en-night`. Leak-matrix `page` row: 0 leaks.
+   - Cloud tier, measured: `voyageai/voyage-multimodal-3.5` pages + `qwen/qwen3-embedding-8b`
+     text + `voyageai/rerank-2.5` for chunks and pages. ~$0.0006 per page to index.
+   - Local tiers: `KB_PAGE_EMBEDDING_FORMAT=vllm` with Qwen3-VL-Embedding-2B/8B under vLLM
+     (`3111e16`, mock-tested only; no NVIDIA box yet). The local page reranker is bge-reranker
+     on page text (measured offline only with bge on chunks); Qwen3-VL-Reranker is untested.
 5. Lite on exactly 2 cores (`taskset`): PP-OCRv6 via ONNX, small-embedder bake-off.
 6. Desk / Studio / Station on real hardware; `kb-server setup`.
 
