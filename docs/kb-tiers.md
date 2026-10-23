@@ -118,12 +118,24 @@ descriptions when the LLM is idle and backs off while users are chatting.
 
 ## Build order
 
-1. Content-addressed disk cache for embeddings, extraction and captions (AGENTS.md rule 7).
-2. `KB_TIER` preset and role config, including residency and the captioner role.
-3. Page cleanup and tables: repeated header/footer removal, table rebuild from word positions.
-   Target: ViDoRe HR table questions 0.50 → ≥ 0.60.
-4. Page-image arm, proven in the cloud first (voyage-multimodal-3.5), then locally with
-   Qwen3-VL-Embedding-2B. Target: HR ≥ 0.65.
+Status as of 2026-10-23 (evening):
+
+1. ✅ Content-addressed disk cache for embeddings, extraction and page vectors
+   (`kb-cache`, `KB_CACHE_DIR`). A repeat ViDoRe run went from 1,686 s to 24 s with zero
+   provider calls. Captions are not cached yet; there is no caption role yet.
+2. ⏸ `KB_TIER` preset. Deferred until the roles it switches exist: a preset that points at
+   models kb-server cannot drive yet would be a setting that does nothing.
+3. ✅ measured, ❌ no gain: header/footer removal (`KB_STRIP_PAGE_FURNITURE`), −0.003
+   [−0.013, +0.006] on ViDoRe HR. Off by default.
+   ❌ dropped for retrieval: rebuilding tables in text. ViDoRe's own markdown, with real
+   tables, scores no better on table questions than our flat text (0.500 vs 0.506). Tables
+   still matter for computing answers (`docs/architecture-target.md` §10), a separate goal.
+4. 🟡 Page-image arm. Offline on ViDoRe HR it lifts page nDCG@10 by +0.068 (local text) and
+   +0.050 (8B text), held-out; images alone win table questions (0.589 vs 0.495). Built in
+   Rust behind `KB_PAGE_EMBEDDING_MODEL`, with a leak-matrix row (0 leaks honest, 224 when
+   scope is deliberately broken). Live measurement in `docs/eval-ab/vidore3-hr-en-pages-live`.
+   Cloud tier: voyage-multimodal-3.5 (~$0.0005 per page at 96 dpi). Local tiers:
+   Qwen3-VL-Embedding-2B, not yet measured.
 5. Lite on exactly 2 cores (`taskset`): PP-OCRv6 via ONNX, small-embedder bake-off.
 6. Desk / Studio / Station on real hardware; `kb-server setup`.
 
