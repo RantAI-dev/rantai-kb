@@ -207,6 +207,9 @@ struct CohereShapeItem {
     relevance_score: f32,
 }
 
+/// Attempts per rerank call for 429 / 5xx answers.
+const RERANK_MAX_ATTEMPTS: u32 = 5;
+
 async fn rerank_cohere_shape(
     client: &reqwest::Client,
     endpoint: &str,
@@ -228,31 +231,57 @@ async fn rerank_cohere_shape(
     };
     let bytes =
         serde_json::to_vec(&body).map_err(|e| PortError::Malformed(format!("rerank req: {e}")))?;
-    let mut req = client
-        .post(endpoint)
-        .header("content-type", "application/json")
-        .body(bytes);
-    if let Some(key) = api_key {
-        req = req.bearer_auth(key);
-    }
-    let res = req
-        .send()
-        .await
-        .map_err(|e| PortError::Unavailable(format!("rerank send: {e}")))?;
-    let status = res.status().as_u16();
-    let resp_body = res
-        .bytes()
-        .await
-        .map_err(|e| PortError::Unavailable(format!("rerank body: {e}")))?;
-    if !(200..300).contains(&status) {
-        let excerpt: String = String::from_utf8_lossy(&resp_body)
-            .chars()
-            .take(300)
-            .collect();
+    // Hosted rerankers rate-limit (OpenRouter's free tier answers 429 per
+    // minute): retry 429 and 5xx a few times with backoff, honouring
+    // Retry-After when given, before calling the rerank failed. The caller's
+    // timeout still bounds the whole call.
+    let mut attempt: u32 = 0;
+    let resp_body = loop {
+        attempt += 1;
+        let mut req = client
+            .post(endpoint)
+            .header("content-type", "application/json")
+            .body(bytes.clone());
+        if let Some(key) = api_key {
+            req = req.bearer_auth(key);
+        }
+        let res = req
+            .send()
+            .await
+            .map_err(|e| PortError::Unavailable(format!("rerank send: {e}")))?;
+        let status = res.status().as_u16();
+        let retry_after = res
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok());
+        let body = res
+            .bytes()
+            .await
+            .map_err(|e| PortError::Unavailable(format!("rerank body: {e}")))?;
+        if (200..300).contains(&status) {
+            break body;
+        }
+        let transient = status == 429 || status >= 500;
+        if transient && attempt < RERANK_MAX_ATTEMPTS {
+            let wait = retry_after.map_or_else(
+                || std::time::Duration::from_millis(500 * 2u64.pow(attempt)),
+                |s| std::time::Duration::from_secs(s.min(30)),
+            );
+            tracing::warn!(
+                status,
+                attempt,
+                wait_ms = wait.as_millis() as u64,
+                "rerank transient error; retrying"
+            );
+            tokio::time::sleep(wait).await;
+            continue;
+        }
+        let excerpt: String = String::from_utf8_lossy(&body).chars().take(300).collect();
         return Err(PortError::Unavailable(format!(
             "rerank http {status}: {excerpt}"
         )));
-    }
+    };
     let parsed: CohereShapeResp = serde_json::from_slice(&resp_body)
         .map_err(|e| PortError::Malformed(format!("rerank shape: {e}")))?;
 
@@ -370,8 +399,84 @@ impl Reranker for CohereReranker {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    /// Answers 429 (with Retry-After: 0) for the first `fail` calls, then 200.
+    async fn flaky_server(fail: usize) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use axum::{Router, http::StatusCode, response::IntoResponse, routing::post};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let c = std::sync::Arc::clone(&calls);
+        let app = Router::new().route(
+            "/v1/rerank",
+            post(move || {
+                let c = std::sync::Arc::clone(&c);
+                async move {
+                    let n = c.fetch_add(1, Ordering::SeqCst);
+                    if n < fail {
+                        (
+                            StatusCode::TOO_MANY_REQUESTS,
+                            [("retry-after", "0")],
+                            "slow down",
+                        )
+                            .into_response()
+                    } else {
+                        axum::Json(serde_json::json!({"results": [
+                            {"index": 1, "relevance_score": 0.9},
+                            {"index": 0, "relevance_score": 0.1}
+                        ]}))
+                        .into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}/v1/rerank"), calls)
+    }
+
+    fn cands() -> Vec<RerankCandidate> {
+        ["a", "b"]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| RerankCandidate {
+                id: kb_ports::ChunkId((*t).to_string()),
+                text: (*t).to_string(),
+                original_rank: i as u32,
+                original_score: 0.0,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_rate_limited_rerank_is_retried_until_it_succeeds() {
+        let (url, calls) = flaky_server(2).await;
+        let r = CohereReranker::new("m", "k", Some(&url)).expect("reranker");
+        let out = r
+            .rerank("q", cands(), 2)
+            .await
+            .expect("recovers after two 429s");
+        assert_eq!(out[0].id.0, "b");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn a_reranker_that_stays_rate_limited_fails_after_bounded_attempts() {
+        let (url, calls) = flaky_server(usize::MAX).await;
+        let r = CohereReranker::new("m", "k", Some(&url)).expect("reranker");
+        assert!(r.rerank("q", cands(), 2).await.is_err());
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            RERANK_MAX_ATTEMPTS as usize
+        );
+    }
 
     #[tokio::test]
     async fn tei_reranker_requires_base_url() {
