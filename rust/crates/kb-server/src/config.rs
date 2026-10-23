@@ -143,6 +143,9 @@ pub struct WorkerConfig {
     pub reap_days: u32,
     /// Reaper sweep interval (`KB_INGEST_REAP_MS`).
     pub reap_ms: u64,
+    /// Strip running headers, footers and page numbers before chunking
+    /// (`KB_STRIP_PAGE_FURNITURE`).
+    pub strip_page_furniture: bool,
 }
 
 impl WorkerConfig {
@@ -155,6 +158,7 @@ impl WorkerConfig {
             stale_after: Duration::from_millis(self.stale_ms),
             max_attempts: self.max_attempts,
             reclaim_interval: Duration::from_millis(self.reclaim_ms),
+            strip_page_furniture: self.strip_page_furniture,
             ..IngestSettings::default()
         }
     }
@@ -190,6 +194,7 @@ where
         reap_ms: int_var(lookup, "KB_INGEST_REAP_MS", 3_600_000)
             .unwrap_or(3_600_000)
             .max(1000),
+        strip_page_furniture: bool_flag(lookup, "KB_STRIP_PAGE_FURNITURE", false),
     }
 }
 

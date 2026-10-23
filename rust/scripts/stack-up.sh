@@ -33,6 +33,7 @@
 #   KB_STACK_GRAPH_ARM=1            # the graph retrieval arm runs on /v1/search
 #   KB_STACK_CACHE_DIR=~/.cache/kb-cache  # disk cache for embeddings + extraction (KB_CACHE_DIR);
 #                                   # KB_STACK_EMBED_CACHE_TAG scopes it (e.g. "q8-rx590")
+#   KB_STACK_SERVER_ENV="KB_X=1 KB_Y=2"  # extra server settings, written into stack.env
 #   KB_STACK_RESTART_SERVER=1       # with the stack already up, re-apply the
 #                                   # options and restart kb-server only. The
 #                                   # containers and their data are untouched.
@@ -440,6 +441,16 @@ else
 export KB_RERANK_ENABLED="false"
 EOF
 fi
+
+# KB_STACK_SERVER_ENV: extra server settings for one run, space-separated
+# NAME=value pairs (e.g. "KB_STRIP_PAGE_FURNITURE=1"). Written into stack.env,
+# because a server started under tmux does not inherit this shell's exports.
+for kv in ${KB_STACK_SERVER_ENV:-}; do
+  case "$kv" in
+    [A-Z_]*=*) printf 'export %s=%q\n' "${kv%%=*}" "${kv#*=}" >> "$STACK_ENV" ;;
+    *) echo "KB_STACK_SERVER_ENV: ignoring '$kv' (want NAME=value)" >&2 ;;
+  esac
+done
 
 # KB_STACK_CACHE_DIR: the server's content-addressed disk cache (KB_CACHE_DIR).
 # It lives outside the stack dir, so it survives stack-down and every eval arm

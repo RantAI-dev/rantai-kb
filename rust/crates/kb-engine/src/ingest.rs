@@ -84,6 +84,10 @@ pub struct IngestSettings {
     pub embedding_model: Option<String>,
     /// Chunking settings.
     pub chunking: SmartChunkingOptions,
+    /// Drop running headers, footers and page numbers from paged documents
+    /// before chunking (`kb_core::furniture`). The stored document content
+    /// is left as extracted; only the chunks change.
+    pub strip_page_furniture: bool,
 }
 
 impl Default for IngestSettings {
@@ -97,6 +101,7 @@ impl Default for IngestSettings {
             reclaim_interval: Duration::from_secs(60),
             embedding_model: None,
             chunking: INGEST_CHUNKING,
+            strip_page_furniture: false,
         }
     }
 }
@@ -476,8 +481,34 @@ impl IngestWorker {
             .flatten()
             .map(|p| (p.page, p.text.chars().filter(|c| *c != '\0').collect()))
             .collect();
+        // Furniture removal only applies on the paged path, where the content
+        // is exactly the pages: there the cleaned pages and the cleaned
+        // content stay consistent by construction.
+        let (content_for_chunks, page_texts) = if self.settings.strip_page_furniture
+            && kb_core::chunk::content_is_pages(&content, &page_texts)
+        {
+            let (cleaned, report) = kb_core::furniture::strip_page_furniture(
+                &page_texts,
+                kb_core::furniture::FurnitureOptions::default(),
+            );
+            if report.lines_removed > 0 {
+                tracing::info!(
+                    lines_removed = report.lines_removed,
+                    shapes = report.shapes.len(),
+                    "page furniture removed"
+                );
+            }
+            let joined = cleaned
+                .iter()
+                .map(|(_, t)| t.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            (std::borrow::Cow::Owned(joined), cleaned)
+        } else {
+            (std::borrow::Cow::Borrowed(content.as_str()), page_texts)
+        };
         let mut chunks = kb_core::chunk::smart_chunk_pages(
-            &content,
+            &content_for_chunks,
             &page_texts,
             &title,
             category_of(&params),
@@ -486,7 +517,7 @@ impl IngestWorker {
         )
         .unwrap_or_else(|| {
             smart_chunk_document(
-                &content,
+                &content_for_chunks,
                 &title,
                 category_of(&params),
                 subcategory_of(&params).as_deref(),

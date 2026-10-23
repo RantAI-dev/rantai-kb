@@ -237,6 +237,34 @@ pub fn smart_chunk_document(
         .collect()
 }
 
+/// True when `content` is exactly the page texts joined by a blank line: the
+/// PDF text-layer shape, where each page can be processed on its own.
+#[must_use]
+pub fn content_is_pages(content: &str, pages: &[(u32, String)]) -> bool {
+    if pages.is_empty() {
+        return false;
+    }
+    let joined_len: usize =
+        pages.iter().map(|(_, t)| t.len()).sum::<usize>() + 2 * (pages.len() - 1);
+    if joined_len != content.len() {
+        return false;
+    }
+    let mut rest = content;
+    for (i, (_, text)) in pages.iter().enumerate() {
+        let Some(r) = rest.strip_prefix(text.as_str()) else {
+            return false;
+        };
+        rest = r;
+        if i + 1 < pages.len() {
+            let Some(r) = rest.strip_prefix("\n\n") else {
+                return false;
+            };
+            rest = r;
+        }
+    }
+    rest.is_empty()
+}
+
 /// Chunk a paged document one page at a time, when its content **is** its
 /// pages.
 ///
@@ -264,22 +292,7 @@ pub fn smart_chunk_pages(
     subcategory: Option<&str>,
     options: SmartChunkingOptions,
 ) -> Option<Vec<Chunk>> {
-    if pages.is_empty() {
-        return None;
-    }
-    let joined_len: usize =
-        pages.iter().map(|(_, t)| t.len()).sum::<usize>() + 2 * (pages.len() - 1);
-    if joined_len != content.len() {
-        return None;
-    }
-    let mut rest = content;
-    for (i, (_, text)) in pages.iter().enumerate() {
-        rest = rest.strip_prefix(text.as_str())?;
-        if i + 1 < pages.len() {
-            rest = rest.strip_prefix("\n\n")?;
-        }
-    }
-    if !rest.is_empty() {
+    if !content_is_pages(content, pages) {
         return None;
     }
 

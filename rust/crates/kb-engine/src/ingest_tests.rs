@@ -649,6 +649,76 @@ async fn a_paged_pdf_is_chunked_page_by_page() {
     }
 }
 
+/// With `strip_page_furniture`, the running title and page numbers that open
+/// every page are not in any chunk, and every chunk keeps its page.
+#[tokio::test]
+async fn page_furniture_is_stripped_from_chunks_but_not_from_the_document() {
+    async fn run(strip: bool) -> Vec<(Option<u64>, String)> {
+        let page_map: Vec<PageText> = (0..6u32)
+            .map(|i| PageText {
+                page: i,
+                text: format!(
+                    "Annual Report on Labour Mobility 2025\n{}\nBody of page {i}: {}",
+                    i + 1,
+                    "wages rose in the region. ".repeat(5)
+                ),
+            })
+            .collect();
+        let content = page_map
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let (jobs, documents, chunks, blobs) = parts();
+        documents.insert_doc(tenant(), document());
+        blobs
+            .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+            .await
+            .unwrap();
+        let worker = IngestWorker::new(
+            jobs.clone(),
+            documents.clone(),
+            chunks.clone(),
+            blobs.clone(),
+            Arc::new(FakeExtractor::returning_result(ExtractionResult {
+                content,
+                file_type: "pdf".to_string(),
+                used_ocr: false,
+                figures: Vec::new(),
+                pages_blocks: None,
+                page_map: Some(page_map),
+                error: None,
+            })),
+            Arc::new(FakeEmbedder::default()),
+            IngestSettings {
+                strip_page_furniture: strip,
+                ..IngestSettings::default()
+            },
+        );
+        jobs.push(job());
+        assert!(worker.run_once().await.unwrap());
+        let stored = chunks.stored_chunks.read().unwrap();
+        stored[&DocumentId::new_unchecked(DOC)]
+            .iter()
+            .map(|c| (c.metadata["page"].as_u64(), c.content.clone()))
+            .collect()
+    }
+
+    let kept = run(false).await;
+    assert!(
+        kept.iter()
+            .all(|(_, c)| c.contains("Annual Report on Labour Mobility"))
+    );
+
+    let stripped = run(true).await;
+    assert_eq!(stripped.len(), 6);
+    for (i, (page, text)) in stripped.iter().enumerate() {
+        assert_eq!(*page, Some(i as u64));
+        assert!(!text.contains("Annual Report on Labour Mobility"), "{text}");
+        assert!(text.contains(&format!("Body of page {i}")));
+    }
+}
+
 #[tokio::test]
 async fn test_ingest_worker_end_to_end_full_pipeline() {
     let (jobs, documents, chunks, blobs) = parts();

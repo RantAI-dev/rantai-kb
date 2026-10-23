@@ -8,6 +8,7 @@ pub mod chunk;
 mod context;
 pub mod figure_assets;
 pub mod figure_gate;
+pub mod furniture;
 mod fusion;
 pub mod graph;
 pub mod intelligence;
