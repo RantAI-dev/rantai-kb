@@ -34,8 +34,7 @@ pub use figure_assets::{
 };
 pub use figure_gate::{GateConfig, PROMPT_STRICT, parse_verdict};
 pub use fusion::{
-    IdRef, RRF_K, RrfItem, RrfOptions, RrfResult, reciprocal_rank_fusion,
-    reciprocal_rank_fusion_with, rrf_contribution,
+    IdRef, RrfItem, RrfOptions, RrfResult, reciprocal_rank_fusion, reciprocal_rank_fusion_with,
 };
 pub use intelligence::{
     Entity, HeuristicConfig, PatternEntityExtractor, PatternExtractionConfig,

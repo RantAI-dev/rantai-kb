@@ -1421,7 +1421,6 @@ name = "kb-store-surreal"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "kb-core",
  "kb-ports",
  "reqwest",
  "serde",

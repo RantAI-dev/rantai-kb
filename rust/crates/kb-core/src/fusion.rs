@@ -3,37 +3,6 @@
 
 use std::collections::HashMap;
 
-/// The RRF constant Qdrant uses server-side.
-///
-/// Qdrant's RRF is `sum over arms of 1 / (2 + rank)`, with `rank` 0-based: a
-/// candidate at the top of one arm contributes `0.5`, one at rank 2
-/// contributes `0.25`. **This is the port's two-arm fusion** — there is no
-/// second constant to choose, because a store that fuses server-side (Qdrant)
-/// has its own and a store that cannot (the in-memory reference index,
-/// SurrealDB) has to reproduce it exactly or the two disagree about the same
-/// candidates.
-///
-/// The original RRF paper's `60` is *not* this, and the difference is not
-/// cosmetic: with `k = 60` the gap between rank 1 and rank 3 is a few percent
-/// of the score, so a passage both arms like barely beats one a single arm
-/// likes. Measured on `miracl-id-200` (`docs/kf-vplane-eval.md`), re-sorting
-/// Qdrant's fused list with `k = 60` cost **0.01 nDCG@10 and 0.017 MRR@10**,
-/// in either engine, and accounted for the whole significant MRR gap against
-/// moco-kf's V-plane.
-pub const RRF_K: f32 = 2.0;
-
-/// One arm's contribution to a candidate's RRF score: `1 / (RRF_K + rank)`,
-/// with `rank` 0-based inside that arm's own list.
-///
-/// Qdrant computes exactly this server-side, in `f32`. Doing the same
-/// arithmetic in `f32` here is what lets an adapter that fuses in process and
-/// the store that fuses server-side produce the same numbers, not merely the
-/// same order.
-#[must_use]
-pub fn rrf_contribution(rank: u32) -> f32 {
-    1.0 / (RRF_K + rank as f32)
-}
-
 /// RRF options.
 #[derive(Debug, Clone, Copy)]
 pub struct RrfOptions {
@@ -240,14 +209,6 @@ mod tests {
         fn id(&self) -> &str {
             &self.id
         }
-    }
-
-    #[test]
-    fn qdrants_rrf_contribution_is_one_over_two_plus_the_zero_based_rank() {
-        // The numbers the whole port now agrees on: rank 0 → 0.5, rank 2 → 0.25.
-        assert!((rrf_contribution(0) - 0.5).abs() < 1e-6);
-        assert!((rrf_contribution(1) - 1.0 / 3.0).abs() < 1e-6);
-        assert!((rrf_contribution(2) - 0.25).abs() < 1e-6);
     }
 
     #[test]

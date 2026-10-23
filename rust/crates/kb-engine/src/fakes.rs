@@ -829,14 +829,6 @@ impl ChunkStore for FakeChunkStore {
 /// A test fake that concatenates instead of fusing is not a smaller version of
 /// the real thing, it is a different thing: the engine and every downstream
 /// consumer assume `search` yields one candidate per unit.
-///
-/// The RRF is the store's arithmetic, not an approximation of it: one
-/// contribution per arm that found the candidate, `1 / (2 + rank)` with the
-/// rank 0-based inside that arm's list
-/// ([`kb_core::rrf_contribution`]). The dense arm's own similarity is
-/// *not* part of the fused score — it stays in `scores.dense` — so the fake's
-/// order is the order the real engine produces, not the order the dense arm
-/// happened to like.
 pub fn fuse_candidates(candidates: Vec<Candidate>, fusion: Fusion, k: usize) -> Vec<Candidate> {
     let mut merged: Vec<Candidate> = Vec::with_capacity(candidates.len());
     for candidate in candidates {
@@ -845,9 +837,20 @@ pub fn fuse_candidates(candidates: Vec<Candidate>, fusion: Fusion, k: usize) -> 
             .position(|existing| existing.unit_id == candidate.unit_id)
         {
             Some(position) => {
+                let previous = merged[position].clone();
                 let entry = &mut merged[position];
-                if matches!(fusion, Fusion::None) && candidate.scores.dense.is_some() {
-                    entry.scores.fused = candidate.scores.fused;
+                match fusion {
+                    Fusion::Rrf { k: rrf_k } => {
+                        entry.scores.fused +=
+                            1.0 / (rrf_k.max(1) as f32 + previous.ranks.fused as f32 + 1.0);
+                        entry.scores.fused +=
+                            1.0 / (rrf_k.max(1) as f32 + candidate.ranks.fused as f32 + 1.0);
+                    }
+                    Fusion::None => {
+                        if candidate.scores.dense.is_some() {
+                            entry.scores.fused = candidate.scores.fused;
+                        }
+                    }
                 }
                 entry.scores.dense = candidate.scores.dense.or(entry.scores.dense);
                 entry.scores.sparse = candidate.scores.sparse.or(entry.scores.sparse);
@@ -857,26 +860,9 @@ pub fn fuse_candidates(candidates: Vec<Candidate>, fusion: Fusion, k: usize) -> 
             None => merged.push(candidate),
         }
     }
-    if matches!(fusion, Fusion::Rrf) {
-        for candidate in &mut merged {
-            candidate.scores.fused = rrf_sum(candidate.ranks);
-        }
-    }
     sort_candidates(&mut merged);
     merged.truncate(k);
     merged
-}
-
-/// The RRF score of one candidate: one contribution per arm that found it.
-fn rrf_sum(ranks: ArmRanks) -> f32 {
-    let mut fused = 0.0f32;
-    if let Some(rank) = ranks.dense {
-        fused += kb_core::rrf_contribution(rank);
-    }
-    if let Some(rank) = ranks.sparse {
-        fused += kb_core::rrf_contribution(rank);
-    }
-    fused
 }
 
 #[async_trait]

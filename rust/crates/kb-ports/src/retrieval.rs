@@ -90,27 +90,23 @@ impl KeywordQuery {
 }
 
 /// How two arm result lists become one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fusion {
-    /// Reciprocal Rank Fusion, **Qdrant's arithmetic**: `sum over arms of
-    /// 1 / (RRF_K + rank)`, with `rank` 0-based inside its own arm and
-    /// `RRF_K = 2` ([`kb_core::RRF_K`]).
-    ///
-    /// There is deliberately no `k` to choose. A store that fuses server-side
-    /// (Qdrant) uses its own constant and hands back the score it computed; a
-    /// store that cannot (the in-memory reference index, SurrealDB) has to
-    /// reproduce that arithmetic exactly — see
-    /// [`kb_core::rrf_contribution`] — or the two rank the same
-    /// candidates differently and the contract suite stops meaning anything.
-    ///
-    /// The original RRF paper's `60` is *not* this constant, and using it cost
-    /// 0.01 nDCG@10 and 0.017 MRR@10 on `miracl-id-200`
-    /// (`docs/kf-vplane-eval.md`).
-    #[default]
-    Rrf,
+    /// Reciprocal Rank Fusion: `sum over arms of 1 / (k + rank)`, rank 1-based.
+    Rrf {
+        /// The RRF constant. 60 is the value from the original paper and what
+        /// the current engine uses.
+        k: u32,
+    },
     /// Do not fuse: return the arms' concatenation, arm order first. Used when
     /// exactly one arm is present, and by adapters that must not reorder.
     None,
+}
+
+impl Default for Fusion {
+    fn default() -> Self {
+        Self::Rrf { k: 60 }
+    }
 }
 
 /// Per-arm scores and the fused score, for observability and for deciding
@@ -430,10 +426,8 @@ mod tests {
     }
 
     #[test]
-    fn default_fusion_is_qdrants_rrf() {
-        // Qdrant's server-side constant, not the paper's 60: see `Fusion::Rrf`.
-        assert_eq!(Fusion::default(), Fusion::Rrf);
-        assert!((kb_core::RRF_K - 2.0).abs() < f32::EPSILON);
+    fn default_fusion_is_rrf_at_sixty() {
+        assert_eq!(Fusion::default(), Fusion::Rrf { k: 60 });
     }
 
     #[test]

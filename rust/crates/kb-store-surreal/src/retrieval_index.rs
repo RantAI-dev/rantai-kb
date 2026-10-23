@@ -370,11 +370,9 @@ fn fuse(dense: Option<Vec<ArmHit>>, sparse: Option<Vec<ArmHit>>, fusion: Fusion)
             };
             let entry = &mut merged[position];
             match fusion {
-                Fusion::Rrf => {
-                    // Qdrant's arithmetic, done here because SurrealDB cannot:
-                    // one contribution per arm, `1 / (2 + rank)` with the rank
-                    // 0-based inside that arm's list.
-                    entry.scores.fused += kb_core::rrf_contribution(hit.rank);
+                Fusion::Rrf { k } => {
+                    // Qdrant's arithmetic, done here because SurrealDB cannot.
+                    entry.scores.fused += 1.0 / (k.max(1) as f32 + hit.rank as f32 + 1.0);
                 }
                 Fusion::None => {
                     // The arm's own score is the ranking key when no fusion was
@@ -673,7 +671,7 @@ mod tests {
         let merged = fuse(
             Some(vec![hit("doc1_0", 0, 0.9), hit("doc1_1", 1, 0.5)]),
             Some(vec![hit("doc1_1", 0, 12.0), hit("doc1_2", 1, 3.0)]),
-            Fusion::Rrf,
+            Fusion::Rrf { k: 60 },
         );
         let ids: Vec<&str> = merged.iter().map(|c| c.unit_id.as_str()).collect();
         assert_eq!(ids, vec!["doc1_0", "doc1_1", "doc1_2"]);
@@ -684,8 +682,7 @@ mod tests {
         assert_eq!(both.scores.sparse, Some(12.0));
         assert_eq!(both.ranks.dense, Some(1));
         assert_eq!(both.ranks.sparse, Some(0));
-        // Qdrant's RRF: 1/(2 + 1) from the dense arm, 1/(2 + 0) from the sparse one.
-        assert!((both.scores.fused - (1.0 / 3.0 + 1.0 / 2.0)).abs() < 1e-6);
+        assert!((both.scores.fused - (1.0 / 62.0 + 1.0 / 61.0)).abs() < 1e-6);
 
         // Two arms agreeing outranks one arm alone at the same rank.
         let single = &merged[0];

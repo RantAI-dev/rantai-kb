@@ -923,7 +923,7 @@ async fn fusion_merges_arms(index: &impl RetrievalIndex) -> Outcome {
         // to overlap.
         per_arm_k: 50,
         k: 50,
-        fusion: Fusion::Rrf,
+        fusion: Fusion::Rrf { k: 60 },
     };
     let rows = match index.search(&query, &scope).await {
         Ok(rows) => rows,
@@ -990,18 +990,8 @@ async fn fusion_merges_arms(index: &impl RetrievalIndex) -> Outcome {
                 .to_string(),
         );
     }
-    // The fused score is the RRF sum, one contribution per arm:
-    // `1 / (RRF_K + rank)` with the rank 0-based inside its own arm.
-    //
-    // This used to be `1/(61 + rank)` — the RRF paper's `k = 60` with
-    // 1-based ranks. The constant is now Qdrant's own (`RRF_K = 2`,
-    // 0-based), because that is what the store computes server-side and what
-    // was measured to be better (`docs/kf-vplane-eval.md`: the k=60 re-sort
-    // cost 0.01 nDCG@10 and 0.017 MRR@10). The assertion is not weaker for
-    // it: it still pins the *exact* fused score of the merged candidate, from
-    // the ranks the adapter reported, to a tolerance of 1e-4.
-    let expected_rrf = kb_core::rrf_contribution(top.ranks.dense.unwrap_or(0))
-        + kb_core::rrf_contribution(top.ranks.sparse.unwrap_or(0));
+    let expected_rrf = 1.0 / (61.0 + top.ranks.dense.unwrap_or(0) as f32)
+        + 1.0 / (61.0 + top.ranks.sparse.unwrap_or(0) as f32);
     if (top.scores.fused - expected_rrf).abs() > 1e-4 {
         return Outcome::Failed(format!(
             "the merged candidate fused to {}, not the RRF sum {} + {} = {expected_rrf}",
