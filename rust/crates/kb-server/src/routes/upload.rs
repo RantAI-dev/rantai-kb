@@ -78,7 +78,7 @@ pub async fn ingest_document(
         return Err(ApiError::missing_scope("kb:write"));
     }
     let upload = read_upload(request, &state).await?;
-    let max_bytes = MimeRegistry::kb_max_file_bytes();
+    let max_bytes = crate::routes::max_file_bytes();
 
     if !is_accepted_extension(&upload.file_name) {
         return Err(ApiError::UnsupportedMedia(format!(
@@ -244,7 +244,7 @@ async fn read_upload(
             if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
                 ApiError::PayloadTooLarge(format!(
                     "The upload is larger than the {}-byte limit.",
-                    MimeRegistry::kb_max_file_bytes()
+                    crate::routes::max_file_bytes()
                 ))
             } else {
                 ApiError::BadRequest(format!("Malformed multipart body: {err}"))
@@ -263,7 +263,7 @@ async fn read_upload(
                     if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
                         ApiError::PayloadTooLarge(format!(
                             "The upload is larger than the {}-byte limit.",
-                            MimeRegistry::kb_max_file_bytes()
+                            crate::routes::max_file_bytes()
                         ))
                     } else {
                         ApiError::BadRequest(format!("Could not read the uploaded file: {err}"))

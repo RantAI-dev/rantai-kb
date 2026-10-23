@@ -44,11 +44,42 @@ use crate::dto::{
 use crate::error::ApiError;
 use crate::state::AppState;
 
+/// Largest accepted upload, in bytes: `KB_MAX_FILE_BYTES`, read once per
+/// process, defaulting to Bun's 50 MB (`src/lib/files/mime-types.ts`) so an
+/// unset variable keeps the two runtimes identical. Large manuals and
+/// textbooks (ViDoRe's 943-page computer science book is 50.9 MB) need more.
+pub fn max_file_bytes() -> u64 {
+    static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| parse_max_file_bytes(std::env::var("KB_MAX_FILE_BYTES").ok().as_deref()))
+}
+
+/// `KB_MAX_FILE_BYTES` parsing: a positive integer, else the default.
+fn parse_max_file_bytes(value: Option<&str>) -> u64 {
+    value
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(MimeRegistry::kb_max_file_bytes)
+}
+
 /// Upper bound on a multipart upload body. The file itself is capped at
-/// `KB_MAX_FILE_BYTES` by the upload route; the slack covers the part headers,
+/// [`max_file_bytes`] by the upload route; the slack covers the part headers,
 /// the form fields and the multipart framing around a file exactly at the limit.
 pub fn upload_body_limit() -> usize {
-    (MimeRegistry::kb_max_file_bytes() + 1024 * 1024) as usize
+    usize::try_from(max_file_bytes() + 1024 * 1024).unwrap_or(usize::MAX)
+}
+
+#[cfg(test)]
+mod max_file_bytes_tests {
+    use super::parse_max_file_bytes;
+
+    #[test]
+    fn unset_or_invalid_keeps_buns_50_mb() {
+        let bun = 50 * 1024 * 1024;
+        assert_eq!(parse_max_file_bytes(None), bun);
+        assert_eq!(parse_max_file_bytes(Some("lots")), bun);
+        assert_eq!(parse_max_file_bytes(Some("0")), bun);
+        assert_eq!(parse_max_file_bytes(Some(" 104857600 ")), 104_857_600);
+    }
 }
 
 /// Top-level router. Authenticated routes go here.
@@ -189,7 +220,7 @@ pub struct FormatsResponse {
 async fn formats() -> Json<FormatsResponse> {
     Json(FormatsResponse {
         extensions: MimeRegistry::kb_accepted_extensions(),
-        max_file_bytes: MimeRegistry::kb_max_file_bytes(),
+        max_file_bytes: max_file_bytes(),
     })
 }
 
