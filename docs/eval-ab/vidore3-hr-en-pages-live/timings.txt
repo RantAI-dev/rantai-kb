@@ -1,0 +1,2 @@
+pages: 491 s wall (ingest + queries)
+text: 27 s wall (ingest + queries)
