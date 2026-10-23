@@ -227,6 +227,25 @@ path.**
   many chunks comes back in reranked order instead of fused order, and takes
   the reranker's latency. Shape unchanged.
 
+### 9. Deliberate Difference: PDFs Are Chunked Page by Page
+- **Bun**: chunks the whole extracted text, then tags each chunk with a page
+  by searching for its first characters in the per-page text.
+- **Rust (deliberate, 2026-10-23)**: when the extracted content is exactly
+  its pages joined by blank lines (the PDF text-layer path), each page is
+  chunked on its own (`kb_core::chunk::smart_chunk_pages`): no chunk crosses
+  a page break and every chunk carries its true page. Other extractors
+  (merged layout markdown, block-level page maps) keep Bun's behaviour.
+- **Why**: on the 14 ViDoRe v3 HR PDFs the old tagging put 950 of 4,929
+  chunks (19%) on the wrong page, nearly all one page early (running headers
+  and the 200-character overlap mislead the prefix search), and 761 chunks
+  straddled a page break (`cargo run -p kb-server --example page_assign_check`).
+  After the change: 0 wrong, 0 straddling. Page-level retrieval measured on
+  per-page units: nDCG@10 0.477 → 0.566 with the reranker
+  (`docs/eval-ab/vidore3-hr-en-ours`).
+- **What it changes in the API**: `page` on search chunks and sources is
+  right far more often; chunk boundaries (and so chunk ids' content) differ
+  from Bun's for PDFs, so **re-index PDFs** for the gain.
+
 ---
 
 ## 6. Shared Known Issues

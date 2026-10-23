@@ -466,13 +466,33 @@ impl IngestWorker {
 
         self.progress(job, StepProgress::of(IngestStep::Chunking), started, &flags)
             .await;
-        let mut chunks = smart_chunk_document(
+        // A paged document whose content is exactly its pages (the PDF text
+        // layer) is chunked page by page, so every chunk has its true page and
+        // none crosses a page break; anything else is chunked whole and its
+        // pages tagged afterwards (`kb_core::chunk::smart_chunk_pages`).
+        let page_texts: Vec<(u32, String)> = extraction
+            .page_map
+            .iter()
+            .flatten()
+            .map(|p| (p.page, p.text.chars().filter(|c| *c != '\0').collect()))
+            .collect();
+        let mut chunks = kb_core::chunk::smart_chunk_pages(
             &content,
+            &page_texts,
             &title,
             category_of(&params),
             subcategory_of(&params).as_deref(),
             self.settings.chunking,
-        );
+        )
+        .unwrap_or_else(|| {
+            smart_chunk_document(
+                &content,
+                &title,
+                category_of(&params),
+                subcategory_of(&params).as_deref(),
+                self.settings.chunking,
+            )
+        });
 
         // Entity / relation extraction (non-fatal, mirrors index-document.ts:58-185)
         if policy.entities {

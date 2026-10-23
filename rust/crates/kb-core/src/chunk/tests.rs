@@ -344,3 +344,92 @@ fn utf16_len_counts_cjk_as_units() {
 fn utf16_len_counts_emoji_surrogate_pair_as_two_units() {
     assert_eq!(utf16_len("🦀"), 2);
 }
+
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod page_chunking {
+    use super::super::{SmartChunkingOptions, smart_chunk_document, smart_chunk_pages};
+
+    const OPTS: SmartChunkingOptions = SmartChunkingOptions {
+        max_chunk_size: Some(800),
+        overlap_size: Some(200),
+        preserve_code_blocks: Some(true),
+        respect_heading_boundaries: Some(true),
+        respect_section_boundaries: None,
+        strategy: None,
+    };
+
+    fn page(n: usize, word: &str) -> String {
+        format!(
+            "Running header of the report\n{n}\n{}",
+            format!("{word} sentence. ").repeat(300)
+        )
+    }
+
+    #[test]
+    fn every_chunk_stays_on_its_own_page() {
+        let pages: Vec<(u32, String)> = vec![
+            (0, page(1, "alpha")),
+            (1, page(2, "beta")),
+            (3, page(4, "gamma")),
+        ];
+        let content = pages
+            .iter()
+            .map(|(_, t)| t.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let chunks = smart_chunk_pages(&content, &pages, "Report", "", None, OPTS)
+            .expect("content is its pages");
+        assert!(
+            chunks.len() > 3,
+            "pages longer than a chunk split into several"
+        );
+        for c in &chunks {
+            let p = c.metadata.page.expect("every chunk has a page");
+            let word = match p {
+                0 => "alpha",
+                1 => "beta",
+                3 => "gamma",
+                _ => panic!("page {p}"),
+            };
+            assert!(
+                c.content.contains(word),
+                "chunk on page {p} holds that page's text"
+            );
+            for other in ["alpha", "beta", "gamma"].iter().filter(|w| **w != word) {
+                assert!(
+                    !c.content.contains(other),
+                    "no chunk crosses into another page"
+                );
+            }
+        }
+        let idx: Vec<u32> = chunks.iter().map(|c| c.metadata.chunk_index).collect();
+        assert_eq!(
+            idx,
+            (0..chunks.len() as u32).collect::<Vec<_>>(),
+            "indices run on across pages"
+        );
+    }
+
+    #[test]
+    fn content_that_is_not_its_pages_is_left_to_the_whole_document_chunker() {
+        let pages: Vec<(u32, String)> = vec![(0, page(1, "alpha")), (1, page(2, "beta"))];
+        let merged = format!("# Title\n\n{}\n\n{}", pages[0].1, pages[1].1);
+        assert!(smart_chunk_pages(&merged, &pages, "Report", "", None, OPTS).is_none());
+        assert!(smart_chunk_pages("", &[], "Report", "", None, OPTS).is_none());
+        let joined_once = format!("{}\n{}", pages[0].1, pages[1].1);
+        assert!(smart_chunk_pages(&joined_once, &pages, "Report", "", None, OPTS).is_none());
+    }
+
+    #[test]
+    fn a_one_page_document_chunks_as_before_but_with_its_page() {
+        let pages: Vec<(u32, String)> = vec![(0, page(1, "alpha"))];
+        let content = pages[0].1.clone();
+        let by_page = smart_chunk_pages(&content, &pages, "Report", "", None, OPTS).unwrap();
+        let whole = smart_chunk_document(&content, "Report", "", None, OPTS);
+        assert_eq!(
+            by_page.iter().map(|c| &c.content).collect::<Vec<_>>(),
+            whole.iter().map(|c| &c.content).collect::<Vec<_>>()
+        );
+        assert!(by_page.iter().all(|c| c.metadata.page == Some(0)));
+    }
+}

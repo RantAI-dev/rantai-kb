@@ -236,3 +236,61 @@ pub fn smart_chunk_document(
         .filter(|c| !c.content.is_empty())
         .collect()
 }
+
+/// Chunk a paged document one page at a time, when its content **is** its
+/// pages.
+///
+/// `pages` is the extractor's `(0-based page, text)` list. When `content` is
+/// exactly those texts joined by a blank line (the PDF text-layer path: one
+/// entry per page), every page is chunked on its own, so no chunk crosses a
+/// page break and every chunk carries its page by construction. Chunk indices
+/// run on across pages, as one call over the whole document would number them.
+///
+/// Returns `None` when `content` is anything else (a layout parser's merged
+/// markdown, block-level page maps): the caller chunks the whole document and
+/// tags pages afterwards, as before.
+///
+/// Why: tagging pages after chunking the whole text put 19% of the chunks of
+/// the ViDoRe v3 HR PDFs on the wrong page (nearly all one page early, misled
+/// by running headers and the 200-character overlap), and 15% straddled a
+/// page break. Chunking per page lifted page-level nDCG@10 there from 0.477 to
+/// 0.566 with the reranker (`docs/eval-ab/vidore3-hr-en-ours`).
+#[must_use]
+pub fn smart_chunk_pages(
+    content: &str,
+    pages: &[(u32, String)],
+    document_title: &str,
+    category: &str,
+    subcategory: Option<&str>,
+    options: SmartChunkingOptions,
+) -> Option<Vec<Chunk>> {
+    if pages.is_empty() {
+        return None;
+    }
+    let joined_len: usize =
+        pages.iter().map(|(_, t)| t.len()).sum::<usize>() + 2 * (pages.len() - 1);
+    if joined_len != content.len() {
+        return None;
+    }
+    let mut rest = content;
+    for (i, (_, text)) in pages.iter().enumerate() {
+        rest = rest.strip_prefix(text.as_str())?;
+        if i + 1 < pages.len() {
+            rest = rest.strip_prefix("\n\n")?;
+        }
+    }
+    if !rest.is_empty() {
+        return None;
+    }
+
+    let mut out = Vec::new();
+    for (page, text) in pages {
+        for mut chunk in smart_chunk_document(text, document_title, category, subcategory, options)
+        {
+            chunk.metadata.chunk_index = u32::try_from(out.len()).unwrap_or(u32::MAX);
+            chunk.metadata.page = Some(*page);
+            out.push(chunk);
+        }
+    }
+    Some(out)
+}

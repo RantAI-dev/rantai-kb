@@ -593,6 +593,62 @@ impl Embedder for ShortEmbedder {
     }
 }
 
+/// A PDF whose content is its pages is chunked page by page: every stored
+/// chunk names its page, and none holds text from two pages.
+#[tokio::test]
+async fn a_paged_pdf_is_chunked_page_by_page() {
+    let words = ["alpha", "beta", "gamma"];
+    let page_map: Vec<PageText> = words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| PageText {
+            page: i as u32,
+            text: format!(
+                "Report header\n{}\n{}",
+                i + 1,
+                format!("{w} sentence. ").repeat(300)
+            ),
+        })
+        .collect();
+    let content = page_map
+        .iter()
+        .map(|p| p.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let h = harness(Arc::new(FakeExtractor::returning_result(
+        ExtractionResult {
+            content,
+            file_type: "pdf".to_string(),
+            used_ocr: false,
+            figures: Vec::new(),
+            pages_blocks: None,
+            page_map: Some(page_map),
+            error: None,
+        },
+    )))
+    .await;
+    h.jobs.push(job());
+    assert!(h.worker.run_once().await.unwrap());
+
+    let stored = h.chunks.stored_chunks.read().unwrap();
+    let chunks = &stored[&DocumentId::new_unchecked(DOC)];
+    assert!(
+        chunks.len() > words.len(),
+        "each long page split into several chunks"
+    );
+    for c in chunks {
+        let page = c.metadata["page"].as_u64().expect("every chunk has a page") as usize;
+        for (i, w) in words.iter().enumerate() {
+            assert_eq!(
+                c.content.contains(w),
+                i == page,
+                "chunk {} on page {page}",
+                c.chunk_index
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_ingest_worker_end_to_end_full_pipeline() {
     let (jobs, documents, chunks, blobs) = parts();
