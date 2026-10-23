@@ -57,6 +57,9 @@ pub enum RetrievalDegrade {
     /// returned unchanged — a search that lost one arm is degraded, not empty,
     /// and saying nothing about it is how a silent regression ships (AGENTS rule 6).
     GraphArmUnavailable,
+    /// The page-image arm (query embedding or page index) failed or timed out.
+    /// The text arms' results are returned unchanged.
+    PageArmUnavailable,
 }
 
 impl RetrievalDegrade {
@@ -71,6 +74,7 @@ impl RetrievalDegrade {
             Self::NeighboursPartial => "neighbours_partial",
             Self::FiguresPartial => "figures_partial",
             Self::GraphArmUnavailable => "graph_arm_unavailable",
+            Self::PageArmUnavailable => "page_arm_unavailable",
         }
     }
 }

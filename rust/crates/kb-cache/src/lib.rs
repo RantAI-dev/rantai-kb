@@ -7,10 +7,13 @@
 
 mod embedder;
 mod extractor;
+mod page_embedder;
 mod store;
+mod vectors;
 
 pub use embedder::CachedEmbedder;
 pub use extractor::CachedExtractor;
+pub use page_embedder::CachedPageEmbedder;
 pub use store::{CacheKey, CacheStats, DiskCache};
 
 #[cfg(test)]

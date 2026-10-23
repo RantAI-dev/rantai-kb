@@ -333,7 +333,10 @@ struct CloneableEmbedder<'a> {
 /// `index` field the vectors are placed by it, so a provider that answers out
 /// of order is handled; a response where only some items carry `index` is also
 /// an error, since its order cannot be established.
-fn parse_openai_ordered(bytes: &[u8], expected: usize) -> Result<Vec<Vec<f32>>, PortError> {
+pub(crate) fn parse_openai_ordered(
+    bytes: &[u8],
+    expected: usize,
+) -> Result<Vec<Vec<f32>>, PortError> {
     let resp: OpenAiResp = serde_json::from_slice(bytes)
         .map_err(|e| PortError::Malformed(format!("openai shape: {e}")))?;
     let data = resp.data;
@@ -392,7 +395,7 @@ fn parse_minimax(bytes: &[u8]) -> Result<Vec<Vec<f32>>, PortError> {
     Ok(resp.vectors)
 }
 
-async fn backoff(attempt: u32) {
+pub(crate) async fn backoff(attempt: u32) {
     let delay = 1000u64 * 2u64.pow(attempt - 1);
     tokio::time::sleep(Duration::from_millis(delay.min(10_000))).await;
 }

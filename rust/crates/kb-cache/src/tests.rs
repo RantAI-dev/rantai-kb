@@ -289,3 +289,52 @@ async fn failed_extractions_are_retried_not_cached() {
     assert_eq!(inner.calls.load(Ordering::SeqCst), 2);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Counts page and query embeds; vector = [bytes len, 1.0].
+#[derive(Default)]
+struct CountingPages {
+    pages: AtomicUsize,
+    queries: AtomicUsize,
+}
+
+#[async_trait]
+impl kb_ports::PageEmbedder for CountingPages {
+    async fn embed_pages(&self, p: &[kb_ports::PageImage]) -> Result<Vec<Vec<f32>>, PortError> {
+        self.pages.fetch_add(p.len(), Ordering::SeqCst);
+        Ok(p.iter().map(|x| vec![x.bytes.len() as f32, 1.0]).collect())
+    }
+    async fn embed_query(&self, t: &str) -> Result<Vec<f32>, PortError> {
+        self.queries.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![t.len() as f32, 0.0])
+    }
+    fn dimension(&self) -> u32 {
+        2
+    }
+}
+
+#[tokio::test]
+async fn page_vectors_are_cached_by_image_bytes_and_queries_by_text() {
+    use kb_ports::{PageEmbedder, PageImage};
+    let root = temp_root();
+    let inner = Arc::new(CountingPages::default());
+    let cached = crate::CachedPageEmbedder::new(inner.clone(), DiskCache::new(&root), "voyage|2");
+    let img = |page: u32, n: usize| PageImage {
+        page,
+        mime: "image/jpeg".into(),
+        bytes: vec![1; n],
+    };
+    let a = cached.embed_pages(&[img(0, 3), img(1, 5)]).await.unwrap();
+    // Same bytes on another page number (a repeated slide): a hit.
+    let b = cached
+        .embed_pages(&[img(7, 5), img(2, 9), img(0, 3)])
+        .await
+        .unwrap();
+    assert_eq!(a, vec![vec![3.0, 1.0], vec![5.0, 1.0]]);
+    assert_eq!(b, vec![vec![5.0, 1.0], vec![9.0, 1.0], vec![3.0, 1.0]]);
+    assert_eq!(inner.pages.load(Ordering::SeqCst), 3);
+
+    cached.embed_query("wages").await.unwrap();
+    cached.embed_query("wages").await.unwrap();
+    assert_eq!(inner.queries.load(Ordering::SeqCst), 1);
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -1327,6 +1327,7 @@ dependencies = [
  "async-trait",
  "axum 0.7.9",
  "base64 0.22.1",
+ "futures",
  "kb-core",
  "kb-ports",
  "reqwest",

@@ -18,6 +18,9 @@ pub enum ChunkType {
     Code,
     Heading,
     Figure,
+    /// A whole page, as an image vector in the page-image index
+    /// (`crate::pages`). Never stored in the text index.
+    Page,
 }
 
 impl ChunkType {
@@ -31,6 +34,7 @@ impl ChunkType {
             Some("code") => Self::Code,
             Some("heading") => Self::Heading,
             Some("figure") => Self::Figure,
+            Some("page") => Self::Page,
             _ => Self::Text,
         }
     }
@@ -45,6 +49,7 @@ impl ChunkType {
             Self::Code => "code",
             Self::Heading => "heading",
             Self::Figure => "figure",
+            Self::Page => "page",
         }
     }
 
@@ -272,6 +277,8 @@ pub enum ProvenanceArm {
     /// this one contributes, and neighbour weave comes after the cut. The order
     /// is only ever compared, never sorted into meaning.
     Graph,
+    /// Brought in by the page-image arm: its page matched the query as an image.
+    Page,
 }
 
 /// Which arms produced a chunk, and what each of them said about it.

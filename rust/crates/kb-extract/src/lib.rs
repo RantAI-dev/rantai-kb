@@ -32,6 +32,7 @@ pub mod mistral;
 pub mod ods;
 pub mod odt;
 pub mod openrouter_vision;
+pub mod page_render;
 pub mod pdfium;
 mod pptx;
 mod rtf;
@@ -63,6 +64,7 @@ pub use mistral::MistralOcrExtractor;
 pub use ods::parse_ods;
 pub use odt::parse_odt;
 pub use openrouter_vision::OpenRouterVisionProvider;
+pub use page_render::PdfiumPageRenderer;
 pub use pdfium::{
     MINIMAL_BLANK_PDF, MINIMAL_PDF_HELLO_WORLD, extract_pdf_text_layer, get_pdf_page_count,
     get_pdfium, init_pdfium, render_pdf_page_to_png, split_pdf_by_page_count,
