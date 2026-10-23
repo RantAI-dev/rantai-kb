@@ -12,3 +12,5 @@ fixed20-nn0: 31 s for 318 queries
 fixed20-nn0-bge20: 744 s for 318 queries
 final20: 41 s for 318 queries
 final20-bge20: 749 s for 318 queries
+emb8b: 1588 s wall (ingest + queries)
+emb8b-bge20: 1780 s for 318 queries

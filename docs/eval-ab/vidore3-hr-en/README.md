@@ -58,6 +58,7 @@ reranker.
 | image: Jina-v4 (3B) | 0.646 |
 | image: ColEmbed-3B-v2 (best) | 0.654 |
 | **rantai-kb, local (0.6B + BM25 + bge reranker)** | **0.561** |
+| **rantai-kb, Qwen3-Embedding-8B via OpenRouter (+ BM25 + bge reranker)** | **0.593** |
 
 Caveats on this comparison:
 
@@ -66,12 +67,27 @@ Caveats on this comparison:
   reranker added +13.7 on HR to Jina-v4 text (multilingual setting), while an image
   reranker added nothing.
 
+## A stronger embedder (`emb8b`, `emb8b-bge20`)
+
+These runs use the same fixed pipeline, with dense vectors from `qwen/qwen3-embedding-8b`
+(OpenRouter, dim 4096) instead of the local 0.6B. Embedding the whole corpus cost about
+$0.013.
+
+| | 0.6B local | 8B OpenRouter | Δ [95% CI] |
+|---|---:|---:|---|
+| No reranker | 0.468 | 0.545 | +0.077 [+0.055, +0.100] |
+| bge top 20 | 0.561 | 0.593 | +0.031 [+0.016, +0.048] |
+
+With the 8B embedder plus the local bge reranker, rantai-kb's text pipeline ties the
+ColQwen2.5 image retriever (0.592) and is 0.06 behind the best published one (0.654).
+
 ## Other runs here
 
 - `text`, `text-bge20`, `text-qwen8b20`: 10 chunks per query, before the fixes.
   qwen3-reranker-8b (OpenRouter, $0.45) scored 0.484, against 0.475 for bge.
-- Spend for this directory: $0.45 (OpenRouter usage 0.1945 → 0.6488). Everything else is
-  local.
+- Spend: $0.45 for the qwen3-reranker-8b run and $0.013 for the 8B embeddings. OpenRouter
+  usage went from 0.1945 to 0.7087; about $0.05 of that was another process sharing the key.
+  Everything else ran locally.
 
 ## Caveats
 
