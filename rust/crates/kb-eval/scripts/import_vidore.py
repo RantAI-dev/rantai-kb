@@ -31,7 +31,10 @@ from pathlib import Path
 import httpx
 import pyarrow.parquet as pq
 
-PINNED = {"vidore/vidore_v3_hr": "0cdf0979f2c5a0fd3e335e6373b9da48a9fe3bc3"}
+PINNED = {
+    "vidore/vidore_v3_hr": "0cdf0979f2c5a0fd3e335e6373b9da48a9fe3bc3",
+    "vidore/vidore_v3_computer_science": "d5cc75883d92e294f0c0fc2662551c9708a06ebc",
+}
 
 
 def fetch(client: httpx.Client, repo: str, rev: str, path: str) -> bytes:
