@@ -170,6 +170,18 @@ In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.d
   exits non-zero on any cross-scope hit. Baseline in `docs/eval-baseline.md`:
   0 hits over 240 probes, with the `documentIds` branch (vector-only in both
   runtimes) and the figure arm reported UNTESTED rather than passing.
+- **Page-image arm row** (Rust only; Bun has no page arm): run on a stack with
+  the arm on (`KB_CHUNK_STORE=qdrant KB_STACK_PAGE_ARM=1 rust/scripts/stack-up.sh`)
+  and a PDF corpus (`kb-server eval leak --pdf …`). The stub's
+  `/page-embeddings` gives every page and query one vector, so every foreign
+  page is a perfect match and only the scope keeps it out. 2026-10-23: 0 leaks
+  over 336 probes; page PASS in tenant / knowledge base / category (positive
+  10/12), UNTESTED in `documentIds` (that branch never runs the page arm). With
+  the page index *and* the chunk fetch unscoped in a throwaway change, the page
+  row reported 224 leaks. With only the page index unscoped it reported 0: the
+  chunk behind a page is fetched under the caller's scope, so the black box
+  cannot see a page-index hole on its own — `kb-engine/src/page_arm_tests.rs`
+  and `kb-server/tests/leak_tests.rs` watch that layer.
 
 ### 7. Rank Fusion (RRF) and the Embedded Text
 

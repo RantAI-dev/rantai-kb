@@ -31,6 +31,13 @@
 #   KB_STACK_GRAPH=1                # ingest writes the Postgres entity graph, with the free
 #                                   # heuristic extractor instead of the OpenRouter one
 #   KB_STACK_GRAPH_ARM=1            # the graph retrieval arm runs on /v1/search
+#   KB_STACK_PAGE_ARM=1             # the page-image arm runs (needs KB_CHUNK_STORE=qdrant):
+#                                   # its embedder is the stub's /page-embeddings, which gives
+#                                   # every page and query one vector — a scope test fixture
+#                                   # (`eval leak --pdf`), not a retrieval-quality setting
+#   KB_STACK_NAME=kb-leak           # container / tmux-session prefix (default kb-smoke), so a
+#                                   # second stack (own KB_STACK_DIR and *_PORTs) can run
+#                                   # beside the default one without either removing the other
 #   KB_STACK_CACHE_DIR=~/.cache/kb-cache  # disk cache for embeddings + extraction (KB_CACHE_DIR);
 #                                   # KB_STACK_EMBED_CACHE_TAG scopes it (e.g. "q8-rx590")
 #   KB_STACK_SERVER_ENV="KB_X=1 KB_Y=2"  # extra server settings, written into stack.env
@@ -43,7 +50,7 @@
 # call. With the graph on, `KB_ENTITY_EXTRACTOR=heuristic` replaces it, so the
 # whole stack stays at zero spend.
 #
-# ONLY the `kb-smoke-*` containers belong to this stack. This machine runs
+# ONLY the `$KB_STACK_NAME-*` (default `kb-smoke-*`) containers belong to this stack. This machine runs
 # other people's containers (ClickHouse, Postgres); `stack-down.sh` never names
 # anything else, and neither should any script that sources stack.env.
 set -euo pipefail
@@ -52,12 +59,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$WORKSPACE_ROOT/.." && pwd)"
 
-PG_CONTAINER="kb-smoke-pg"
-SURREAL_CONTAINER="kb-smoke-surreal"
-RUSTFS_CONTAINER="kb-smoke-rustfs"
-TEI_EMBED_CONTAINER="kb-smoke-tei-embed"
-TEI_RERANK_CONTAINER="kb-smoke-tei-rerank"
-QDRANT_CONTAINER="kb-smoke-qdrant"
+STACK_NAME="${KB_STACK_NAME:-kb-smoke}"
+PG_CONTAINER="${STACK_NAME}-pg"
+SURREAL_CONTAINER="${STACK_NAME}-surreal"
+RUSTFS_CONTAINER="${STACK_NAME}-rustfs"
+TEI_EMBED_CONTAINER="${STACK_NAME}-tei-embed"
+TEI_RERANK_CONTAINER="${STACK_NAME}-tei-rerank"
+QDRANT_CONTAINER="${STACK_NAME}-qdrant"
+SERVER_SESSION="${STACK_NAME}-server"
+STUB_SESSION="${STACK_NAME}-stub"
 
 PG_PORT="${KB_STACK_PG_PORT:-15432}"
 SURREAL_PORT="${KB_STACK_SURREAL_PORT:-18000}"
@@ -81,6 +91,7 @@ KB_STACK_EMBEDDINGS="${KB_STACK_EMBEDDINGS:-stub}"
 # gate stacks keep behaving exactly as they did before the graph existed.
 KB_STACK_GRAPH="${KB_STACK_GRAPH:-0}"
 KB_STACK_GRAPH_ARM="${KB_STACK_GRAPH_ARM:-0}"
+KB_STACK_PAGE_ARM="${KB_STACK_PAGE_ARM:-0}"
 KB_STACK_RESTART_SERVER="${KB_STACK_RESTART_SERVER:-0}"
 KB_STACK_RERANK="${KB_STACK_RERANK:-none}"
 if [ "$KB_CHUNK_STORE" = "qdrant" ]; then
@@ -126,6 +137,51 @@ GRAPH_ENV
   fi
 }
 
+# Apply the page-image-arm option to stack.env, idempotently for the same reason
+# as the graph options. The arm's embedder is the stub's /page-embeddings, at
+# the stub's dimension; libpdfium is pinned by path because the server renders
+# pages with it and a server started under tmux has no useful cwd to search.
+write_page_env() {
+  grep -v -E '^export (KB_PAGE_|PDFIUM_DYNAMIC_LIB_PATH)' "$STACK_ENV" > "$STACK_ENV.new" || true
+  mv "$STACK_ENV.new" "$STACK_ENV"
+  if [ "$KB_STACK_PAGE_ARM" = "1" ]; then
+    if [ "$KB_CHUNK_STORE" != "qdrant" ]; then
+      echo "KB_STACK_PAGE_ARM=1 needs KB_CHUNK_STORE=qdrant: the page index is a Qdrant collection" >&2
+      exit 1
+    fi
+    cat >> "$STACK_ENV" <<PAGE_ENV
+export KB_PAGE_EMBEDDING_MODEL="stub-page"
+export KB_PAGE_EMBEDDING_BASE_URL="http://127.0.0.1:${STUB_PORT}/page-embeddings"
+export KB_PAGE_EMBEDDING_API_KEY="stub"
+export KB_PAGE_EMBEDDING_DIM="8"
+PAGE_ENV
+    if [ -z "${PDFIUM_DYNAMIC_LIB_PATH:-}" ] && [ -f "$WORKSPACE_ROOT/.vendor/pdfium/lib/libpdfium.so" ]; then
+      echo "export PDFIUM_DYNAMIC_LIB_PATH=\"$WORKSPACE_ROOT/.vendor/pdfium/lib/libpdfium.so\"" >> "$STACK_ENV"
+    elif [ -n "${PDFIUM_DYNAMIC_LIB_PATH:-}" ]; then
+      echo "export PDFIUM_DYNAMIC_LIB_PATH=\"$PDFIUM_DYNAMIC_LIB_PATH\"" >> "$STACK_ENV"
+    fi
+  fi
+}
+
+start_stub() {
+  echo "Starting stub embedding server on port ${STUB_PORT}..."
+  if command -v tmux >/dev/null 2>&1; then
+    tmux kill-session -t "$STUB_SESSION" 2>/dev/null || true
+    tmux new-session -d -s "$STUB_SESSION" "bash -c 'echo \$\$ > \"$STUB_PID_FILE\" && exec \"$STUB_BIN\" \"127.0.0.1:${STUB_PORT}\" 8 > \"$STUB_LOG\" 2>&1'"
+  else
+    nohup "$STUB_BIN" "127.0.0.1:${STUB_PORT}" 8 > "$STUB_LOG" 2>&1 &
+    echo $! > "$STUB_PID_FILE"
+  fi
+
+  for _ in {1..30}; do
+    if curl -s "http://127.0.0.1:${STUB_PORT}/health" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.5
+  done
+  echo "stub embeddings on 127.0.0.1:${STUB_PORT} (pid $(cat "$STUB_PID_FILE"))"
+}
+
 alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
 
 read_pid() { [ -f "$1" ] && cat "$1" || true; }
@@ -137,11 +193,16 @@ if alive "$(read_pid "$SERVER_PID_FILE")"; then
     # Tearing the stack down would drop the Postgres volume and the ingest with
     # it, which is an hour of CPU for nothing.
     write_graph_env
-    tmux kill-session -t kb-smoke-server 2>/dev/null || true
+    write_page_env
+    if [ "$KB_STACK_PAGE_ARM" = "1" ] && ! alive "$(read_pid "$STUB_PID_FILE")"; then
+      [ -f "$STUB_BIN" ] || cargo build -p kb-server --example stub_embeddings --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
+      start_stub
+    fi
+    tmux kill-session -t "$SERVER_SESSION" 2>/dev/null || true
     kill "$(read_pid "$SERVER_PID_FILE")" 2>/dev/null || true
     sleep 1
     if command -v tmux >/dev/null 2>&1; then
-      tmux new-session -d -s kb-smoke-server "bash -c 'source \"$STACK_ENV\" && echo \$\$ > \"$SERVER_PID_FILE\" && exec \"$KB_SERVER_BIN\" serve > \"$SERVER_LOG\" 2>&1'"
+      tmux new-session -d -s "$SERVER_SESSION" "bash -c 'source \"$STACK_ENV\" && echo \$\$ > \"$SERVER_PID_FILE\" && exec \"$KB_SERVER_BIN\" serve > \"$SERVER_LOG\" 2>&1'"
     else
       nohup "$KB_SERVER_BIN" serve > "$SERVER_LOG" 2>&1 &
       echo $! > "$SERVER_PID_FILE"
@@ -150,11 +211,11 @@ if alive "$(read_pid "$SERVER_PID_FILE")"; then
       curl -s "http://127.0.0.1:${SERVER_PORT}/health" | grep -q '"ok":true' && break
       sleep 0.5
     done
-    echo "kb-smoke kb-server restarted with the current KB_STACK_* options"
+    echo "${STACK_NAME} kb-server restarted with the current KB_STACK_* options"
     echo "source $STACK_ENV   # then rust/scripts/stack-down.sh to stop it"
     exit 0
   fi
-  echo "kb-smoke stack already up: kb-server on http://127.0.0.1:${SERVER_PORT} (pid $(read_pid "$SERVER_PID_FILE"))"
+  echo "${STACK_NAME} stack already up: kb-server on http://127.0.0.1:${SERVER_PORT} (pid $(read_pid "$SERVER_PID_FILE"))"
   echo "source $STACK_ENV   # then rust/scripts/stack-down.sh to stop it"
   exit 0
 fi
@@ -165,8 +226,8 @@ rm -f "$STUB_PID_FILE" "$SERVER_PID_FILE"
 echo "Host memory status:"
 free -h
 
-echo "=== 1. Starting kb-smoke base containers ==="
-# Only kb-smoke-* names. Nothing else on this host is ours.
+echo "=== 1. Starting ${STACK_NAME} base containers ==="
+# Only ${STACK_NAME}-* names. Nothing else on this host is ours.
 docker rm -f "$PG_CONTAINER" "$SURREAL_CONTAINER" "$RUSTFS_CONTAINER" "$TEI_EMBED_CONTAINER" "$TEI_RERANK_CONTAINER" "$QDRANT_CONTAINER" >/dev/null 2>&1 || true
 
 docker run -d --name "$PG_CONTAINER" \
@@ -242,7 +303,7 @@ if [ "$KB_STACK_QDRANT" = "1" ]; then
 fi
 
 echo "=== 2. Building binaries (before memory-heavy models start) ==="
-if [ "$KB_STACK_EMBEDDINGS" = "stub" ]; then
+if [ "$KB_STACK_EMBEDDINGS" = "stub" ] || [ "$KB_STACK_PAGE_ARM" = "1" ]; then
   [ -f "$STUB_BIN" ] || cargo build -p kb-server --example stub_embeddings --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
 fi
 [ -f "$KB_SERVER_BIN" ] || cargo build -p kb-server --bin kb-server --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
@@ -287,22 +348,11 @@ elif [ "$KB_STACK_EMBEDDINGS" = "openrouter" ]; then
   fi
   echo "Embeddings from OpenRouter (${KB_STACK_OR_MODEL:-qwen/qwen3-embedding-8b}); no local model started."
 else
-  echo "Starting stub embedding server on port ${STUB_PORT}..."
-  if command -v tmux >/dev/null 2>&1; then
-    tmux kill-session -t kb-smoke-stub 2>/dev/null || true
-    tmux new-session -d -s kb-smoke-stub "bash -c 'echo \$\$ > \"$STUB_PID_FILE\" && exec \"$STUB_BIN\" \"127.0.0.1:${STUB_PORT}\" 8 > \"$STUB_LOG\" 2>&1'"
-  else
-    nohup "$STUB_BIN" "127.0.0.1:${STUB_PORT}" 8 > "$STUB_LOG" 2>&1 &
-    echo $! > "$STUB_PID_FILE"
-  fi
-
-  for _ in {1..30}; do
-    if curl -s "http://127.0.0.1:${STUB_PORT}/health" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 0.5
-  done
-  echo "stub embeddings on 127.0.0.1:${STUB_PORT} (pid $(cat "$STUB_PID_FILE"))"
+  start_stub
+fi
+# The page arm's embedder is the stub too, whatever embeds the text.
+if [ "$KB_STACK_PAGE_ARM" = "1" ] && [ "$KB_STACK_EMBEDDINGS" != "stub" ]; then
+  start_stub
 fi
 
 if [ "$KB_STACK_RERANK" = "tei" ]; then
@@ -359,9 +409,11 @@ export KB_STACK_SURREAL_CONTAINER="$SURREAL_CONTAINER"
 export KB_STACK_RUSTFS_CONTAINER="$RUSTFS_CONTAINER"
 export KB_STACK_TEI_EMBED_CONTAINER="$TEI_EMBED_CONTAINER"
 export KB_STACK_TEI_RERANK_CONTAINER="$TEI_RERANK_CONTAINER"
+export KB_STACK_NAME="$STACK_NAME"
 EOF
 
 write_graph_env
+write_page_env
 
 # QDRANT_URL is exported only when Qdrant was actually started, so a script that
 # sources stack.env cannot be handed a URL that answers nothing.
@@ -472,8 +524,8 @@ echo "=== 4. Migrations and vector schema ==="
 
 echo "=== 5. Starting kb-server ==="
 if command -v tmux >/dev/null 2>&1; then
-  tmux kill-session -t kb-smoke-server 2>/dev/null || true
-  tmux new-session -d -s kb-smoke-server "bash -c 'source \"$STACK_ENV\" && echo \$\$ > \"$SERVER_PID_FILE\" && exec \"$KB_SERVER_BIN\" serve > \"$SERVER_LOG\" 2>&1'"
+  tmux kill-session -t "$SERVER_SESSION" 2>/dev/null || true
+  tmux new-session -d -s "$SERVER_SESSION" "bash -c 'source \"$STACK_ENV\" && echo \$\$ > \"$SERVER_PID_FILE\" && exec \"$KB_SERVER_BIN\" serve > \"$SERVER_LOG\" 2>&1'"
 else
   nohup "$KB_SERVER_BIN" serve > "$SERVER_LOG" 2>&1 &
   echo $! > "$SERVER_PID_FILE"
@@ -493,7 +545,7 @@ if ! curl -s "http://127.0.0.1:${SERVER_PORT}/health" | grep -q '"ok":true'; the
 fi
 
 echo ""
-echo "kb-smoke stack is up."
+echo "${STACK_NAME} stack is up."
 echo "  kb-server   http://127.0.0.1:${SERVER_PORT}  (pid $(cat "$SERVER_PID_FILE"), log $SERVER_LOG)"
 echo "  postgres    127.0.0.1:${PG_PORT}   surreal 127.0.0.1:${SURREAL_PORT}   s3 127.0.0.1:${S3_PORT}"
 if [ "$KB_STACK_EMBEDDINGS" = "tei" ]; then
@@ -505,6 +557,9 @@ else
 fi
 if [ "$KB_STACK_RERANK" = "tei" ]; then
   echo "  tei-rerank  http://127.0.0.1:${TEI_RERANK_PORT} (bge-reranker-v2-m3)"
+fi
+if [ "$KB_STACK_PAGE_ARM" = "1" ]; then
+  echo "  page arm    stub-page via http://127.0.0.1:${STUB_PORT}/page-embeddings (dim 8, one vector for all)"
 fi
 if [ "$KB_STACK_QDRANT" = "1" ]; then
   echo "  qdrant      http://127.0.0.1:${QDRANT_HTTP_PORT} (grpc 127.0.0.1:${QDRANT_GRPC_PORT}, ${QDRANT_IMAGE})"
