@@ -1,0 +1,5 @@
+text: 876 s wall (ingest + queries)
+text-bge20: 838 s for 318 queries
+text-qwen8b20: 300 s for 318 queries
+pdf20: 874 s wall (ingest + queries)
+pdf20-bge20: 799 s for 318 queries
