@@ -213,6 +213,22 @@ async def rerank_tei(client: httpx.AsyncClient, model: str, query: str, document
     return order, scores, 0.0, None
 
 
+async def rerank_llama(client: httpx.AsyncClient, base: str, query: str, documents: list[str]):
+    """POST {base}/v1/rerank: llama.cpp's server (`--reranking`), e.g. the LAN
+    RX 590. The key is LLAMA_GPU_API_KEY. One request per query, every
+    candidate in it, as the engine would send them.
+    """
+    resp = await client.post(
+        base.rstrip("/") + "/v1/rerank",
+        headers={"Authorization": f"Bearer {os.environ.get('LLAMA_GPU_API_KEY', '')}"},
+        json={"model": "x", "query": query, "documents": documents},
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"llama rerank failed: {resp.status_code} {resp.text[:200]}")
+    rows = sorted(resp.json()["results"], key=lambda r: r["relevance_score"], reverse=True)
+    return [r["index"] for r in rows], [r["relevance_score"] for r in rows], 0.0, None
+
+
 # ---------- the run ----------
 
 
@@ -222,9 +238,13 @@ async def main() -> int:
     ap.add_argument("--dataset", type=Path, required=True, help="dataset dir (for queries.jsonl and qrels/test.tsv)")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--model", action="append", required=True,
-                    help="backend:target, e.g. openrouter:qwen/qwen3-reranker-8b or tei:http://127.0.0.1:18082/rerank")
+                    help="backend:target, e.g. openrouter:qwen/qwen3-reranker-8b, tei:http://127.0.0.1:18082/rerank "
+                         "or llama:http://192.168.18.92:8082")
     ap.add_argument("--name", action="append", default=[], help="a name for the model (defaults to the target)")
     ap.add_argument("--limit", type=int, default=0, help="only the first N queries (a probe)")
+    ap.add_argument("--depth", type=int, default=0,
+                    help="rerank only the first N candidates; the rest keep their fused order "
+                         "after them, as in the engine (0 = all)")
     ap.add_argument("--budget", type=float, default=0.50, help="hard cap on the paid spend of this run, in USD")
     ap.add_argument("--concurrency", type=int, default=4)
     ap.add_argument("--cache", type=Path, default=None, help="cache file (default <out>/rerank-cache.jsonl)")
@@ -314,6 +334,9 @@ async def main() -> int:
         elif backend == "tei":
             async def call(client, query, documents, target=target):
                 return await rerank_tei(client, target, query, documents)
+        elif backend == "llama":
+            async def call(client, query, documents, target=target):
+                return await rerank_llama(client, target, query, documents)
         elif backend == "cache":
             # A model that was run by another script and left in the cache
             # (the local Qwen3 reranker, which TEI cannot serve). It is never
@@ -330,7 +353,8 @@ async def main() -> int:
 
         # The documents the reranker sees: the chunk's own text, full, not
         # truncated — the same text the engine hands its own reranker.
-        documents_by_qid = {qid: [c["text"] for c in cands[qid]] for qid in qids}
+        depth = args.depth or None
+        documents_by_qid = {qid: [c["text"] for c in cands[qid][:depth]] for qid in qids}
         total_chars = sum(len(t) for docs in documents_by_qid.values() for t in docs)
         est_tokens = total_chars / CHARS_PER_TOKEN
         print(f"\n=== {label} ({backend}:{target}) ===", file=sys.stderr)
@@ -417,6 +441,10 @@ async def main() -> int:
             print(f"STOP: the total spend ${spent:.4f} is over the ${args.budget} budget", file=sys.stderr)
             return 2
 
+        # The candidates past --depth were not reranked: they follow, in fused order.
+        for qid in orders:
+            n = len(documents_by_qid[qid])
+            orders[qid] = list(orders[qid]) + list(range(n, len(cands[qid])))
         run = doc_run(orders)
         m = metrics(run, qrels_eval)
         row = {

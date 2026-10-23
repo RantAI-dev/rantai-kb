@@ -23,6 +23,10 @@
 #                                   # instruction); KB_STACK_REMOTE_EMBED_MODEL / _DIM override.
 #   KB_SERVER_BIN=.../release/kb-server  # a prebuilt binary (e.g. release, for latency runs)
 #   KB_STACK_RERANK=tei             # starts kb-smoke-tei-rerank (bge-reranker-v2-m3)
+#   KB_STACK_RERANK=remote          # a llama.cpp --reranking server elsewhere:
+#                                   # KB_STACK_REMOTE_RERANK_URL (base, e.g. http://host:8082),
+#                                   # key KB_STACK_REMOTE_RERANK_KEY (default: the embed key),
+#                                   # KB_STACK_RERANK_CANDIDATES (default 10) reranked per query
 #   KB_STACK_QDRANT=1               # starts kb-smoke-qdrant (Qdrant v1.19.2; HTTP 6333, gRPC 6334)
 #   KB_STACK_GRAPH=1                # ingest writes the Postgres entity graph, with the free
 #                                   # heuristic extractor instead of the OpenRouter one
@@ -415,6 +419,18 @@ export KB_RERANK_PROVIDER="tei"
 export KB_RERANK_BASE_URL="http://127.0.0.1:${TEI_RERANK_PORT}"
 export KB_RERANK_MODEL="BAAI/bge-reranker-v2-m3"
 export KB_RERANK_API_KEY="unused-for-tei"
+EOF
+elif [ "$KB_STACK_RERANK" = "remote" ]; then
+  # llama.cpp's /v1/rerank takes the Cohere request shape, so the cohere
+  # adapter talks to it; KB_RERANK_BASE_URL is that adapter's full endpoint.
+  cat >> "$STACK_ENV" <<EOF
+export KB_RERANK_ENABLED="true"
+export KB_RERANK_PROVIDER="cohere"
+export KB_RERANK_BASE_URL="${KB_STACK_REMOTE_RERANK_URL%/}/v1/rerank"
+export KB_RERANK_MODEL="${KB_STACK_REMOTE_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}"
+export KB_RERANK_API_KEY="${KB_STACK_REMOTE_RERANK_KEY:-${KB_STACK_REMOTE_EMBED_KEY:-}}"
+export KB_RERANK_CANDIDATE_LIMIT="${KB_STACK_RERANK_CANDIDATES:-10}"
+export KB_RERANK_TIMEOUT_MS="${KB_STACK_RERANK_TIMEOUT_MS:-20000}"
 EOF
 else
   cat >> "$STACK_ENV" <<EOF

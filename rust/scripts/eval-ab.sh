@@ -50,6 +50,9 @@ for arm in "$@"; do
   source "$STACK_DIR/stack.env"
   key="$("$bin" create-api-key "ab-$label" "ab-$label" --scopes kb:read,kb:write | grep -oE 'rkb_[A-Za-z0-9_-]+' | head -n 1)"
   test -n "$key"
+  # Kept outside the output dir (which is committed) for eval-variants.sh,
+  # which queries this arm's tenant again.
+  (umask 077; echo "$key" > "$STACK_DIR/ab-key-$label")
   rm -rf "${OUT:?}/$label"
   start=$(date +%s)
   "$CLIENT_BIN" eval \
@@ -57,9 +60,11 @@ for arm in "$@"; do
     --api-key "$key" \
     --dataset "$DATASET" \
     --out "$OUT/$label" \
-    --label "$label"
+    --label "$label" \
+    ${KB_AB_MAX_CHUNKS:+--max-chunks "$KB_AB_MAX_CHUNKS"}
   echo "$label: $(( $(date +%s) - start )) s wall (ingest + queries)" | tee -a "$OUT/timings.txt"
 done
 
-"$SCRIPT_DIR/stack-down.sh" >/dev/null 2>&1 || true
+# KB_AB_KEEP=1 leaves the last arm's stack up, for eval-variants.sh.
+[ "${KB_AB_KEEP:-0}" = "1" ] || "$SCRIPT_DIR/stack-down.sh" >/dev/null 2>&1 || true
 echo "results in $OUT"
