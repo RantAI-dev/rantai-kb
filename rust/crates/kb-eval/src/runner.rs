@@ -11,6 +11,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -39,6 +40,10 @@ pub struct RunnerConfig {
     /// How long to wait for one ingest job before giving up on it.
     pub job_timeout: Duration,
     pub poll_interval: Duration,
+    /// How many corpus files are uploaded and awaited at once. One at a time
+    /// costs a poll interval per file on both sides (client and worker), so a
+    /// 3,000-file corpus spends most of its ingest asleep.
+    pub ingest_concurrency: usize,
 }
 
 impl RunnerConfig {
@@ -61,6 +66,7 @@ impl RunnerConfig {
             gain: Gain::default(),
             job_timeout: Duration::from_secs(900),
             poll_interval: Duration::from_millis(500),
+            ingest_concurrency: 16,
         }
     }
 }
@@ -381,7 +387,8 @@ fn endpoint(base_url: &str, path: &str) -> String {
     format!("{}{}", base_url.trim_end_matches('/'), path)
 }
 
-/// Upload every corpus file, polling each job to completion.
+/// Upload every corpus file, polling each job to completion, with up to
+/// `ingest_concurrency` files in flight.
 ///
 /// Reuses an existing `ingest-map.json` so a partial re-run does not re-upload
 /// files that already landed. Failures are counted, logged and skipped: the
@@ -400,11 +407,16 @@ async fn ingest_all(
         HashMap::new()
     };
     let mut failures: Vec<Failure> = Vec::new();
-    for file in &dataset.corpus {
-        if map.contains_key(&file.key) {
-            continue;
-        }
-        match ingest_one(client, config, file).await {
+    let pending: Vec<_> = dataset
+        .corpus
+        .iter()
+        .filter(|file| !map.contains_key(&file.key))
+        .collect();
+    let mut results = futures::stream::iter(pending)
+        .map(|file| async move { (file, ingest_one(client, config, file).await) })
+        .buffer_unordered(config.ingest_concurrency.max(1));
+    while let Some((file, result)) = results.next().await {
+        match result {
             Ok(IngestOutcome::Landed(document_id)) => {
                 map.insert(file.key.clone(), document_id);
                 save_ingest_map(&map_path, &map)?;

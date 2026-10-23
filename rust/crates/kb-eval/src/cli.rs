@@ -79,6 +79,8 @@ RUN FLAGS
     --label LABEL       run label written into the outputs (default run)
     --timeout SECS      per-job ingest timeout (default 900)
     --poll-ms MS        job poll interval (default 500)
+    --ingest-concurrency N
+                        corpus files uploaded at once (default 16)
     --allow-failures    exit 0 even when queries or corpus files failed
                         (the outputs are written either way)
 
@@ -138,6 +140,7 @@ async fn eval(args: &[String]) -> Result<(), EvalError> {
     config.gain = parse_gain(args)?;
     config.job_timeout = Duration::from_secs(parse_uint_u64(args, "--timeout", 900)?);
     config.poll_interval = Duration::from_millis(parse_uint_u64(args, "--poll-ms", 500)?);
+    config.ingest_concurrency = parse_uint(args, "--ingest-concurrency", 16)?.max(1);
 
     let allow_failures = has_flag(args, "--allow-failures");
     let report = run_harness(config).await?;
