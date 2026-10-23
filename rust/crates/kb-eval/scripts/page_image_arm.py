@@ -27,6 +27,8 @@ ap.add_argument("--workers", type=int, default=4)
 ap.add_argument("--rrf-k", type=int, default=60)
 ap.add_argument("--max-cost", type=float, default=1.0, help="stop if spend passes this (USD)")
 ap.add_argument("--text", action="append", default=[], help="name=path to a page-level TREC run")
+ap.add_argument("--page-text-dir", default="", help="extract_dump outputs (<doc>.txt); embed each page as its text + image")
+ap.add_argument("--page-text-chars", type=int, default=6000)
 a = ap.parse_args()
 
 key = next(l.split("=", 1)[1].strip().strip('"') for l in open(a.env) if l.startswith("OPENROUTER_API_KEY="))
@@ -118,7 +120,32 @@ def image_input(b):
                          "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(b).decode()}}]}
 
 
-page_vec = embed_all([(pid, open(p, "rb").read()) for pid, p in pages], "page", image_input, "document")
+def page_texts(d):
+    import re
+    out = {}
+    for f in os.listdir(d):
+        if not f.endswith(".txt"):
+            continue
+        parts = re.split(r"^===== page (\d+) =====\n", open(os.path.join(d, f)).read(), flags=re.M)
+        for i in range(1, len(parts), 2):
+            out[f"{f[:-4]}#p{int(parts[i])}"] = parts[i + 1].strip()[: a.page_text_chars]
+    return out
+
+
+if a.page_text_dir:
+    texts = page_texts(a.page_text_dir)
+    print(f"page texts: {len(texts)}", file=sys.stderr)
+
+    def text_image_input(payload):
+        pid, img = payload.split(b"\0", 1)
+        t = texts.get(pid.decode(), "")
+        content = ([{"type": "text", "text": t}] if t else []) + image_input(img)["content"]
+        return {"content": content}
+
+    page_vec = embed_all([(pid, pid.encode() + b"\0" + open(p, "rb").read()) for pid, p in pages],
+                         "page+text", text_image_input, "document")
+else:
+    page_vec = embed_all([(pid, open(p, "rb").read()) for pid, p in pages], "page", image_input, "document")
 queries = [json.loads(l) for l in open(os.path.join(a.dataset, "queries.jsonl"))]
 query_vec = embed_all([(q["_id"], q["text"].encode()) for q in queries], "query",
                       lambda b: b.decode(), "query")
@@ -133,7 +160,7 @@ def norm(v):
 pids = [pid for pid, _ in pages]
 P = [norm(page_vec[pid]) for pid in pids]
 image_run = {}
-with open(os.path.join(a.out, "image.page.trec"), "w") as f:
+with open(os.path.join(a.out, ("textimage" if a.page_text_dir else "image") + ".page.trec"), "w") as f:
     for q in queries:
         qv = norm(query_vec[q["_id"]])
         scores = sorted(((sum(x * y for x, y in zip(qv, pv)), pid) for pid, pv in zip(pids, P)), reverse=True)[:100]

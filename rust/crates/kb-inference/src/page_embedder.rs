@@ -118,7 +118,12 @@ impl HttpPageEmbedder {
 
 fn image_input(page: &PageImage) -> serde_json::Value {
     let b64 = base64::engine::general_purpose::STANDARD.encode(&page.bytes);
-    json!({"content": [{"type": "image_url", "image_url": {"url": format!("data:{};base64,{b64}", page.mime)}}]})
+    let image = json!({"type": "image_url", "image_url": {"url": format!("data:{};base64,{b64}", page.mime)}});
+    if page.text.trim().is_empty() {
+        json!({ "content": [image] })
+    } else {
+        json!({ "content": [{"type": "text", "text": page.text}, image] })
+    }
 }
 
 #[async_trait]
@@ -224,6 +229,7 @@ mod tests {
             page: n,
             mime: "image/jpeg".into(),
             bytes: vec![7; len],
+            text: String::new(),
         }
     }
 
@@ -244,6 +250,25 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(url.starts_with("data:image/jpeg;base64,"));
+    }
+
+    #[tokio::test]
+    async fn a_page_with_text_goes_as_text_then_image() {
+        let (url, seen) = fake().await;
+        let e = HttpPageEmbedder::new(settings(url, 3)).unwrap();
+        let mut p = page(0, 3);
+        p.text = "Table 2: wages by country".into();
+        e.embed_pages(&[p, page(1, 3)]).await.unwrap();
+        let seen = seen.lock().unwrap();
+        let first = &seen[0]["input"][0]["content"];
+        assert_eq!(first[0]["type"], "text");
+        assert_eq!(first[0]["text"], "Table 2: wages by country");
+        assert_eq!(first[1]["type"], "image_url");
+        assert_eq!(
+            seen[0]["input"][1]["content"].as_array().unwrap().len(),
+            1,
+            "no text, image only"
+        );
     }
 
     #[tokio::test]

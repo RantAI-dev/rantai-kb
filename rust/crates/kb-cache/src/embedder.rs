@@ -24,6 +24,8 @@ pub struct CachedEmbedder {
     inner: Arc<dyn Embedder>,
     cache: DiskCache,
     fingerprint: String,
+    query_prefix: String,
+    passage_prefix: String,
 }
 
 impl CachedEmbedder {
@@ -35,11 +37,33 @@ impl CachedEmbedder {
             inner,
             cache,
             fingerprint: fingerprint.into(),
+            query_prefix: String::new(),
+            passage_prefix: String::new(),
         }
     }
 
+    /// The prefixes the inner embedder wraps around queries and passages.
+    /// Each side's key depends only on its own prefix, so changing the query
+    /// instruction never invalidates the (far more numerous) passage vectors.
+    #[must_use]
+    pub fn with_prefixes(mut self, query_prefix: &str, passage_prefix: &str) -> Self {
+        self.query_prefix = query_prefix.to_string();
+        self.passage_prefix = passage_prefix.to_string();
+        self
+    }
+
     fn key(&self, kind: &[u8], text: &str) -> CacheKey {
-        CacheKey::from_parts(&[self.fingerprint.as_bytes(), kind, text.as_bytes()])
+        let prefix = if kind == b"query" {
+            &self.query_prefix
+        } else {
+            &self.passage_prefix
+        };
+        CacheKey::from_parts(&[
+            self.fingerprint.as_bytes(),
+            kind,
+            prefix.as_bytes(),
+            text.as_bytes(),
+        ])
     }
 
     async fn load(&self, key: &CacheKey) -> Option<Vec<f32>> {

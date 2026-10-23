@@ -73,6 +73,7 @@ pub fn render_pdf_pages(
             page: index,
             mime: "image/jpeg".to_string(),
             bytes,
+            text: String::new(),
         });
     }
     Ok(out)

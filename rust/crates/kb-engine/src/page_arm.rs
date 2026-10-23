@@ -231,6 +231,8 @@ pub struct PageIngest {
     pub index: Arc<dyn RetrievalIndex>,
     /// Pages rendered per document, at most.
     pub max_pages: u32,
+    /// Characters of each page's text embedded with its image; 0 = image only.
+    pub text_chars: usize,
 }
 
 /// Page ids are derived, so a re-ingest overwrites rather than duplicates.
@@ -248,6 +250,7 @@ impl PageIngest {
     /// # Errors
     ///
     /// Rendering, embedding or storing failed.
+    #[allow(clippy::too_many_arguments)]
     pub async fn index_document(
         &self,
         tenant: &TenantId,
@@ -256,14 +259,22 @@ impl PageIngest {
         mime_type: &str,
         bytes: &[u8],
         chunks_by_page: &HashMap<u32, Vec<ChunkId>>,
+        page_texts: &HashMap<u32, String>,
     ) -> Result<usize, PortError> {
         self.index.delete_document(tenant, document_id).await?;
-        let pages = self
+        let mut pages = self
             .renderer
             .render(mime_type, bytes, self.max_pages)
             .await?;
         if pages.is_empty() {
             return Ok(0);
+        }
+        if self.text_chars > 0 {
+            for p in &mut pages {
+                if let Some(t) = page_texts.get(&p.page) {
+                    p.text = t.trim().chars().take(self.text_chars).collect();
+                }
+            }
         }
         let vectors = self.embedder.embed_pages(&pages).await?;
         if vectors.len() != pages.len() {

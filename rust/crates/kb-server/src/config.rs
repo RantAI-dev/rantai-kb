@@ -119,6 +119,9 @@ pub struct PageArmSettings {
     pub embedder: kb_inference::PageEmbedderSettings,
     pub dpi: u32,
     pub max_pages: u32,
+    /// Characters of each page's text embedded with its image
+    /// (`KB_PAGE_TEXT_CHARS`, default 6000; 0 = image only).
+    pub text_chars: usize,
     pub arm: kb_engine::PageArmConfig,
 }
 
@@ -224,16 +227,14 @@ pub struct EmbedderConfig {
 }
 
 impl EmbedderConfig {
-    /// What a cached vector depends on: the model, its dimension and the
-    /// prefixes wrapped around every text. Not the URL: the same model served
-    /// from another host yields the same vectors. A different quantisation
-    /// behind the same model name is what `KB_EMBEDDING_CACHE_TAG` is for.
+    /// What a cached vector depends on besides its text and prefix: the model
+    /// and its dimension. Not the URL: the same model served from another host
+    /// yields the same vectors. A different quantisation behind the same model
+    /// name is what `KB_EMBEDDING_CACHE_TAG` is for. The query and passage
+    /// prefixes are keyed per side by `kb_cache::CachedEmbedder::with_prefixes`.
     #[must_use]
     pub fn cache_fingerprint(&self, tag: &str) -> String {
-        format!(
-            "model={}|dim={}|qp={}|pp={}|tag={tag}",
-            self.model, self.dimension, self.query_prefix, self.passage_prefix
-        )
+        format!("model={}|dim={}|tag={tag}", self.model, self.dimension)
     }
 }
 
@@ -563,6 +564,7 @@ impl Config {
                     },
                     dpi: int_var(&lookup, "KB_PAGE_IMAGE_DPI", 96u32)?.clamp(36, 300),
                     max_pages: int_var(&lookup, "KB_PAGE_IMAGE_MAX_PAGES", 500u32)?,
+                    text_chars: int_var(&lookup, "KB_PAGE_TEXT_CHARS", 6000usize)?,
                     arm: kb_engine::PageArmConfig {
                         image_weight: float_var(&lookup, "KB_PAGE_ARM_WEIGHT", 0.5)?
                             .clamp(0.0, 1.0),

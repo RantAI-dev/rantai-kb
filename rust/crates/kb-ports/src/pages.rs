@@ -23,6 +23,10 @@ pub struct PageImage {
     /// `image/jpeg` or `image/png`.
     pub mime: String,
     pub bytes: Vec<u8>,
+    /// The page's own text (its text layer), embedded together with the image
+    /// when not empty. On ViDoRe v3 HR, text + image page vectors scored 0.605
+    /// alone against 0.575 for the image alone (`docs/eval-ab/vidore3-hr-en-image`).
+    pub text: String,
 }
 
 /// Renders a stored file's pages to images.

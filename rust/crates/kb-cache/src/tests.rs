@@ -322,6 +322,7 @@ async fn page_vectors_are_cached_by_image_bytes_and_queries_by_text() {
         page,
         mime: "image/jpeg".into(),
         bytes: vec![1; n],
+        text: String::new(),
     };
     let a = cached.embed_pages(&[img(0, 3), img(1, 5)]).await.unwrap();
     // Same bytes on another page number (a repeated slide): a hit.
@@ -336,5 +337,31 @@ async fn page_vectors_are_cached_by_image_bytes_and_queries_by_text() {
     cached.embed_query("wages").await.unwrap();
     cached.embed_query("wages").await.unwrap();
     assert_eq!(inner.queries.load(Ordering::SeqCst), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn a_new_query_prefix_keeps_the_passage_vectors() {
+    let root = temp_root();
+    let inner = Arc::new(CountingEmbedder::default());
+    let a =
+        CachedEmbedder::new(inner.clone(), DiskCache::new(&root), "m").with_prefixes("Q1: ", "");
+    a.embed_passages(&texts(&["x", "y"])).await.unwrap();
+    a.embed_query("q").await.unwrap();
+    let b =
+        CachedEmbedder::new(inner.clone(), DiskCache::new(&root), "m").with_prefixes("Q2: ", "");
+    b.embed_passages(&texts(&["x", "y"])).await.unwrap();
+    b.embed_query("q").await.unwrap();
+    assert_eq!(inner.passages.load(Ordering::SeqCst), 2, "passages reused");
+    assert_eq!(
+        inner.queries.load(Ordering::SeqCst),
+        2,
+        "a new query prefix re-embeds queries"
+    );
+    // A new passage prefix does re-embed passages.
+    let c =
+        CachedEmbedder::new(inner.clone(), DiskCache::new(&root), "m").with_prefixes("Q2: ", "P: ");
+    c.embed_passages(&texts(&["x"])).await.unwrap();
+    assert_eq!(inner.passages.load(Ordering::SeqCst), 3);
     let _ = std::fs::remove_dir_all(root);
 }

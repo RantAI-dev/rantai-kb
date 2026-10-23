@@ -724,6 +724,12 @@ impl IngestWorker {
         // is still searchable by text; it just has no image arm, and the log says
         // so rather than the document failing.
         if let Some(pages) = &self.page_ingest {
+            let page_texts_by_page: HashMap<u32, String> = extraction
+                .page_map
+                .iter()
+                .flatten()
+                .map(|p| (p.page, p.text.clone()))
+                .collect();
             let category = chunks.first().map(|c| c.metadata.category.clone());
             match pages
                 .index_document(
@@ -733,6 +739,7 @@ impl IngestWorker {
                     mime,
                     &bytes,
                     &chunks_by_page,
+                    &page_texts_by_page,
                 )
                 .await
             {

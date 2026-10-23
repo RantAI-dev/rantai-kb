@@ -135,11 +135,17 @@ impl AppState {
         if let Some(cache) = config.cache.as_ref() {
             let fingerprint = config.embedder.cache_fingerprint(&cache.embedding_tag);
             tracing::info!(dir = %cache.dir.display(), %fingerprint, "embedding disk cache on");
-            embedder = Arc::new(kb_cache::CachedEmbedder::new(
-                embedder,
-                kb_cache::DiskCache::new(&cache.dir),
-                fingerprint,
-            ));
+            embedder = Arc::new(
+                kb_cache::CachedEmbedder::new(
+                    embedder,
+                    kb_cache::DiskCache::new(&cache.dir),
+                    fingerprint,
+                )
+                .with_prefixes(
+                    &config.embedder.query_prefix,
+                    &config.embedder.passage_prefix,
+                ),
+            );
         }
         let reranker: Arc<dyn kb_ports::Reranker> =
             build_reranker(&config.reranker).map_err(|e| anyhow::anyhow!("reranker: {e}"))?;
@@ -270,6 +276,7 @@ impl AppState {
                 embedder: Arc::clone(&arm.embedder),
                 index: Arc::clone(&arm.index),
                 max_pages: pages.max_pages,
+                text_chars: pages.text_chars,
             }));
         }
         Ok(worker)

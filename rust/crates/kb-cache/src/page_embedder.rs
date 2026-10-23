@@ -63,7 +63,21 @@ impl CachedPageEmbedder {
 #[async_trait]
 impl PageEmbedder for CachedPageEmbedder {
     async fn embed_pages(&self, pages: &[PageImage]) -> Result<Vec<Vec<f32>>, PortError> {
-        let keys: Vec<CacheKey> = pages.iter().map(|p| self.key(b"page", &p.bytes)).collect();
+        // Image-only pages keep the key they always had; a page with text is a
+        // different input and a different vector.
+        let keys: Vec<CacheKey> = pages
+            .iter()
+            .map(|p| {
+                if p.text.is_empty() {
+                    self.key(b"page", &p.bytes)
+                } else {
+                    let mut content = p.text.as_bytes().to_vec();
+                    content.push(0);
+                    content.extend_from_slice(&p.bytes);
+                    self.key(b"page+text", &content)
+                }
+            })
+            .collect();
         let mut out: Vec<Option<Vec<f32>>> = Vec::with_capacity(pages.len());
         for k in &keys {
             out.push(self.load(k).await);

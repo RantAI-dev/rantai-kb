@@ -281,6 +281,7 @@ impl PageRenderer for FakeRenderer {
                 page,
                 mime: "image/jpeg".into(),
                 bytes: vec![page as u8; 4],
+                text: String::new(),
             })
             .collect())
     }
@@ -294,6 +295,7 @@ async fn page_ingest_stores_one_unit_per_page_and_a_reingest_replaces_them() {
         embedder: embedder(vec![1.0, 0.0, 0.0]),
         index: index.clone(),
         max_pages: 100,
+        text_chars: 0,
     };
     let mut by_page: HashMap<u32, Vec<ChunkId>> = HashMap::new();
     by_page.insert(1, vec![ChunkId("d1_4".into()), ChunkId("d1_5".into())]);
@@ -305,6 +307,7 @@ async fn page_ingest_stores_one_unit_per_page_and_a_reingest_replaces_them() {
             "application/pdf",
             b"%PDF",
             &by_page,
+            &HashMap::new(),
         )
         .await
         .unwrap();
@@ -325,6 +328,7 @@ async fn page_ingest_stores_one_unit_per_page_and_a_reingest_replaces_them() {
             "application/pdf",
             b"%PDF",
             &by_page,
+            &HashMap::new(),
         )
         .await
         .unwrap();
@@ -339,7 +343,15 @@ async fn page_ingest_stores_one_unit_per_page_and_a_reingest_replaces_them() {
 
     // Not a PDF: nothing rendered, and the old pages are gone.
     let n = ingest(5)
-        .index_document(&t("t1"), &d("d1"), None, "text/plain", b"hi", &by_page)
+        .index_document(
+            &t("t1"),
+            &d("d1"),
+            None,
+            "text/plain",
+            b"hi",
+            &by_page,
+            &HashMap::new(),
+        )
         .await
         .unwrap();
     assert_eq!(n, 0);
