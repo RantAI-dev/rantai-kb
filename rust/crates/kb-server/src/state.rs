@@ -293,6 +293,10 @@ impl AppState {
                 .vision
                 .as_ref()
                 .map(|_| Arc::clone(&self.blob) as Arc<dyn kb_ports::BlobStore>);
+            let caption = match pages.caption.as_ref() {
+                None => None,
+                Some(caption) => Some(build_page_caption(caption, config.cache.as_ref())?),
+            };
             worker = worker.with_page_ingest(Arc::new(kb_engine::PageIngest {
                 renderer: Arc::new(kb_extract::PdfiumPageRenderer {
                     dpi: pages.dpi,
@@ -303,10 +307,53 @@ impl AppState {
                 blobs: page_blobs,
                 max_pages: pages.max_pages,
                 text_chars: pages.text_chars,
+                caption,
             }));
         }
         Ok(worker)
     }
+}
+
+/// The opt-in ingest-time page describer, wrapped in its disk cache when
+/// `KB_CACHE_DIR` is set. The fingerprint names everything but the image that
+/// changes an answer, so a prompt or model change never reuses an old one.
+fn build_page_caption(
+    caption: &crate::config::PageCaptionSettings,
+    cache: Option<&crate::config::CacheConfig>,
+) -> anyhow::Result<kb_engine::PageCaption> {
+    let describer: Arc<dyn kb_ports::PageDescriber> = Arc::new(
+        kb_inference::HttpPageDescriber::new(caption.describer.clone())
+            .map_err(|e| anyhow::anyhow!("page describer: {e}"))?,
+    );
+    let describer: Arc<dyn kb_ports::PageDescriber> = match cache {
+        Some(cache) => {
+            let fingerprint = format!(
+                "caption|{}|prompt={}|reasoning={}",
+                caption.describer.model,
+                kb_inference::PAGE_DESCRIBE_PROMPT_VERSION,
+                if caption.describer.no_reasoning {
+                    "off"
+                } else {
+                    "on"
+                },
+            );
+            tracing::info!(
+                %fingerprint,
+                dir = %cache.dir.display(),
+                "page caption disk cache on"
+            );
+            Arc::new(kb_cache::CachedPageDescriber::new(
+                describer,
+                kb_cache::DiskCache::new(&cache.dir),
+                fingerprint,
+            ))
+        }
+        None => describer,
+    };
+    Ok(kb_engine::PageCaption {
+        describer,
+        config: caption.config,
+    })
 }
 
 /// The page-image arm: its own Qdrant collection (one per page-embedding

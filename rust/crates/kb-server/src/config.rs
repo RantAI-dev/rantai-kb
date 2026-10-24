@@ -126,6 +126,9 @@ pub struct PageArmSettings {
     /// The opt-in live vision rerank of the top page images
     /// (`KB_PAGE_VISION_RERANK_MODEL`). `None` leaves it off.
     pub vision: Option<PageVisionSettings>,
+    /// Opt-in visual description of each page at ingest
+    /// (`KB_PAGE_CAPTION_MODEL`). `None` leaves it off.
+    pub caption: Option<PageCaptionSettings>,
 }
 
 /// Live vision rerank wiring: which vision model scores the page images, and
@@ -134,6 +137,14 @@ pub struct PageArmSettings {
 pub struct PageVisionSettings {
     pub scorer: kb_inference::VisionScorerSettings,
     pub config: kb_engine::PageVisionRerankConfig,
+}
+
+/// Ingest-time page captions (`KB_PAGE_CAPTION_MODEL`). Opt-in, and only with
+/// the page arm: without rendered pages there is nothing to describe.
+#[derive(Clone, Debug)]
+pub struct PageCaptionSettings {
+    pub describer: kb_inference::PageDescriberSettings,
+    pub config: kb_engine::PageCaptionConfig,
 }
 
 /// Where the disk caches live and how their keys are scoped.
@@ -584,6 +595,15 @@ impl Config {
                          (KB_PAGE_EMBEDDING_MODEL unset); vision rerank stays off"
                     );
                 }
+                if lookup("KB_PAGE_CAPTION_MODEL")
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    tracing::warn!(
+                        "KB_PAGE_CAPTION_MODEL is set but the page arm is off \
+                         (KB_PAGE_EMBEDDING_MODEL unset); page captions stay off"
+                    );
+                }
                 None
             }
             Some(model) => {
@@ -643,6 +663,72 @@ impl Config {
                         },
                     }),
                 };
+                let caption = match lookup("KB_PAGE_CAPTION_MODEL")
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                {
+                    None => None,
+                    Some(caption_model) => {
+                        let concurrency =
+                            int_var(&lookup, "KB_PAGE_CAPTION_CONCURRENCY", 8usize)?.clamp(1, 64);
+                        let timeout = Duration::from_millis(
+                            int_var(&lookup, "KB_PAGE_CAPTION_TIMEOUT_MS", 30_000u64)?.max(1_000),
+                        );
+                        let text_chunks = bool_flag(&lookup, "KB_PAGE_CAPTION_TEXT_CHUNKS", true);
+                        let rerank_text = bool_flag(&lookup, "KB_PAGE_CAPTION_RERANK_TEXT", true);
+                        if !text_chunks && !rerank_text {
+                            // Describing pages nobody reads would be a paid call
+                            // with no effect: say so and stay off.
+                            tracing::warn!(
+                                "KB_PAGE_CAPTION_MODEL is set but both KB_PAGE_CAPTION_TEXT_CHUNKS \
+                                 and KB_PAGE_CAPTION_RERANK_TEXT are off; page captions stay off"
+                            );
+                            None
+                        } else {
+                            tracing::info!(
+                                model = %caption_model,
+                                concurrency,
+                                text_chunks,
+                                rerank_text,
+                                "page captioning on"
+                            );
+                            Some(PageCaptionSettings {
+                                describer: kb_inference::PageDescriberSettings {
+                                    base_url: lookup("KB_PAGE_CAPTION_BASE_URL")
+                                        .filter(|v| !v.trim().is_empty())
+                                        .unwrap_or_else(|| {
+                                            kb_inference::DEFAULT_PAGE_CAPTION_BASE_URL.to_string()
+                                        }),
+                                    model: caption_model,
+                                    api_key: lookup("KB_PAGE_CAPTION_API_KEY")
+                                        .filter(|s| !s.trim().is_empty())
+                                        .or_else(|| {
+                                            lookup("OPENROUTER_API_KEY")
+                                                .filter(|s| !s.trim().is_empty())
+                                        }),
+                                    request_timeout: timeout,
+                                    max_tokens: int_var(
+                                        &lookup,
+                                        "KB_PAGE_CAPTION_MAX_TOKENS",
+                                        300u32,
+                                    )?
+                                    .max(1),
+                                    no_reasoning: bool_flag(
+                                        &lookup,
+                                        "KB_PAGE_CAPTION_NO_REASONING",
+                                        false,
+                                    ),
+                                },
+                                config: kb_engine::PageCaptionConfig {
+                                    concurrency,
+                                    timeout,
+                                    rerank_text,
+                                    text_chunks,
+                                },
+                            })
+                        }
+                    }
+                };
                 Some(PageArmSettings {
                     embedder: kb_inference::PageEmbedderSettings {
                         base_url: lookup("KB_PAGE_EMBEDDING_BASE_URL")
@@ -701,6 +787,7 @@ impl Config {
                         },
                     },
                     vision,
+                    caption,
                 })
             }
         };
@@ -1296,6 +1383,109 @@ mod tests {
         map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map.insert("OPENROUTER_API_KEY", "test-key");
         map.insert("KB_PAGE_VISION_RERANK_MODEL", "qwen/qwen3.7-flash");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert!(cfg.pages.is_none());
+    }
+
+    fn page_caption(map: &HashMap<&'static str, &'static str>) -> Option<PageCaptionSettings> {
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        cfg.pages.expect("page arm configured").caption
+    }
+
+    #[test]
+    fn test_page_caption_is_off_until_a_model_is_named() {
+        let map = page_arm_map();
+        assert!(page_caption(&map).is_none());
+    }
+
+    #[test]
+    fn test_page_caption_defaults() {
+        let mut map = page_arm_map();
+        map.insert("KB_PAGE_CAPTION_MODEL", "qwen/qwen3.7-flash");
+        let caption = page_caption(&map).expect("caption configured");
+        assert_eq!(caption.describer.model, "qwen/qwen3.7-flash");
+        assert_eq!(
+            caption.describer.base_url,
+            kb_inference::DEFAULT_PAGE_CAPTION_BASE_URL
+        );
+        // The OpenRouter key the server already holds is the default.
+        assert_eq!(caption.describer.api_key.as_deref(), Some("test-key"));
+        assert!(!caption.describer.no_reasoning);
+        assert_eq!(caption.describer.max_tokens, 300);
+        assert_eq!(
+            caption.describer.request_timeout,
+            Duration::from_millis(30_000)
+        );
+        assert_eq!(caption.config, kb_engine::PageCaptionConfig::default());
+        assert_eq!(
+            caption.config,
+            kb_engine::PageCaptionConfig {
+                concurrency: 8,
+                timeout: Duration::from_millis(30_000),
+                rerank_text: true,
+                text_chunks: true,
+            }
+        );
+    }
+
+    #[test]
+    fn test_page_caption_overrides() {
+        let mut map = page_arm_map();
+        map.insert("KB_PAGE_CAPTION_MODEL", "qwen/qwen3.7-flash");
+        map.insert(
+            "KB_PAGE_CAPTION_BASE_URL",
+            "http://127.0.0.1:8000/v1/chat/completions",
+        );
+        map.insert("KB_PAGE_CAPTION_API_KEY", "caption-key");
+        map.insert("KB_PAGE_CAPTION_CONCURRENCY", "3");
+        map.insert("KB_PAGE_CAPTION_TIMEOUT_MS", "4000");
+        map.insert("KB_PAGE_CAPTION_MAX_TOKENS", "120");
+        map.insert("KB_PAGE_CAPTION_NO_REASONING", "1");
+        map.insert("KB_PAGE_CAPTION_TEXT_CHUNKS", "false");
+        let caption = page_caption(&map).expect("caption configured");
+        assert_eq!(
+            caption.describer.base_url,
+            "http://127.0.0.1:8000/v1/chat/completions"
+        );
+        assert_eq!(caption.describer.api_key.as_deref(), Some("caption-key"));
+        assert!(caption.describer.no_reasoning);
+        assert_eq!(caption.describer.max_tokens, 120);
+        assert_eq!(
+            caption.describer.request_timeout,
+            Duration::from_millis(4_000)
+        );
+        assert_eq!(
+            caption.config,
+            kb_engine::PageCaptionConfig {
+                concurrency: 3,
+                timeout: Duration::from_millis(4_000),
+                rerank_text: true,
+                text_chunks: false,
+            }
+        );
+    }
+
+    /// Describing pages whose descriptions nothing reads would be a paid call
+    /// with no effect: both uses off means the stage stays off.
+    #[test]
+    fn test_page_caption_with_both_uses_off_stays_off() {
+        let mut map = page_arm_map();
+        map.insert("KB_PAGE_CAPTION_MODEL", "qwen/qwen3.7-flash");
+        map.insert("KB_PAGE_CAPTION_TEXT_CHUNKS", "false");
+        map.insert("KB_PAGE_CAPTION_RERANK_TEXT", "false");
+        assert!(page_caption(&map).is_none());
+    }
+
+    /// Without rendered pages there is nothing to describe.
+    #[test]
+    fn test_page_caption_needs_the_page_arm() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("SURREAL_DB_URL", "http://localhost:8000");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_PAGE_CAPTION_MODEL", "qwen/qwen3.7-flash");
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
         assert!(cfg.pages.is_none());
