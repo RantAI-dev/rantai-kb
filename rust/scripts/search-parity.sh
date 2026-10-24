@@ -331,10 +331,10 @@ ORDER_CASES=0
 # Bun's answer is a no-op. `docs/rust-cutover.md` records the deliberate
 # difference.
 #
-# A keyword hit (no `chunkType`) also loses its `page` here: Rust reports the
-# page of keyword hits when it knows it, and Bun's keyword arm never had one
-# (`docs/rust-cutover.md` §10). Vector hits keep `page`, so a page difference
-# there is still a failure.
+# A keyword hit (no `chunkType`) also loses its `page` and `section` here: Rust
+# reports the page and heading of keyword hits when it knows them, and Bun's
+# keyword arm never fetched either (`docs/rust-cutover.md` §10). Vector hits keep
+# both, so a page or section difference there is still a failure.
 #
 # `chunks` is sorted by id for the same reason, one step further: both runtimes
 # order by k=60 RRF, but Rust takes its candidate pool from the top of Qdrant's
@@ -344,7 +344,18 @@ ORDER_CASES=0
 # reported separately, as a count, and not used as a pass/fail signal: the
 # question this script answers is "do the two runtimes return the same
 # chunks", and the order is a known, measured, deliberate difference.
-NORMALIZE_JQ='walk(if type == "object" and has("totalTimeMs") then (.embeddingTimeMs = 0 | .vectorSearchTimeMs = 0 | .entitySearchTimeMs = 0 | .graphSearchTimeMs = 0 | .fusionTimeMs = 0 | .totalTimeMs = 0) elif type == "number" then ((. * 10000 | round) / 10000) else . end) | del(.chunks[]?.retrieval) | (.chunks[]? |= (if has("chunkType") then . else del(.page) end)) | .chunks = ((.chunks // []) | sort_by(.id))'
+NORMALIZE_JQ='walk(if type == "object" and has("totalTimeMs") then (.embeddingTimeMs = 0 | .vectorSearchTimeMs = 0 | .entitySearchTimeMs = 0 | .graphSearchTimeMs = 0 | .fusionTimeMs = 0 | .totalTimeMs = 0) elif type == "number" then ((. * 10000 | round) / 10000) else . end) | del(.chunks[]?.retrieval) | (.chunks[]? |= (if has("chunkType") then . else del(.page, .section) end)) | .chunks = ((.chunks // []) | sort_by(.id))'
+
+# Bun's answer only: drop the duplicate chunk ids its two arms emit for one
+# chunk. Bun keys its candidate pool and RRF scores on the SurrealDB `RecordId`
+# object, which JavaScript compares by reference, so a chunk found by both arms
+# is listed twice (the keyword copy with `similarity: 0`). Rust merges by
+# `ChunkId` (Deliberate Difference §12). Keeping the highest-`similarity` copy
+# compares the two runtimes on the set of chunks they return. The dedupe is
+# applied to Bun's answer and NOT to Rust's on purpose: a Rust regression that
+# emitted duplicates again must still fail this matrix.
+BUN_DEDUPE_JQ='.chunks = ((.chunks // []) | group_by(.id) | map(max_by(.similarity)))'
+BUN_NORMALIZE_JQ="$NORMALIZE_JQ | $BUN_DEDUPE_JQ"
 
 for idx in "${!TEST_CASES[@]}"; do
   BODY="${TEST_CASES[$idx]}"
@@ -362,7 +373,7 @@ for idx in "${!TEST_CASES[@]}"; do
     -d "$BODY" \
     "http://127.0.0.1:${RUST_PORT}/v1/search")
 
-  echo "$BUN_RESP" | jq -S "$NORMALIZE_JQ" > "$TMP_DIR/bun_norm.json" 2>"$TMP_DIR/bun_err.log" || {
+  echo "$BUN_RESP" | jq -S "$BUN_NORMALIZE_JQ" > "$TMP_DIR/bun_norm.json" 2>"$TMP_DIR/bun_err.log" || {
     echo "ERROR: Failed to parse Bun JSON response: $BUN_RESP"
     cat "$TMP_DIR/bun_err.log"
     FAILED_CASES=$((FAILED_CASES + 1))

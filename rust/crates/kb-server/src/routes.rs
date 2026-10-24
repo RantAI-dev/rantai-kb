@@ -758,7 +758,9 @@ async fn get_document(
     let chunk_views: Vec<DocumentChunkView> = chunks
         .iter()
         .map(|c| DocumentChunkView {
-            id: c.unit_id.0.clone(),
+            // Bun's `String(row.id)`: `document_chunk:⟨{bare}⟩`. The same
+            // boundary rule as a search hit's id (see `dto::chunk_id_for_client`).
+            id: crate::dto::chunk_id_for_client(&c.unit_id.0),
             chunk_index: c.chunk_index,
             content: c.content.clone(),
             chunk_type: Some(c.chunk_type.as_storage().to_string()),

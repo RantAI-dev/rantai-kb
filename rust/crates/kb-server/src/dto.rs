@@ -16,6 +16,65 @@ pub fn parse_json<T: DeserializeOwned + Default>(body: &[u8]) -> T {
     serde_json::from_slice(body).unwrap_or_default()
 }
 
+/// The SurrealDB table every chunk lives in, and the prefix of every chunk id
+/// the API emits.
+const CHUNK_TABLE: &str = "document_chunk";
+
+/// A chunk id as a client sees it: `document_chunk:⟨{bare}⟩`.
+///
+/// The `RetrievalIndex` port's [`kb_ports::ChunkId`] is the bare ident
+/// `{document_id}_{chunk_index}` — that is what the store is queried with and
+/// what every adapter hands back — but the API is a drop-in for Bun, and Bun
+/// serialises a SurrealDB `RecordId` with `toString()`, which is
+/// `document_chunk:⟨…⟩` (U+27E8 / U+27E9). The wrapper is therefore applied
+/// here, once, at the wire boundary, and *not* in the port: a client that
+/// stored an id from a search response must be able to send it back to a route
+/// that accepts one, and a client of Bun must see the same string.
+///
+/// Idempotent: an id that already carries the wrapper is re-encoded, not
+/// double-wrapped. Every route that emits a chunk id goes through this
+/// function; every route that accepts one goes through
+/// [`chunk_id_from_client`], so a client may hold either form.
+#[must_use]
+pub fn chunk_id_for_client(id: &str) -> String {
+    format!("{CHUNK_TABLE}:⟨{}⟩", chunk_id_from_client(id))
+}
+
+/// The bare ident inside a chunk id, whichever form a client sent.
+///
+/// Accepts both shapes a caller can hold: Bun's `document_chunk:⟨{bare}⟩` and
+/// the bare `{bare}` this service's own ports speak. SurrealDB may also render
+/// the ident with backticks (`` document_chunk:`{bare}` ``) depending on the
+/// HTTP vs RPC endpoint, so that shape is accepted too.
+///
+/// This is the *only* place the wrapper is removed. Callers that hold a chunk
+/// id from a request or a URL split it here and pass the bare ident to the
+/// store; anything else would make `document_chunk:⟨d_0⟩` and `d_0` name two
+/// different chunks.
+#[must_use]
+pub fn chunk_id_from_client(id: &str) -> String {
+    let ident = id
+        .strip_prefix(CHUNK_TABLE)
+        .and_then(|rest| rest.strip_prefix(':'))
+        .unwrap_or(id);
+    ident
+        .trim_matches(|c| c == '⟨' || c == '⟩' || c == '`')
+        .to_string()
+}
+
+/// `None` for an absent *or empty* string, and for nothing else.
+///
+/// Bun's search path coalesces an empty section to `null`
+/// (`metadata?.section || null` in `vector-store.ts`), and an empty heading
+/// path used to be stored as `""` by this service's chunker, so a chunk with no
+/// heading serialised as `"section": ""` where Bun answered `null`.
+///
+/// `||` is falsy-only in JavaScript: a whitespace-only section (`" "`) is
+/// truthy and Bun emits it verbatim, so it must not be trimmed away here.
+fn null_if_empty(value: Option<String>) -> Option<String> {
+    value.filter(|s| !s.is_empty())
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SearchRequestDto {
     /// Left as raw JSON: the TypeScript route rejects a non-string query with
@@ -420,13 +479,13 @@ impl From<SearchHit> for ChunkDto {
             )
         };
         ChunkDto {
-            id: hit.chunk.id.0,
+            id: chunk_id_for_client(&hit.chunk.id.0),
             content: hit.chunk.content,
             document_id: hit.chunk.document_id.0,
             document_title: hit.chunk.document_title,
             categories: hit.chunk.categories,
             subcategory: hit.chunk.subcategory,
-            section: hit.chunk.metadata.section,
+            section: null_if_empty(hit.chunk.metadata.section),
             similarity: hit.similarity,
             contextual_prefix,
             asset_key,
@@ -442,7 +501,7 @@ impl From<SourceEntry> for SourceDto {
         SourceDto {
             document_id: s.document_id,
             document_title: s.document_title,
-            section: s.section,
+            section: null_if_empty(s.section),
             categories: s.categories,
             asset_key: s.asset_key,
             page: s.page,
@@ -523,6 +582,95 @@ mod tests {
             is_bm25: bm25,
             retrieval,
         }
+    }
+
+    #[test]
+    fn a_chunk_id_is_buns_record_id_on_the_wire() {
+        // Bun serialises SurrealDB's `RecordId` with `toString()`, i.e.
+        // `document_chunk:⟨{bare}⟩`. The port speaks the bare ident, so the
+        // wrapper is applied at this boundary and nowhere else.
+        let dto = ChunkDto::from(hit(false, None));
+        let value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(value["id"], "document_chunk:⟨c-1⟩");
+    }
+
+    #[test]
+    fn a_client_chunk_id_is_accepted_in_either_form() {
+        // Whatever a caller holds — Bun's wrapper, the bare ident, or
+        // SurrealDB's backticked rendering — resolves to the same bare ident
+        // the store keys on.
+        for id in [
+            "document_chunk:⟨d_0⟩",
+            "document_chunk:`d_0`",
+            "document_chunk:d_0",
+            "d_0",
+        ] {
+            assert_eq!(chunk_id_from_client(id), "d_0", "{id}");
+        }
+        // Encoding is idempotent, so a round trip never double-wraps.
+        assert_eq!(
+            chunk_id_for_client(&chunk_id_from_client("document_chunk:⟨d_0⟩")),
+            "document_chunk:⟨d_0⟩"
+        );
+        // The bytes a client receives decode back to the ident the store keys
+        // on, so an id taken from one route and sent to another is lossless.
+        let dto = ChunkDto::from(hit(false, None));
+        assert_eq!(
+            chunk_id_from_client(&dto.id),
+            "c-1",
+            "a wire id resolves back to the port's bare ident: {}",
+            dto.id
+        );
+    }
+
+    #[test]
+    fn an_empty_section_serialises_as_null_but_whitespace_does_not() {
+        // Bun: `metadata?.section || null`. `||` is falsy-only, so an empty
+        // heading path is null and a whitespace-only one is emitted verbatim —
+        // trimming it here would be a difference Bun does not have.
+        for section in [None, Some(String::new())] {
+            let mut h = hit(false, None);
+            h.chunk.metadata.section = section;
+            let value = serde_json::to_value(ChunkDto::from(h)).unwrap();
+            assert_eq!(
+                value["section"],
+                serde_json::Value::Null,
+                "an empty section is null, not \"\": {value}"
+            );
+        }
+        let mut h = hit(false, None);
+        h.chunk.metadata.section = Some("   ".to_string());
+        let value = serde_json::to_value(ChunkDto::from(h)).unwrap();
+        assert_eq!(
+            value["section"], "   ",
+            "Bun's `||` keeps whitespace: {value}"
+        );
+    }
+
+    #[test]
+    fn an_empty_source_section_serialises_as_null() {
+        let source = SourceEntry {
+            document_id: Some("d-1".to_string()),
+            document_title: "Doc".to_string(),
+            section: Some(String::new()),
+            categories: vec!["guides".to_string()],
+            asset_key: None,
+            page: None,
+            chunk_type: Some("text".to_string()),
+        };
+        let value = serde_json::to_value(SourceDto::from(source.clone())).unwrap();
+        assert_eq!(value["section"], serde_json::Value::Null, "{value}");
+        // Same falsy-only rule as `ChunkDto`: Bun's sources copy the chunk's
+        // already-coalesced section, so whitespace survives.
+        let spaced = SourceDto::from(SourceEntry {
+            section: Some("  ".to_string()),
+            ..source
+        });
+        assert_eq!(
+            serde_json::to_value(spaced).unwrap()["section"],
+            "  ",
+            "whitespace is truthy in Bun's `||`"
+        );
     }
 
     #[test]
@@ -607,6 +755,11 @@ mod tests {
         assert!(value.get("assetKey").is_none(), "{value}");
         assert_eq!(value["contextualPrefix"], serde_json::Value::Null);
         assert_eq!(value["similarity"], 0.0);
+        // The heading (like the page) is real data this service has and Bun's
+        // keyword arm never fetched (`docs/rust-cutover.md` §10); the parity
+        // script drops it from keyword hits rather than making both runtimes
+        // forget it.
+        assert_eq!(value["section"], "Intro", "{value}");
         assert_eq!(
             value["retrieval"],
             serde_json::json!({"arms": ["sparse"], "sparseRank": 2, "fusedScore": 0.5})
