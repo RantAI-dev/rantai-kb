@@ -103,3 +103,34 @@ the blend re-tuned by CV (voyage). With the shipped blend fixed (w=0.7, k=1, ful
 held out), depth 20 is 0.006 below depth 30 for both rerankers (voyage 0.705 vs 0.711, Nemotron
 0.699 vs 0.705). `KB_PAGE_RERANK_DEPTH` stays 30; 20 is an option to cut rerank cost by a
 third if the blend is re-tuned for it.
+
+## A vision LLM reranking the top page images: small, real gain (2026-10-24, offline)
+
+There is no multimodal reranker on OpenRouter, so `kb-eval/scripts/vision_rerank.py` asks a
+cheap vision chat model to score the top pages of the live cloud default (`vmm-ti-pr`, 0.711)
+from their 96 dpi images: one call per query, 0-10 per page, JSON out. Its order is blended
+with the run's order by weighted RRF, tuned by 2-fold CV (even/odd queries), so every number
+below is held out. Answers are cached on disk; the depth-10 qwen3.7 row reruns for free.
+
+| Vision model, pages shown | vision alone | CV blend | delta vs run (95% CI) | cost, 318 queries |
+|---|---:|---:|---|---:|
+| (run: `vmm-ti-pr`) | | 0.711 | | |
+| `qwen/qwen3.7-flash`, top 10 | 0.720 | 0.724 | +0.013 [+0.002, +0.024] | $0.09 |
+| **`qwen/qwen3.7-flash`, top 20** | 0.720 | **0.727** | **+0.016 [+0.004, +0.027]** | $0.17 |
+| `qwen/qwen3.8-flash` (reasoning off), top 10 | 0.716 | 0.717 | +0.006 [−0.003, +0.013] | $0.40 |
+| `google/gemini-2.5-flash-lite`, top 10 | 0.635 | 0.711 | CV picks weight 0 | |
+
+- The gain is spread over content types (top 10, qwen3.7: Table +0.011, Chart +0.011,
+  Text +0.013), not only charts.
+- qwen3.8-flash thinks by default and spends the 300-token budget before it writes the JSON,
+  so every call failed until `--no-reasoning` (`reasoning.enabled=false`). Even then it is
+  worse and costs 4x as much. The script now aborts when the first 8 queries all fail and
+  none succeeds, instead of paying for six retries on each query.
+- 1-2 queries per run fail (q49 is always a 400 on qwen3.7) and keep the run's order; they
+  are scored, not dropped.
+- Not measured: added latency per search (one vision call with 10-20 images), and whether
+  the gain holds on CS.
+
+Verdict: a vision rerank adds about +0.015 for about $0.55 per 1,000 searches (top 20). That
+is worth an opt-in live stage for the cloud tier, behind a timeout that degrades visibly to
+the current order. It is not built yet.
