@@ -302,7 +302,9 @@ pub async fn merge_pages(
 /// Rerank the top `cfg.depth` fused slots on their text and blend that order
 /// with the fused one. A page's text is the text stored on its page unit; a
 /// slot with no stored text falls back to its ranked chunks' text, and a slot
-/// with neither keeps its fused position by being scored last.
+/// with neither is not sent (hosted rerankers reject empty documents, e.g.
+/// voyage's 400 "Input cannot contain empty strings") and so ranks last in the
+/// reranker's list.
 async fn rerank_slots(
     fused: &[Slot],
     by_slot: &HashMap<Slot, Vec<SearchHit>>,
@@ -332,7 +334,7 @@ async fn rerank_slots(
     let candidates: Vec<RerankCandidate> = head
         .iter()
         .enumerate()
-        .map(|(i, slot)| {
+        .filter_map(|(i, slot)| {
             let from_page = match slot {
                 Slot::Page(doc, page) => stored
                     .get(&page_unit_id(doc, *page))
@@ -351,15 +353,21 @@ async fn rerank_slots(
                     })
                     .unwrap_or_default()
             });
-            RerankCandidate {
+            if text.trim().is_empty() {
+                return None;
+            }
+            Some(RerankCandidate {
                 id: ChunkId(i.to_string()),
                 text: text.chars().take(cfg.chars).collect(),
                 original_rank: u32::try_from(i).unwrap_or(u32::MAX),
                 original_score: 0.0,
-            }
+            })
         })
         .collect();
-    let final_k = u32::try_from(depth).unwrap_or(u32::MAX);
+    if candidates.len() < 2 {
+        return Ok(fused.to_vec());
+    }
+    let final_k = u32::try_from(candidates.len()).unwrap_or(u32::MAX);
     let ranked = tokio::time::timeout(
         cfg.timeout,
         ctx.reranker.rerank(ctx.query, candidates, final_k),
@@ -378,6 +386,9 @@ async fn rerank_slots(
     order.extend(fused[depth..].iter().cloned());
     Ok(order)
 }
+
+/// Page units per upsert request when indexing a document's pages.
+const PAGE_UPSERT_BATCH: usize = 64;
 
 /// Characters of page text stored on a page unit (what a page reranker reads).
 pub const PAGE_TEXT_STORED_CHARS: usize = 8000;
@@ -472,7 +483,14 @@ impl PageIngest {
             })
             .collect();
         let n = units.len();
-        self.index.upsert(units).await?;
+        // In batches: one request with every page of a long PDF (943 pages ×
+        // 1,024 floats) timed out against Qdrant.
+        let mut units = units;
+        while !units.is_empty() {
+            let rest = units.split_off(units.len().min(PAGE_UPSERT_BATCH));
+            self.index.upsert(units).await?;
+            units = rest;
+        }
         Ok(n)
     }
 }

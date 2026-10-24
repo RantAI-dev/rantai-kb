@@ -11,6 +11,8 @@
 # Embeddings come from KB_STACK_EMBEDDINGS (default "remote": the LAN GPU box, with
 # KB_STACK_REMOTE_EMBED_URL / KB_STACK_REMOTE_EMBED_KEY; the key defaults to
 # LLAMA_GPU_API_KEY from the repo's .env). Chunk store defaults to Qdrant.
+# KB_AB_TIMEOUT: per-document ingest timeout in seconds (client default 900; a
+# 943-page PDF with the page arm on needs more).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -61,7 +63,8 @@ for arm in "$@"; do
     --dataset "$DATASET" \
     --out "$OUT/$label" \
     --label "$label" \
-    ${KB_AB_MAX_CHUNKS:+--max-chunks "$KB_AB_MAX_CHUNKS"}
+    ${KB_AB_MAX_CHUNKS:+--max-chunks "$KB_AB_MAX_CHUNKS"} \
+    ${KB_AB_TIMEOUT:+--timeout "$KB_AB_TIMEOUT"}
   echo "$label: $(( $(date +%s) - start )) s wall (ingest + queries)" | tee -a "$OUT/timings.txt"
 done
 

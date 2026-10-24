@@ -384,6 +384,10 @@ impl kb_ports::Reranker for KeywordReranker {
         if self.fail {
             return Err(PortError::Unavailable("reranker down".into()));
         }
+        // Like voyage rerank-2.5: one empty document fails the whole call.
+        if candidates.iter().any(|c| c.text.trim().is_empty()) {
+            return Err(PortError::Unavailable("empty document".into()));
+        }
         let mut scored: Vec<(f32, kb_ports::RerankCandidate)> = candidates
             .into_iter()
             .map(|c| (if c.text.contains("answer") { 1.0 } else { 0.0 }, c))
@@ -482,4 +486,80 @@ async fn page_rerank_reads_page_text_and_lifts_the_answer_page() {
     let degraded = merge_pages(&text, &scope, text_hits, &pages, &config, 10, Some(ctx)).await;
     assert!(degraded.rerank_failed);
     assert_eq!(ids(&degraded.hits), ids(&plain.hits), "fused order stands");
+}
+
+/// An image-only page with no stored text and no chunk hits must not be sent
+/// to the reranker as an empty document (voyage rejects the whole call).
+#[tokio::test]
+async fn page_rerank_skips_pages_with_no_text() {
+    let text: Arc<dyn RetrievalIndex> = Arc::new(InMemoryIndex::new(2));
+    text.upsert(vec![
+        text_unit("t1", "d1", 0, 0, "intro chunk"),
+        text_unit("t1", "d1", 2, 2, "a table header only"),
+    ])
+    .await
+    .unwrap();
+    let page_index: Arc<dyn RetrievalIndex> = Arc::new(InMemoryIndex::new(3));
+    let mut p2 = page_unit("t1", "d1", 2, vec![1.0, 0.0, 0.0], &["d1_2"]);
+    p2.content = "full page text with the answer".into();
+    let mut p0 = page_unit("t1", "d1", 0, vec![0.0, 1.0, 0.0], &["d1_0"]);
+    p0.content = "intro page".into();
+    let blank = page_unit("t1", "d1", 7, vec![0.0, 0.0, 1.0], &[]);
+    page_index.upsert(vec![p0, p2, blank]).await.unwrap();
+    let scope = make_fake_scope(t("t1"), vec![d("d1")]);
+    let text_hits: Vec<_> = text
+        .fetch(&scope, &[ChunkId("d1_0".into())])
+        .await
+        .unwrap()
+        .into_iter()
+        .map(candidate_to_hit)
+        .collect();
+    let page = |n: u32, chunks: Vec<ChunkId>| crate::page_arm::RankedPage {
+        document_id: d("d1"),
+        page: n,
+        score: 0.1,
+        chunk_ids: chunks,
+    };
+    let pages = vec![page(7, vec![]), page(2, vec![ChunkId("d1_2".into())])];
+    let config = PageArmConfig {
+        rerank: Some(crate::page_arm::PageRerankConfig::default()),
+        ..PageArmConfig::default()
+    };
+    let reranker: Arc<dyn kb_ports::Reranker> = Arc::new(KeywordReranker { fail: false });
+    let ctx = crate::page_arm::PageRerankContext {
+        page_index: &page_index,
+        reranker: &reranker,
+        query: "q",
+    };
+    let out = merge_pages(&text, &scope, text_hits, &pages, &config, 10, Some(ctx)).await;
+    assert!(!out.rerank_failed, "a blank page must not fail the rerank");
+    assert_eq!(out.hits[0].chunk.id.0, "d1_2");
+}
+
+/// A long PDF's pages are all stored even though they go in several batches.
+#[tokio::test]
+async fn page_ingest_stores_every_page_of_a_long_pdf() {
+    let index = Arc::new(InMemoryIndex::new(3));
+    let ingest = PageIngest {
+        renderer: Arc::new(FakeRenderer(150)),
+        embedder: embedder(vec![1.0, 0.0, 0.0]),
+        index: index.clone(),
+        max_pages: 500,
+        text_chars: 0,
+    };
+    let n = ingest
+        .index_document(
+            &t("t1"),
+            &d("d1"),
+            None,
+            "application/pdf",
+            b"%PDF",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(n, 150);
+    let stored = index.ordered_chunks(&t("t1"), &d("d1")).await.unwrap();
+    assert_eq!(stored.len(), 150);
 }
