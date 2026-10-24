@@ -110,6 +110,8 @@ pub struct StageTimingsDto {
     pub enrich: f64,
     pub fusion: f64,
     pub rerank: f64,
+    /// Page-image arm after the text rerank: page fusion and page rerank.
+    pub pages: f64,
     pub neighbours: f64,
     pub figures: f64,
     /// Building the context string and the numbered sources.
@@ -143,6 +145,9 @@ pub struct StageDetailDto {
     /// The graph arm, end to end: seed lookup, scoped-graph load or cache hit,
     /// the walk, and the chunk fetch it needs to fuse.
     pub graph_arm: f64,
+    /// The page-image arm's query embed and page search, concurrent with the
+    /// text arms.
+    pub page_arm: f64,
     /// `find_alive_meta_by_ids` inside the keyword arm (Postgres).
     pub scope_check: f64,
 }
@@ -152,7 +157,7 @@ pub struct StageDetailDto {
 /// `total` is excluded: it is the bound, not one of the things that adds up to
 /// it.
 #[must_use]
-pub fn accounted_pairs(s: &StageTimingsDto) -> [(&'static str, f64); 10] {
+pub fn accounted_pairs(s: &StageTimingsDto) -> [(&'static str, f64); 11] {
     [
         ("scopeBuild", s.scope_build),
         ("expand", s.expand),
@@ -160,6 +165,7 @@ pub fn accounted_pairs(s: &StageTimingsDto) -> [(&'static str, f64); 10] {
         ("enrich", s.enrich),
         ("fusion", s.fusion),
         ("rerank", s.rerank),
+        ("pages", s.pages),
         ("neighbours", s.neighbours),
         ("figures", s.figures),
         ("context", s.context),
@@ -194,6 +200,7 @@ impl StageTimingsDto {
             enrich: round_ms(self.enrich),
             fusion: round_ms(self.fusion),
             rerank: round_ms(self.rerank),
+            pages: round_ms(self.pages),
             neighbours: round_ms(self.neighbours),
             figures: round_ms(self.figures),
             context: round_ms(self.context),
@@ -222,6 +229,7 @@ impl StageDetailDto {
             keyword_arm: round_ms(self.keyword_arm),
             entity_arm: round_ms(self.entity_arm),
             graph_arm: round_ms(self.graph_arm),
+            page_arm: round_ms(self.page_arm),
             scope_check: round_ms(self.scope_check),
         }
     }
@@ -237,6 +245,7 @@ impl From<&StageTimings> for StageDetailDto {
             keyword_arm: t.keyword_arm_ms,
             entity_arm: t.entity_arm_ms,
             graph_arm: t.graph_arm_ms,
+            page_arm: t.page_arm_ms,
             scope_check: t.scope_check_ms,
         }
     }
@@ -365,6 +374,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
                 enrich: outcome.timings.enrich_ms,
                 fusion: outcome.timings.fusion_ms,
                 rerank: outcome.timings.rerank_ms,
+                pages: outcome.timings.pages_ms,
                 neighbours: outcome.timings.neighbours_ms,
                 figures: outcome.timings.figures_ms,
                 context: outcome.timings.context_ms,

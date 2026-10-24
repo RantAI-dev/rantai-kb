@@ -901,6 +901,7 @@ pub async fn execute_pipeline(
 
     // 5b. Fuse the page-image arm's pages with the ranked text hits, at page
     // level. A failed or slow arm degrades the search; it never empties it.
+    let pages_sw = Stopwatch::start(clock);
     if let (Some(task), Some(arm)) = (page_task, opts.page_arm.as_ref()) {
         match task.await {
             Ok((Ok(Ok(pages)), elapsed)) => {
@@ -972,6 +973,7 @@ pub async fn execute_pipeline(
             }
         }
     }
+    timings.pages_ms = pages_sw.elapsed_ms();
 
     // 6. Cut to max_chunks (1..=50)
     reranked_hits.truncate(max_chunks);

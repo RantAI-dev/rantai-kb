@@ -173,6 +173,9 @@ pub struct StageTimings {
     pub fusion_ms: f64,
     /// Cross-encoder rerank, when enabled and when there were candidates.
     pub rerank_ms: f64,
+    /// Page-image arm, after the text rerank: fusing its pages with the text
+    /// hits and the page-level rerank. Sequential, so it is part of the sum.
+    pub pages_ms: f64,
     /// Neighbour fetch and weave.
     pub neighbours_ms: f64,
     /// Figure co-retrieval and the optional figure gate.
@@ -227,6 +230,7 @@ impl StageTimings {
             + self.enrich_ms
             + self.fusion_ms
             + self.rerank_ms
+            + self.pages_ms
             + self.neighbours_ms
             + self.figures_ms
             + self.context_ms
@@ -235,13 +239,14 @@ impl StageTimings {
     /// The stages as `(name, ms)` pairs, accounted first, for logging and for
     /// a caller that wants to render them without knowing the field names.
     #[must_use]
-    pub fn accounted_pairs(&self) -> [(&'static str, f64); 8] {
+    pub fn accounted_pairs(&self) -> [(&'static str, f64); 9] {
         [
             ("expand", self.expand_ms),
             ("arms", self.arms_ms),
             ("enrich", self.enrich_ms),
             ("fusion", self.fusion_ms),
             ("rerank", self.rerank_ms),
+            ("pages", self.pages_ms),
             ("neighbours", self.neighbours_ms),
             ("figures", self.figures_ms),
             ("context", self.context_ms),
@@ -250,13 +255,14 @@ impl StageTimings {
 
     /// The overlapping measurements, as `(name, ms)` pairs.
     #[must_use]
-    pub fn detail_pairs(&self) -> [(&'static str, f64); 7] {
+    pub fn detail_pairs(&self) -> [(&'static str, f64); 8] {
         [
             ("queryEmbed", self.query_embed_ms),
             ("vectorArm", self.vector_arm_ms),
             ("keywordArm", self.keyword_arm_ms),
             ("entityArm", self.entity_arm_ms),
             ("graphArm", self.graph_arm_ms),
+            ("pageArm", self.page_arm_ms),
             ("scopeCheck", self.scope_check_ms),
             ("engineTotal", self.engine_total_ms),
         ]
@@ -380,7 +386,7 @@ mod tests {
         assert_eq!(t.accounted_sum_ms(), 0.0);
         assert_eq!(t.total_ms, 0.0);
         assert!(!t.query_embed_cached);
-        assert_eq!(t.accounted_pairs().len(), 8);
-        assert_eq!(t.detail_pairs().len(), 7);
+        assert_eq!(t.accounted_pairs().len(), 9);
+        assert_eq!(t.detail_pairs().len(), 8);
     }
 }
