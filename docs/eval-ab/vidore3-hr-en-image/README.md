@@ -174,3 +174,26 @@ the old order; that is most of the gap to the offline +0.016, which waited for e
 Verdict: **leave it off.** It adds ~5.5 s to every search for a gain we cannot separate from
 zero. Cheaper to try later: top 10 (offline +0.013, about half the images) or a faster vision
 model; neither was run. Cost of this run: about $0.30.
+
+## Page captions (visual descriptions) at ingest: no gain (2026-10-24)
+
+`KB_PAGE_CAPTION_MODEL=qwen/qwen3.7-flash` with `KB_PAGE_CAPTION_NO_REASONING=true`: each
+page image is described by the vision model; a description becomes a `[Visual]` figure chunk
+in the text index and is appended to the page text the page reranker reads. On the live cloud
+default (`../vidore3-hr-en-night/vmm-cap-ti-pr`): 547 of 1,097 pages described, 550 answered
+NONE (no visual content), 1 failed.
+
+| | `vmm-ti-pr` | `vmm-cap-ti-pr` |
+|---|---:|---:|
+| page nDCG@10 | 0.711 | 0.706 (−0.005 [−0.011, +0.001]) |
+| Chart queries (n=104) | 0.667 | 0.665 |
+| Table queries (n=112) | 0.713 | 0.706 |
+| search p50 | ~2.1 s | 1.8 s |
+
+Verdict: **leave it off.** The page-image arm already carries what the descriptions add,
+even for charts. Cost of the descriptions: under $0.10 for 1,097 pages.
+
+The first attempt described nothing: qwen3.7-flash reasons by default on this prompt, spent
+all 300 tokens thinking (`finish_reason: length`, empty content), and the adapter read the
+empty reply as NONE and cached it for every page. Fixed in `c4bc54c`: an empty reply is now an
+error, never cached; only an explicit NONE means "no visuals".
