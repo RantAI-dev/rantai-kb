@@ -21,6 +21,7 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::{StreamExt, TryStreamExt, stream};
 use kb_ports::{Embedder, PortError, QueryEmbedding};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
@@ -304,11 +305,18 @@ impl EmbedderImpl {
             }
             return Ok(out);
         }
-        let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
-        for batch in texts.chunks(size) {
-            out.extend(self.embed_openai_batch(batch, kind).await?);
-        }
-        Ok(out)
+        // `embed_concurrency` requests in flight, results kept in input order.
+        // Sequential batches made text embedding the slowest ingest step: 118
+        // batches of a 943-page PDF took 211 s at ~1.8 s each.
+        let requests: Vec<_> = texts
+            .chunks(size)
+            .map(|batch| self.embed_openai_batch(batch, kind))
+            .collect();
+        let batches: Vec<Vec<Vec<f32>>> = stream::iter(requests)
+            .buffered(self.settings.embed_concurrency.max(1) as usize)
+            .try_collect()
+            .await?;
+        Ok(batches.into_iter().flatten().collect())
     }
 }
 
@@ -595,7 +603,13 @@ mod tests {
     #[tokio::test]
     async fn batched_order_is_preserved_across_batches() {
         let input = texts(7);
-        let (embedder, seen) = embedder_for(Mode::InOrder, 3).await;
+        let (url, seen) = fake_server(Mode::InOrder).await;
+        let mut s = settings();
+        s.base_url = url;
+        s.batch_size = 3;
+        // One request at a time, so the server sees the batches in order.
+        s.embed_concurrency = 1;
+        let embedder = EmbedderImpl::new(s).expect("embedder");
         let out = embedder
             .embed_many(&input, EmbedKind::Passage)
             .await
@@ -613,6 +627,69 @@ mod tests {
             flattened,
             input.iter().collect::<Vec<_>>(),
             "inputs unsplit"
+        );
+    }
+
+    /// Batches go out `embed_concurrency` at a time, and the vectors still come
+    /// back in input order even when a later batch answers first.
+    #[tokio::test]
+    async fn batches_run_concurrently_and_keep_input_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Clone, Default)]
+        struct Load {
+            now: Arc<AtomicUsize>,
+            max: Arc<AtomicUsize>,
+        }
+        async fn slow(State(load): State<Load>, Json(body): Json<Value>) -> Json<Value> {
+            let now = load.now.fetch_add(1, Ordering::SeqCst) + 1;
+            load.max.fetch_max(now, Ordering::SeqCst);
+            let inputs: Vec<String> = body["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_string())
+                .collect();
+            // Earlier batches answer later, so arrival order is reversed.
+            let n: u64 = inputs[0]
+                .trim()
+                .rsplit(' ')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(200u64.saturating_sub(n * 20))).await;
+            load.now.fetch_sub(1, Ordering::SeqCst);
+            let items: Vec<Value> = inputs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| json!({"index": i, "embedding": vector_for(t)}))
+                .collect();
+            Json(json!({"object": "list", "data": items}))
+        }
+        let load = Load::default();
+        let app = Router::new()
+            .route("/v1/embeddings", post(slow))
+            .with_state(load.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let mut s = settings();
+        s.base_url = format!("http://{addr}/v1/embeddings");
+        s.batch_size = 1;
+        s.embed_concurrency = 3;
+        let input = texts(7);
+        let out = EmbedderImpl::new(s)
+            .unwrap()
+            .embed_many(&input, EmbedKind::Passage)
+            .await
+            .unwrap();
+        assert_eq!(out, expected(&input), "vectors in input order");
+        assert_eq!(
+            load.max.load(Ordering::SeqCst),
+            3,
+            "three requests in flight"
         );
     }
 

@@ -458,7 +458,14 @@ impl Config {
             // Both tunable for slow local backends: a consumer GPU embedding
             // a long PDF needs more than 15 s per batch once several batches
             // queue on it (docs/local-models.md).
-            embed_concurrency: int_var(&lookup, "KB_EMBEDDING_CONCURRENCY", 4u32)?.clamp(1, 32),
+            // Bun reads `KB_EMBED_CONCURRENCY`; honour it when the Rust name is unset,
+            // so one .env drives both runtimes.
+            embed_concurrency: if lookup("KB_EMBEDDING_CONCURRENCY").is_some() {
+                int_var(&lookup, "KB_EMBEDDING_CONCURRENCY", 4u32)?
+            } else {
+                int_var(&lookup, "KB_EMBED_CONCURRENCY", 4u32)?
+            }
+            .clamp(1, 32),
             query_prefix: lookup("KB_EMBEDDING_QUERY_PREFIX").unwrap_or_default(),
             passage_prefix: lookup("KB_EMBEDDING_PASSAGE_PREFIX").unwrap_or_default(),
             send_input_type: bool_flag(&lookup, "KB_EMBEDDING_INPUT_TYPE", false),
@@ -1036,6 +1043,10 @@ mod tests {
             .expect("config should load");
         assert_eq!(cfg.embedder.request_timeout, Duration::from_secs(15));
         assert_eq!(cfg.embedder.embed_concurrency, 4);
+        map.insert("KB_EMBED_CONCURRENCY", "6");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.embedder.embed_concurrency, 6, "Bun's name is honoured");
         map.insert("KB_EMBEDDING_TIMEOUT_MS", "120000");
         map.insert("KB_EMBEDDING_CONCURRENCY", "1");
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
