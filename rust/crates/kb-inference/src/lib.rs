@@ -9,6 +9,7 @@ pub mod embedder;
 pub mod heuristic_extractor;
 pub mod llm_extractor;
 pub mod llm_reranker;
+pub mod page_describer;
 pub mod page_embedder;
 pub mod query_cache;
 pub mod query_expansion;
@@ -22,6 +23,10 @@ pub use llm_extractor::{ExtractorSettings, LlmCombinedExtractor};
 /// Type alias for ExtractorSettings.
 pub type ExtractorConfig = ExtractorSettings;
 pub use llm_reranker::LlmReranker;
+pub use page_describer::{
+    DEFAULT_PAGE_CAPTION_BASE_URL, HttpPageDescriber, PAGE_DESCRIBE_PROMPT,
+    PAGE_DESCRIBE_PROMPT_VERSION, PageDescriberSettings,
+};
 pub use page_embedder::{HttpPageEmbedder, PageEmbedFormat, PageEmbedderSettings};
 pub use query_expansion::{ExpansionSettings, QueryExpander};
 pub use rerankers::{CohereReranker, TeiReranker, VllmReranker};

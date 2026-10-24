@@ -309,6 +309,7 @@ async fn page_ingest_stores_one_unit_per_page_and_a_reingest_replaces_them() {
         max_pages: 100,
         blobs: None,
         text_chars: 0,
+        caption: None,
     };
     let mut by_page: HashMap<u32, Vec<ChunkId>> = HashMap::new();
     by_page.insert(1, vec![ChunkId("d1_4".into()), ChunkId("d1_5".into())]);
@@ -556,6 +557,7 @@ async fn page_ingest_stores_every_page_of_a_long_pdf() {
         max_pages: 500,
         blobs: None,
         text_chars: 0,
+        caption: None,
     };
     let n = ingest
         .index_document(
@@ -605,6 +607,7 @@ async fn a_failed_page_window_loses_only_its_own_pages() {
         max_pages: 500,
         blobs: None,
         text_chars: 0,
+        caption: None,
     };
     let out = ingest
         .index_document(
@@ -657,6 +660,7 @@ async fn an_unrendered_page_is_counted_and_skipped() {
         max_pages: 10,
         blobs: None,
         text_chars: 0,
+        caption: None,
     };
     let out = ingest
         .index_document(
@@ -1162,6 +1166,7 @@ async fn page_images_are_stored_under_the_page_key() {
         blobs: Some(blobs.clone()),
         max_pages: 100,
         text_chars: 0,
+        caption: None,
     };
     let out = ingest
         .index_document(
@@ -1215,6 +1220,7 @@ async fn a_failed_page_image_write_does_not_fail_the_window() {
         blobs: Some(Arc::new(FailingBlob)),
         max_pages: 100,
         text_chars: 0,
+        caption: None,
     };
     let out = ingest
         .index_document(
@@ -1240,4 +1246,212 @@ async fn a_failed_page_image_write_does_not_fail_the_window() {
             .len(),
         3
     );
+}
+
+// ---- ingest-time page captions ----
+
+/// Describes each page as "chart on page N"; can fail or stall on one page.
+struct FakeDescriber {
+    calls: AtomicUsize,
+    fail_on: Option<u32>,
+    slow_on: Option<u32>,
+}
+
+impl FakeDescriber {
+    fn new() -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            fail_on: None,
+            slow_on: None,
+        }
+    }
+}
+
+#[async_trait]
+impl kb_ports::PageDescriber for FakeDescriber {
+    async fn describe(&self, page: &PageImage) -> Result<Option<String>, PortError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if Some(page.page) == self.fail_on {
+            return Err(PortError::Unavailable("describer down".into()));
+        }
+        if Some(page.page) == self.slow_on {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+        Ok(Some(format!("chart on page {}", page.page + 1)))
+    }
+}
+
+/// Records the `text` of every page it is asked to embed.
+#[derive(Default)]
+struct RecordingPageEmbedder {
+    seen: std::sync::Mutex<Vec<Vec<String>>>,
+}
+
+#[async_trait]
+impl PageEmbedder for RecordingPageEmbedder {
+    async fn embed_pages(&self, pages: &[PageImage]) -> Result<Vec<Vec<f32>>, PortError> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push(pages.iter().map(|p| p.text.clone()).collect());
+        Ok(pages.iter().map(|_| vec![1.0, 0.0, 0.0]).collect())
+    }
+    async fn embed_query(&self, _: &str) -> Result<Vec<f32>, PortError> {
+        Ok(vec![1.0, 0.0, 0.0])
+    }
+    fn dimension(&self) -> u32 {
+        3
+    }
+}
+
+fn caption(describer: Arc<FakeDescriber>, timeout: Duration) -> crate::PageCaption {
+    crate::PageCaption {
+        describer,
+        config: crate::PageCaptionConfig {
+            concurrency: 4,
+            timeout,
+            rerank_text: true,
+            text_chunks: true,
+        },
+    }
+}
+
+#[tokio::test]
+async fn page_descriptions_join_the_stored_text_but_not_the_embedder_input() {
+    let index = Arc::new(InMemoryIndex::new(3));
+    let embedder = Arc::new(RecordingPageEmbedder::default());
+    let describer = Arc::new(FakeDescriber::new());
+    let ingest = PageIngest {
+        renderer: Arc::new(FakeRenderer(2)),
+        embedder: embedder.clone(),
+        index: index.clone(),
+        blobs: None,
+        max_pages: 100,
+        text_chars: 200,
+        caption: Some(caption(describer.clone(), Duration::from_secs(5))),
+    };
+    let mut page_texts = HashMap::new();
+    page_texts.insert(0u32, "The body text of page one.".to_string());
+    page_texts.insert(1u32, "The body text of page two.".to_string());
+
+    let out = ingest
+        .index_document(
+            &t("t1"),
+            &d("d1"),
+            None,
+            "application/pdf",
+            b"%PDF",
+            &HashMap::new(),
+            &page_texts,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(out.indexed, 2);
+    assert_eq!(out.described, 2);
+    assert_eq!(out.descriptions_failed, 0);
+    assert_eq!(
+        out.descriptions,
+        vec![
+            (0, "chart on page 1".to_string()),
+            (1, "chart on page 2".to_string())
+        ]
+    );
+    let stored = index.ordered_chunks(&t("t1"), &d("d1")).await.unwrap();
+    assert_eq!(
+        stored[0].content,
+        "The body text of page one.\n\n[Visual] chart on page 1"
+    );
+    assert_eq!(
+        stored[1].content,
+        "The body text of page two.\n\n[Visual] chart on page 2"
+    );
+
+    // The page vector inputs stay exactly the page's own text: no `[Visual]`,
+    // so every page-embedding cache entry from before the caption stage stays
+    // valid.
+    let seen = embedder.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0],
+        vec!["The body text of page one.", "The body text of page two."]
+    );
+    assert_eq!(describer.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_failed_or_slow_description_leaves_the_page_indexed_and_counted() {
+    let index = Arc::new(InMemoryIndex::new(3));
+    let describer = Arc::new(FakeDescriber {
+        calls: AtomicUsize::new(0),
+        fail_on: Some(0),
+        slow_on: Some(1),
+    });
+    let ingest = PageIngest {
+        renderer: Arc::new(FakeRenderer(3)),
+        embedder: embedder(vec![1.0, 0.0, 0.0]),
+        index: index.clone(),
+        blobs: None,
+        max_pages: 100,
+        text_chars: 0,
+        caption: Some(caption(describer, Duration::from_millis(20))),
+    };
+    let out = ingest
+        .index_document(
+            &t("t1"),
+            &d("d1"),
+            None,
+            "application/pdf",
+            b"%PDF",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(out.indexed, 3, "a failed caption never costs a page");
+    assert_eq!(out.failed, 0);
+    assert_eq!(out.described, 1);
+    assert_eq!(out.descriptions_failed, 2);
+    assert_eq!(out.descriptions, vec![(2, "chart on page 3".to_string())]);
+    let stored = index.ordered_chunks(&t("t1"), &d("d1")).await.unwrap();
+    assert_eq!(stored.len(), 3);
+    assert_eq!(stored[0].content, "");
+    assert_eq!(stored[1].content, "");
+    assert_eq!(stored[2].content, "[Visual] chart on page 3");
+}
+
+#[tokio::test]
+async fn without_a_caption_stage_nothing_is_described_or_appended() {
+    let index = Arc::new(InMemoryIndex::new(3));
+    let ingest = PageIngest {
+        renderer: Arc::new(FakeRenderer(2)),
+        embedder: embedder(vec![1.0, 0.0, 0.0]),
+        index: index.clone(),
+        blobs: None,
+        max_pages: 100,
+        text_chars: 200,
+        caption: None,
+    };
+    let mut page_texts = HashMap::new();
+    page_texts.insert(0u32, "body one".to_string());
+    page_texts.insert(1u32, "body two".to_string());
+    let out = ingest
+        .index_document(
+            &t("t1"),
+            &d("d1"),
+            None,
+            "application/pdf",
+            b"%PDF",
+            &HashMap::new(),
+            &page_texts,
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.described, 0);
+    assert!(out.descriptions.is_empty());
+    assert_eq!(out.descriptions_failed, 0);
+    let stored = index.ordered_chunks(&t("t1"), &d("d1")).await.unwrap();
+    assert_eq!(stored[0].content, "body one");
+    assert_eq!(stored[1].content, "body two");
 }

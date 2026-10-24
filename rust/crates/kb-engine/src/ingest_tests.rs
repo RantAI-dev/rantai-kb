@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use kb_ports::{
@@ -1460,6 +1461,7 @@ fn page_ingest(
         index: index.clone(),
         max_pages: 1000,
         text_chars: 0,
+        caption: None,
     });
     (ingest, index)
 }
@@ -1555,4 +1557,228 @@ async fn a_failed_text_step_removes_the_pages_indexed_alongside_it() {
     assert!(!jobs.finished.read().unwrap()[0].success);
     assert_eq!(document_status_of(&documents), "failed");
     assert_eq!(stored_pages(&index).await, 0);
+}
+
+// ---- ingest-time page captions in the text index ----
+
+/// Describes each page as "chart on page N", or fails on `fail_on`.
+struct DescribePages {
+    calls: AtomicUsize,
+    fail_on: Option<u32>,
+}
+
+#[async_trait::async_trait]
+impl kb_ports::PageDescriber for DescribePages {
+    async fn describe(&self, page: &kb_ports::PageImage) -> Result<Option<String>, PortError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if Some(page.page) == self.fail_on {
+            return Err(PortError::Unavailable("describer down".into()));
+        }
+        Ok(Some(format!("chart on page {}", page.page + 1)))
+    }
+}
+
+/// Passages succeed on the first call (the document's text) and fail after
+/// that (the visual descriptions).
+struct FailSecondEmbedder {
+    calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Embedder for FailSecondEmbedder {
+    async fn embed_query(&self, _: &str) -> Result<Vec<f32>, PortError> {
+        Ok(vec![0.1, 0.2, 0.3, 0.4])
+    }
+    async fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, PortError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) >= 1 {
+            return Err(PortError::Unavailable("description embedding down".into()));
+        }
+        Ok(texts.iter().map(|_| vec![0.1, 0.2, 0.3, 0.4]).collect())
+    }
+    fn dimension(&self) -> u32 {
+        4
+    }
+}
+
+fn page_ingest_with_caption(
+    pages: u32,
+    describer: Arc<dyn kb_ports::PageDescriber>,
+) -> (
+    Arc<crate::PageIngest>,
+    Arc<crate::in_memory_index::InMemoryIndex>,
+) {
+    let index = Arc::new(crate::in_memory_index::InMemoryIndex::new(3));
+    let ingest = Arc::new(crate::PageIngest {
+        renderer: Arc::new(BlankPages(pages)),
+        embedder: Arc::new(Pages3 { fail_on: None }),
+        blobs: None,
+        index: index.clone(),
+        max_pages: 1000,
+        text_chars: 0,
+        caption: Some(crate::PageCaption {
+            describer,
+            config: crate::PageCaptionConfig::default(),
+        }),
+    });
+    (ingest, index)
+}
+
+fn worker_with_text_index(
+    jobs: Arc<FakeJobStore>,
+    documents: Arc<FakeDocumentStore>,
+    index: Arc<dyn kb_ports::RetrievalIndex>,
+    blobs: Arc<FakeBlobStore>,
+    extractor: Arc<dyn Extractor>,
+    embedder: Arc<dyn Embedder>,
+) -> IngestWorker {
+    IngestWorker::new(
+        jobs,
+        documents,
+        index,
+        blobs,
+        extractor,
+        embedder,
+        IngestSettings {
+            embedding_model: Some("bge-m3".to_string()),
+            ..IngestSettings::default()
+        },
+    )
+}
+
+#[tokio::test]
+async fn page_descriptions_are_indexed_as_figure_chunks_after_the_text_chunks() {
+    let (jobs, documents, _chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let index = Arc::new(crate::in_memory_index::InMemoryIndex::new(4));
+    let describer = Arc::new(DescribePages {
+        calls: AtomicUsize::new(0),
+        fail_on: Some(0),
+    });
+    let (pages, _page_index) = page_ingest_with_caption(3, describer.clone());
+    let worker = worker_with_text_index(
+        jobs,
+        documents.clone(),
+        index.clone(),
+        blobs,
+        extractor(),
+        Arc::new(FakeEmbedder::default()),
+    )
+    .with_page_ingest(pages);
+
+    let outcome = worker.run_job(job()).await;
+    assert!(
+        matches!(outcome, JobOutcome::Ready { .. }),
+        "document failed: {outcome:?}"
+    );
+    let written = match outcome {
+        JobOutcome::Ready { chunks } => chunks,
+        JobOutcome::Failed { .. } => 0,
+    };
+    assert!(written > 0);
+
+    let stored = index
+        .ordered_chunks(&tenant(), &DocumentId::new_unchecked(DOC))
+        .await
+        .unwrap();
+    let figures: Vec<_> = stored
+        .iter()
+        .filter(|c| c.chunk_type == kb_ports::ChunkType::Figure)
+        .collect();
+    assert_eq!(figures.len(), 2, "one chunk per described page");
+    assert_eq!(figures[0].unit_id.0, format!("{DOC}_{written}"));
+    assert_eq!(figures[1].unit_id.0, format!("{DOC}_{}", written + 1));
+    assert_eq!(figures[0].page, Some(1));
+    assert_eq!(figures[1].page, Some(2));
+    assert_eq!(figures[0].content, "[Visual] chart on page 2");
+    assert_eq!(figures[1].content, "[Visual] chart on page 3");
+    assert_eq!(figures[0].metadata["section"], "Visual description");
+    assert_eq!(figures[0].metadata["chunkType"], "figure");
+    assert_eq!(figures[0].tenant, tenant());
+    assert_eq!(figures[1].tenant, tenant());
+
+    // The text chunks keep their own ids; the description ids follow them.
+    for (i, chunk) in stored
+        .iter()
+        .filter(|c| c.chunk_type != kb_ports::ChunkType::Figure)
+        .enumerate()
+    {
+        assert_eq!(chunk.unit_id.0, format!("{DOC}_{i}"));
+    }
+
+    let meta = page_images_meta(&documents).unwrap();
+    assert_eq!(meta["described"], 2);
+    assert_eq!(meta["descriptionsFailed"], 1);
+    assert_eq!(describer.calls.load(Ordering::SeqCst), 3);
+    let visual = documents.docs.read().unwrap()[&tenant()][0]
+        .metadata
+        .as_ref()
+        .unwrap()["visualChunks"]
+        .clone();
+    assert_eq!(visual["written"], 2);
+    assert_eq!(visual["failed"], 0);
+}
+
+#[tokio::test]
+async fn a_failed_description_embedding_does_not_fail_the_document() {
+    let (jobs, documents, _chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let index = Arc::new(crate::in_memory_index::InMemoryIndex::new(4));
+    let describer = Arc::new(DescribePages {
+        calls: AtomicUsize::new(0),
+        fail_on: None,
+    });
+    let (pages, _page_index) = page_ingest_with_caption(2, describer);
+    let worker = worker_with_text_index(
+        jobs,
+        documents.clone(),
+        index.clone(),
+        blobs,
+        extractor(),
+        Arc::new(FailSecondEmbedder {
+            calls: AtomicUsize::new(0),
+        }),
+    )
+    .with_page_ingest(pages);
+
+    let outcome = worker.run_job(job()).await;
+    assert!(
+        matches!(outcome, JobOutcome::Ready { .. }),
+        "document failed: {outcome:?}"
+    );
+    let written = match outcome {
+        JobOutcome::Ready { chunks } => chunks,
+        JobOutcome::Failed { .. } => 0,
+    };
+    let stored = index
+        .ordered_chunks(&tenant(), &DocumentId::new_unchecked(DOC))
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), written, "only the text chunks are indexed");
+    assert!(
+        stored
+            .iter()
+            .all(|c| c.chunk_type != kb_ports::ChunkType::Figure),
+        "no description chunk survives a failed embedding"
+    );
+    assert_eq!(document_status_of(&documents), "ready");
+
+    // The descriptions were generated, and their write failed visibly.
+    let meta = page_images_meta(&documents).unwrap();
+    assert_eq!(meta["described"], 2);
+    assert_eq!(meta["descriptionsFailed"], 0);
+    let visual = documents.docs.read().unwrap()[&tenant()][0]
+        .metadata
+        .as_ref()
+        .unwrap()["visualChunks"]
+        .clone();
+    assert_eq!(visual["written"], 0);
+    assert_eq!(visual["failed"], 2);
 }

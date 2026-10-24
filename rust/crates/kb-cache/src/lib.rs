@@ -8,6 +8,7 @@
 
 mod embedder;
 mod extractor;
+mod page_describer;
 mod page_embedder;
 mod reranker;
 mod store;
@@ -16,6 +17,7 @@ mod vision_scorer;
 
 pub use embedder::CachedEmbedder;
 pub use extractor::CachedExtractor;
+pub use page_describer::CachedPageDescriber;
 pub use page_embedder::CachedPageEmbedder;
 pub use reranker::CachedReranker;
 pub use store::{CacheKey, CacheStats, DiskCache};
