@@ -1456,6 +1456,7 @@ fn page_ingest(
     let ingest = Arc::new(crate::PageIngest {
         renderer: Arc::new(BlankPages(pages)),
         embedder: Arc::new(Pages3 { fail_on }),
+        blobs: None,
         index: index.clone(),
         max_pages: 1000,
         text_chars: 0,

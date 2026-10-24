@@ -173,6 +173,10 @@ pub struct StageTimings {
     pub fusion_ms: f64,
     /// Cross-encoder rerank, when enabled and when there were candidates.
     pub rerank_ms: f64,
+    /// Live vision rerank of the top page images, when configured and when
+    /// reranking is on. Sequential with the rest of the page work, so it is an
+    /// accounted stage.
+    pub vision_rerank_ms: f64,
     /// Neighbour fetch and weave.
     pub neighbours_ms: f64,
     /// Figure co-retrieval and the optional figure gate.
@@ -227,6 +231,7 @@ impl StageTimings {
             + self.enrich_ms
             + self.fusion_ms
             + self.rerank_ms
+            + self.vision_rerank_ms
             + self.neighbours_ms
             + self.figures_ms
             + self.context_ms
@@ -235,13 +240,14 @@ impl StageTimings {
     /// The stages as `(name, ms)` pairs, accounted first, for logging and for
     /// a caller that wants to render them without knowing the field names.
     #[must_use]
-    pub fn accounted_pairs(&self) -> [(&'static str, f64); 8] {
+    pub fn accounted_pairs(&self) -> [(&'static str, f64); 9] {
         [
             ("expand", self.expand_ms),
             ("arms", self.arms_ms),
             ("enrich", self.enrich_ms),
             ("fusion", self.fusion_ms),
             ("rerank", self.rerank_ms),
+            ("visionRerank", self.vision_rerank_ms),
             ("neighbours", self.neighbours_ms),
             ("figures", self.figures_ms),
             ("context", self.context_ms),
@@ -380,7 +386,7 @@ mod tests {
         assert_eq!(t.accounted_sum_ms(), 0.0);
         assert_eq!(t.total_ms, 0.0);
         assert!(!t.query_embed_cached);
-        assert_eq!(t.accounted_pairs().len(), 8);
+        assert_eq!(t.accounted_pairs().len(), 9);
         assert_eq!(t.detail_pairs().len(), 7);
     }
 }

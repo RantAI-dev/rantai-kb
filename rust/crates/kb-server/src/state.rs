@@ -89,10 +89,19 @@ impl AppState {
             }
             (false, _) => None,
         };
+        let blob: Arc<dyn BlobStore> = Arc::new(
+            kb_store_blob::S3BlobStore::new(config.s3).map_err(|e| anyhow::anyhow!("s3: {e}"))?,
+        );
         let page_arm = match config.pages.as_ref() {
             None => None,
             Some(pages) => Some(Arc::new(
-                build_page_arm(&config.qdrant, pages, config.cache.as_ref()).await?,
+                build_page_arm(
+                    &config.qdrant,
+                    pages,
+                    config.cache.as_ref(),
+                    Arc::clone(&blob),
+                )
+                .await?,
             )),
         };
         let documents: Arc<dyn DocumentStore> =
@@ -124,9 +133,6 @@ impl AppState {
         let entities: Arc<dyn EntityStore> = Arc::new(
             kb_store_surreal::SurrealChunkStore::new(config.surreal.clone())
                 .map_err(|e| anyhow::anyhow!("surreal entities: {e}"))?,
-        );
-        let blob: Arc<dyn BlobStore> = Arc::new(
-            kb_store_blob::S3BlobStore::new(config.s3).map_err(|e| anyhow::anyhow!("s3: {e}"))?,
         );
         let mut embedder: Arc<dyn Embedder> = Arc::new(
             kb_inference::EmbedderImpl::new(embedder_settings_from(config.embedder.clone()))
@@ -280,6 +286,13 @@ impl AppState {
         if let (Some(arm), Some(pages)) =
             (self.engine.inputs.page_arm.as_ref(), config.pages.as_ref())
         {
+            // Only the vision rerank reads the stored page images, so only it
+            // turns the writes on: otherwise every ingested page is a JPEG in
+            // the bucket with no consumer.
+            let page_blobs = pages
+                .vision
+                .as_ref()
+                .map(|_| Arc::clone(&self.blob) as Arc<dyn kb_ports::BlobStore>);
             worker = worker.with_page_ingest(Arc::new(kb_engine::PageIngest {
                 renderer: Arc::new(kb_extract::PdfiumPageRenderer {
                     dpi: pages.dpi,
@@ -287,6 +300,7 @@ impl AppState {
                 }),
                 embedder: Arc::clone(&arm.embedder),
                 index: Arc::clone(&arm.index),
+                blobs: page_blobs,
                 max_pages: pages.max_pages,
                 text_chars: pages.text_chars,
             }));
@@ -302,6 +316,7 @@ async fn build_page_arm(
     qdrant: &kb_store_qdrant::QdrantSettings,
     pages: &crate::config::PageArmSettings,
     cache: Option<&crate::config::CacheConfig>,
+    blobs: Arc<dyn kb_ports::BlobStore>,
 ) -> anyhow::Result<kb_engine::PageArm> {
     let settings = kb_store_qdrant::QdrantSettings {
         model_slug: pages.embedder.model.clone(),
@@ -335,10 +350,55 @@ async fn build_page_arm(
         ));
     }
     tracing::info!(%collection, model = %pages.embedder.model, "page-image arm on");
+    let vision = match pages.vision.as_ref() {
+        None => None,
+        Some(settings) => {
+            let scorer: Arc<dyn kb_ports::PageVisionScorer> = Arc::new(
+                kb_inference::HttpPageVisionScorer::new(settings.scorer.clone())
+                    .map_err(|e| anyhow::anyhow!("vision scorer: {e}"))?,
+            );
+            let scorer: Arc<dyn kb_ports::PageVisionScorer> = match cache {
+                Some(cache) => {
+                    let fingerprint = format!(
+                        "vision|{}|prompt={}|reasoning={}",
+                        settings.scorer.model,
+                        kb_inference::VISION_PROMPT_VERSION,
+                        if settings.scorer.no_reasoning {
+                            "off"
+                        } else {
+                            "on"
+                        },
+                    );
+                    tracing::info!(
+                        %fingerprint,
+                        dir = %cache.dir.display(),
+                        "vision rerank disk cache on"
+                    );
+                    Arc::new(kb_cache::CachedPageVisionScorer::new(
+                        scorer,
+                        kb_cache::DiskCache::new(&cache.dir),
+                        fingerprint,
+                    ))
+                }
+                None => scorer,
+            };
+            tracing::info!(
+                model = %settings.scorer.model,
+                depth = settings.config.depth,
+                "vision rerank on"
+            );
+            Some(kb_engine::PageVision {
+                scorer,
+                blobs,
+                config: settings.config,
+            })
+        }
+    };
     Ok(kb_engine::PageArm {
         embedder,
         index,
         config: pages.arm,
+        vision,
     })
 }
 

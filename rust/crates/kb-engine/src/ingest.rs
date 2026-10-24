@@ -809,7 +809,23 @@ impl IngestWorker {
                 } else {
                     tracing::info!(pages = o.indexed, "page images indexed");
                 }
-                json!({"pageImages": {"indexed": o.indexed, "failed": o.failed, "error": o.error}})
+                if o.images_failed > 0 {
+                    tracing::warn!(
+                        images_failed = o.images_failed,
+                        "page images not stored; the vision rerank cannot read them"
+                    );
+                }
+                let mut recorded = json!({"pageImages": {
+                    "indexed": o.indexed,
+                    "failed": o.failed,
+                    "error": o.error
+                }});
+                // Only present when it happened, so a document ingested before
+                // the vision stage existed keeps exactly the metadata it had.
+                if o.images_failed > 0 {
+                    recorded["pageImages"]["imagesFailed"] = json!(o.images_failed);
+                }
+                recorded
             }
             Err(e) => {
                 tracing::warn!(error = %e, "page images not indexed (non-fatal)");

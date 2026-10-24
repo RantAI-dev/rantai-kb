@@ -123,6 +123,17 @@ pub struct PageArmSettings {
     /// (`KB_PAGE_TEXT_CHARS`, default 6000; 0 = image only).
     pub text_chars: usize,
     pub arm: kb_engine::PageArmConfig,
+    /// The opt-in live vision rerank of the top page images
+    /// (`KB_PAGE_VISION_RERANK_MODEL`). `None` leaves it off.
+    pub vision: Option<PageVisionSettings>,
+}
+
+/// Live vision rerank wiring: which vision model scores the page images, and
+/// how its order is blended with the current one.
+#[derive(Clone, Debug)]
+pub struct PageVisionSettings {
+    pub scorer: kb_inference::VisionScorerSettings,
+    pub config: kb_engine::PageVisionRerankConfig,
 }
 
 /// Where the disk caches live and how their keys are scoped.
@@ -560,7 +571,21 @@ impl Config {
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
         {
-            None => None,
+            None => {
+                // A vision rerank with no page arm has no images to read and
+                // no page order to blend: say so at boot rather than leave an
+                // operator waiting for a stage that will never run.
+                if lookup("KB_PAGE_VISION_RERANK_MODEL")
+                    .map(|v| !v.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    tracing::warn!(
+                        "KB_PAGE_VISION_RERANK_MODEL is set but the page arm is off \
+                         (KB_PAGE_EMBEDDING_MODEL unset); vision rerank stays off"
+                    );
+                }
+                None
+            }
             Some(model) => {
                 if chunk_store_choice != ChunkStoreChoice::Qdrant {
                     bail!("KB_PAGE_EMBEDDING_MODEL needs KB_CHUNK_STORE=qdrant");
@@ -579,6 +604,44 @@ impl Config {
                     Some(other) => bail!(
                         "KB_PAGE_EMBEDDING_FORMAT must be \"openrouter\" or \"vllm\", got {other:?}"
                     ),
+                };
+                let vision_timeout = Duration::from_millis(
+                    int_var(&lookup, "KB_PAGE_VISION_RERANK_TIMEOUT_MS", 8_000u64)?.max(100),
+                );
+                let vision = match lookup("KB_PAGE_VISION_RERANK_MODEL")
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                {
+                    None => None,
+                    Some(vision_model) => Some(PageVisionSettings {
+                        scorer: kb_inference::VisionScorerSettings {
+                            base_url: lookup("KB_PAGE_VISION_RERANK_BASE_URL")
+                                .filter(|v| !v.trim().is_empty())
+                                .unwrap_or_else(|| {
+                                    kb_inference::DEFAULT_VISION_BASE_URL.to_string()
+                                }),
+                            model: vision_model,
+                            api_key: lookup("KB_PAGE_VISION_RERANK_API_KEY")
+                                .filter(|s| !s.trim().is_empty())
+                                .or_else(|| {
+                                    lookup("OPENROUTER_API_KEY").filter(|s| !s.trim().is_empty())
+                                }),
+                            request_timeout: vision_timeout,
+                            no_reasoning: bool_flag(
+                                &lookup,
+                                "KB_PAGE_VISION_RERANK_NO_REASONING",
+                                false,
+                            ),
+                        },
+                        config: kb_engine::PageVisionRerankConfig {
+                            depth: int_var(&lookup, "KB_PAGE_VISION_RERANK_DEPTH", 20usize)?
+                                .clamp(2, 100),
+                            weight: float_var(&lookup, "KB_PAGE_VISION_RERANK_WEIGHT", 0.6)?
+                                .clamp(0.0, 1.0),
+                            rrf_k: int_var(&lookup, "KB_PAGE_VISION_RERANK_K", 5u32)?.max(1),
+                            timeout: vision_timeout,
+                        },
+                    }),
                 };
                 Some(PageArmSettings {
                     embedder: kb_inference::PageEmbedderSettings {
@@ -626,6 +689,7 @@ impl Config {
                             None
                         },
                     },
+                    vision,
                 })
             }
         };
@@ -1122,5 +1186,89 @@ mod tests {
             err.to_string().contains("KB_PAGE_EMBEDDING_FORMAT"),
             "{err}"
         );
+    }
+
+    fn page_vision(map: &HashMap<&'static str, &'static str>) -> Option<PageVisionSettings> {
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        cfg.pages.expect("page arm configured").vision
+    }
+
+    #[test]
+    fn test_page_vision_rerank_is_off_until_a_model_is_named() {
+        let map = page_arm_map();
+        assert!(page_vision(&map).is_none());
+    }
+
+    #[test]
+    fn test_page_vision_rerank_defaults() {
+        let mut map = page_arm_map();
+        map.insert("KB_PAGE_VISION_RERANK_MODEL", "qwen/qwen3.7-flash");
+        let vision = page_vision(&map).expect("vision rerank configured");
+        assert_eq!(vision.scorer.model, "qwen/qwen3.7-flash");
+        assert_eq!(
+            vision.scorer.base_url,
+            kb_inference::DEFAULT_VISION_BASE_URL
+        );
+        // The OpenRouter key the server already holds is the default.
+        assert_eq!(vision.scorer.api_key.as_deref(), Some("test-key"));
+        assert!(!vision.scorer.no_reasoning);
+        assert_eq!(vision.scorer.request_timeout, Duration::from_millis(8_000));
+        assert_eq!(
+            vision.config,
+            kb_engine::PageVisionRerankConfig {
+                depth: 20,
+                weight: 0.6,
+                rrf_k: 5,
+                timeout: Duration::from_millis(8_000),
+            }
+        );
+    }
+
+    #[test]
+    fn test_page_vision_rerank_overrides() {
+        let mut map = page_arm_map();
+        map.insert("KB_PAGE_VISION_RERANK_MODEL", "qwen/qwen3.7-flash");
+        map.insert(
+            "KB_PAGE_VISION_RERANK_BASE_URL",
+            "http://127.0.0.1:8000/v1/chat/completions",
+        );
+        map.insert("KB_PAGE_VISION_RERANK_API_KEY", "vision-key");
+        map.insert("KB_PAGE_VISION_RERANK_DEPTH", "10");
+        map.insert("KB_PAGE_VISION_RERANK_TIMEOUT_MS", "3000");
+        map.insert("KB_PAGE_VISION_RERANK_WEIGHT", "0.5");
+        map.insert("KB_PAGE_VISION_RERANK_K", "3");
+        map.insert("KB_PAGE_VISION_RERANK_NO_REASONING", "1");
+        let vision = page_vision(&map).expect("vision rerank configured");
+        assert_eq!(
+            vision.scorer.base_url,
+            "http://127.0.0.1:8000/v1/chat/completions"
+        );
+        assert_eq!(vision.scorer.api_key.as_deref(), Some("vision-key"));
+        assert!(vision.scorer.no_reasoning);
+        assert_eq!(vision.scorer.request_timeout, Duration::from_millis(3_000));
+        assert_eq!(
+            vision.config,
+            kb_engine::PageVisionRerankConfig {
+                depth: 10,
+                weight: 0.5,
+                rrf_k: 3,
+                timeout: Duration::from_millis(3_000),
+            }
+        );
+    }
+
+    /// The vision stage has no images to read without the page arm, so it
+    /// stays off even when its model is named.
+    #[test]
+    fn test_page_vision_rerank_needs_the_page_arm() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("SURREAL_DB_URL", "http://localhost:8000");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_PAGE_VISION_RERANK_MODEL", "qwen/qwen3.7-flash");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert!(cfg.pages.is_none());
     }
 }

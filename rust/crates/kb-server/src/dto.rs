@@ -110,6 +110,8 @@ pub struct StageTimingsDto {
     pub enrich: f64,
     pub fusion: f64,
     pub rerank: f64,
+    /// The live vision rerank of the top page images, when configured.
+    pub vision_rerank: f64,
     pub neighbours: f64,
     pub figures: f64,
     /// Building the context string and the numbered sources.
@@ -152,7 +154,7 @@ pub struct StageDetailDto {
 /// `total` is excluded: it is the bound, not one of the things that adds up to
 /// it.
 #[must_use]
-pub fn accounted_pairs(s: &StageTimingsDto) -> [(&'static str, f64); 10] {
+pub fn accounted_pairs(s: &StageTimingsDto) -> [(&'static str, f64); 11] {
     [
         ("scopeBuild", s.scope_build),
         ("expand", s.expand),
@@ -160,6 +162,7 @@ pub fn accounted_pairs(s: &StageTimingsDto) -> [(&'static str, f64); 10] {
         ("enrich", s.enrich),
         ("fusion", s.fusion),
         ("rerank", s.rerank),
+        ("visionRerank", s.vision_rerank),
         ("neighbours", s.neighbours),
         ("figures", s.figures),
         ("context", s.context),
@@ -194,6 +197,7 @@ impl StageTimingsDto {
             enrich: round_ms(self.enrich),
             fusion: round_ms(self.fusion),
             rerank: round_ms(self.rerank),
+            vision_rerank: round_ms(self.vision_rerank),
             neighbours: round_ms(self.neighbours),
             figures: round_ms(self.figures),
             context: round_ms(self.context),
@@ -365,6 +369,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
                 enrich: outcome.timings.enrich_ms,
                 fusion: outcome.timings.fusion_ms,
                 rerank: outcome.timings.rerank_ms,
+                vision_rerank: outcome.timings.vision_rerank_ms,
                 neighbours: outcome.timings.neighbours_ms,
                 figures: outcome.timings.figures_ms,
                 context: outcome.timings.context_ms,
@@ -740,5 +745,19 @@ mod tests {
             Some(11),
             "exactly the Bun fields plus stageTimingsMs, nothing renamed away"
         );
+    }
+
+    #[test]
+    fn the_vision_rerank_stage_is_reported_like_every_other_stage() {
+        let stats = StageTimingsDto {
+            rerank: 3.0,
+            vision_rerank: 2.0,
+            total: 10.0,
+            ..StageTimingsDto::default()
+        };
+        let value = serde_json::to_value(stats).unwrap();
+        assert_eq!(value["visionRerank"], 2.0);
+        assert!(accounted_pairs(&stats).contains(&("visionRerank", 2.0)));
+        assert!(stats.accounted_sum_ms() >= 5.0);
     }
 }
