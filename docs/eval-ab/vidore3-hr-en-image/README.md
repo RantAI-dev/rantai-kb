@@ -133,4 +133,15 @@ below is held out. Answers are cached on disk; the depth-10 qwen3.7 row reruns f
 
 Verdict: a vision rerank adds about +0.015 for about $0.55 per 1,000 searches (top 20). That
 is worth an opt-in live stage for the cloud tier, behind a timeout that degrades visibly to
-the current order. It is not built yet.
+the current order.
+
+**Implemented** (2026-10-24) as an opt-in stage. Ingest stores each rendered page JPEG under
+`documents/{tenant}/{doc}/pages/p-NNNNN.jpg` when the stage is configured; search fetches the
+images of the top `depth` pages, asks the vision model for one score per page, and blends its
+order with the page order by the same weighted RRF (`w`, `k`). Everything below `depth` keeps
+its order; any failure (missing blob, scorer error, timeout) keeps the order and reports
+`vision_rerank_unavailable`. Settings: `KB_PAGE_VISION_RERANK_MODEL` (unset = off; e.g.
+`qwen/qwen3.7-flash`), `_BASE_URL`, `_API_KEY` (default `OPENROUTER_API_KEY`), `_DEPTH` (20),
+`_TIMEOUT_MS` (8000), `_WEIGHT` (0.6), `_K` (5), `_NO_REASONING` (false). Answers are cached on
+disk under `KB_CACHE_DIR`, keyed by model, prompt version, reasoning flag, query, page ids and
+image hashes.
