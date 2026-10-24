@@ -145,3 +145,14 @@ its order; any failure (missing blob, scorer error, timeout) keeps the order and
 `_TIMEOUT_MS` (8000), `_WEIGHT` (0.6), `_K` (5), `_NO_REASONING` (false). Answers are cached on
 disk under `KB_CACHE_DIR`, keyed by model, prompt version, reasoning flag, query, page ids and
 image hashes.
+
+**Page captions** (2026-10-24) are the ingest-side sibling: with
+`KB_PAGE_CAPTION_MODEL` set, each rendered page is described once (charts, tables, diagrams,
+maps, photos only — never the running text) and the description is appended to the page text
+the page reranker reads and embedded into the text index as a figure chunk. Off by default;
+requires the page arm. Knobs: `KB_PAGE_CAPTION_BASE_URL`, `KB_PAGE_CAPTION_API_KEY` (default
+`OPENROUTER_API_KEY`), `KB_PAGE_CAPTION_CONCURRENCY` (8), `KB_PAGE_CAPTION_TIMEOUT_MS`
+(30000), `KB_PAGE_CAPTION_MAX_TOKENS` (300), `KB_PAGE_CAPTION_NO_REASONING` (false),
+`KB_PAGE_CAPTION_TEXT_CHUNKS` (true) and `KB_PAGE_CAPTION_RERANK_TEXT` (true). Answers are
+cached on disk under `KB_CACHE_DIR` by model, prompt version, reasoning flag and image hash,
+including `NONE`. Its effect on retrieval is not measured yet.

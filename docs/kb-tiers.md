@@ -198,6 +198,17 @@ Status as of 2026-10-24:
      `_WEIGHT` (0.6), `_K` (5), `_NO_REASONING`, `_BASE_URL`, `_API_KEY` (defaults to
      `OPENROUTER_API_KEY`). Requires the page arm; a failure keeps the page order and reports
      `vision_rerank_unavailable`. Live latency is not measured yet.
+   - Page captions (opt-in, ingest, cloud): `KB_PAGE_CAPTION_MODEL` asks a vision model to
+     describe only what each rendered page draws — charts, graphs, tables, diagrams, maps,
+     photos — once, at ingest. The description joins the stored page text the page reranker
+     reads and is embedded into the text index as a figure chunk, so chart content becomes
+     searchable as text. Off by default and requires the page arm. Other knobs:
+     `_BASE_URL`, `_API_KEY` (defaults to `OPENROUTER_API_KEY`), `_CONCURRENCY` (8),
+     `_TIMEOUT_MS` (30000), `_MAX_TOKENS` (300), `_NO_REASONING` (false), `_TEXT_CHUNKS`
+     (true) and `_RERANK_TEXT` (true), the last two so each use can be measured alone.
+     Answers are cached on disk under `KB_CACHE_DIR`, keyed by model, prompt version,
+     reasoning flag and image hash; a page with no visuals (`NONE`) is cached too. Effect on
+     retrieval is not measured yet.
 5. Lite on exactly 2 cores (`taskset`): PP-OCRv6 via ONNX, small-embedder bake-off.
 6. Desk / Studio / Station on real hardware; `kb-server setup`.
 
