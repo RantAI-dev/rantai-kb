@@ -34,13 +34,32 @@ pub struct PageImage {
 pub trait PageRenderer: Send + Sync {
     /// Render the first `max_pages` pages of `file_bytes`. An empty list for a
     /// format that has no pages (only PDFs do today); an error only when a paged
-    /// file cannot be rendered.
+    /// file cannot be rendered at all. A single page that fails to render comes
+    /// back with empty `bytes`, so the caller can count it rather than lose the
+    /// whole document.
     async fn render(
         &self,
         mime_type: &str,
         file_bytes: &[u8],
         max_pages: u32,
     ) -> Result<Vec<PageImage>, PortError>;
+
+    /// Render pages `first .. first + count` (0-based), fewer at the end of the
+    /// document. Lets a caller embed one window of pages while the next one
+    /// renders. The default renders from the start and drops the pages before
+    /// `first`; a real renderer should do better.
+    async fn render_range(
+        &self,
+        mime_type: &str,
+        file_bytes: &[u8],
+        first: u32,
+        count: u32,
+    ) -> Result<Vec<PageImage>, PortError> {
+        let pages = self
+            .render(mime_type, file_bytes, first.saturating_add(count))
+            .await?;
+        Ok(pages.into_iter().filter(|p| p.page >= first).collect())
+    }
 }
 
 /// Embeds page images, and text queries into the same space.

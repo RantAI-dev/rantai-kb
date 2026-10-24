@@ -38,10 +38,27 @@ fn is_pdf(mime_type: &str, bytes: &[u8]) -> bool {
 ///
 /// # Errors
 ///
-/// When pdfium is missing, the PDF cannot be loaded, or a page fails to render.
+/// When pdfium is missing or the PDF cannot be loaded. A page that fails to
+/// render comes back with empty `bytes`.
 pub fn render_pdf_pages(
     pdf_bytes: &[u8],
     max_pages: u32,
+    dpi: u32,
+    jpeg_quality: u8,
+) -> Result<Vec<PageImage>, ExtractError> {
+    render_pdf_page_range(pdf_bytes, 0, max_pages, dpi, jpeg_quality)
+}
+
+/// Render pages `first .. first + count` of a PDF to JPEG (fewer at the end).
+///
+/// # Errors
+///
+/// When pdfium is missing or the PDF cannot be loaded. A page that fails to
+/// render comes back with empty `bytes`.
+pub fn render_pdf_page_range(
+    pdf_bytes: &[u8],
+    first: u32,
+    count: u32,
     dpi: u32,
     jpeg_quality: u8,
 ) -> Result<Vec<PageImage>, ExtractError> {
@@ -53,22 +70,21 @@ pub fn render_pdf_pages(
     let scale = dpi.clamp(36, 300) as f32 / 72.0;
     let config = PdfRenderConfig::new().scale_page_by_factor(scale);
     let mut out = Vec::new();
-    for (i, page) in document.pages().iter().enumerate() {
-        let index = u32::try_from(i).unwrap_or(u32::MAX);
-        if index >= max_pages {
-            break;
-        }
-        let bitmap = page
-            .render_with_config(&config)
-            .map_err(|e| ExtractError::Container(format!("failed to render page {i}: {e}")))?;
-        let rgb = bitmap
-            .as_image()
-            .map_err(|e| ExtractError::Container(format!("page {i} bitmap: {e}")))?
-            .to_rgb8();
-        let mut bytes = Vec::new();
-        JpegEncoder::new_with_quality(&mut Cursor::new(&mut bytes), jpeg_quality.clamp(30, 95))
-            .encode_image(&rgb)
-            .map_err(|e| ExtractError::Container(format!("page {i} jpeg: {e}")))?;
+    let pages = document.pages();
+    #[allow(clippy::cast_sign_loss)]
+    let end = first.saturating_add(count).min(pages.len() as u32);
+    for index in first..end {
+        // One bad page must not cost the document its other pages: it comes
+        // back with no bytes, and the page arm counts it as failed.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let rendered = pages
+            .get(index as _)
+            .map_err(|e| format!("load: {e}"))
+            .and_then(|page| render_one(&page, &config, jpeg_quality));
+        let bytes = rendered.unwrap_or_else(|e| {
+            tracing::warn!(page = index, error = %e, "page not rendered");
+            Vec::new()
+        });
         out.push(PageImage {
             page: index,
             mime: "image/jpeg".to_string(),
@@ -77,6 +93,24 @@ pub fn render_pdf_pages(
         });
     }
     Ok(out)
+}
+
+fn render_one(
+    page: &PdfPage<'_>,
+    config: &PdfRenderConfig,
+    jpeg_quality: u8,
+) -> Result<Vec<u8>, String> {
+    let rgb = page
+        .render_with_config(config)
+        .map_err(|e| format!("render: {e}"))?
+        .as_image()
+        .map_err(|e| format!("bitmap: {e}"))?
+        .to_rgb8();
+    let mut bytes = Vec::new();
+    JpegEncoder::new_with_quality(&mut Cursor::new(&mut bytes), jpeg_quality.clamp(30, 95))
+        .encode_image(&rgb)
+        .map_err(|e| format!("jpeg: {e}"))?;
+    Ok(bytes)
 }
 
 #[async_trait]
@@ -97,6 +131,26 @@ impl PageRenderer for PdfiumPageRenderer {
             .map_err(|e| PortError::Unavailable(format!("page render task: {e}")))?
             .map_err(|e| PortError::Unavailable(format!("page render: {e}")))
     }
+
+    async fn render_range(
+        &self,
+        mime_type: &str,
+        file_bytes: &[u8],
+        first: u32,
+        count: u32,
+    ) -> Result<Vec<PageImage>, PortError> {
+        if !is_pdf(mime_type, file_bytes) || count == 0 {
+            return Ok(Vec::new());
+        }
+        let bytes = file_bytes.to_vec();
+        let (dpi, quality) = (self.dpi, self.jpeg_quality);
+        tokio::task::spawn_blocking(move || {
+            render_pdf_page_range(&bytes, first, count, dpi, quality)
+        })
+        .await
+        .map_err(|e| PortError::Unavailable(format!("page render task: {e}")))?
+        .map_err(|e| PortError::Unavailable(format!("page render: {e}")))
+    }
 }
 
 #[cfg(test)]
@@ -104,6 +158,26 @@ impl PageRenderer for PdfiumPageRenderer {
 mod tests {
     use super::*;
     use crate::pdfium::MINIMAL_PDF_HELLO_WORLD;
+
+    #[tokio::test]
+    async fn a_range_past_the_last_page_is_empty_not_an_error() {
+        if get_pdfium().is_err() {
+            eprintln!("libpdfium not found; skipping");
+            return;
+        }
+        let r = PdfiumPageRenderer::default();
+        let first = r
+            .render_range("application/pdf", MINIMAL_PDF_HELLO_WORLD, 0, 64)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 1, "a 1-page PDF has one page in 0..64");
+        assert!(!first[0].bytes.is_empty());
+        let past = r
+            .render_range("application/pdf", MINIMAL_PDF_HELLO_WORLD, 1, 64)
+            .await
+            .unwrap();
+        assert!(past.is_empty());
+    }
 
     #[tokio::test]
     async fn renders_a_pdf_page_as_jpeg_at_the_requested_dpi() {

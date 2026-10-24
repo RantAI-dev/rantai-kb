@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use kb_ports::{
     Candidate, ChunkId, ChunkType, DocumentId, DocumentScope, Fusion, HybridQuery, IndexUnit,
-    PageEmbedder, PageRenderer, PortError, ProvenanceArm, RerankCandidate, Reranker,
+    PageEmbedder, PageImage, PageRenderer, PortError, ProvenanceArm, RerankCandidate, Reranker,
     RetrievalIndex, RetrievalProvenance, SearchHit, TenantId,
 };
 
@@ -387,8 +387,9 @@ async fn rerank_slots(
     Ok(order)
 }
 
-/// Page units per upsert request when indexing a document's pages.
-const PAGE_UPSERT_BATCH: usize = 64;
+/// Pages embedded and stored together. One upsert of all 943 pages of a long
+/// PDF timed out against Qdrant; 64 is one request's worth.
+const PAGE_WINDOW: usize = 64;
 
 /// Characters of page text stored on a page unit (what a page reranker reads).
 pub const PAGE_TEXT_STORED_CHARS: usize = 8000;
@@ -429,15 +430,71 @@ impl PageIngest {
         bytes: &[u8],
         chunks_by_page: &HashMap<u32, Vec<ChunkId>>,
         page_texts: &HashMap<u32, String>,
-    ) -> Result<usize, PortError> {
+    ) -> Result<PageOutcome, PortError> {
         self.index.delete_document(tenant, document_id).await?;
+        // Window by window: the next window renders while this one is embedded
+        // and stored. A long PDF never holds every page or request body at
+        // once, and a window that fails costs only its own pages, not the
+        // document's whole page arm (`PageOutcome::failed`).
+        let mut outcome = PageOutcome::default();
+        let mut window = self.render_window(mime_type, bytes, 0, page_texts).await?;
+        while !window.is_empty() {
+            let next_first = window[window.len() - 1].page + 1;
+            let more = window.len() == PAGE_WINDOW && next_first < self.max_pages;
+            let render_next = async {
+                if more {
+                    Some(
+                        self.render_window(mime_type, bytes, next_first, page_texts)
+                            .await,
+                    )
+                } else {
+                    None
+                }
+            };
+            let (stored, next) = tokio::join!(
+                self.store_window(
+                    tenant,
+                    document_id,
+                    &category,
+                    window,
+                    chunks_by_page,
+                    page_texts
+                ),
+                render_next
+            );
+            outcome.indexed += stored.indexed;
+            outcome.failed += stored.failed;
+            if outcome.error.is_none() {
+                outcome.error = stored.error;
+            }
+            window = match next {
+                Some(Ok(w)) => w,
+                Some(Err(e)) => {
+                    tracing::warn!(error = %e, first = next_first, "page rendering stopped");
+                    outcome.error.get_or_insert_with(|| e.to_string());
+                    Vec::new()
+                }
+                None => Vec::new(),
+            };
+        }
+        Ok(outcome)
+    }
+
+    /// Up to [`PAGE_WINDOW`] pages from `first`, each with its own text when
+    /// `text_chars` asks for it.
+    async fn render_window(
+        &self,
+        mime_type: &str,
+        bytes: &[u8],
+        first: u32,
+        page_texts: &HashMap<u32, String>,
+    ) -> Result<Vec<PageImage>, PortError> {
+        #[allow(clippy::cast_possible_truncation)]
+        let count = (PAGE_WINDOW as u32).min(self.max_pages.saturating_sub(first));
         let mut pages = self
             .renderer
-            .render(mime_type, bytes, self.max_pages)
+            .render_range(mime_type, bytes, first, count)
             .await?;
-        if pages.is_empty() {
-            return Ok(0);
-        }
         if self.text_chars > 0 {
             for p in &mut pages {
                 if let Some(t) = page_texts.get(&p.page) {
@@ -445,52 +502,117 @@ impl PageIngest {
                 }
             }
         }
-        let vectors = self.embedder.embed_pages(&pages).await?;
-        if vectors.len() != pages.len() {
-            return Err(PortError::Malformed(format!(
-                "page embedder returned {} vectors for {} pages",
-                vectors.len(),
-                pages.len()
-            )));
-        }
-        let units: Vec<IndexUnit> = pages
-            .iter()
-            .zip(vectors)
-            .map(|(p, dense)| {
-                let chunk_ids: Vec<&str> = chunks_by_page
-                    .get(&p.page)
-                    .map(|ids| ids.iter().map(|c| c.0.as_str()).collect())
-                    .unwrap_or_default();
-                IndexUnit {
-                    id: page_unit_id(document_id, p.page),
-                    document_id: document_id.clone(),
-                    tenant: tenant.clone(),
-                    knowledge_base_id: None,
-                    category: category.clone(),
-                    chunk_index: p.page,
-                    page: Some(p.page),
-                    chunk_type: ChunkType::Page,
-                    // The page's text, for page-level reranking at search time.
-                    content: page_texts
-                        .get(&p.page)
-                        .map(|t| t.trim().chars().take(PAGE_TEXT_STORED_CHARS).collect())
-                        .unwrap_or_default(),
-                    contextual_prefix: None,
-                    metadata: serde_json::json!({ "chunkIds": chunk_ids, "page": p.page }),
-                    dense,
-                    sparse: kb_core::sparse::SparseVector::default(),
-                }
-            })
-            .collect();
-        let n = units.len();
-        // In batches: one request with every page of a long PDF (943 pages ×
-        // 1,024 floats) timed out against Qdrant.
-        let mut units = units;
-        while !units.is_empty() {
-            let rest = units.split_off(units.len().min(PAGE_UPSERT_BATCH));
-            self.index.upsert(units).await?;
-            units = rest;
-        }
-        Ok(n)
+        Ok(pages)
     }
+
+    /// Embed and store one window; pages that did not render are counted, never sent.
+    async fn store_window(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+        category: &Option<String>,
+        window: Vec<PageImage>,
+        chunks_by_page: &HashMap<u32, Vec<ChunkId>>,
+        page_texts: &HashMap<u32, String>,
+    ) -> PageOutcome {
+        let mut outcome = PageOutcome::default();
+        let (window, unrendered): (Vec<PageImage>, Vec<PageImage>) =
+            window.into_iter().partition(|p| !p.bytes.is_empty());
+        if let Some(first) = unrendered.first() {
+            outcome.failed += unrendered.len();
+            outcome.error = Some(format!(
+                "{} page(s) could not be rendered (first: page {})",
+                unrendered.len(),
+                first.page + 1
+            ));
+        }
+        if window.is_empty() {
+            return outcome;
+        }
+        let stored = async {
+            let vectors = self.embedder.embed_pages(&window).await?;
+            if vectors.len() != window.len() {
+                return Err(PortError::Malformed(format!(
+                    "page embedder returned {} vectors for {} pages",
+                    vectors.len(),
+                    window.len()
+                )));
+            }
+            let units: Vec<IndexUnit> = window
+                .iter()
+                .zip(vectors)
+                .map(|(p, dense)| {
+                    self.unit(
+                        tenant,
+                        document_id,
+                        category,
+                        p,
+                        dense,
+                        chunks_by_page,
+                        page_texts,
+                    )
+                })
+                .collect();
+            self.index.upsert(units).await
+        }
+        .await;
+        match stored {
+            Ok(()) => outcome.indexed += window.len(),
+            Err(e) => {
+                let (first, last) = (window[0].page, window[window.len() - 1].page);
+                tracing::warn!(error = %e, first, last, "page window not indexed");
+                outcome.failed += window.len();
+                outcome.error.get_or_insert_with(|| e.to_string());
+            }
+        }
+        outcome
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn unit(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+        category: &Option<String>,
+        p: &PageImage,
+        dense: Vec<f32>,
+        chunks_by_page: &HashMap<u32, Vec<ChunkId>>,
+        page_texts: &HashMap<u32, String>,
+    ) -> IndexUnit {
+        let chunk_ids: Vec<&str> = chunks_by_page
+            .get(&p.page)
+            .map(|ids| ids.iter().map(|c| c.0.as_str()).collect())
+            .unwrap_or_default();
+        IndexUnit {
+            id: page_unit_id(document_id, p.page),
+            document_id: document_id.clone(),
+            tenant: tenant.clone(),
+            knowledge_base_id: None,
+            category: category.clone(),
+            chunk_index: p.page,
+            page: Some(p.page),
+            chunk_type: ChunkType::Page,
+            // The page's text, for page-level reranking at search time.
+            content: page_texts
+                .get(&p.page)
+                .map(|t| t.trim().chars().take(PAGE_TEXT_STORED_CHARS).collect())
+                .unwrap_or_default(),
+            contextual_prefix: None,
+            metadata: serde_json::json!({ "chunkIds": chunk_ids, "page": p.page }),
+            dense,
+            sparse: kb_core::sparse::SparseVector::default(),
+        }
+    }
+}
+
+/// What the page arm stored for one document.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageOutcome {
+    /// Pages embedded and stored.
+    pub indexed: usize,
+    /// Pages rendered but not stored, because their window's embedding or
+    /// upsert failed.
+    pub failed: usize,
+    /// The first failure, when there was one.
+    pub error: Option<String>,
 }

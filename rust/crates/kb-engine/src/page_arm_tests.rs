@@ -14,7 +14,7 @@ use crate::fakes::{
     FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeReranker, make_fake_hit, make_fake_scope,
 };
 use crate::in_memory_index::InMemoryIndex;
-use crate::page_arm::{PageArm, PageArmConfig, PageIngest, merge_pages, page_unit_id};
+use crate::page_arm::{PageArm, PageArmConfig, PageIngest, PageOutcome, merge_pages, page_unit_id};
 use crate::retrieval::{RetrievalOptions, candidate_to_hit, execute_pipeline};
 use crate::timing::SystemClock;
 
@@ -315,7 +315,7 @@ async fn page_ingest_stores_one_unit_per_page_and_a_reingest_replaces_them() {
         )
         .await
         .unwrap();
-    assert_eq!(n, 3);
+    assert_eq!(n.indexed, 3);
     let stored = index.ordered_chunks(&t("t1"), &d("d1")).await.unwrap();
     assert_eq!(stored.len(), 3);
     assert_eq!(
@@ -358,7 +358,7 @@ async fn page_ingest_stores_one_unit_per_page_and_a_reingest_replaces_them() {
         )
         .await
         .unwrap();
-    assert_eq!(n, 0);
+    assert_eq!(n, PageOutcome::default());
     assert!(
         index
             .ordered_chunks(&t("t1"), &d("d1"))
@@ -559,7 +559,105 @@ async fn page_ingest_stores_every_page_of_a_long_pdf() {
         )
         .await
         .unwrap();
-    assert_eq!(n, 150);
+    assert_eq!(n.indexed, 150);
     let stored = index.ordered_chunks(&t("t1"), &d("d1")).await.unwrap();
     assert_eq!(stored.len(), 150);
+}
+
+/// Fails any request that contains one given page.
+struct FailOnPage(u32);
+
+#[async_trait]
+impl PageEmbedder for FailOnPage {
+    async fn embed_pages(&self, pages: &[PageImage]) -> Result<Vec<Vec<f32>>, PortError> {
+        if pages.iter().any(|p| p.page == self.0) {
+            return Err(PortError::Unavailable("provider down".into()));
+        }
+        Ok(pages.iter().map(|_| vec![1.0, 0.0, 0.0]).collect())
+    }
+    async fn embed_query(&self, _: &str) -> Result<Vec<f32>, PortError> {
+        Ok(vec![1.0, 0.0, 0.0])
+    }
+    fn dimension(&self) -> u32 {
+        3
+    }
+}
+
+/// One failed request costs its own window of pages, not the whole document,
+/// and the outcome says how many pages are missing.
+#[tokio::test]
+async fn a_failed_page_window_loses_only_its_own_pages() {
+    let index = Arc::new(InMemoryIndex::new(3));
+    let ingest = PageIngest {
+        renderer: Arc::new(FakeRenderer(150)),
+        embedder: Arc::new(FailOnPage(70)),
+        index: index.clone(),
+        max_pages: 500,
+        text_chars: 0,
+    };
+    let out = ingest
+        .index_document(
+            &t("t1"),
+            &d("d1"),
+            None,
+            "application/pdf",
+            b"%PDF",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (out.indexed, out.failed),
+        (86, 64),
+        "window 64..128 is lost"
+    );
+    assert!(out.error.as_deref().unwrap().contains("provider down"));
+    let stored = index.ordered_chunks(&t("t1"), &d("d1")).await.unwrap();
+    assert_eq!(stored.len(), 86);
+    assert!(stored.iter().all(|c| !(64..128).contains(&c.chunk_index)));
+}
+
+/// Three pages, the middle one unrenderable (no bytes).
+struct OneBadPage;
+
+#[async_trait]
+impl PageRenderer for OneBadPage {
+    async fn render(&self, _: &str, _: &[u8], _: u32) -> Result<Vec<PageImage>, PortError> {
+        Ok((0..3)
+            .map(|page| PageImage {
+                page,
+                mime: "image/jpeg".into(),
+                bytes: if page == 1 { Vec::new() } else { vec![1] },
+                text: String::new(),
+            })
+            .collect())
+    }
+}
+
+/// A page that could not be rendered is counted, never sent to the embedder.
+#[tokio::test]
+async fn an_unrendered_page_is_counted_and_skipped() {
+    let index = Arc::new(InMemoryIndex::new(3));
+    let ingest = PageIngest {
+        renderer: Arc::new(OneBadPage),
+        embedder: Arc::new(FailOnPage(1)),
+        index: index.clone(),
+        max_pages: 10,
+        text_chars: 0,
+    };
+    let out = ingest
+        .index_document(
+            &t("t1"),
+            &d("d1"),
+            None,
+            "application/pdf",
+            b"%PDF",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!((out.indexed, out.failed), (2, 1));
+    assert!(out.error.unwrap().contains("first: page 2"));
 }

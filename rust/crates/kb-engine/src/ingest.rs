@@ -609,14 +609,91 @@ impl IngestWorker {
             .await;
         }
 
-        if chunks.is_empty() {
-            // The Bun worker reaches the same place: `storeChunks` returns
-            // early on an empty batch, and the document is still marked ready.
-            return self
-                .finish_ready(job, document_id, 0, started, &flags)
-                .await;
+        // Chunk ids are fixed before embedding, so the page arm can run next to
+        // text embedding instead of after it: on a 943-page PDF the two were
+        // 211 s and 205 s back to back.
+        let mut chunks_by_page: HashMap<u32, Vec<ChunkId>> = HashMap::new();
+        for c in chunks
+            .iter()
+            .filter(|c| c.metadata.chunk_type.as_deref() != Some("figure"))
+        {
+            if let Some(p) = c.metadata.page {
+                chunks_by_page.entry(p).or_default().push(ChunkId(format!(
+                    "{}_{}",
+                    document_id.0, c.metadata.chunk_index
+                )));
+            }
+        }
+        let pages = async {
+            let pages = self.page_ingest.as_ref()?;
+            let page_texts: HashMap<u32, String> = extraction
+                .page_map
+                .iter()
+                .flatten()
+                .map(|p| (p.page, p.text.clone()))
+                .collect();
+            let category = chunks.first().map_or_else(
+                || Some(category_of(&params).to_string()).filter(|c| !c.is_empty()),
+                |c| Some(c.metadata.category.clone()),
+            );
+            Some(
+                pages
+                    .index_document(
+                        &job.tenant_id,
+                        document_id,
+                        category,
+                        mime,
+                        &bytes,
+                        &chunks_by_page,
+                        &page_texts,
+                    )
+                    .await,
+            )
+        };
+        let (text, pages) = tokio::join!(
+            self.embed_and_store(job, document_id, &title, &chunks, started, &flags),
+            pages
+        );
+        let written = match text {
+            Ok(n) => n,
+            Err(e) => {
+                // The document is about to be marked failed; don't leave its
+                // pages searchable (scope does not look at document status).
+                if let (Some(_), Some(ingest)) = (&pages, &self.page_ingest) {
+                    if let Err(err) = ingest
+                        .index
+                        .delete_document(&job.tenant_id, document_id)
+                        .await
+                    {
+                        tracing::warn!(error = %err, "could not remove pages of a failed document");
+                    }
+                }
+                return Err(e);
+            }
+        };
+        if let Some(pages) = pages {
+            self.record_pages(document_id, pages).await;
         }
 
+        self.finish_ready(job, document_id, written, started, &flags)
+            .await
+    }
+
+    /// Embed and store a document's text chunks; returns how many were stored.
+    /// No chunks: nothing is touched, as in the Bun worker (`storeChunks`
+    /// returns early on an empty batch and the document is still ready).
+    async fn embed_and_store(
+        &self,
+        job: &JobRecord,
+        document_id: &DocumentId,
+        title: &str,
+        chunks: &[Chunk],
+        started: Instant,
+        flags: &ProgressFlags,
+    ) -> Result<usize, String> {
+        if chunks.is_empty() {
+            return Ok(0);
+        }
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
         // The text embedded for a chunk: the document's title, the chunk's
         // heading path when the chunker found one, and the chunk's content.
@@ -632,7 +709,7 @@ impl IngestWorker {
             .iter()
             .map(|c| {
                 kb_core::title::embedding_text(
-                    &title,
+                    title,
                     c.metadata.heading_path.as_deref(),
                     &c.content,
                 )
@@ -642,7 +719,7 @@ impl IngestWorker {
             job,
             StepProgress::at(IngestStep::Embedding, 0, total),
             started,
-            &flags,
+            flags,
         )
         .await;
         let embeddings = self
@@ -664,7 +741,7 @@ impl IngestWorker {
             job,
             StepProgress::at(IngestStep::Embedding, total, total),
             started,
-            &flags,
+            flags,
         )
         .await;
 
@@ -672,7 +749,7 @@ impl IngestWorker {
             job,
             StepProgress::at(IngestStep::Storing, 0, total),
             started,
-            &flags,
+            flags,
         )
         .await;
         let units: Vec<IndexUnit> = chunks
@@ -709,48 +786,39 @@ impl IngestWorker {
             .await
             .map_err(|e| format!("clearing old chunks failed: {e}"))?;
         let written = units.len();
-        let mut chunks_by_page: HashMap<u32, Vec<ChunkId>> = HashMap::new();
-        for u in units.iter().filter(|u| u.chunk_type != ChunkType::Figure) {
-            if let Some(p) = u.page {
-                chunks_by_page.entry(p).or_default().push(u.id.clone());
-            }
-        }
         self.index
             .upsert(units)
             .await
             .map_err(|e| format!("storing chunks failed: {e}"))?;
+        Ok(written)
+    }
 
-        // Page images: best-effort. A document whose pages could not be embedded
-        // is still searchable by text; it just has no image arm, and the log says
-        // so rather than the document failing.
-        if let Some(pages) = &self.page_ingest {
-            let page_texts_by_page: HashMap<u32, String> = extraction
-                .page_map
-                .iter()
-                .flatten()
-                .map(|p| (p.page, p.text.clone()))
-                .collect();
-            let category = chunks.first().map(|c| c.metadata.category.clone());
-            match pages
-                .index_document(
-                    &job.tenant_id,
-                    document_id,
-                    category,
-                    mime,
-                    &bytes,
-                    &chunks_by_page,
-                    &page_texts_by_page,
-                )
-                .await
-            {
-                Ok(n) if n > 0 => tracing::info!(pages = n, "page images indexed"),
-                Ok(_) => {}
-                Err(e) => tracing::warn!(error = %e, "page images not indexed (non-fatal)"),
+    /// Put the page arm's result on the document, where the API shows it, so a
+    /// document whose pages were not (all) indexed is visible as such rather
+    /// than only in a log line. Best-effort: text search works either way.
+    async fn record_pages(
+        &self,
+        document_id: &DocumentId,
+        pages: Result<crate::page_arm::PageOutcome, PortError>,
+    ) {
+        let patch = match pages {
+            Ok(o) if o.indexed == 0 && o.failed == 0 => return,
+            Ok(o) => {
+                if o.failed > 0 {
+                    tracing::warn!(indexed = o.indexed, failed = o.failed, error = ?o.error, "page images partly indexed");
+                } else {
+                    tracing::info!(pages = o.indexed, "page images indexed");
+                }
+                json!({"pageImages": {"indexed": o.indexed, "failed": o.failed, "error": o.error}})
             }
+            Err(e) => {
+                tracing::warn!(error = %e, "page images not indexed (non-fatal)");
+                json!({"pageImages": {"indexed": 0, "error": e.to_string()}})
+            }
+        };
+        if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
+            tracing::warn!(error = %e, "could not record the page-image outcome");
         }
-
-        self.finish_ready(job, document_id, written, started, &flags)
-            .await
     }
 
     /// Extract entities and relations once, then write them to every store that

@@ -1396,3 +1396,162 @@ Acme Corp also sponsors the Bandung workshop run by Alice.";
         assert_eq!(scoped.arc_count(), 0);
     }
 }
+
+// ---- page arm inside the ingest job ----
+
+/// Renders `.0` blank pages for any PDF.
+struct BlankPages(u32);
+
+#[async_trait::async_trait]
+impl kb_ports::PageRenderer for BlankPages {
+    async fn render(
+        &self,
+        mime: &str,
+        _: &[u8],
+        max: u32,
+    ) -> Result<Vec<kb_ports::PageImage>, PortError> {
+        if mime != "application/pdf" {
+            return Ok(Vec::new());
+        }
+        Ok((0..self.0.min(max))
+            .map(|page| kb_ports::PageImage {
+                page,
+                mime: "image/jpeg".into(),
+                bytes: vec![1],
+                text: String::new(),
+            })
+            .collect())
+    }
+}
+
+/// Page vectors of width 3; fails any request holding page `fail_on`.
+struct Pages3 {
+    fail_on: Option<u32>,
+}
+
+#[async_trait::async_trait]
+impl kb_ports::PageEmbedder for Pages3 {
+    async fn embed_pages(&self, pages: &[kb_ports::PageImage]) -> Result<Vec<Vec<f32>>, PortError> {
+        if pages.iter().any(|p| Some(p.page) == self.fail_on) {
+            return Err(PortError::Unavailable("provider down".into()));
+        }
+        Ok(pages.iter().map(|_| vec![1.0, 0.0, 0.0]).collect())
+    }
+    async fn embed_query(&self, _: &str) -> Result<Vec<f32>, PortError> {
+        Ok(vec![1.0, 0.0, 0.0])
+    }
+    fn dimension(&self) -> u32 {
+        3
+    }
+}
+
+fn page_ingest(
+    pages: u32,
+    fail_on: Option<u32>,
+) -> (
+    Arc<crate::PageIngest>,
+    Arc<crate::in_memory_index::InMemoryIndex>,
+) {
+    let index = Arc::new(crate::in_memory_index::InMemoryIndex::new(3));
+    let ingest = Arc::new(crate::PageIngest {
+        renderer: Arc::new(BlankPages(pages)),
+        embedder: Arc::new(Pages3 { fail_on }),
+        index: index.clone(),
+        max_pages: 1000,
+        text_chars: 0,
+    });
+    (ingest, index)
+}
+
+async fn stored_pages(index: &crate::in_memory_index::InMemoryIndex) -> usize {
+    index
+        .ordered_chunks(&tenant(), &DocumentId::new_unchecked(DOC))
+        .await
+        .unwrap()
+        .len()
+}
+
+fn page_images_meta(documents: &Arc<FakeDocumentStore>) -> Option<serde_json::Value> {
+    documents.docs.read().unwrap()[&tenant()][0]
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("pageImages").cloned())
+}
+
+#[tokio::test]
+async fn page_images_are_indexed_and_recorded_on_the_document() {
+    let mut h = harness(extractor()).await;
+    let (pages, index) = page_ingest(5, None);
+    h.worker = h.worker.with_page_ingest(pages);
+    assert!(matches!(
+        h.worker.run_job(job()).await,
+        JobOutcome::Ready { .. }
+    ));
+    assert_eq!(stored_pages(&index).await, 5);
+    assert_eq!(
+        page_images_meta(&h.documents),
+        Some(serde_json::json!({"indexed": 5, "failed": 0, "error": null}))
+    );
+}
+
+/// A failed page window is visible on the document, and the document is still
+/// ready: text search does not depend on page images.
+#[tokio::test]
+async fn partly_failed_page_images_are_visible_on_a_ready_document() {
+    let mut h = harness(extractor()).await;
+    let (pages, index) = page_ingest(100, Some(80));
+    h.worker = h.worker.with_page_ingest(pages);
+    assert!(matches!(
+        h.worker.run_job(job()).await,
+        JobOutcome::Ready { .. }
+    ));
+    assert_eq!(document_status(&h), "ready");
+    assert_eq!(stored_pages(&index).await, 64);
+    let meta = page_images_meta(&h.documents).unwrap();
+    assert_eq!(
+        (meta["indexed"].as_u64(), meta["failed"].as_u64()),
+        (Some(64), Some(36))
+    );
+    assert!(meta["error"].as_str().unwrap().contains("provider down"));
+}
+
+/// A PDF with no text layer (a scan) still gets its page images: that is the
+/// document the page arm helps most.
+#[tokio::test]
+async fn a_pdf_with_no_text_still_gets_page_images() {
+    let mut h = harness(Arc::new(FakeExtractor::returning("", "text"))).await;
+    let (pages, index) = page_ingest(3, None);
+    h.worker = h.worker.with_page_ingest(pages);
+    assert_eq!(
+        h.worker.run_job(job()).await,
+        JobOutcome::Ready { chunks: 0 }
+    );
+    assert_eq!(stored_pages(&index).await, 3);
+}
+
+/// Pages are indexed alongside text; when the text fails, the document is
+/// failed and its pages must not stay searchable.
+#[tokio::test]
+async fn a_failed_text_step_removes_the_pages_indexed_alongside_it() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"x".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let (pages, index) = page_ingest(5, None);
+    let worker = worker_with(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        extractor(),
+        Arc::new(ShortEmbedder),
+    )
+    .with_page_ingest(pages);
+    jobs.push(job());
+    assert!(worker.run_once().await.unwrap());
+    assert!(!jobs.finished.read().unwrap()[0].success);
+    assert_eq!(document_status_of(&documents), "failed");
+    assert_eq!(stored_pages(&index).await, 0);
+}
