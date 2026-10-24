@@ -81,3 +81,19 @@ chosen by 2-fold CV (`page_rerank.py`):
 Two independent rerankers agree. For reference: the best published retriever on this set
 (ColEmbed-3B-v2) scores 0.654, and the paper's best pipeline with a reranker (Jina-v4 text +
 zerank-2, Table 2, multilingual setting) 0.665. Live confirmation is in `../vidore3-hr-en-night`.
+
+## Score-based blend instead of RRF for the page rerank: no gain (2026-10-24)
+
+Same fused list (0.655) and the same cached reranker scores, three ways to blend the reranker
+with the fused order, each tuned by 2-fold CV (`page_rerank_scoreblend.py`; reads the
+page-rerank cache only, so it costs nothing):
+
+| Page reranker | weighted RRF (shipped) | min-max score blend | z-score blend |
+|---|---:|---:|---:|
+| voyageai/rerank-2.5 | **0.704** | 0.700 (−0.004 [−0.013, +0.003]) | 0.702 (−0.002 [−0.011, +0.007]) |
+| nvidia/nemotron-3.5-rerank-8b | **0.705** | 0.701 (−0.004 [−0.013, +0.004]) | 0.699 (−0.006 [−0.015, +0.003]) |
+
+Score blending (Bruch et al. 2023 found it often beats RRF once tuned) does not help here; the
+shipped rank-based blend stays. Caveat: the "run score" side is itself an RRF score of the text
+and page arms, because the text arm's raw scores are not saved in the eval runs; a score-based
+fusion of the raw arms (cosine, BM25, rerank) is untested.
