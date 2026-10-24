@@ -89,3 +89,28 @@ The page rerank was tuned (w=0.7, k=1) and validated with Nemotron and voyage on
 3,000 characters of page text is the suspect. It is also slow on the RX 590: the page arm adds
 ~10.6 s to the p50 (2.1 → 12.7 s); the query's page vector is cached, so that is almost all
 bge scoring 30 long page texts (inferred from the timings, not profiled).
+
+## One embedder for the cloud tier: voyage-multimodal-3.5 for text chunks too (`vmm-*`)
+
+Text chunks embedded with `voyageai/voyage-multimodal-3.5` (dim 1024,
+`KB_EMBEDDING_INPUT_TYPE=true` so queries go as `query` and chunks as `document`, no prefix)
+instead of Qwen3-Embedding-8B. Pages (same model), BM25, voyage rerank-2.5 and every setting
+unchanged; page vectors from the cache. 0 failed, 0 degraded.
+
+| Arm | Page nDCG@10 | Recall@10 | MRR@10 | Table | Chart | p50 / p95 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| `vmm-text` | **0.674** | 0.680 | 0.808 | 0.654 | 0.605 | 631 / 1,428 |
+| `vmm-ti-pr` | **0.711** | 0.735 | 0.809 | 0.713 | 0.667 | 2,120 / 2,848 |
+
+Paired deltas (95% bootstrap CI):
+
+- `vmm-text` vs `voy-qp-text` (8B with instruction): **+0.017 [+0.005, +0.030]**; vs `voy-text`
+  (8B, no instruction): +0.029 [+0.015, +0.044]. Voyage is the better text embedder here.
+- `vmm-ti-pr` vs `voy-qp-ti-pr`: +0.004 [−0.004, +0.012], a tie. The page arm already brings
+  voyage's view of each page, so most of the text gain is absorbed.
+- `vmm-ti-pr` vs `vmm-text`: +0.037 [+0.020, +0.054].
+
+**Decision for the cloud tier:** voyage-multimodal-3.5 for chunks and pages. It ties the
+two-model stack at the top (**0.711, best live score**), wins clearly without pages, and is one
+model, one key and one query embedding per search. Cost of both arms: $0.61 (chunk embeddings
+plus reranking). Not isolated: how much of the text gain is `input_type` itself.

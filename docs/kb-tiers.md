@@ -177,6 +177,11 @@ Status as of 2026-10-23 (evening):
    - Cloud tier, measured: `voyageai/voyage-multimodal-3.5` pages + `qwen/qwen3-embedding-8b`
      text (with Qwen's query instruction in `KB_EMBEDDING_QUERY_PREFIX`) + `voyageai/rerank-2.5`
      for chunks and pages: **0.708** live on HR. ~$0.0006 per page to index.
+   - Cloud tier, one embedder (2026-10-24): `voyageai/voyage-multimodal-3.5` for text chunks
+     too (`KB_EMBEDDING_INPUT_TYPE=true`): **0.711** (a tie with 0.708 at the top; text-only
+     0.674 vs 0.657, +0.017 [+0.005, +0.030]). This is the cloud default: one model, one key.
+   - Same stack with the local bge reranker instead of voyage: 0.628 (text-only 0.618); bge
+     keeps only +0.010 of the page arm's gain.
    - ViDoRe v3 computer science, text stack only: 0.785 (best published 0.786); the page arm
      was not run there (budget).
    - Local tiers: `KB_PAGE_EMBEDDING_FORMAT=vllm` with Qwen3-VL-Embedding-2B/8B under vLLM
