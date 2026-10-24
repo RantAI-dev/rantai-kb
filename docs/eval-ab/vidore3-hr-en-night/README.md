@@ -114,3 +114,24 @@ Paired deltas (95% bootstrap CI):
 two-model stack at the top (**0.711, best live score**), wins clearly without pages, and is one
 model, one key and one query embedding per search. Cost of both arms: $0.61 (chunk embeddings
 plus reranking). Not isolated: how much of the text gain is `input_type` itself.
+
+## bge should not rerank pages (`bge-qp-nopr-ti-pr`)
+
+Offline first (`page_rerank.py` on the saved fused run, 8B text + bge + text+image pages,
+0.655): bge on page text **alone scores 0.597 (−0.058 [−0.084, −0.034])**, and the best blend,
+chosen on held-out halves, adds only +0.003 [−0.005, +0.012]. Nemotron and voyage rerank-2.5
+add +0.049 on the same list.
+
+Live, same stack as `bge-qp-ti-pr` with `KB_PAGE_RERANK=false` (0 failed, 0 degraded):
+
+| Arm | Page nDCG@10 | Recall@10 | MRR@10 | Table | Chart | p50 / p95 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| `bge-qp-ti-pr` (page rerank on) | 0.628 | 0.686 | 0.731 | 0.606 | 0.589 | 12,723 / 16,148 |
+| **`bge-qp-nopr-ti-pr`** (page rerank off) | **0.661** | 0.690 | 0.777 | 0.635 | 0.607 | 2,123 / 2,763 |
+
+- vs page rerank on: **+0.032 [+0.015, +0.050]**, and 6× faster.
+- vs text only (`bge-qp-text`): +0.043 [+0.026, +0.059]; the page arm's gain is back.
+
+**Rule:** page rerank only with a strong long-text reranker (voyage rerank-2.5, Nemotron).
+With bge, set `KB_PAGE_RERANK=false`. (The arm name keeps the runner's `-ti-pr` suffix; page
+rerank was off.)

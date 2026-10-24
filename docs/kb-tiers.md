@@ -180,8 +180,10 @@ Status as of 2026-10-23 (evening):
    - Cloud tier, one embedder (2026-10-24): `voyageai/voyage-multimodal-3.5` for text chunks
      too (`KB_EMBEDDING_INPUT_TYPE=true`): **0.711** (a tie with 0.708 at the top; text-only
      0.674 vs 0.657, +0.017 [+0.005, +0.030]). This is the cloud default: one model, one key.
-   - Same stack with the local bge reranker instead of voyage: 0.628 (text-only 0.618); bge
-     keeps only +0.010 of the page arm's gain.
+   - Same stack with the local bge reranker instead of voyage: text-only 0.618; with pages
+     **0.661 with `KB_PAGE_RERANK=false`** (0.628 with it on: bge is a poor page reranker,
+     −0.058 alone offline, and adds ~10 s per search on the RX 590). Local tiers with bge keep
+     page rerank off until a stronger local reranker (Qwen3-VL-Reranker) is measured.
    - ViDoRe v3 computer science, text stack only: 0.785 (best published 0.786); the page arm
      was not run there (budget).
    - Local tiers: `KB_PAGE_EMBEDDING_FORMAT=vllm` with Qwen3-VL-Embedding-2B/8B under vLLM
