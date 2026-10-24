@@ -169,10 +169,11 @@ measurement (build order 5); the Desk / Studio / Station rerank widths are estim
 
 | Variable | lite | desk | studio | station | cloud |
 |---|---|---|---|---|---|
-| `KB_EMBEDDING_MODEL` | `Qwen/Qwen3-Embedding-0.6B` | same | same | same | `voyageai/voyage-multimodal-3.5` |
-| `KB_EMBEDDING_DIM` | 1024 | 1024 | 1024 | 1024 | 1024 |
+| `KB_EMBEDDING_MODEL` | `intfloat/multilingual-e5-small` | `Qwen/Qwen3-Embedding-0.6B` | same as desk | same as desk | `voyageai/voyage-multimodal-3.5` |
+| `KB_EMBEDDING_DIM` | 384 | 1024 | 1024 | 1024 | 1024 |
 | `KB_EMBEDDING_BASE_URL` | `http://127.0.0.1:8081/v1/embeddings` | same | same | same | OpenRouter (built-in default) |
-| `KB_EMBEDDING_QUERY_PREFIX` | Qwen3 instruction¹ | same | same | same | — |
+| `KB_EMBEDDING_QUERY_PREFIX` | `query: ` | Qwen3 instruction¹ | same as desk | same as desk | — |
+| `KB_EMBEDDING_PASSAGE_PREFIX` | `passage: ` | — | — | — | — |
 | `KB_EMBEDDING_TIMEOUT_MS` | 120000 | same | same | same | — |
 | `KB_EMBEDDING_INPUT_TYPE` | — | — | — | — | `true` |
 | `KB_EMBED_CONCURRENCY` | 1 | 2 | 4 | 8 | — |
@@ -193,7 +194,9 @@ measurement (build order 5); the Desk / Studio / Station rerank widths are estim
 `rust/scripts/stack-up.sh` and `docs/local-models.md` already use.
 
 A dash means the preset leaves the setting alone, so that setting's own default applies.
-`same` means the value in lite's column.
+`same` means the value in lite's column, unless it says otherwise. Lite's e5-small was chosen by
+measurement on 2 cores (`docs/eval-ab/lite-2core`); run its embedder with 1 thread so it leaves a
+core for kb-server.
 
 - The local text stack is what we can run today (`docs/local-models.md`):
   Qwen3-Embedding-0.6B at an OpenAI-compatible endpoint, bge-reranker-v2-m3 at a local
