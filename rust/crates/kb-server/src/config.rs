@@ -590,8 +590,19 @@ impl Config {
                         format,
                         batch_size: int_var(&lookup, "KB_PAGE_EMBEDDING_BATCH_SIZE", 4u32)?
                             .clamp(1, 64),
-                        concurrency: int_var(&lookup, "KB_PAGE_EMBEDDING_CONCURRENCY", 4u32)?
-                            .clamp(1, 32),
+                        // OpenRouter/voyage: no 429 up to 32 requests in flight and 23
+                        // pages/s at 16 with flat latency (2026-10-24,
+                        // docs/eval-ab/ingest-big-pdf). A local vLLM GPU is shared
+                        // with the chat model, so it keeps the old 4.
+                        concurrency: int_var(
+                            &lookup,
+                            "KB_PAGE_EMBEDDING_CONCURRENCY",
+                            match format {
+                                kb_inference::PageEmbedFormat::OpenRouter => 16u32,
+                                kb_inference::PageEmbedFormat::VllmChat => 4u32,
+                            },
+                        )?
+                        .clamp(1, 32),
                         request_timeout: Duration::from_millis(
                             int_var(&lookup, "KB_PAGE_EMBEDDING_TIMEOUT_MS", 60_000u64)?.max(1_000),
                         ),
@@ -1111,6 +1122,24 @@ mod tests {
             kb_inference::PageEmbedFormat::VllmChat,
             "the local vLLM shape is selected by name"
         );
+    }
+
+    #[test]
+    fn test_page_concurrency_defaults_to_16_hosted_and_4_on_vllm() {
+        let concurrency = |map: &HashMap<&'static str, &'static str>| {
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .pages
+                .expect("page arm configured")
+                .embedder
+                .concurrency
+        };
+        let mut map = page_arm_map();
+        assert_eq!(concurrency(&map), 16);
+        map.insert("KB_PAGE_EMBEDDING_FORMAT", "vllm");
+        assert_eq!(concurrency(&map), 4, "a local GPU is shared with chat");
+        map.insert("KB_PAGE_EMBEDDING_CONCURRENCY", "8");
+        assert_eq!(concurrency(&map), 8, "an explicit value wins");
     }
 
     #[test]

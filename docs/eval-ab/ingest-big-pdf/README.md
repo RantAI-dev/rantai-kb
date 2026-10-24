@@ -1,4 +1,4 @@
-# Big-PDF ingest: 427 s → 163 s for 943 pages (2026-10-24)
+# Big-PDF ingest: 427 s → 71 s for 943 pages (2026-10-24)
 
 **Result.** A cold ingest of the 943-page *Introduction to Computer Science* PDF (50.9 MB,
 3,771 chunks, 945 page images), with the page-image arm on and provider-like latency, went
@@ -49,9 +49,30 @@ are for that latency, and a real provider adds its own variance and rate limits.
 | + 1, 2 | 207 s | text 4 in flight, ~55 s, alongside pages; pages start after the full render |
 | + 3 | **163 s** | pages start at 24 s instead of ~69 s |
 
-What is left is the page embedding itself: 237 requests at 4 in flight is ~150 s at this
-latency. Going faster means raising `KB_PAGE_EMBEDDING_CONCURRENCY`, which depends on the
-provider's rate limits (not measured).
+## Page-embedding concurrency: 16 by default for hosted embedders
+
+After the changes above, the page embedding itself was the critical path: 237 requests at 4 in
+flight is ~150 s. `kb-eval/scripts/page_embed_ratelimit_probe.py` sent real 4-page requests to
+`voyageai/voyage-multimodal-3.5` on OpenRouter at rising concurrency (paid, $0.55 total):
+
+| In flight | Requests | Errors | Pages/s | Latency p50 / max |
+|---:|---:|---|---:|---|
+| 4 | 16 | none | 7.0 | 2.19 / 2.79 s |
+| 8 | 32 | none | 11.5 | 2.35 / 4.10 s |
+| 16 | 64 | none | 23.0 | 2.39 / 3.82 s |
+| 32 | 128 | none | 33.0 | 3.31 / 6.14 s |
+
+No 429 at any level; latency stays flat up to 16 and rises at 32. The default
+`KB_PAGE_EMBEDDING_CONCURRENCY` is now **16 for hosted embedders** and stays 4 for a local vLLM
+(`KB_PAGE_EMBEDDING_FORMAT=vllm`), whose GPU is shared with the chat model.
+
+The same benchmark at 16 in flight (fake latency 2.4 s): **71 s** for the 943-page PDF
+(427 s at the start of the day, 163 s after the changes above). Pages now finish ~57 s after
+they start, which is the pdfium render time: rendering, single-threaded, is the critical path.
+
+Not changed: `KB_PAGE_IMAGE_MAX_PAGES` defaults to 500, so a longer document gets page images
+for its first 500 pages only (the evals set 2,000). It is also a spend cap (~$0.30 per 500
+pages on voyage), so raising it is a product decision.
 
 Tests: a failed window loses only its pages; an unrendered page is counted and never sent;
 text batches overlap and keep their order; the outcome is on the document; a scan gets
