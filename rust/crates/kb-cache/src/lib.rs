@@ -12,12 +12,14 @@ mod page_embedder;
 mod reranker;
 mod store;
 mod vectors;
+mod vision_scorer;
 
 pub use embedder::CachedEmbedder;
 pub use extractor::CachedExtractor;
 pub use page_embedder::CachedPageEmbedder;
 pub use reranker::CachedReranker;
 pub use store::{CacheKey, CacheStats, DiskCache};
+pub use vision_scorer::CachedPageVisionScorer;
 
 #[cfg(test)]
 mod tests;

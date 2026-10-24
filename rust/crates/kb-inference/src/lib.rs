@@ -13,6 +13,7 @@ pub mod page_embedder;
 pub mod query_cache;
 pub mod query_expansion;
 pub mod rerankers;
+pub mod vision_scorer;
 pub mod vlm_gate;
 
 pub use embedder::{EmbedderImpl, EmbedderSettings};
@@ -24,6 +25,9 @@ pub use llm_reranker::LlmReranker;
 pub use page_embedder::{HttpPageEmbedder, PageEmbedFormat, PageEmbedderSettings};
 pub use query_expansion::{ExpansionSettings, QueryExpander};
 pub use rerankers::{CohereReranker, TeiReranker, VllmReranker};
+pub use vision_scorer::{
+    DEFAULT_VISION_BASE_URL, HttpPageVisionScorer, VISION_PROMPT_VERSION, VisionScorerSettings,
+};
 pub use vlm_gate::VlmFigureGate;
 
 use async_trait::async_trait;
