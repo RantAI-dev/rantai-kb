@@ -51,3 +51,30 @@ which timed out. The rerun above has none of these failures.
 Cost: about $1.24 for the broken run (page embeddings, now cached). The rerun paid only for
 reranking: the key's usage rose $0.35 over a window that also held failed vision-rerank test
 calls, so the rerun cost at most that. `cs-vmm-text` was fully cached (34 s wall, no provider calls).
+
+## Search latency (2026-10-24)
+
+`cs-vmm-ti-pr` reported p50 1.7 s but **p99 36 s**, and no stage explained it: the page fusion
+and page rerank ran after the text rerank inside no stage. They are now the accounted stage
+`pages`, and the page arm's own query embed + search is `detail.pageArm` (`dce93ab`).
+
+Re-measured with every rerank call live (the 215 CS queries prefixed with "Question: " so
+nothing came from the rerank cache), same setup, binary at `dce93ab`:
+
+| Stage | p50 | p95 | p99 |
+|---|---:|---:|---:|
+| **total** | **2,118 ms** | 2,610 ms | **3,223 ms** |
+| query embed (voyage, uncached) | 771 | 876 | 1,015 |
+| text rerank (voyage rerank-2.5, top 20) | 534 | 565 | 694 |
+| `pages` (page fusion + page rerank, top 30) | 695 | 914 | 1,771 |
+| neighbours | 46 | 334 | 512 |
+| page arm (concurrent with the text arms) | 790 | 857 | 978 |
+
+0 failed, 0 degraded, no retry warnings in the server log, page nDCG@10 0.826. The 36 s tail
+did not come back. It most likely came from the machine during that run (about 1 GB of memory
+free, right after the broken run), but its server log was lost in a reboot, so that is a guess.
+
+What is left is serial waiting: the page rerank needs the text rerank's order (it reranks the
+fused page list), so the two cannot simply overlap without changing the algorithm. Also, with
+one voyage model for text and pages, the query is embedded twice (once per arm, in parallel):
+no time lost, one paid call per search wasted. Neither is fixed yet.
