@@ -36,3 +36,36 @@ empty cache, `KB_TIER=lite`. Postgres, SurrealDB, Qdrant and S3 were **not** pin
 
 Not measured: ViDoRe HR on Lite (only the failed attempt above), a reranker on 2 cores, and
 PP-OCRv6 for scans.
+
+## PDFs: ViDoRe HR on 2 cores, toward 5 pages/s (2026-10-24)
+
+1,110 pages, 14 PDFs, `KB_TIER=lite`, no reranker, no page arm; embedder and kb-server pinned to
+cores 0-1 (databases not pinned); machine quiet (load ~1.3). Ingest time is first "ingest
+claimed" to last "ingest finished" in the server log.
+
+| Setup | Ingest | **Pages/s** | Page nDCG@10 | vs full (95% CI) |
+|---|---:|---:|---:|---|
+| e5-small, full chunk (~234 tokens) | 715 s | 1.55 | **0.545** | — |
+| e5-small, `KB_EMBEDDING_MAX_CHARS=512`, 2 requests in flight | 315 s | 3.52 | 0.524 | −0.021 [−0.041, −0.002] |
+| same + `KB_CHUNK_OVERLAP=0` | 317 s | 3.50 | 0.507 | −0.038 [−0.061, −0.015] |
+| e5-small, `KB_EMBEDDING_MAX_CHARS=384` | 260 s | 4.27 | 0.509 | −0.036 [−0.057, −0.016] |
+| `minishlab/potion-multilingual-128M` (model2vec, static) | 21 s | 53 | 0.442 | −0.102 [−0.125, −0.080] |
+| floor: instant fake embedder | 17 s | 65 | — | — |
+
+For scale: the fully local GPU text stack (Qwen3-0.6B + BM25 + bge reranker) scored 0.561 on HR.
+e5-small full-chunk Lite, with no reranker, is 0.016 behind it.
+
+What limits it (`ort_bench.py`, `embed_bench.py` in this directory):
+
+- **Embedding is ~95% of ingest.** Everything else (pdfium text, chunking, BM25, Qdrant)
+  ingests HR in 17 s.
+- **e5-small runs at ~4.9 chunks/s per core** on this Xeon E5-2680 v4 (Broadwell, AVX2) and
+  scales with cores (1: 4.9, 2: 9.7, 4: 17.1 chunks/s). Thread variables change nothing.
+- **int8 does not help here**: the int8 ONNX file runs at the same speed as fp32 (9.2 vs 8.9
+  chunks/s), because Broadwell has no VNNI. CPUs with AVX512-VNNI / AVX-VNNI (Ice Lake and newer
+  Xeons, Zen 4) usually get 2-3x from int8; not measured here.
+- **Cost is linear in tokens**: 234 tokens 9.2, 128 tokens 19.8, 96 tokens 27.3, 64 tokens
+  41.5 chunks/s. Hence `KB_EMBEDDING_MAX_CHARS` (the dense vector sees a prefix; BM25 and the
+  stored chunk keep the full text).
+- `KB_CHUNK_OVERLAP=0` does not reduce the chunk count on HR (pages are chunked one by one), and
+  costs quality: rejected.

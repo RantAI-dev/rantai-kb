@@ -1782,3 +1782,64 @@ async fn a_failed_description_embedding_does_not_fail_the_document() {
     assert_eq!(visual["written"], 0);
     assert_eq!(visual["failed"], 2);
 }
+
+/// Records every passage it is asked to embed.
+#[derive(Default)]
+struct RecordingEmbedder {
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl Embedder for RecordingEmbedder {
+    async fn embed_query(&self, _text: &str) -> Result<Vec<f32>, PortError> {
+        Ok(vec![0.0; 2])
+    }
+    async fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, PortError> {
+        self.seen.lock().unwrap().extend(texts.iter().cloned());
+        Ok(texts.iter().map(|_| vec![0.0; 2]).collect())
+    }
+    fn dimension(&self) -> u32 {
+        2
+    }
+}
+
+/// `embedding_max_chars` caps what the embedder sees, never what is stored:
+/// the chunk keeps its full text for BM25 and for the answer.
+#[tokio::test]
+async fn embedding_max_chars_caps_the_embedder_input_but_not_the_stored_chunk() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let embedder = Arc::new(RecordingEmbedder::default());
+    let worker = IngestWorker::new(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        extractor(),
+        embedder.clone(),
+        IngestSettings {
+            embedding_model: Some("bge-m3".to_string()),
+            embedding_max_chars: 40,
+            ..IngestSettings::default()
+        },
+    );
+    assert!(matches!(
+        worker.run_job(job()).await,
+        JobOutcome::Ready { .. }
+    ));
+    let seen = embedder.seen.lock().unwrap().clone();
+    assert!(!seen.is_empty());
+    assert!(seen.iter().all(|t| t.chars().count() <= 40), "{seen:?}");
+    let stored = chunks.stored_chunks.read().unwrap();
+    let longest = stored
+        .values()
+        .flatten()
+        .map(|c| c.content.chars().count())
+        .max()
+        .unwrap();
+    assert!(longest > 40, "stored chunks keep their full text");
+}

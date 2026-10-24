@@ -189,6 +189,14 @@ pub struct WorkerConfig {
     /// Run entity and relation extraction at all
     /// (`KB_ENTITY_EXTRACTION_ENABLED`, default on).
     pub entity_extraction_enabled: bool,
+    /// Characters of each chunk sent to the embedder, 0 = all
+    /// (`KB_EMBEDDING_MAX_CHARS`).
+    pub embedding_max_chars: usize,
+    /// Chunk size and overlap in characters (`KB_CHUNK_SIZE`, default 800;
+    /// `KB_CHUNK_OVERLAP`, default 200). Changing them changes chunk boundaries,
+    /// so a corpus is re-chunked only on re-ingest.
+    pub chunk_size: u32,
+    pub chunk_overlap: u32,
 }
 
 impl WorkerConfig {
@@ -203,6 +211,12 @@ impl WorkerConfig {
             reclaim_interval: Duration::from_millis(self.reclaim_ms),
             strip_page_furniture: self.strip_page_furniture,
             entity_extraction_enabled: self.entity_extraction_enabled,
+            embedding_max_chars: self.embedding_max_chars,
+            chunking: kb_core::chunk::SmartChunkingOptions {
+                max_chunk_size: Some(self.chunk_size),
+                overlap_size: Some(self.chunk_overlap),
+                ..kb_engine::INGEST_CHUNKING
+            },
             ..IngestSettings::default()
         }
     }
@@ -240,6 +254,11 @@ where
             .max(1000),
         strip_page_furniture: bool_flag(lookup, "KB_STRIP_PAGE_FURNITURE", false),
         entity_extraction_enabled: bool_flag(lookup, "KB_ENTITY_EXTRACTION_ENABLED", true),
+        embedding_max_chars: int_var(lookup, "KB_EMBEDDING_MAX_CHARS", 0usize).unwrap_or(0),
+        chunk_size: int_var(lookup, "KB_CHUNK_SIZE", 800u32)
+            .unwrap_or(800)
+            .max(100),
+        chunk_overlap: int_var(lookup, "KB_CHUNK_OVERLAP", 200u32).unwrap_or(200),
     }
 }
 
@@ -1331,6 +1350,34 @@ mod tests {
             kb_inference::PageEmbedFormat::VllmChat,
             "the local vLLM shape is selected by name"
         );
+    }
+
+    #[test]
+    fn test_chunking_and_embedding_cap_default_to_today_and_are_tunable() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("SURREAL_DB_URL", "http://localhost:8000");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        let load = |map: &HashMap<&'static str, &'static str>| {
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .worker
+                .ingest_settings()
+        };
+        let s = load(&map);
+        assert_eq!(
+            format!("{:?}", s.chunking),
+            format!("{:?}", kb_engine::INGEST_CHUNKING),
+            "defaults unchanged"
+        );
+        assert_eq!(s.embedding_max_chars, 0);
+        map.insert("KB_CHUNK_SIZE", "1200");
+        map.insert("KB_CHUNK_OVERLAP", "0");
+        map.insert("KB_EMBEDDING_MAX_CHARS", "512");
+        let s = load(&map);
+        assert_eq!(s.chunking.max_chunk_size, Some(1200));
+        assert_eq!(s.chunking.overlap_size, Some(0));
+        assert_eq!(s.embedding_max_chars, 512);
     }
 
     #[test]

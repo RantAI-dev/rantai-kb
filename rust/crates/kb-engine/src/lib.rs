@@ -64,7 +64,9 @@ mod page_arm_tests;
 mod tests;
 
 pub use graph_arm::{GraphArm, GraphArmConfig, GraphCache, GraphRanking};
-pub use ingest::{CancelToken, IngestSettings, IngestWorker, JobOutcome, reap_failed_job_uploads};
+pub use ingest::{
+    CancelToken, INGEST_CHUNKING, IngestSettings, IngestWorker, JobOutcome, reap_failed_job_uploads,
+};
 pub use page_arm::{
     MergeOutcome, PageArm, PageArmConfig, PageCaption, PageCaptionConfig, PageIngest, PageOutcome,
     PageRerankConfig, PageRerankContext, PageVision, PageVisionContext, PageVisionRerankConfig,

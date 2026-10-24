@@ -93,6 +93,12 @@ pub struct IngestSettings {
     /// it off: it is the most expensive non-embedding step, and a tier preset
     /// has to be able to say so without the engine reading the environment.
     pub entity_extraction_enabled: bool,
+    /// Characters of each chunk's embedding text sent to the embedder; 0 = all.
+    /// The chunk is stored and BM25-indexed in full; only the dense vector sees
+    /// the prefix. On a 2-core CPU the embedder's cost is linear in tokens, and
+    /// e5-small at 128 tokens embeds ~2x the chunks/s of a full ~234-token chunk
+    /// (`docs/eval-ab/lite-2core`).
+    pub embedding_max_chars: usize,
 }
 
 impl Default for IngestSettings {
@@ -108,6 +114,7 @@ impl Default for IngestSettings {
             chunking: INGEST_CHUNKING,
             strip_page_furniture: false,
             entity_extraction_enabled: true,
+            embedding_max_chars: 0,
         }
     }
 }
@@ -732,14 +739,20 @@ impl IngestWorker {
         // first lost the document's heading entirely, because the title was
         // only ever the file's name. Both are fixed here
         // (`docs/kf-vplane-eval.md`).
+        let max_chars = self.settings.embedding_max_chars;
         let texts: Vec<String> = chunks
             .iter()
             .map(|c| {
-                kb_core::title::embedding_text(
+                let text = kb_core::title::embedding_text(
                     title,
                     c.metadata.heading_path.as_deref(),
                     &c.content,
-                )
+                );
+                if max_chars > 0 && text.chars().count() > max_chars {
+                    text.chars().take(max_chars).collect()
+                } else {
+                    text
+                }
             })
             .collect();
         self.progress(
