@@ -94,6 +94,8 @@ ENVIRONMENT
 
 async fn serve() -> Result<(), CliError> {
     let config = Config::from_env().map_err(|e| CliError::Failed(e.to_string()))?;
+    // One INFO line saying what `KB_TIER` filled, if a tier is set.
+    config.log_tier();
     // `run` is the same call the pre-subcommand binary made; the process only
     // returns when the listener stops.
     crate::run(config)
@@ -135,9 +137,15 @@ fn migrations_dir() -> PathBuf {
 
 /// `kb-server apply-schema` — the SurrealDB DDL, at `KB_EMBEDDING_DIM`.
 async fn apply_schema() -> Result<(), CliError> {
-    let dim = Config::embedding_dim(&env_lookup);
+    // The vector index width is part of the schema, and `KB_TIER` can change it
+    // (`cloud` embeds at 1024), so the tier is resolved here too: without it
+    // `apply-schema` would build an index the server cannot write to.
+    let tier =
+        crate::tier::Tier::from_lookup(&env_lookup).map_err(|e| CliError::Failed(e.to_string()))?;
+    let lookup = crate::tier::with_preset(tier, &env_lookup);
+    let dim = Config::embedding_dim(&lookup);
     let settings =
-        Config::surreal_from_lookup(env_lookup).map_err(|e| CliError::Failed(e.to_string()))?;
+        Config::surreal_from_lookup(&lookup).map_err(|e| CliError::Failed(e.to_string()))?;
     let store = SurrealChunkStore::new(settings)?;
 
     for sql in schema::schema_statements(dim) {

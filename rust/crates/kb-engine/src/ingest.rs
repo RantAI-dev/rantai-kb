@@ -88,6 +88,11 @@ pub struct IngestSettings {
     /// before chunking (`kb_core::furniture`). The stored document content
     /// is left as extracted; only the chunks change.
     pub strip_page_furniture: bool,
+    /// Run entity and relation extraction at all
+    /// (`KB_ENTITY_EXTRACTION_ENABLED`, default on). A CPU-only profile turns
+    /// it off: it is the most expensive non-embedding step, and a tier preset
+    /// has to be able to say so without the engine reading the environment.
+    pub entity_extraction_enabled: bool,
 }
 
 impl Default for IngestSettings {
@@ -102,6 +107,7 @@ impl Default for IngestSettings {
             embedding_model: None,
             chunking: INGEST_CHUNKING,
             strip_page_furniture: false,
+            entity_extraction_enabled: true,
         }
     }
 }
@@ -419,9 +425,7 @@ impl IngestWorker {
 
         let policy = resolve_ingest_policy(&job.filename, figure_mode);
 
-        let entity_extraction_enabled = std::env::var("KB_ENTITY_EXTRACTION_ENABLED")
-            .map(|v| v != "false" && v != "0")
-            .unwrap_or(true);
+        let entity_extraction_enabled = self.settings.entity_extraction_enabled;
 
         let flags = ProgressFlags {
             entities: policy.entities && entity_extraction_enabled,
