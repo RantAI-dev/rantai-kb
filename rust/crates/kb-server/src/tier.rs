@@ -29,6 +29,7 @@ pub enum Tier {
 pub const TIER_NAMES: [&str; 5] = ["lite", "desk", "studio", "station", "cloud"];
 
 const QWEN3_EMBEDDING: &str = "Qwen/Qwen3-Embedding-0.6B";
+const E5_SMALL_EMBEDDING: &str = "intfloat/multilingual-e5-small";
 const BGE_RERANKER: &str = "BAAI/bge-reranker-v2-m3";
 const VOYAGE_EMBEDDING: &str = "voyageai/voyage-multimodal-3.5";
 const VOYAGE_RERANKER: &str = "voyageai/rerank-2.5";
@@ -69,12 +70,28 @@ const QWEN3_QUERY_PREFIX: &str =
 /// "bge should not rerank pages"). It only matters when an operator turns the
 /// page arm on.
 const LOCAL: &[(&str, &str)] = &[
-    ("KB_EMBEDDING_MODEL", QWEN3_EMBEDDING),
-    ("KB_EMBEDDING_DIM", "1024"),
     ("KB_EMBEDDING_BASE_URL", LOCAL_EMBEDDINGS),
-    ("KB_EMBEDDING_QUERY_PREFIX", QWEN3_QUERY_PREFIX),
     ("KB_EMBEDDING_TIMEOUT_MS", "120000"),
     ("KB_PAGE_RERANK", "false"),
+];
+
+/// Desk and up embed text with Qwen3-Embedding-0.6B on a GPU.
+const QWEN3_TEXT: &[(&str, &str)] = &[
+    ("KB_EMBEDDING_MODEL", QWEN3_EMBEDDING),
+    ("KB_EMBEDDING_DIM", "1024"),
+    ("KB_EMBEDDING_QUERY_PREFIX", QWEN3_QUERY_PREFIX),
+];
+
+/// Lite embeds text with multilingual-e5-small on the CPU. Measured on 2 pinned
+/// cores, the embedder capped at 1 thread (2026-10-24, MIRACL-id-50,
+/// `docs/kb-tiers.md` "Lite, measured"): nDCG@10 0.802 against 0.811 for
+/// Qwen3-0.6B (−0.009 [−0.047, +0.027], a tie), but 1,485 passages ingest in
+/// ~2 min instead of 86 min and a search takes 42 ms instead of 802 ms.
+const E5_SMALL_TEXT: &[(&str, &str)] = &[
+    ("KB_EMBEDDING_MODEL", E5_SMALL_EMBEDDING),
+    ("KB_EMBEDDING_DIM", "384"),
+    ("KB_EMBEDDING_QUERY_PREFIX", "query: "),
+    ("KB_EMBEDDING_PASSAGE_PREFIX", "passage: "),
 ];
 
 /// The chunk reranker Desk and up run: bge at the local `/rerank` endpoint.
@@ -201,10 +218,10 @@ impl Tier {
     /// The preset tables that apply to this tier, most general first.
     fn tables(self) -> &'static [&'static [(&'static str, &'static str)]] {
         match self {
-            Self::Lite => &[LOCAL, LITE],
-            Self::Desk => &[LOCAL, LOCAL_RERANK, DESK],
-            Self::Studio => &[LOCAL, LOCAL_RERANK, STUDIO],
-            Self::Station => &[LOCAL, LOCAL_RERANK, STATION],
+            Self::Lite => &[LOCAL, E5_SMALL_TEXT, LITE],
+            Self::Desk => &[LOCAL, QWEN3_TEXT, LOCAL_RERANK, DESK],
+            Self::Studio => &[LOCAL, QWEN3_TEXT, LOCAL_RERANK, STUDIO],
+            Self::Station => &[LOCAL, QWEN3_TEXT, LOCAL_RERANK, STATION],
             Self::Cloud => &[CLOUD],
         }
     }
@@ -381,7 +398,7 @@ mod tests {
         assert_eq!(effective("KB_RERANK_ENABLED").as_deref(), Some(""));
         assert_eq!(
             effective("KB_EMBEDDING_DIM").as_deref(),
-            Some("1024"),
+            Some("384"),
             "an unset variable takes the preset"
         );
         assert_eq!(effective("NOT_A_KB_SETTING"), None);
@@ -424,7 +441,8 @@ mod tests {
 
     #[test]
     fn the_plan_stays_on_one_line_even_for_a_multiline_value() {
-        let plan = TierPlan::resolve(Tier::Lite, &|_: &str| None);
+        // Desk carries the multiline Qwen3 instruction.
+        let plan = TierPlan::resolve(Tier::Desk, &|_: &str| None);
         let line = plan.describe();
         assert!(!line.contains('\n'), "the log must stay one line: {line}");
         assert!(

@@ -31,7 +31,7 @@ Metal); that is accepted for the chat model only.
 | Role | Lite | Desk (8 GB) | Studio (24 GB) | Station | Cloud |
 |---|---|---|---|---|---|
 | Chat LLM (the app's) | elsewhere | Bonsai-2-9B (2.0–2.6 GB + 0.6 GB vision), 5 users | Bonsai-2-27B (6.0–7.2 GB + 0.6 GB vision), 5 users | 32–35B × 5 users, or 8–9B × 20 users | API |
-| Embedding (text + page images, one space) | small multilingual text model on CPU | Qwen3-VL-Embedding-2B, 8-bit | Qwen3-VL-Embedding-2B, full precision | Qwen3-VL-Embedding-8B | voyage-multimodal-3.5 or gemini-embedding-2 |
+| Embedding (text + page images, one space) | multilingual-e5-small on CPU (measured: `docs/eval-ab/lite-2core`) | Qwen3-VL-Embedding-2B, 8-bit | Qwen3-VL-Embedding-2B, full precision | Qwen3-VL-Embedding-8B | voyage-multimodal-3.5 or gemini-embedding-2 |
 | Reranker | tiny text reranker, or none | Qwen3-VL-Reranker-2B, 8-bit | Qwen3-VL-Reranker-2B, full precision | Qwen3-VL-Reranker-8B | voyage rerank-2.5 / cohere rerank-4 / qwen3-reranker-8b |
 | Digital PDF text | pdfium text layer | text layer | text layer | text layer | text layer |
 | Scans / complex pages | PP-OCRv6 (ONNX, CPU) | PaddleOCR-VL-1.6, loaded during ingest | PaddleOCR-VL-1.6, resident | MinerU2.5-Pro / PaddleOCR-VL | Mistral OCR |
@@ -281,7 +281,7 @@ Status as of 2026-10-24:
      Answers are cached on disk under `KB_CACHE_DIR`, keyed by model, prompt version,
      reasoning flag and image hash; a page with no visuals (`NONE`) is cached too. Effect on
      retrieval is not measured yet.
-5. Lite on exactly 2 cores (`taskset`): PP-OCRv6 via ONNX, small-embedder bake-off.
+5. Lite on exactly 2 cores (`taskset`): ✅ small-embedder bake-off (2026-10-24, `docs/eval-ab/lite-2core`): multilingual-e5-small, 0.802 nDCG@10 on MIRACL-id-50, ~2 min ingest, 42 ms search; Qwen3-0.6B ties on quality but is 41× slower to ingest. The embedder must be capped to 1 thread or it starves the server. PP-OCRv6 not done.
 6. Desk / Studio / Station on real hardware; `kb-server setup`.
 
 ## Open risks

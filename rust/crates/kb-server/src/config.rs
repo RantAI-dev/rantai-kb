@@ -1537,7 +1537,8 @@ mod tests {
             assert_eq!(plan.tier.as_str(), tier);
             assert!(!plan.filled.is_empty(), "{tier} filled nothing");
 
-            assert_eq!(cfg.embedder.dimension, 1024, "{tier}");
+            let dim = if tier == "lite" { 384 } else { 1024 };
+            assert_eq!(cfg.embedder.dimension, dim, "{tier}");
             assert_eq!(cfg.embedder.embed_concurrency, concurrency, "{tier}");
             assert_eq!(
                 cfg.engine.rerank_candidate_limit,
@@ -1570,9 +1571,15 @@ mod tests {
                     other => panic!("cloud reranker should be cohere-shaped, got {other:?}"),
                 }
             } else {
-                assert_eq!(cfg.embedder.model, "Qwen/Qwen3-Embedding-0.6B");
+                if tier == "lite" {
+                    assert_eq!(cfg.embedder.model, "intfloat/multilingual-e5-small");
+                    assert_eq!(cfg.embedder.query_prefix, "query: ");
+                    assert_eq!(cfg.embedder.passage_prefix, "passage: ");
+                } else {
+                    assert_eq!(cfg.embedder.model, "Qwen/Qwen3-Embedding-0.6B");
+                    assert_eq!(cfg.embedder.query_prefix, QWEN3_INSTRUCTION);
+                }
                 assert_eq!(cfg.embedder.base_url, "http://127.0.0.1:8081/v1/embeddings");
-                assert_eq!(cfg.embedder.query_prefix, QWEN3_INSTRUCTION);
                 assert_eq!(cfg.embedder.request_timeout, Duration::from_secs(120));
                 assert_eq!(cfg.chunk_store_choice, ChunkStoreChoice::Surreal);
                 assert!(
@@ -1637,7 +1644,7 @@ mod tests {
             );
         }
         // Values the operator did not touch still come from the tier.
-        assert_eq!(cfg.embedder.dimension, 1024);
+        assert_eq!(cfg.embedder.dimension, 384);
         assert!(
             plan.filled
                 .iter()
