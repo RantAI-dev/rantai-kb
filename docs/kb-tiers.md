@@ -157,7 +157,7 @@ descriptions when the LLM is idle and backs off while users are chatting.
 
 ## Build order
 
-Status as of 2026-10-23 (evening):
+Status as of 2026-10-24:
 
 1. ✅ Content-addressed disk cache for embeddings, extraction and page vectors
    (`kb-cache`, `KB_CACHE_DIR`). A repeat ViDoRe run went from 1,686 s to 24 s with zero
@@ -184,8 +184,10 @@ Status as of 2026-10-23 (evening):
      **0.661 with `KB_PAGE_RERANK=false`** (0.628 with it on: bge is a poor page reranker,
      −0.058 alone offline, and adds ~10 s per search on the RX 590). Local tiers with bge keep
      page rerank off until a stronger local reranker (Qwen3-VL-Reranker) is measured.
-   - ViDoRe v3 computer science, text stack only: 0.785 (best published 0.786); the page arm
-     was not run there (budget).
+   - ViDoRe v3 computer science (2026-10-24), cloud default (one voyage embedder, pages,
+     voyage rerank): **0.828** (text-only 0.779; best published retriever 0.786). The page arm
+     adds +0.049 [+0.035, +0.065]; voyage instead of qwen3-8b for chunks is a wash here
+     (−0.006 [−0.021, +0.006]). `docs/eval-ab/vidore3-cs-en-night`.
    - Local tiers: `KB_PAGE_EMBEDDING_FORMAT=vllm` with Qwen3-VL-Embedding-2B/8B under vLLM
      (`3111e16`, mock-tested only; no NVIDIA box yet). The local page reranker is bge-reranker
      on page text (measured offline only with bge on chunks); Qwen3-VL-Reranker is untested.
