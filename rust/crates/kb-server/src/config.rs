@@ -223,6 +223,9 @@ pub struct EmbedderConfig {
     pub embed_concurrency: u32,
     pub query_prefix: String,
     pub passage_prefix: String,
+    /// `KB_EMBEDDING_INPUT_TYPE=true`: send Voyage's `input_type`
+    /// (`query` / `document`) with every embedding request.
+    pub send_input_type: bool,
     pub request_timeout: Duration,
 }
 
@@ -234,7 +237,17 @@ impl EmbedderConfig {
     /// prefixes are keyed per side by `kb_cache::CachedEmbedder::with_prefixes`.
     #[must_use]
     pub fn cache_fingerprint(&self, tag: &str) -> String {
-        format!("model={}|dim={}|tag={tag}", self.model, self.dimension)
+        // `input_type` changes the vector, so it is part of the key; the
+        // suffix is omitted when off so existing cache entries stay valid.
+        let input_type = if self.send_input_type {
+            "|input_type=1"
+        } else {
+            ""
+        };
+        format!(
+            "model={}|dim={}{input_type}|tag={tag}",
+            self.model, self.dimension
+        )
     }
 }
 
@@ -448,6 +461,7 @@ impl Config {
             embed_concurrency: int_var(&lookup, "KB_EMBEDDING_CONCURRENCY", 4u32)?.clamp(1, 32),
             query_prefix: lookup("KB_EMBEDDING_QUERY_PREFIX").unwrap_or_default(),
             passage_prefix: lookup("KB_EMBEDDING_PASSAGE_PREFIX").unwrap_or_default(),
+            send_input_type: bool_flag(&lookup, "KB_EMBEDDING_INPUT_TYPE", false),
             request_timeout: Duration::from_millis(
                 int_var(&lookup, "KB_EMBEDDING_TIMEOUT_MS", 15_000u64)?.max(1_000),
             ),
@@ -994,6 +1008,15 @@ mod tests {
         let b = cfg.embedder.cache_fingerprint("");
         assert_ne!(a, b, "the tag must change the fingerprint");
         assert!(a.contains("dim=4096"));
+        assert!(!cfg.embedder.send_input_type, "input_type is opt-in");
+
+        // Voyage's input_type changes the vector, so it changes the key.
+        map.insert("KB_EMBEDDING_INPUT_TYPE", "true");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert!(cfg.embedder.send_input_type);
+        assert_ne!(cfg.embedder.cache_fingerprint(&cache.embedding_tag), a);
+        map.remove("KB_EMBEDDING_INPUT_TYPE");
 
         // An extraction fingerprint never carries a secret.
         let mut extract = cfg.extract.clone();

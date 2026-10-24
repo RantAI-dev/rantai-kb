@@ -39,6 +39,10 @@ pub struct EmbedderSettings {
     pub embed_concurrency: u32,
     pub query_prefix: String,
     pub passage_prefix: String,
+    /// Send `input_type: "query" | "document"` (Voyage's asymmetric
+    /// embedding hint) on OpenAI-shaped requests. Off by default: most
+    /// OpenAI-compatible servers reject or ignore unknown fields.
+    pub send_input_type: bool,
     pub request_timeout: Duration,
 }
 
@@ -64,6 +68,8 @@ struct OpenAiReq<'a> {
     input: Vec<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     dimensions: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_type: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -217,11 +223,16 @@ impl EmbedderImpl {
 
     /// Embed `inputs` in one OpenAI-compatible request and return the vectors
     /// in the order the inputs were sent.
-    async fn embed_openai_batch(&self, inputs: &[String]) -> Result<Vec<Vec<f32>>, PortError> {
+    async fn embed_openai_batch(
+        &self,
+        inputs: &[String],
+        kind: EmbedKind,
+    ) -> Result<Vec<Vec<f32>>, PortError> {
         let r = OpenAiReq {
             model: &self.settings.model,
             input: inputs.iter().map(String::as_str).collect(),
             dimensions: Some(self.settings.dimension),
+            input_type: self.settings.send_input_type.then(|| kind.as_input_type()),
         };
         let body = serde_json::to_vec(&r).map_err(|e| PortError::Malformed(format!("req: {e}")))?;
         let bytes = self.post(body).await?;
@@ -256,7 +267,7 @@ impl EmbedderImpl {
                 .next()
                 .ok_or_else(|| PortError::Malformed("minimax: empty vectors".into()))?
         } else {
-            self.embed_openai_batch(std::slice::from_ref(&prefixed))
+            self.embed_openai_batch(std::slice::from_ref(&prefixed), kind)
                 .await?
                 .into_iter()
                 .next()
@@ -295,7 +306,7 @@ impl EmbedderImpl {
         }
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
         for batch in texts.chunks(size) {
-            out.extend(self.embed_openai_batch(batch).await?);
+            out.extend(self.embed_openai_batch(batch, kind).await?);
         }
         Ok(out)
     }
@@ -308,6 +319,13 @@ pub enum EmbedKind {
 }
 
 impl EmbedKind {
+    fn as_input_type(self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::Passage => "document",
+        }
+    }
+
     fn as_minimax_type(self) -> &'static str {
         match self {
             Self::Query => "query",
@@ -453,6 +471,7 @@ mod tests {
             embed_concurrency: 2,
             query_prefix: String::new(),
             passage_prefix: String::new(),
+            send_input_type: false,
             request_timeout: Duration::from_secs(5),
         }
     }
@@ -695,6 +714,23 @@ mod tests {
         assert_eq!(seen[0], vec!["Instruct: q\napa kabar".to_string()]);
     }
 
+    #[test]
+    fn input_type_is_sent_only_when_enabled() {
+        let req = |input_type| {
+            serde_json::to_value(OpenAiReq {
+                model: "voyageai/voyage-multimodal-3.5",
+                input: vec!["wages"],
+                dimensions: Some(1024),
+                input_type,
+            })
+            .unwrap()
+        };
+        assert!(req(None).get("input_type").is_none());
+        let on = |kind: EmbedKind| req(Some(kind.as_input_type()))["input_type"].clone();
+        assert_eq!(on(EmbedKind::Query), "query");
+        assert_eq!(on(EmbedKind::Passage), "document");
+    }
+
     #[tokio::test]
     async fn gemini_cap_bounds_the_request() {
         let input = texts(10);
@@ -777,6 +813,7 @@ mod dispatch_tests {
             embed_concurrency: 2,
             query_prefix: String::new(),
             passage_prefix: String::new(),
+            send_input_type: false,
             request_timeout: std::time::Duration::from_secs(5),
         };
         let embedder: Arc<dyn Embedder> = Arc::new(EmbedderImpl::new(settings).unwrap());
