@@ -114,7 +114,44 @@ async fn detail_returns_document_and_ordered_chunks() {
     assert_eq!(chunks[0]["content"], "first");
     assert_eq!(chunks[1]["chunkIndex"], 1);
     assert_eq!(chunks[1]["content"], "second");
-    assert_eq!(chunks[0]["id"], "doc-1_0");
+    // Bun's `String(row.id)`: the document-detail route names the same record
+    // form as a search hit.
+    assert_eq!(chunks[0]["id"], "document_chunk:⟨doc-1_0⟩");
+}
+
+/// The id the detail route hands out decodes back to the bare ident the store
+/// keys on, in both forms a caller can hold.
+///
+/// No route consumes a chunk id today (search takes document ids; the figure
+/// route takes an asset key), so this is the boundary property those routes
+/// will need when one does: `dto::chunk_id_from_client` is the single decode
+/// point, and it accepts Bun's `document_chunk:⟨…⟩` and the bare ident alike.
+#[tokio::test]
+async fn a_chunk_id_from_the_detail_route_resolves_in_either_form() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    h.documents
+        .insert_doc(TenantId(TENANT.to_string()), doc_meta("doc-1", "Detail"));
+    h.chunks
+        .stored_chunks
+        .write()
+        .unwrap()
+        .insert(DocumentId("doc-1".into()), vec![chunk_to_store("first", 0)]);
+
+    let response = h
+        .send("GET", "/v1/documents/doc-1", &tenant_key(TENANT))
+        .await;
+    let body = json_body(response).await;
+    let wire_id = body["chunks"][0]["id"].as_str().expect("id").to_string();
+
+    assert_eq!(wire_id, kb_server::dto::chunk_id_for_client("doc-1_0"));
+    for sent in [wire_id, "doc-1_0".to_string()] {
+        assert_eq!(
+            kb_server::dto::chunk_id_from_client(&sent),
+            "doc-1_0",
+            "either form must name the same chunk: {sent}"
+        );
+    }
 }
 
 #[tokio::test]

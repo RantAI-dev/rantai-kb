@@ -202,7 +202,12 @@ async fn test_search_happy_path_fields() {
 
     let chunks = body.chunks.expect("chunks present");
     assert_eq!(chunks.len(), 1);
-    assert_eq!(chunks[0].id, "c_1");
+    assert_eq!(chunks[0].id, "document_chunk:⟨c_1⟩");
+    assert_eq!(
+        kb_server::dto::chunk_id_from_client(&chunks[0].id),
+        "c_1",
+        "the id goes out in Bun's form and comes back to the bare ident the store keys on"
+    );
     assert_eq!(chunks[0].document_title, "Happy Path Document");
     let sources = body.sources.expect("sources present");
     assert_eq!(sources.len(), 1);

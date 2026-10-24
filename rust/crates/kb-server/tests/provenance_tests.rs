@@ -192,11 +192,14 @@ async fn search(h: &Harness) -> serde_json::Value {
 }
 
 fn chunk(body: &serde_json::Value, id: &str) -> serde_json::Value {
+    // `id` is the bare ident the fake store keys on; the wire carries Bun's
+    // `document_chunk:⟨…⟩` form.
+    let wire_id = kb_server::dto::chunk_id_for_client(id);
     body["chunks"]
         .as_array()
         .expect("chunks array")
         .iter()
-        .find(|c| c["id"] == id)
+        .find(|c| c["id"] == wire_id)
         .unwrap_or_else(|| panic!("no chunk {id} in {}", body["chunks"]))
         .clone()
 }
@@ -311,7 +314,7 @@ async fn the_response_deserialises_into_the_dto_with_its_own_type() {
     let chunks = parsed.chunks.expect("chunks");
     let keyword = chunks
         .iter()
-        .find(|c| c.id == "c-key")
+        .find(|c| c.id == kb_server::dto::chunk_id_for_client("c-key"))
         .expect("the keyword hit");
     let retrieval = keyword
         .retrieval

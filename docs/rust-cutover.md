@@ -126,6 +126,8 @@ In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.d
   - Query parameters like `limit=abc` fall back gracefully to default `100` rather than causing an unhandled 500 error (`take: NaN` in Prisma).
 - **Additive Delete Response**:
   - `DELETE /v1/documents/:id` in Rust returns additive fields (`chunks_removed` and `blob_key_pending`) in addition to `{ "ok": true }`.
+- **Chunk ids are Bun's record form**:
+  - Every chunk id the API emits — `chunks[].id` on `POST /v1/search`, `chunks[].id` on `GET /v1/documents/:id` — is `document_chunk:⟨{document_id}_{chunk_index}⟩`, the string Bun's `RecordId.toString()` produces (`String(row.id)` in `src/service/api.ts`). Internally the port's `ChunkId` stays the bare ident; the wrapper is applied once, at the wire boundary (`kb-server/src/dto.rs::chunk_id_for_client`), so an id a client stored from a Rust answer is the same string it would have stored from Bun, and `chunk_id_from_client` accepts either form (wrapped, bare, or the backticked rendering a different SurrealDB endpoint may produce). Before 2026-10-24 Rust answered the bare ident, which broke clients and the parity matrix.
 
 ### 5. Additive `retrieval` Provenance on Search Chunks
 
@@ -258,17 +260,25 @@ path.**
   right far more often; chunk boundaries (and so chunk ids' content) differ
   from Bun's for PDFs, so **re-index PDFs** for the gain.
 
-### 10. Deliberate Difference: Keyword Hits Carry Their Page
+### 10. Deliberate Difference: Keyword Hits Carry Their Page and Section
 - **Bun**: a chunk found only by the keyword (BM25) arm is serialised without
-  `page`, `chunkType` or `assetKey`; the keyword index had no page.
-- **Rust (deliberate, 2026-10-23)**: the store holds the page of every chunk,
-  so a keyword-only hit now carries `page` when it is known (omitted, as
-  before, when it is not). `chunkType`, `assetKey` and `contextualPrefix: null`
-  keep Bun's shape.
+  `page`, `chunkType` or `assetKey`, and with `section: null` and
+  `contextualPrefix: null`; the keyword arm's query selects neither the
+  chunk's page nor its metadata.
+- **Rust (deliberate, 2026-10-23)**: the store holds the page and the metadata
+  of every chunk, so a keyword-only hit now carries `page` and `section` when
+  they are known (each omitted/null, as before, when it is not). `chunkType`,
+  `assetKey` and `contextualPrefix: null` keep Bun's shape.
 - **Why**: in a sampled ViDoRe v3 HR query, 9 of the 20 chunks returned were
   keyword-only; without a page they cannot be cited, and a client ranking
-  pages silently loses them. The context text and `sources` already carried the page.
-- **Parity**: `search-parity.sh` drops `page` from keyword hits before diffing.
+  pages silently loses them. The same argument holds for the heading: it is
+  what a source card shows next to the document title, and dropping it would
+  make a keyword-only hit look like a chunk from a document with no headings.
+  The context text and `sources` already carried both.
+- **Parity**: `search-parity.sh` drops `page` and `section` from keyword hits
+  before diffing. Neither field can be compared there — Bun's keyword arm never
+  fetched them — so the matrix compares the fields both runtimes can produce
+  for that chunk.
 
 ### 11. Deliberate Difference: Neighbour Chunks Follow the Ranked Hits
 - **Bun**: neighbour chunks (`KB_NEIGHBOR_WINDOW`, default 1) are woven into
@@ -282,12 +292,55 @@ path.**
   neighbours off), and the top-ranked hit could be returned second.
 - **Parity**: chunk order is already compared as a set (§7).
 
+### 12. Deliberate Difference: Cross-Arm Duplicate Chunks Are Merged
+- **Bun**: when the dense and the keyword arm match the same chunk, the
+  response can list that chunk twice — once with its cosine `similarity`, and
+  once as a keyword hit with `similarity: 0`, `section: null` and
+  `contextualPrefix: null`.
+- **Root cause (Bun)**: both arms run `SELECT id, … FROM document_chunk`, but
+  the SurrealDB driver returns a fresh `RecordId` object per row.
+  `src/lib/rag/retriever.ts` keys its candidate pool (`pool.has(b.id)`) and its
+  RRF accumulator on those objects, and JavaScript `Map` compares them by
+  reference, so the same chunk's two `RecordId` instances are two keys and are
+  never merged. The ids are equal as *strings* — `document_chunk:⟨…⟩` — which
+  is why the duplicate surfaces in the response and not in the store.
+- **Rust (deliberate, 2026-10-24)**: `ChunkId` is a value, not an object
+  reference, so `RetrievalIndex::search` merges the arms by ident
+  (`kb-store-surreal/src/retrieval_index.rs::fuse`, the in-memory index and the
+  fakes do the same). A chunk both arms found is one entry carrying both arms'
+  ranks and scores, reported in `retrieval` (§5).
+- **Why**: a duplicate is never the better answer. It spends one of the
+  caller's `maxChunks` slots, renders the same passage twice in `context`, and
+  gives the client a second copy of a source with `similarity: 0`, which ranks
+  as if it were irrelevant. Nothing is lost by merging: the additive
+  `retrieval` block says which arms found the chunk.
+- **Parity**: `search-parity.sh` drops Bun's duplicate before diffing — it
+  groups the normalised `chunks` by id and keeps the copy with the highest
+  `similarity`. The dedupe is applied to Bun's answer only, so a Rust
+  regression that started emitting duplicates again would still fail the
+  matrix.
+
 ---
 
 ## 6. Shared Known Issues
 
-### Duplicate Chunks Across Retrieval Arms
-- **Behavior**: When both the vector search arm and the BM25 search arm match the exact same chunk, the chunk can appear twice in the returned `chunks` array (once with its cosine vector similarity score and once with `similarity: 0.0` from the BM25 arm).
-- **Root Cause**: In TypeScript (`src/lib/rag/retriever.ts`), vector chunks and BM25 chunks arrive as separate SurrealDB `RecordId` object instances. JavaScript `Map.has()` and `scores.get()` in the reciprocal rank fusion (RRF) logic perform object reference identity equality (`===`) rather than ID value equality. Consequently, cross-arm deduplication does not merge the two hits.
-- **Rust Parity Alignment**: Rust intentionally mirrors this behavior in `kb-engine::retrieval` to preserve search result parity with TypeScript.
-- **Next Step**: A deduplication pass by normalized chunk ID (`chunk.id.0` / `RecordId.toString()`) should be implemented simultaneously in both Bun and Rust runtimes in a future release.
+### Duplicate Chunks Across Retrieval Arms (Bun only; Rust merges — §12)
+- **Behavior**: When both the vector search arm and the BM25 search arm match the
+  exact same chunk, Bun can list that chunk twice in the returned `chunks` array
+  (once with its cosine vector similarity score and once with `similarity: 0.0`,
+  `section: null` and `contextualPrefix: null` from the keyword arm). Rust does
+  not: it merges the two hits into one (Deliberate Difference §12).
+- **Root Cause**: In TypeScript (`src/lib/rag/retriever.ts`), vector chunks and
+  BM25 chunks arrive as separate SurrealDB `RecordId` object instances.
+  JavaScript `Map.has()` and `scores.get()` in the reciprocal rank fusion (RRF)
+  logic perform object reference identity equality (`===`) rather than ID value
+  equality. Consequently, cross-arm deduplication does not merge the two hits,
+  even though both ids stringify to the same `document_chunk:⟨…⟩`.
+- **Rust**: merged by `ChunkId` in the store adapter's fusion, reported in the
+  additive `retrieval` block (§5). See §12 for the difference and its rationale.
+- **Parity**: `search-parity.sh` groups the normalised `chunks` by id and keeps
+  the highest-`similarity` copy of Bun's answer before diffing; the dedupe is
+  applied to Bun only, so a Rust duplicate would still fail the matrix.
+- **Next Step**: Bun is frozen. If it is ever unfrozen, key the pool and the RRF
+  accumulator on `String(id)` instead of the `RecordId` instance.
+
