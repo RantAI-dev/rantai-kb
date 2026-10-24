@@ -672,7 +672,30 @@ impl IngestWorker {
             }
         };
         if let Some(pages) = pages {
+            let descriptions = match &pages {
+                Ok(outcome) => outcome.descriptions.clone(),
+                Err(_) => Vec::new(),
+            };
             self.record_pages(document_id, pages).await;
+            // The caption stage's second use: make chart and table content
+            // searchable as text. Best-effort — the document is ready either
+            // way, and a failure here is counted, not raised.
+            if !descriptions.is_empty() {
+                let category = chunks.first().map_or_else(
+                    || category_of(&params).to_string(),
+                    |c| c.metadata.category.clone(),
+                );
+                self.store_visual_descriptions(
+                    job,
+                    document_id,
+                    &title,
+                    &category,
+                    subcategory_of(&params).as_deref(),
+                    &descriptions,
+                    written,
+                )
+                .await;
+            }
         }
 
         self.finish_ready(job, document_id, written, started, &flags)
@@ -825,6 +848,12 @@ impl IngestWorker {
                 if o.images_failed > 0 {
                     recorded["pageImages"]["imagesFailed"] = json!(o.images_failed);
                 }
+                // The caption stage: pages that got a description, and calls
+                // that failed or timed out (those pages were still indexed).
+                if o.described > 0 || o.descriptions_failed > 0 {
+                    recorded["pageImages"]["described"] = json!(o.described);
+                    recorded["pageImages"]["descriptionsFailed"] = json!(o.descriptions_failed);
+                }
                 recorded
             }
             Err(e) => {
@@ -834,6 +863,111 @@ impl IngestWorker {
         };
         if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
             tracing::warn!(error = %e, "could not record the page-image outcome");
+        }
+    }
+
+    /// Embed the page descriptions into the text index as figure chunks, with
+    /// ids continuing after the text chunks (`{doc}_{n}`). Best-effort: a
+    /// failure is logged and recorded on the document, and never fails it.
+    ///
+    /// Why figure chunks: they are the shape the retrieval path already sends
+    /// to the figure arm and reads back as figures, and a page's chart is a
+    /// figure whether a layout parser cropped it or a vision model described it.
+    #[allow(clippy::too_many_arguments)]
+    async fn store_visual_descriptions(
+        &self,
+        job: &JobRecord,
+        document_id: &DocumentId,
+        title: &str,
+        category: &str,
+        subcategory: Option<&str>,
+        descriptions: &[(u32, String)],
+        first_index: usize,
+    ) {
+        let contents: Vec<(u32, String)> = descriptions
+            .iter()
+            .map(|(page, description)| (*page, format!("[Visual] {description}")))
+            .collect();
+        let texts: Vec<String> = contents.iter().map(|(_, text)| text.clone()).collect();
+        let embeddings = match self.embedder.embed_passages(&texts).await {
+            Ok(vectors) if vectors.len() == descriptions.len() => vectors,
+            Ok(vectors) => {
+                tracing::warn!(
+                    vectors = vectors.len(),
+                    descriptions = descriptions.len(),
+                    "visual description embedding returned the wrong count (non-fatal)"
+                );
+                self.record_visual_chunks(document_id, 0, descriptions.len())
+                    .await;
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "visual description embedding failed (non-fatal)");
+                self.record_visual_chunks(document_id, 0, descriptions.len())
+                    .await;
+                return;
+            }
+        };
+
+        let units: Vec<IndexUnit> = contents
+            .into_iter()
+            .zip(embeddings)
+            .enumerate()
+            .map(|(offset, ((page, content), dense))| {
+                let chunk_index = u32::try_from(first_index + offset).unwrap_or(u32::MAX);
+                let metadata = ChunkMetadata {
+                    document_title: title.to_string(),
+                    category: category.to_string(),
+                    subcategory: subcategory.map(str::to_string),
+                    section: Some("Visual description".to_string()),
+                    heading_path: None,
+                    chunk_index,
+                    chunk_type: Some("figure".to_string()),
+                    page: Some(page),
+                    asset_key: None,
+                    anchor_chunk_index: None,
+                    contextual_prefix: None,
+                };
+                IndexUnit {
+                    id: ChunkId(format!("{}_{}", document_id.0, chunk_index)),
+                    document_id: document_id.clone(),
+                    tenant: job.tenant_id.clone(),
+                    knowledge_base_id: None,
+                    category: Some(category.to_string()),
+                    chunk_index,
+                    page: Some(page),
+                    chunk_type: ChunkType::Figure,
+                    sparse: kb_core::sparse::encode_document(&content),
+                    content,
+                    contextual_prefix: None,
+                    metadata: storage_metadata(&metadata),
+                    dense,
+                }
+            })
+            .collect();
+        let written = units.len();
+        match self.index.upsert(units).await {
+            Ok(()) => {
+                tracing::info!(chunks = written, "page visual descriptions indexed");
+                self.record_visual_chunks(document_id, written, 0).await;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, chunks = written, "visual descriptions not indexed (non-fatal)");
+                self.record_visual_chunks(document_id, 0, written).await;
+            }
+        }
+    }
+
+    /// Put how the visual-description chunk write went on the document. Only
+    /// when there was something to write, so an ingest without captions keeps
+    /// exactly the metadata it had.
+    async fn record_visual_chunks(&self, document_id: &DocumentId, written: usize, failed: usize) {
+        if written == 0 && failed == 0 {
+            return;
+        }
+        let patch = json!({"visualChunks": {"written": written, "failed": failed}});
+        if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
+            tracing::warn!(error = %e, "could not record the visual-chunk outcome");
         }
     }
 

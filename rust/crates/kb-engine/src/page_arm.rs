@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use kb_ports::{
     BlobStore, Candidate, ChunkId, ChunkType, DocumentId, DocumentScope, Fusion, HybridQuery,
-    IndexUnit, PageEmbedder, PageImage, PageRenderer, PageVisionScorer, PortError, ProvenanceArm,
-    RerankCandidate, Reranker, RetrievalIndex, RetrievalProvenance, SearchHit, TenantId,
-    page_image_path,
+    IndexUnit, PageDescriber, PageEmbedder, PageImage, PageRenderer, PageVisionScorer, PortError,
+    ProvenanceArm, RerankCandidate, Reranker, RetrievalIndex, RetrievalProvenance, SearchHit,
+    TenantId, page_image_path,
 };
 
 use crate::retrieval::candidate_to_hit_from;
@@ -147,6 +147,48 @@ pub struct PageVision {
     pub scorer: Arc<dyn PageVisionScorer>,
     pub blobs: Arc<dyn BlobStore>,
     pub config: PageVisionRerankConfig,
+}
+
+/// Ingest-time page captions: how hard the describer stage may work, and which
+/// of its two consumers are on. Both uses are separately switchable so each can
+/// be measured alone against the same document.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageCaptionConfig {
+    /// Descriptions in flight per window (`KB_PAGE_CAPTION_CONCURRENCY`).
+    pub concurrency: usize,
+    /// Budget for one page's description. Past it the page has none, counted.
+    pub timeout: Duration,
+    /// Append `\n\n[Visual] …` to the stored page text the page reranker reads
+    /// (`KB_PAGE_CAPTION_RERANK_TEXT`).
+    pub rerank_text: bool,
+    /// Return the descriptions so ingest can embed them into the text index
+    /// (`KB_PAGE_CAPTION_TEXT_CHUNKS`).
+    pub text_chunks: bool,
+}
+
+impl Default for PageCaptionConfig {
+    fn default() -> Self {
+        Self {
+            concurrency: 8,
+            timeout: Duration::from_secs(30),
+            rerank_text: true,
+            text_chunks: true,
+        }
+    }
+}
+
+/// The caption stage, installed on [`PageIngest`] when configured. The engine
+/// only sees the port; provider, endpoint and cache live outside it.
+pub struct PageCaption {
+    pub describer: Arc<dyn PageDescriber>,
+    pub config: PageCaptionConfig,
+}
+
+/// One window's descriptions: the text by page, and how many calls failed.
+#[derive(Debug, Default)]
+struct WindowDescriptions {
+    by_page: HashMap<u32, String>,
+    failed: usize,
 }
 
 /// The result of [`merge_pages`].
@@ -605,6 +647,9 @@ pub struct PageIngest {
     pub max_pages: u32,
     /// Characters of each page's text embedded with its image; 0 = image only.
     pub text_chars: usize,
+    /// The opt-in visual descriptions of each rendered page. `None` leaves
+    /// both uses off and never calls a model.
+    pub caption: Option<PageCaption>,
 }
 
 /// Page ids are derived, so a re-ingest overwrites rather than duplicates.
@@ -667,6 +712,9 @@ impl PageIngest {
             outcome.indexed += stored.indexed;
             outcome.failed += stored.failed;
             outcome.images_failed += stored.images_failed;
+            outcome.described += stored.described;
+            outcome.descriptions_failed += stored.descriptions_failed;
+            outcome.descriptions.extend(stored.descriptions);
             if outcome.error.is_none() {
                 outcome.error = stored.error;
             }
@@ -732,35 +780,6 @@ impl PageIngest {
         if window.is_empty() {
             return outcome;
         }
-        let stored = async {
-            let vectors = self.embedder.embed_pages(&window).await?;
-            if vectors.len() != window.len() {
-                return Err(PortError::Malformed(format!(
-                    "page embedder returned {} vectors for {} pages",
-                    vectors.len(),
-                    window.len()
-                )));
-            }
-            let units: Vec<IndexUnit> = window
-                .iter()
-                .zip(vectors)
-                .map(|(p, dense)| {
-                    self.unit(
-                        tenant,
-                        document_id,
-                        category,
-                        p,
-                        dense,
-                        chunks_by_page,
-                        page_texts,
-                    )
-                })
-                .collect();
-            self.index.upsert(units).await
-        };
-        // The images the vision rerank reads. Best-effort and independent of
-        // the vector write: a bucket that refused a page must not cost the page
-        // its search entry, so failures are counted, never returned.
         let store_images = async {
             let Some(blobs) = self.blobs.as_ref() else {
                 return 0;
@@ -783,7 +802,56 @@ impl PageIngest {
             }
             failed
         };
-        let (stored, images_failed) = tokio::join!(stored, store_images);
+        let ((embedded, descriptions), images_failed) = tokio::join!(
+            async {
+                tokio::join!(
+                    self.embedder.embed_pages(&window),
+                    self.describe_window(&window),
+                )
+            },
+            store_images
+        );
+        outcome.described += descriptions.by_page.len();
+        outcome.descriptions_failed += descriptions.failed;
+        if self.caption.as_ref().is_some_and(|c| c.config.text_chunks) {
+            let mut described: Vec<(u32, String)> = descriptions
+                .by_page
+                .iter()
+                .map(|(page, text)| (*page, text.clone()))
+                .collect();
+            described.sort_by_key(|(page, _)| *page);
+            outcome.descriptions = described;
+        }
+        let stored = match embedded {
+            Err(e) => Err(e),
+            Ok(vectors) if vectors.len() != window.len() => Err(PortError::Malformed(format!(
+                "page embedder returned {} vectors for {} pages",
+                vectors.len(),
+                window.len()
+            ))),
+            Ok(vectors) => {
+                let units: Vec<IndexUnit> = window
+                    .iter()
+                    .zip(vectors)
+                    .map(|(p, dense)| {
+                        self.unit(
+                            tenant,
+                            document_id,
+                            category,
+                            p,
+                            dense,
+                            chunks_by_page,
+                            page_texts,
+                            descriptions.by_page.get(&p.page).map(String::as_str),
+                        )
+                    })
+                    .collect();
+                self.index.upsert(units).await
+            }
+        };
+        // The images the vision rerank reads. Best-effort and independent of
+        // the vector write: a bucket that refused a page must not cost the page
+        // its search entry, so failures are counted, never returned.
         outcome.images_failed += images_failed;
         match stored {
             Ok(()) => outcome.indexed += window.len(),
@@ -797,6 +865,45 @@ impl PageIngest {
         outcome
     }
 
+    /// Describe the visuals of every page in a window, bounded concurrency,
+    /// one timeout per page. A failure or a timeout is counted and leaves that
+    /// page without a description; it never fails the window.
+    async fn describe_window(&self, pages: &[PageImage]) -> WindowDescriptions {
+        let Some(caption) = self.caption.as_ref() else {
+            return WindowDescriptions::default();
+        };
+        if !caption.config.rerank_text && !caption.config.text_chunks {
+            return WindowDescriptions::default();
+        }
+        let concurrency = caption.config.concurrency.max(1);
+        let timeout = caption.config.timeout;
+        // Chunks of `concurrency`, each fully joined before the next: bounded
+        // in flight, and no stream of borrowed futures (which rustc cannot
+        // prove `Send` for every lifetime inside the worker's `spawn`).
+        let mut results: Vec<(u32, Result<Option<String>, PortError>)> = Vec::new();
+        for chunk in pages.chunks(concurrency) {
+            let described = chunk
+                .iter()
+                .map(|page| describe_page(Arc::clone(&caption.describer), page, timeout));
+            results.extend(futures::future::join_all(described).await);
+        }
+
+        let mut out = WindowDescriptions::default();
+        for (page, result) in results {
+            match result {
+                Ok(Some(text)) if !text.trim().is_empty() => {
+                    out.by_page.insert(page, text.trim().to_string());
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    out.failed += 1;
+                    tracing::warn!(page, error = %e, "page description failed (non-fatal)");
+                }
+            }
+        }
+        out
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn unit(
         &self,
@@ -807,11 +914,26 @@ impl PageIngest {
         dense: Vec<f32>,
         chunks_by_page: &HashMap<u32, Vec<ChunkId>>,
         page_texts: &HashMap<u32, String>,
+        description: Option<&str>,
     ) -> IndexUnit {
         let chunk_ids: Vec<&str> = chunks_by_page
             .get(&p.page)
             .map(|ids| ids.iter().map(|c| c.0.as_str()).collect())
             .unwrap_or_default();
+        let page_text = page_texts.get(&p.page).map_or("", |t| t.trim());
+        let content = match (self.caption.as_ref(), description) {
+            (Some(caption), Some(description)) if caption.config.rerank_text => {
+                let mut text = String::with_capacity(page_text.len() + description.len() + 12);
+                text.push_str(page_text);
+                if !page_text.is_empty() {
+                    text.push_str("\n\n");
+                }
+                text.push_str("[Visual] ");
+                text.push_str(description);
+                text
+            }
+            _ => page_text.to_string(),
+        };
         IndexUnit {
             id: page_unit_id(document_id, p.page),
             document_id: document_id.clone(),
@@ -821,17 +943,31 @@ impl PageIngest {
             chunk_index: p.page,
             page: Some(p.page),
             chunk_type: ChunkType::Page,
-            // The page's text, for page-level reranking at search time.
-            content: page_texts
-                .get(&p.page)
-                .map(|t| t.trim().chars().take(PAGE_TEXT_STORED_CHARS).collect())
-                .unwrap_or_default(),
+            // The page's text, for page-level reranking at search time, plus its
+            // visual description when that use is on.
+            content: content.chars().take(PAGE_TEXT_STORED_CHARS).collect(),
             contextual_prefix: None,
             metadata: serde_json::json!({ "chunkIds": chunk_ids, "page": p.page }),
             dense,
             sparse: kb_core::sparse::SparseVector::default(),
         }
     }
+}
+
+/// Describe one page under a deadline. A separate `async fn` (rather than a
+/// closure returning an `async` block) keeps the worker's future provably
+/// `Send`, which `tokio::spawn` needs.
+async fn describe_page(
+    describer: Arc<dyn PageDescriber>,
+    page: &PageImage,
+    timeout: Duration,
+) -> (u32, Result<Option<String>, PortError>) {
+    let described = tokio::time::timeout(timeout, describer.describe(page)).await;
+    let described = match described {
+        Ok(result) => result,
+        Err(_) => Err(PortError::Timeout),
+    };
+    (page.page, described)
 }
 
 /// What the page arm stored for one document.
@@ -845,6 +981,14 @@ pub struct PageOutcome {
     /// Page images whose blob write failed. Best-effort: the page is still
     /// indexed for search, but the vision rerank cannot read its image.
     pub images_failed: usize,
+    /// Pages that got a visual description (a non-empty model answer).
+    pub described: usize,
+    /// Description calls that failed or timed out. Those pages simply have no
+    /// description; they are still indexed.
+    pub descriptions_failed: usize,
+    /// The descriptions, by page, for the ingest step that embeds them into the
+    /// text index. Sorted by page. Empty unless `KB_PAGE_CAPTION_TEXT_CHUNKS`.
+    pub descriptions: Vec<(u32, String)>,
     /// The first failure, when there was one.
     pub error: Option<String>,
 }
