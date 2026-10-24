@@ -156,3 +156,21 @@ requires the page arm. Knobs: `KB_PAGE_CAPTION_BASE_URL`, `KB_PAGE_CAPTION_API_K
 `KB_PAGE_CAPTION_TEXT_CHUNKS` (true) and `KB_PAGE_CAPTION_RERANK_TEXT` (true). Answers are
 cached on disk under `KB_CACHE_DIR` by model, prompt version, reasoning flag and image hash,
 including `NONE`. Its effect on retrieval is not measured yet.
+
+### Live (2026-10-24): +0.009, not significant, and 7.5 s per search
+
+The opt-in stage (`KB_PAGE_VISION_RERANK_MODEL=qwen/qwen3.7-flash`, defaults: top 20, w 0.6,
+k 5, 8 s deadline) on the live cloud default (`../vidore3-hr-en-night/vmm-vis-ti-pr`):
+
+| | `vmm-ti-pr` | `vmm-vis-ti-pr` |
+|---|---:|---:|
+| page nDCG@10 | 0.711 | 0.720 (+0.009 [−0.002, +0.020]) |
+| degraded | 0 | 58 / 318 (`vision_rerank_unavailable`: 57 timeouts, 1 malformed) |
+| search p50 / p95 | ~2.1 s / 2.6 s | 7.6 s / 9.3 s |
+| vision stage p50 / p95 | — | 6.7 s / 8.0 s |
+
+One call with 20 page images takes ~6.7 s, so 18% of searches hit the 8 s deadline and keep
+the old order; that is most of the gap to the offline +0.016, which waited for every answer.
+Verdict: **leave it off.** It adds ~5.5 s to every search for a gain we cannot separate from
+zero. Cheaper to try later: top 10 (offline +0.013, about half the images) or a faster vision
+model; neither was run. Cost of this run: about $0.30.
