@@ -148,6 +148,8 @@ pub struct StageDetailDto {
     /// The page-image arm's query embed and page search, concurrent with the
     /// text arms.
     pub page_arm: f64,
+    /// The live vision rerank of the top page images, inside `pages`.
+    pub vision_rerank: f64,
     /// `find_alive_meta_by_ids` inside the keyword arm (Postgres).
     pub scope_check: f64,
 }
@@ -230,6 +232,7 @@ impl StageDetailDto {
             entity_arm: round_ms(self.entity_arm),
             graph_arm: round_ms(self.graph_arm),
             page_arm: round_ms(self.page_arm),
+            vision_rerank: round_ms(self.vision_rerank),
             scope_check: round_ms(self.scope_check),
         }
     }
@@ -246,6 +249,7 @@ impl From<&StageTimings> for StageDetailDto {
             entity_arm: t.entity_arm_ms,
             graph_arm: t.graph_arm_ms,
             page_arm: t.page_arm_ms,
+            vision_rerank: t.vision_rerank_ms,
             scope_check: t.scope_check_ms,
         }
     }
@@ -750,5 +754,24 @@ mod tests {
             Some(11),
             "exactly the Bun fields plus stageTimingsMs, nothing renamed away"
         );
+    }
+
+    #[test]
+    fn the_vision_rerank_is_reported_as_detail_inside_pages() {
+        let mut stats = StageTimingsDto {
+            pages: 3.0,
+            total: 10.0,
+            ..StageTimingsDto::default()
+        };
+        stats.detail.vision_rerank = 2.0;
+        let value = serde_json::to_value(stats).unwrap();
+        assert_eq!(value["detail"]["visionRerank"], 2.0);
+        assert!(
+            accounted_pairs(&stats)
+                .iter()
+                .all(|(name, _)| *name != "visionRerank"),
+            "already counted inside pages"
+        );
+        assert!((stats.accounted_sum_ms() - 3.0).abs() < 1e-9);
     }
 }

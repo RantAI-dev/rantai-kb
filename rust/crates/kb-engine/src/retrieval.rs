@@ -958,6 +958,34 @@ pub async fn execute_pipeline(
                         }
                     }
                 }
+                // 5c. Opt-in live vision rerank of the top page images, after
+                // the page rerank. Its model order is blended with the current
+                // one by weighted RRF; any failure keeps the order and is
+                // reported, never swallowed (AGENTS rule 6). Every page it sees
+                // comes from a hit that already passed scope.
+                if opts.rerank_enabled
+                    && let Some(vision) = arm.vision.as_ref()
+                {
+                    let vision_sw = Stopwatch::start(clock);
+                    let ctx = crate::page_arm::PageVisionContext {
+                        scorer: &vision.scorer,
+                        blobs: &vision.blobs,
+                        config: &vision.config,
+                        query,
+                        tenant: scope.tenant(),
+                    };
+                    match crate::page_arm::vision_rerank(&mut reranked_hits, &ctx).await {
+                        Ok(()) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "vision rerank failed (non-fatal); keeping page order"
+                            );
+                            degrades.push(RetrievalDegrade::VisionRerankUnavailable);
+                        }
+                    }
+                    timings.vision_rerank_ms = vision_sw.elapsed_ms();
+                }
             }
             Ok((Ok(Err(e)), _)) => {
                 tracing::warn!(error = %e, "page arm failed (non-fatal)");

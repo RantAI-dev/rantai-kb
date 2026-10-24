@@ -2,19 +2,25 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use kb_ports::{
-    ChunkId, ChunkType, DocumentId, IndexUnit, PageEmbedder, PageImage, PageRenderer, PortError,
-    ProvenanceArm, RetrievalDegrade, RetrievalIndex, TenantId,
+    BlobStore, ChunkId, ChunkType, DocumentId, IndexUnit, PageEmbedder, PageImage, PageRenderer,
+    PageVisionScorer, PortError, ProvenanceArm, RetrievalDegrade, RetrievalIndex, SearchHit,
+    TenantId, page_image_path,
 };
 
 use crate::fakes::{
-    FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeReranker, make_fake_hit, make_fake_scope,
+    FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeReranker, make_fake_hit,
+    make_fake_scope,
 };
 use crate::in_memory_index::InMemoryIndex;
-use crate::page_arm::{PageArm, PageArmConfig, PageIngest, PageOutcome, merge_pages, page_unit_id};
+use crate::page_arm::{
+    PageArm, PageArmConfig, PageIngest, PageOutcome, PageVision, PageVisionRerankConfig,
+    merge_pages, page_unit_id, vision_rerank,
+};
 use crate::retrieval::{RetrievalOptions, candidate_to_hit, execute_pipeline};
 use crate::timing::SystemClock;
 
@@ -115,6 +121,7 @@ async fn the_page_arm_never_returns_a_page_outside_the_scope() {
     let arm = PageArm {
         embedder: embedder(vec![1.0, 0.0, 0.0]),
         index: pages,
+        vision: None,
         config: PageArmConfig::default(),
     };
     // Tenant 1, but only d1 visible: d3 (same tenant) is out of scope too.
@@ -246,6 +253,7 @@ async fn a_failing_page_arm_degrades_and_keeps_the_text_results() {
         page_arm: Some(Arc::new(PageArm {
             embedder: failing,
             index: Arc::new(InMemoryIndex::new(3)),
+            vision: None,
             config: PageArmConfig::default(),
         })),
         min_similarity: 0.0,
@@ -299,6 +307,7 @@ async fn page_ingest_stores_one_unit_per_page_and_a_reingest_replaces_them() {
         embedder: embedder(vec![1.0, 0.0, 0.0]),
         index: index.clone(),
         max_pages: 100,
+        blobs: None,
         text_chars: 0,
     };
     let mut by_page: HashMap<u32, Vec<ChunkId>> = HashMap::new();
@@ -545,6 +554,7 @@ async fn page_ingest_stores_every_page_of_a_long_pdf() {
         embedder: embedder(vec![1.0, 0.0, 0.0]),
         index: index.clone(),
         max_pages: 500,
+        blobs: None,
         text_chars: 0,
     };
     let n = ingest
@@ -593,6 +603,7 @@ async fn a_failed_page_window_loses_only_its_own_pages() {
         embedder: Arc::new(FailOnPage(70)),
         index: index.clone(),
         max_pages: 500,
+        blobs: None,
         text_chars: 0,
     };
     let out = ingest
@@ -644,6 +655,7 @@ async fn an_unrendered_page_is_counted_and_skipped() {
         embedder: Arc::new(FailOnPage(1)),
         index: index.clone(),
         max_pages: 10,
+        blobs: None,
         text_chars: 0,
     };
     let out = ingest
@@ -660,4 +672,572 @@ async fn an_unrendered_page_is_counted_and_skipped() {
         .unwrap();
     assert_eq!((out.indexed, out.failed), (2, 1));
     assert!(out.error.unwrap().contains("first: page 2"));
+}
+
+// ── Live vision rerank ──────────────────────────────────────────────────────
+
+/// A blob store that records every key it is asked for, so a test can assert
+/// which pages were read — and, just as important, which were not.
+#[derive(Clone, Default)]
+struct RecordingBlob {
+    objects: Arc<std::sync::RwLock<HashMap<String, Vec<u8>>>>,
+    downloads: Arc<std::sync::RwLock<Vec<String>>>,
+}
+
+impl RecordingBlob {
+    async fn put(&self, document: &str, page: u32) {
+        let key = page_image_path(Some("t1"), document, page);
+        self.objects
+            .write()
+            .unwrap()
+            .insert(key, vec![page as u8; 4]);
+    }
+
+    fn downloaded(&self) -> Vec<String> {
+        self.downloads.read().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl BlobStore for RecordingBlob {
+    async fn upload(&self, key: &str, body: Vec<u8>, _: &str) -> Result<u64, PortError> {
+        let len = body.len() as u64;
+        self.objects.write().unwrap().insert(key.to_string(), body);
+        Ok(len)
+    }
+
+    async fn download(&self, key: &str) -> Result<Vec<u8>, PortError> {
+        self.downloads.write().unwrap().push(key.to_string());
+        self.objects
+            .read()
+            .unwrap()
+            .get(key)
+            .cloned()
+            .ok_or_else(|| PortError::Unavailable(format!("no blob at {key}")))
+    }
+
+    async fn delete(&self, key: &str) -> Result<(), PortError> {
+        self.objects.write().unwrap().remove(key);
+        Ok(())
+    }
+}
+
+/// Returns fixed scores, optionally after a delay, or an error when `scores`
+/// is `None`.
+struct FakeVisionScorer {
+    scores: std::sync::Mutex<Option<Vec<f32>>>,
+    delay: Duration,
+    calls: AtomicUsize,
+}
+
+impl FakeVisionScorer {
+    fn new(scores: Vec<f32>) -> Arc<Self> {
+        Arc::new(Self {
+            scores: std::sync::Mutex::new(Some(scores)),
+            delay: Duration::ZERO,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn failing() -> Arc<Self> {
+        Arc::new(Self {
+            scores: std::sync::Mutex::new(None),
+            delay: Duration::ZERO,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn slow(delay: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            scores: std::sync::Mutex::new(Some(vec![5.0, 4.0, 3.0, 2.0])),
+            delay,
+            calls: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl PageVisionScorer for FakeVisionScorer {
+    async fn score(&self, _: &str, pages: &[PageImage]) -> Result<Vec<f32>, PortError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        let guard = self.scores.lock().unwrap();
+        match guard.as_ref() {
+            Some(scores) => Ok(scores.iter().copied().take(pages.len()).collect()),
+            None => Err(PortError::Unavailable("vision scorer down".into())),
+        }
+    }
+}
+
+fn page_hit(id: &str, document: &str, page: u32, score: f32) -> SearchHit {
+    let mut hit = make_fake_hit(id, document, "Title", "content", page, score);
+    hit.chunk.metadata.page = Some(page);
+    hit
+}
+
+fn recorded_hits(hits: &[SearchHit]) -> Vec<String> {
+    hits.iter().map(|h| h.chunk.id.0.clone()).collect()
+}
+
+fn vision_config(depth: usize, timeout: Duration) -> PageVisionRerankConfig {
+    PageVisionRerankConfig {
+        depth,
+        weight: 0.6,
+        rrf_k: 5,
+        timeout,
+    }
+}
+
+/// The blend formula: `(1-w)/(k + run_rank + 1) + w/(k + vision_rank + 1)`.
+///
+/// Pages 0,1,2 have run ranks 0,1,2 and vision scores 2,9,1, so the vision
+/// order is 1,0,2. With w=0.6, k=5:
+///   page 1: 0.4/7 + 0.6/6 = 0.15714
+///   page 0: 0.4/6 + 0.6/7 = 0.15238
+///   page 2: 0.4/8 + 0.6/8 = 0.12500
+/// Page 3 is outside `depth` and keeps its place even though its score is high.
+#[tokio::test]
+async fn vision_rerank_reorders_only_the_top_depth_page_slots() {
+    let pages = ["p0", "p1", "p2", "p3"];
+    let mut hits: Vec<_> = pages
+        .iter()
+        .enumerate()
+        .map(|(i, id)| page_hit(id, "d1", u32::try_from(i).unwrap(), 1.0))
+        .collect();
+    let blobs = Arc::new(RecordingBlob::default());
+    for page in 1..=3 {
+        blobs.put("d1", page).await;
+    }
+    let scorer: Arc<dyn PageVisionScorer> = FakeVisionScorer::new(vec![2.0, 9.0, 1.0, 8.0]);
+    let blobs: Arc<dyn BlobStore> = blobs.clone();
+    let config = vision_config(3, Duration::from_secs(5));
+    let ctx = crate::page_arm::PageVisionContext {
+        scorer: &scorer,
+        blobs: &blobs,
+        config: &config,
+        query: "q",
+        tenant: &t("t1"),
+    };
+    vision_rerank(&mut hits, &ctx).await.unwrap();
+    assert_eq!(recorded_hits(&hits), vec!["p1", "p0", "p2", "p3"]);
+}
+
+#[tokio::test]
+async fn vision_rerank_keeps_the_order_when_the_scorer_fails() {
+    let mut hits: Vec<_> = (0..3)
+        .map(|i| page_hit(&format!("p{i}"), "d1", i, 1.0))
+        .collect();
+    let before = recorded_hits(&hits);
+    let blobs = Arc::new(RecordingBlob::default());
+    for page in 1..=3 {
+        blobs.put("d1", page).await;
+    }
+    let scorer: Arc<dyn PageVisionScorer> = FakeVisionScorer::failing();
+    let blobs: Arc<dyn BlobStore> = blobs.clone();
+    let config = vision_config(3, Duration::from_secs(5));
+    let ctx = crate::page_arm::PageVisionContext {
+        scorer: &scorer,
+        blobs: &blobs,
+        config: &config,
+        query: "q",
+        tenant: &t("t1"),
+    };
+    assert!(vision_rerank(&mut hits, &ctx).await.is_err());
+    assert_eq!(recorded_hits(&hits), before);
+}
+
+#[tokio::test]
+async fn vision_rerank_keeps_the_order_on_timeout() {
+    let mut hits: Vec<_> = (0..3)
+        .map(|i| page_hit(&format!("p{i}"), "d1", i, 1.0))
+        .collect();
+    let before = recorded_hits(&hits);
+    let blobs = Arc::new(RecordingBlob::default());
+    for page in 1..=3 {
+        blobs.put("d1", page).await;
+    }
+    let scorer: Arc<dyn PageVisionScorer> = FakeVisionScorer::slow(Duration::from_millis(200));
+    let blobs: Arc<dyn BlobStore> = blobs.clone();
+    let config = vision_config(3, Duration::from_millis(5));
+    let ctx = crate::page_arm::PageVisionContext {
+        scorer: &scorer,
+        blobs: &blobs,
+        config: &config,
+        query: "q",
+        tenant: &t("t1"),
+    };
+    let err = vision_rerank(&mut hits, &ctx).await.unwrap_err();
+    assert!(matches!(err, PortError::Timeout), "{err}");
+    assert_eq!(recorded_hits(&hits), before);
+}
+
+#[tokio::test]
+async fn vision_rerank_keeps_the_order_when_a_page_image_is_missing() {
+    let mut hits: Vec<_> = (0..3)
+        .map(|i| page_hit(&format!("p{i}"), "d1", i, 1.0))
+        .collect();
+    let before = recorded_hits(&hits);
+    let blobs = Arc::new(RecordingBlob::default());
+    // Page 2's image was never stored.
+    blobs.put("d1", 1).await;
+    blobs.put("d1", 3).await;
+    let scorer: Arc<dyn PageVisionScorer> = FakeVisionScorer::new(vec![1.0, 2.0, 3.0]);
+    let blobs: Arc<dyn BlobStore> = blobs.clone();
+    let config = vision_config(3, Duration::from_secs(5));
+    let ctx = crate::page_arm::PageVisionContext {
+        scorer: &scorer,
+        blobs: &blobs,
+        config: &config,
+        query: "q",
+        tenant: &t("t1"),
+    };
+    assert!(vision_rerank(&mut hits, &ctx).await.is_err());
+    assert_eq!(recorded_hits(&hits), before);
+}
+
+/// Runs a search with a page arm and a vision stage over a small scoped
+/// corpus. The text index returns `text_hits`; the page index returns `pages`.
+#[allow(clippy::too_many_arguments)]
+async fn run_pipeline_with_vision(
+    scope: &kb_ports::DocumentScope,
+    pages: Vec<IndexUnit>,
+    text_hits: Vec<SearchHit>,
+    vision: Option<PageVision>,
+    rerank_enabled: bool,
+) -> crate::RetrievalOutcome {
+    let page_index = Arc::new(InMemoryIndex::new(3));
+    page_index.upsert(pages).await.unwrap();
+    let doc_store = Arc::new(FakeDocumentStore::default());
+    let chunk_store = Arc::new(FakeChunkStore::default());
+    chunk_store.vector_hits.write().unwrap().extend(text_hits);
+    let opts = RetrievalOptions {
+        page_arm: Some(Arc::new(PageArm {
+            embedder: embedder(vec![1.0, 0.0, 0.0]),
+            index: page_index,
+            config: PageArmConfig::default(),
+            vision,
+        })),
+        min_similarity: 0.0,
+        rerank_enabled,
+        ..RetrievalOptions::default()
+    };
+    execute_pipeline(
+        &(doc_store as Arc<_>),
+        &(chunk_store as Arc<_>),
+        &(Arc::new(FakeEmbedder::default()) as Arc<_>),
+        &(Arc::new(FakeReranker::default()) as Arc<_>),
+        &(Arc::new(crate::NoopExpander) as Arc<_>),
+        scope,
+        "query",
+        &opts,
+        &SystemClock,
+    )
+    .await
+    .unwrap()
+}
+
+fn vision_slot(
+    scorer: Arc<dyn PageVisionScorer>,
+    blobs: Arc<RecordingBlob>,
+    config: PageVisionRerankConfig,
+) -> PageVision {
+    PageVision {
+        scorer,
+        blobs: blobs as Arc<dyn BlobStore>,
+        config,
+    }
+}
+
+fn pipeline_corpus() -> (Vec<IndexUnit>, Vec<SearchHit>) {
+    let pages = (0..3)
+        .map(|page| {
+            let dense = vec![1.0, 0.01 * f32::from(u8::try_from(page).unwrap()), 0.0];
+            page_unit("t1", "d1", page, dense, &[])
+        })
+        .collect();
+    let hits = (0..3)
+        .map(|i| page_hit(&format!("d1_{i}"), "d1", i, 0.9 - 0.1 * f32::from(i as u8)))
+        .collect();
+    (pages, hits)
+}
+
+#[tokio::test]
+async fn a_failing_vision_rerank_degrades_and_keeps_the_page_order() {
+    let scope = make_fake_scope(t("t1"), vec![d("d1")]);
+    let (pages, hits) = pipeline_corpus();
+    let blobs = Arc::new(RecordingBlob::default());
+    for page in 1..=3 {
+        blobs.put("d1", page).await;
+    }
+    let baseline = run_pipeline_with_vision(&scope, pages.clone(), hits.clone(), None, false).await;
+    let outcome = run_pipeline_with_vision(
+        &scope,
+        pages,
+        hits,
+        Some(vision_slot(
+            FakeVisionScorer::failing(),
+            Arc::clone(&blobs),
+            vision_config(3, Duration::from_secs(5)),
+        )),
+        true,
+    )
+    .await;
+    assert!(
+        outcome
+            .degrades
+            .contains(&RetrievalDegrade::VisionRerankUnavailable),
+        "{:?}",
+        outcome.degrades
+    );
+    assert_eq!(
+        recorded_hits(&outcome.chunks),
+        recorded_hits(&baseline.chunks)
+    );
+    assert!(outcome.timings.vision_rerank_ms > 0.0);
+}
+
+#[tokio::test]
+async fn a_timed_out_vision_rerank_degrades_and_keeps_the_page_order() {
+    let scope = make_fake_scope(t("t1"), vec![d("d1")]);
+    let (pages, hits) = pipeline_corpus();
+    let blobs = Arc::new(RecordingBlob::default());
+    for page in 1..=3 {
+        blobs.put("d1", page).await;
+    }
+    let baseline = run_pipeline_with_vision(&scope, pages.clone(), hits.clone(), None, false).await;
+    let outcome = run_pipeline_with_vision(
+        &scope,
+        pages,
+        hits,
+        Some(vision_slot(
+            FakeVisionScorer::slow(Duration::from_millis(200)),
+            Arc::clone(&blobs),
+            vision_config(3, Duration::from_millis(5)),
+        )),
+        true,
+    )
+    .await;
+    assert!(
+        outcome
+            .degrades
+            .contains(&RetrievalDegrade::VisionRerankUnavailable),
+        "{:?}",
+        outcome.degrades
+    );
+    assert_eq!(
+        recorded_hits(&outcome.chunks),
+        recorded_hits(&baseline.chunks)
+    );
+}
+
+#[tokio::test]
+async fn a_missing_page_image_degrades_and_keeps_the_page_order() {
+    let scope = make_fake_scope(t("t1"), vec![d("d1")]);
+    let (pages, hits) = pipeline_corpus();
+    let blobs = Arc::new(RecordingBlob::default());
+    // Page 2's image is absent.
+    blobs.put("d1", 1).await;
+    blobs.put("d1", 3).await;
+    let baseline = run_pipeline_with_vision(&scope, pages.clone(), hits.clone(), None, false).await;
+    let outcome = run_pipeline_with_vision(
+        &scope,
+        pages,
+        hits,
+        Some(vision_slot(
+            FakeVisionScorer::new(vec![3.0, 2.0, 1.0]),
+            Arc::clone(&blobs),
+            vision_config(3, Duration::from_secs(5)),
+        )),
+        true,
+    )
+    .await;
+    assert!(
+        outcome
+            .degrades
+            .contains(&RetrievalDegrade::VisionRerankUnavailable),
+        "{:?}",
+        outcome.degrades
+    );
+    assert_eq!(
+        recorded_hits(&outcome.chunks),
+        recorded_hits(&baseline.chunks)
+    );
+}
+
+#[tokio::test]
+async fn the_vision_stage_reads_no_images_when_it_is_off() {
+    let scope = make_fake_scope(t("t1"), vec![d("d1")]);
+    let (pages, hits) = pipeline_corpus();
+    let blobs = Arc::new(RecordingBlob::default());
+    for page in 1..=3 {
+        blobs.put("d1", page).await;
+    }
+    // Not configured at all.
+    let outcome = run_pipeline_with_vision(&scope, pages.clone(), hits.clone(), None, true).await;
+    assert!(outcome.timings.vision_rerank_ms <= 0.0);
+    // Configured, but reranking is off for this search.
+    let outcome = run_pipeline_with_vision(
+        &scope,
+        pages,
+        hits,
+        Some(vision_slot(
+            FakeVisionScorer::new(vec![1.0, 2.0, 3.0]),
+            Arc::clone(&blobs),
+            vision_config(3, Duration::from_secs(5)),
+        )),
+        false,
+    )
+    .await;
+    assert!(outcome.timings.vision_rerank_ms <= 0.0);
+    assert!(
+        blobs.downloaded().is_empty(),
+        "the stage must not read images when it will not run: {:?}",
+        blobs.downloaded()
+    );
+}
+
+/// A page of another tenant's document matches the query exactly, and its image
+/// exists. The search must never read it: only pages of scoped hits are fetched.
+#[tokio::test]
+async fn vision_never_reads_a_page_outside_the_scope() {
+    let scope = make_fake_scope(t("t1"), vec![d("d1")]);
+    let mut pages: Vec<IndexUnit> = (0..2)
+        .map(|page| page_unit("t1", "d1", page, vec![1.0, 0.0, 0.0], &[]))
+        .collect();
+    pages.push(page_unit("t2", "d2", 0, vec![1.0, 0.0, 0.0], &[]));
+    let hits = (0..2)
+        .map(|i| page_hit(&format!("d1_{i}"), "d1", i, 0.9))
+        .collect();
+    let blobs = Arc::new(RecordingBlob::default());
+    for page in 1..=2 {
+        blobs.put("d1", page).await;
+    }
+    // The out-of-scope tenant's page image exists and is readable.
+    let foreign = page_image_path(Some("t2"), "d2", 1);
+    blobs
+        .objects
+        .write()
+        .unwrap()
+        .insert(foreign.clone(), vec![9; 4]);
+    let outcome = run_pipeline_with_vision(
+        &scope,
+        pages,
+        hits,
+        Some(vision_slot(
+            FakeVisionScorer::new(vec![9.0, 1.0]),
+            Arc::clone(&blobs),
+            vision_config(2, Duration::from_secs(5)),
+        )),
+        true,
+    )
+    .await;
+    assert!(
+        !outcome
+            .degrades
+            .contains(&RetrievalDegrade::VisionRerankUnavailable)
+    );
+    let downloaded = blobs.downloaded();
+    assert!(!downloaded.is_empty(), "the stage did run");
+    assert!(
+        downloaded
+            .iter()
+            .all(|key| key.starts_with("documents/t1/d1/")),
+        "a page outside the scope was read: {downloaded:?}"
+    );
+    assert!(!downloaded.contains(&foreign));
+}
+
+// ── Storing page images at ingest ───────────────────────────────────────────
+
+#[tokio::test]
+async fn page_images_are_stored_under_the_page_key() {
+    let index = Arc::new(InMemoryIndex::new(3));
+    let blobs = Arc::new(FakeBlobStore::default());
+    let ingest = PageIngest {
+        renderer: Arc::new(FakeRenderer(3)),
+        embedder: embedder(vec![1.0, 0.0, 0.0]),
+        index: index.clone(),
+        blobs: Some(blobs.clone()),
+        max_pages: 100,
+        text_chars: 0,
+    };
+    let out = ingest
+        .index_document(
+            &t("t1"),
+            &d("d1"),
+            None,
+            "application/pdf",
+            b"%PDF",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.indexed, 3);
+    assert_eq!(out.images_failed, 0);
+    let objects = blobs.objects.read().unwrap();
+    for page in 1..=3 {
+        let key = page_image_path(Some("t1"), "d1", page);
+        assert_eq!(
+            objects.get(&key).map(Vec::as_slice),
+            Some(vec![(page - 1) as u8; 4].as_slice()),
+            "page {page} image missing or wrong: {objects:?}"
+        );
+    }
+}
+
+/// A blob store that refuses every write.
+#[derive(Clone, Default)]
+struct FailingBlob;
+
+#[async_trait]
+impl BlobStore for FailingBlob {
+    async fn upload(&self, _: &str, _: Vec<u8>, _: &str) -> Result<u64, PortError> {
+        Err(PortError::Unavailable("bucket is down".into()))
+    }
+    async fn download(&self, _: &str) -> Result<Vec<u8>, PortError> {
+        Err(PortError::Unavailable("bucket is down".into()))
+    }
+    async fn delete(&self, _: &str) -> Result<(), PortError> {
+        Err(PortError::Unavailable("bucket is down".into()))
+    }
+}
+
+#[tokio::test]
+async fn a_failed_page_image_write_does_not_fail_the_window() {
+    let index = Arc::new(InMemoryIndex::new(3));
+    let ingest = PageIngest {
+        renderer: Arc::new(FakeRenderer(3)),
+        embedder: embedder(vec![1.0, 0.0, 0.0]),
+        index: index.clone(),
+        blobs: Some(Arc::new(FailingBlob)),
+        max_pages: 100,
+        text_chars: 0,
+    };
+    let out = ingest
+        .index_document(
+            &t("t1"),
+            &d("d1"),
+            None,
+            "application/pdf",
+            b"%PDF",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(out.indexed, 3, "the pages are still searchable");
+    assert_eq!(out.failed, 0);
+    assert_eq!(out.images_failed, 3);
+    assert!(out.error.is_none(), "{:?}", out.error);
+    assert_eq!(
+        index
+            .ordered_chunks(&t("t1"), &d("d1"))
+            .await
+            .unwrap()
+            .len(),
+        3
+    );
 }

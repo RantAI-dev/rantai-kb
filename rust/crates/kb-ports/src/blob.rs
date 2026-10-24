@@ -48,6 +48,18 @@ pub fn asset_path(tenant_id: Option<&str>, document_id: &str, filename: &str) ->
     format!("documents/{org}/{document_id}/assets/{safe}")
 }
 
+/// Storage key for one rendered page image.
+///
+/// `page` is 1-based, the same numbering the page images are labelled with in
+/// the vision-rerank prompt (`Page 1:` …), and is zero-padded to five digits
+/// so the keys sort in reading order. The tenant fallback is the same
+/// `global` as [`document_path`].
+#[must_use]
+pub fn page_image_path(tenant_id: Option<&str>, document_id: &str, page: u32) -> String {
+    let org = tenant_id.filter(|t| !t.is_empty()).unwrap_or("global");
+    format!("documents/{org}/{document_id}/pages/p-{page:05}.jpg")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +92,23 @@ mod tests {
         assert_eq!(
             asset_path(Some("tenant1"), "doc123", "fig1.png"),
             "documents/tenant1/doc123/assets/fig1.png"
+        );
+    }
+
+    #[test]
+    fn page_images_are_one_based_and_zero_padded() {
+        assert_eq!(
+            page_image_path(Some("tenant1"), "doc123", 1),
+            "documents/tenant1/doc123/pages/p-00001.jpg"
+        );
+        assert_eq!(
+            page_image_path(Some("tenant1"), "doc123", 943),
+            "documents/tenant1/doc123/pages/p-00943.jpg"
+        );
+        // The same tenant fallback as every other document-scoped key.
+        assert_eq!(
+            page_image_path(None, "doc123", 2),
+            "documents/global/doc123/pages/p-00002.jpg"
         );
     }
 }

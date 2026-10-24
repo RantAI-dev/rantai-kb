@@ -121,7 +121,7 @@ In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.d
 - **Explicit-Empty Knowledge Base Filter**:
   - In TypeScript, `POST /v1/search` with `knowledgeBaseIds: []` falls through to all knowledge bases. In Rust, an explicit empty list correctly returns a message that the key is not bound to any of the requested knowledge bases, preventing data leakage.
 - **Degrades Field**:
-  - Rust adds a top-level `degrades` list to `POST /v1/search` results when degradable backends (e.g. reranker or query expander) fail, allowing clients to detect partial degradations without failing the entire search.
+  - Rust adds a top-level `degrades` list to `POST /v1/search` results when degradable backends (e.g. reranker or query expander) fail, allowing clients to detect partial degradations without failing the entire search. Labels are snake_case: `vector_arm_failed`, `bm25_arm_failed`, `expansion_unavailable`, `rerank_unavailable`, `neighbours_partial`, `figures_partial`, `graph_arm_unavailable`, `page_arm_unavailable`, and `vision_rerank_unavailable` (the opt-in live vision rerank failed or timed out; the page order is unchanged).
 - **Lenient Query Parameter Parsing**:
   - Query parameters like `limit=abc` fall back gracefully to default `100` rather than causing an unhandled 500 error (`take: NaN` in Prisma).
 - **Additive Delete Response**:

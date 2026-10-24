@@ -191,6 +191,13 @@ Status as of 2026-10-24:
    - Local tiers: `KB_PAGE_EMBEDDING_FORMAT=vllm` with Qwen3-VL-Embedding-2B/8B under vLLM
      (`3111e16`, mock-tested only; no NVIDIA box yet). The local page reranker is bge-reranker
      on page text (measured offline only with bge on chunks); Qwen3-VL-Reranker is untested.
+   - Live vision rerank (opt-in, cloud): `KB_PAGE_VISION_RERANK_MODEL=qwen/qwen3.7-flash` adds
+     one chat call over the top page images; its order is blended with the page order by
+     weighted RRF. Offline ViDoRe HR: 0.711 → **0.727** nDCG@10 at depth 20
+     (`docs/eval-ab/vidore3-hr-en-image`). Other knobs: `_DEPTH` (20), `_TIMEOUT_MS` (8000),
+     `_WEIGHT` (0.6), `_K` (5), `_NO_REASONING`, `_BASE_URL`, `_API_KEY` (defaults to
+     `OPENROUTER_API_KEY`). Requires the page arm; a failure keeps the page order and reports
+     `vision_rerank_unavailable`. Live latency is not measured yet.
 5. Lite on exactly 2 cores (`taskset`): PP-OCRv6 via ONNX, small-embedder bake-off.
 6. Desk / Studio / Station on real hardware; `kb-server setup`.
 

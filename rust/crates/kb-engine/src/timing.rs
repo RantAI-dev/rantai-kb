@@ -176,6 +176,9 @@ pub struct StageTimings {
     /// Page-image arm, after the text rerank: fusing its pages with the text
     /// hits and the page-level rerank. Sequential, so it is part of the sum.
     pub pages_ms: f64,
+    /// Live vision rerank of the top page images, when configured and when
+    /// reranking is on. Part of `pages_ms`, so reported as detail, not summed.
+    pub vision_rerank_ms: f64,
     /// Neighbour fetch and weave.
     pub neighbours_ms: f64,
     /// Figure co-retrieval and the optional figure gate.
@@ -255,7 +258,7 @@ impl StageTimings {
 
     /// The overlapping measurements, as `(name, ms)` pairs.
     #[must_use]
-    pub fn detail_pairs(&self) -> [(&'static str, f64); 8] {
+    pub fn detail_pairs(&self) -> [(&'static str, f64); 9] {
         [
             ("queryEmbed", self.query_embed_ms),
             ("vectorArm", self.vector_arm_ms),
@@ -263,6 +266,7 @@ impl StageTimings {
             ("entityArm", self.entity_arm_ms),
             ("graphArm", self.graph_arm_ms),
             ("pageArm", self.page_arm_ms),
+            ("visionRerank", self.vision_rerank_ms),
             ("scopeCheck", self.scope_check_ms),
             ("engineTotal", self.engine_total_ms),
         ]
@@ -387,6 +391,6 @@ mod tests {
         assert_eq!(t.total_ms, 0.0);
         assert!(!t.query_embed_cached);
         assert_eq!(t.accounted_pairs().len(), 9);
-        assert_eq!(t.detail_pairs().len(), 8);
+        assert_eq!(t.detail_pairs().len(), 9);
     }
 }

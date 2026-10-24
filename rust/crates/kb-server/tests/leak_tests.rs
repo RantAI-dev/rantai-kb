@@ -339,6 +339,7 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
         Arc::new(PageArm {
             embedder: Arc::new(SameVectorPageEmbedder),
             index,
+            vision: None,
             config: PageArmConfig::default(),
         })
     });

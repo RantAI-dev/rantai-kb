@@ -951,6 +951,24 @@ async fn delete_document(
     {
         tracing::warn!(error = %err, "page-image delete failed during hard delete");
     }
+    // The page JPEGs the vision rerank reads. Their count is what ingest
+    // recorded on the document; without it there is nothing to address, so the
+    // delete is skipped rather than guessed. Best-effort: a bucket that refuses
+    // one page must not keep the row the user deleted.
+    let page_images = doc
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("pageImages"))
+        .and_then(|p| p.get("indexed"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    for page in 1..=page_images {
+        let page = u32::try_from(page).unwrap_or(u32::MAX);
+        let key = kb_ports::page_image_path(Some(&auth.tenant_id.0), &doc.id.0, page);
+        if let Err(err) = state.blob.delete(&key).await {
+            tracing::warn!(error = %err, %key, "page-image blob delete failed during hard delete");
+        }
+    }
     if let Some(graph) = state.graph.as_ref()
         && let Err(err) = graph.delete_document(&auth.tenant_id, &doc_id).await
     {

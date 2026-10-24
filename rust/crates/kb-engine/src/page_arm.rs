@@ -19,9 +19,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kb_ports::{
-    Candidate, ChunkId, ChunkType, DocumentId, DocumentScope, Fusion, HybridQuery, IndexUnit,
-    PageEmbedder, PageImage, PageRenderer, PortError, ProvenanceArm, RerankCandidate, Reranker,
-    RetrievalIndex, RetrievalProvenance, SearchHit, TenantId,
+    BlobStore, Candidate, ChunkId, ChunkType, DocumentId, DocumentScope, Fusion, HybridQuery,
+    IndexUnit, PageEmbedder, PageImage, PageRenderer, PageVisionScorer, PortError, ProvenanceArm,
+    RerankCandidate, Reranker, RetrievalIndex, RetrievalProvenance, SearchHit, TenantId,
+    page_image_path,
 };
 
 use crate::retrieval::candidate_to_hit_from;
@@ -96,6 +97,58 @@ pub struct PageRerankContext<'a> {
     pub query: &'a str,
 }
 
+/// Live vision reranking: after the page rerank, a cheap vision model looks at
+/// the top `depth` pages' images and its order is blended with the current page
+/// order by weighted RRF.
+///
+/// Offline on ViDoRe v3 HR, qwen3.7-flash over the top 20 page images lifted
+/// page nDCG@10 from 0.711 to 0.727 held-out (`docs/eval-ab/vidore3-hr-en-image`).
+/// It is opt-in: every search pays one vision call and must tolerate it adding
+/// nothing, so a failure keeps the order and reports a degrade.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PageVisionRerankConfig {
+    /// Page slots the vision model sees and may reorder.
+    pub depth: usize,
+    /// Weight of the vision order in the blend (current order gets `1 - w`).
+    pub weight: f32,
+    /// RRF constant of the blend.
+    pub rrf_k: u32,
+    /// Deadline for fetching the images and scoring them. Past it the current
+    /// order stands, degraded.
+    pub timeout: Duration,
+}
+
+impl Default for PageVisionRerankConfig {
+    fn default() -> Self {
+        Self {
+            depth: 20,
+            weight: 0.6,
+            rrf_k: 5,
+            timeout: Duration::from_secs(8),
+        }
+    }
+}
+
+/// What vision reranking needs at search time. Both the scorer and the blob
+/// store are ports: the engine never learns which provider or bucket is behind
+/// them.
+pub struct PageVisionContext<'a> {
+    pub scorer: &'a Arc<dyn PageVisionScorer>,
+    pub blobs: &'a Arc<dyn BlobStore>,
+    pub config: &'a PageVisionRerankConfig,
+    pub query: &'a str,
+    /// The caller's tenant, for the page-image key. Every page passed here comes
+    /// from a scoped hit, never from the request.
+    pub tenant: &'a TenantId,
+}
+
+/// The vision stage, installed on [`PageArm`] when configured.
+pub struct PageVision {
+    pub scorer: Arc<dyn PageVisionScorer>,
+    pub blobs: Arc<dyn BlobStore>,
+    pub config: PageVisionRerankConfig,
+}
+
 /// The result of [`merge_pages`].
 #[derive(Debug)]
 pub struct MergeOutcome {
@@ -121,6 +174,8 @@ pub struct PageArm {
     pub embedder: Arc<dyn PageEmbedder>,
     pub index: Arc<dyn RetrievalIndex>,
     pub config: PageArmConfig,
+    /// The opt-in live vision rerank of the top page images.
+    pub vision: Option<PageVision>,
 }
 
 impl PageArm {
@@ -387,6 +442,148 @@ async fn rerank_slots(
     Ok(order)
 }
 
+/// One run of consecutive hits that sit in the same slot. [`merge_pages`]
+/// emits all hits of a page together, so the final ordering is a list of these
+/// runs and a "page-level result" is one run.
+#[derive(Debug)]
+struct SlotRun {
+    slot: Slot,
+    start: usize,
+    end: usize,
+}
+
+fn slot_runs(hits: &[SearchHit]) -> Vec<SlotRun> {
+    let mut runs: Vec<SlotRun> = Vec::new();
+    for (i, hit) in hits.iter().enumerate() {
+        let slot = slot_of(hit);
+        match runs.last_mut() {
+            Some(run) if run.slot == slot => run.end = i + 1,
+            _ => runs.push(SlotRun {
+                slot,
+                start: i,
+                end: i + 1,
+            }),
+        }
+    }
+    runs
+}
+
+/// Reorder the top `depth` page slots by blending the vision model's order with
+/// the current one, leaving everything below `depth` in place.
+///
+/// Weighted RRF, exactly as `vision_rerank.py`: a slot at position `r` in the
+/// current order scores `(1 - w) / (k + r + 1)` and the vision order adds
+/// `w / (k + vision_rank + 1)`; ties keep the current order. Only slots that
+/// are pages are visible to the model — a chunk-only slot among the top `depth`
+/// keeps its place, and the page slots are reordered around it.
+///
+/// # Errors
+///
+/// Any page image missing from the blob store, the scorer failing or timing
+/// out, or a score count other than one per page. The caller keeps the order
+/// and records a degrade; nothing is reordered on error.
+pub async fn vision_rerank(
+    hits: &mut Vec<SearchHit>,
+    ctx: &PageVisionContext<'_>,
+) -> Result<(), PortError> {
+    let runs = slot_runs(hits);
+    let depth = ctx.config.depth.min(runs.len());
+    if depth < 2 {
+        return Ok(());
+    }
+    let head = &runs[..depth];
+    let scorable: Vec<usize> = head
+        .iter()
+        .enumerate()
+        .filter(|(_, run)| matches!(run.slot, Slot::Page(..)))
+        .map(|(i, _)| i)
+        .collect();
+    if scorable.len() < 2 {
+        return Ok(());
+    }
+
+    let fetched = tokio::time::timeout(ctx.config.timeout, async {
+        let fetches = scorable.iter().map(|&i| {
+            let Slot::Page(document_id, page) = &head[i].slot else {
+                unreachable!("only page slots were selected");
+            };
+            let key = page_image_path(Some(&ctx.tenant.0), &document_id.0, page.saturating_add(1));
+            let blobs = Arc::clone(ctx.blobs);
+            let page = *page;
+            async move {
+                let bytes = blobs.download(&key).await?;
+                Ok::<PageImage, PortError>(PageImage {
+                    page,
+                    mime: "image/jpeg".into(),
+                    bytes,
+                    text: String::new(),
+                })
+            }
+        });
+        let pages: Vec<PageImage> = futures::future::join_all(fetches)
+            .await
+            .into_iter()
+            .collect::<Result<_, _>>()?;
+        ctx.scorer.score(ctx.query, &pages).await
+    })
+    .await
+    .map_err(|_| PortError::Timeout)??;
+    if fetched.len() != scorable.len() {
+        return Err(PortError::Malformed(format!(
+            "vision rerank returned {} scores for {} pages",
+            fetched.len(),
+            scorable.len()
+        )));
+    }
+
+    // Vision order: score descending, ties kept in the current run order.
+    let mut vision_positions: Vec<usize> = (0..scorable.len()).collect();
+    vision_positions.sort_by(|&a, &b| {
+        fetched[b]
+            .partial_cmp(&fetched[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.cmp(&b))
+    });
+    let run_slots: Vec<Slot> = scorable.iter().map(|&i| head[i].slot.clone()).collect();
+    let vision_slots: Vec<Slot> = vision_positions
+        .iter()
+        .map(|&j| run_slots[j].clone())
+        .collect();
+    let blended = kb_core::page_fusion::fuse_page_rankings(
+        &run_slots,
+        &vision_slots,
+        ctx.config.weight,
+        ctx.config.rrf_k,
+    );
+
+    // Rebuild the head in run order, filling the page positions with the blend
+    // and leaving any chunk-only slot exactly where it was.
+    let slot_to_run: HashMap<&Slot, usize> = scorable.iter().map(|&i| (&head[i].slot, i)).collect();
+    let mut order_runs: Vec<usize> = Vec::with_capacity(runs.len());
+    let mut next = 0;
+    for (position, _) in head.iter().enumerate() {
+        if scorable.contains(&position) {
+            let run_index = *slot_to_run.get(&blended[next]).ok_or_else(|| {
+                PortError::Malformed("vision rerank: blended slot is not in the head".into())
+            })?;
+            order_runs.push(run_index);
+            next += 1;
+        } else {
+            order_runs.push(position);
+        }
+    }
+    order_runs.extend(depth..runs.len());
+
+    let mut old: Vec<Option<SearchHit>> = std::mem::take(hits).into_iter().map(Some).collect();
+    let mut rebuilt: Vec<SearchHit> = Vec::with_capacity(old.len());
+    for run_index in order_runs {
+        let run = &runs[run_index];
+        rebuilt.extend(old[run.start..run.end].iter_mut().filter_map(Option::take));
+    }
+    *hits = rebuilt;
+    Ok(())
+}
+
 /// Pages embedded and stored together. One upsert of all 943 pages of a long
 /// PDF timed out against Qdrant; 64 is one request's worth.
 const PAGE_WINDOW: usize = 64;
@@ -399,6 +596,11 @@ pub struct PageIngest {
     pub renderer: Arc<dyn PageRenderer>,
     pub embedder: Arc<dyn PageEmbedder>,
     pub index: Arc<dyn RetrievalIndex>,
+    /// Where page images are stored for the live vision rerank. `None` does not
+    /// store them: without the stage there is no reader, and a page JPEG per
+    /// page of every document is real storage. Controlled by the composition
+    /// root.
+    pub blobs: Option<Arc<dyn BlobStore>>,
     /// Pages rendered per document, at most.
     pub max_pages: u32,
     /// Characters of each page's text embedded with its image; 0 = image only.
@@ -464,6 +666,7 @@ impl PageIngest {
             );
             outcome.indexed += stored.indexed;
             outcome.failed += stored.failed;
+            outcome.images_failed += stored.images_failed;
             if outcome.error.is_none() {
                 outcome.error = stored.error;
             }
@@ -554,8 +757,34 @@ impl PageIngest {
                 })
                 .collect();
             self.index.upsert(units).await
-        }
-        .await;
+        };
+        // The images the vision rerank reads. Best-effort and independent of
+        // the vector write: a bucket that refused a page must not cost the page
+        // its search entry, so failures are counted, never returned.
+        let store_images = async {
+            let Some(blobs) = self.blobs.as_ref() else {
+                return 0;
+            };
+            let uploads = window.iter().map(|p| {
+                let key =
+                    page_image_path(Some(&tenant.0), &document_id.0, p.page.saturating_add(1));
+                let blobs = Arc::clone(blobs);
+                let bytes = p.bytes.clone();
+                let mime = p.mime.clone();
+                async move { blobs.upload(&key, bytes, &mime).await }
+            });
+            let results = futures::future::join_all(uploads).await;
+            let mut failed = 0;
+            for result in results {
+                if let Err(e) = result {
+                    failed += 1;
+                    tracing::warn!(error = %e, "page image not stored (non-fatal)");
+                }
+            }
+            failed
+        };
+        let (stored, images_failed) = tokio::join!(stored, store_images);
+        outcome.images_failed += images_failed;
         match stored {
             Ok(()) => outcome.indexed += window.len(),
             Err(e) => {
@@ -613,6 +842,9 @@ pub struct PageOutcome {
     /// Pages rendered but not stored, because their window's embedding or
     /// upsert failed.
     pub failed: usize,
+    /// Page images whose blob write failed. Best-effort: the page is still
+    /// indexed for search, but the vision rerank cannot read its image.
+    pub images_failed: usize,
     /// The first failure, when there was one.
     pub error: Option<String>,
 }
