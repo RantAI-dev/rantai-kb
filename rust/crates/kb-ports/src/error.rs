@@ -60,6 +60,10 @@ pub enum RetrievalDegrade {
     /// The page-image arm (query embedding or page index) failed or timed out.
     /// The text arms' results are returned unchanged.
     PageArmUnavailable,
+    /// The live vision rerank of the top page images failed, timed out or did
+    /// not return one usable score per page. The page order is returned
+    /// unchanged; the search is degraded, not empty.
+    VisionRerankUnavailable,
 }
 
 impl RetrievalDegrade {
@@ -75,6 +79,7 @@ impl RetrievalDegrade {
             Self::FiguresPartial => "figures_partial",
             Self::GraphArmUnavailable => "graph_arm_unavailable",
             Self::PageArmUnavailable => "page_arm_unavailable",
+            Self::VisionRerankUnavailable => "vision_rerank_unavailable",
         }
     }
 }

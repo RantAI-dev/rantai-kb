@@ -74,3 +74,16 @@ pub trait PageEmbedder: Send + Sync {
     /// Width of every vector this embedder returns.
     fn dimension(&self) -> u32;
 }
+
+/// Scores page images against a query with a vision model.
+///
+/// One call per query, the pages in the order given; the result is one 0-10
+/// relevance score per page, in the same order. A scorer that cannot answer
+/// (transport error, a malformed reply, a score count that does not match)
+/// returns [`PortError`]; the engine treats that as a visible degradation and
+/// keeps the page order it already had.
+#[async_trait]
+pub trait PageVisionScorer: Send + Sync {
+    /// One score per page, in order.
+    async fn score(&self, query: &str, pages: &[PageImage]) -> Result<Vec<f32>, PortError>;
+}

@@ -18,13 +18,13 @@ mod scope;
 mod traits;
 mod types;
 
-pub use blob::{BlobStore, asset_path, document_path, sanitize_filename};
+pub use blob::{BlobStore, asset_path, document_path, page_image_path, sanitize_filename};
 #[cfg(feature = "contract")]
 pub mod contract;
 pub use error::{EngineError, PortError, RetrievalDegrade};
 pub use graph::{EntityMentions, EntityUpsert, GraphStore, RelationUpsert, TenantGraph};
 pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
-pub use pages::{PageEmbedder, PageImage, PageRenderer};
+pub use pages::{PageEmbedder, PageImage, PageRenderer, PageVisionScorer};
 pub use retrieval::{
     ArmRanks, ArmScores, Candidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit,
     KeywordQuery, KeywordSemantics, RetrievalIndex, sort_candidates,
