@@ -138,11 +138,11 @@ impl EmbedderImpl {
             .contains("minimax")
     }
 
-    fn api_key(&self) -> Result<String, PortError> {
+    fn api_key(&self) -> Option<&str> {
         self.settings
             .api_key
-            .clone()
-            .ok_or_else(|| PortError::Invalid("embedding api key not set".into()))
+            .as_deref()
+            .filter(|key| !key.is_empty())
     }
 
     /// The query-cache key. Model-scoped, so switching models cannot serve a
@@ -151,11 +151,31 @@ impl EmbedderImpl {
         format!("{}|{}", self.settings.model, text.trim())
     }
 
+    /// One embedding POST: the body, plus the bearer token only when a key is
+    /// configured. A local OpenAI-compatible endpoint (TEI, llama.cpp without
+    /// `--api-key`, Ollama) needs no token, and the CPU tiers run without a
+    /// paid key.
+    fn embedding_request(
+        client: &reqwest::Client,
+        url: &str,
+        body: Vec<u8>,
+        api_key: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let req = client
+            .post(url)
+            .header("content-type", "application/json")
+            .body(body);
+        match api_key {
+            Some(key) if !key.is_empty() => req.bearer_auth(key),
+            _ => req,
+        }
+    }
+
     /// POST a prepared body and return the raw response bytes, retrying
     /// transient failures (5xx, 429, transport) up to `MAX_RETRIES`.
     async fn post(&self, body: Vec<u8>) -> Result<Vec<u8>, PortError> {
         let url = self.settings.base_url.clone();
-        let api_key = self.api_key()?;
+        let api_key = self.api_key();
         let label = if self.is_minimax() {
             "minimax"
         } else {
@@ -164,12 +184,7 @@ impl EmbedderImpl {
 
         let mut last_err: Option<PortError> = None;
         for attempt in 1..=MAX_RETRIES {
-            let req = self
-                .client
-                .post(&url)
-                .bearer_auth(&api_key)
-                .header("content-type", "application/json")
-                .body(body.clone())
+            let req = Self::embedding_request(&self.client, &url, body.clone(), api_key)
                 .build()
                 .map_err(|e| PortError::Unavailable(format!("build: {e}")))?;
 
@@ -482,6 +497,45 @@ mod tests {
             send_input_type: false,
             request_timeout: Duration::from_secs(5),
         }
+    }
+
+    #[tokio::test]
+    async fn a_local_endpoint_without_a_key_embeds_and_sends_no_bearer() {
+        // The CPU tiers point at a local OpenAI-compatible server with no key.
+        let (url, _seen) = fake_server(Mode::InOrder).await;
+        let mut s = settings();
+        s.base_url = url.clone();
+        s.api_key = None;
+        let embedder = EmbedderImpl::new(s).expect("embedder");
+        let input = texts(2);
+        let out = embedder
+            .embed_many(&input, EmbedKind::Passage)
+            .await
+            .expect("a keyless local endpoint must work");
+        assert_eq!(out, expected(&input));
+
+        let req =
+            EmbedderImpl::embedding_request(&reqwest::Client::new(), &url, b"{}".to_vec(), None)
+                .build()
+                .expect("request");
+        assert!(
+            req.headers().get(reqwest::header::AUTHORIZATION).is_none(),
+            "no key configured means no Authorization header"
+        );
+        let req = EmbedderImpl::embedding_request(
+            &reqwest::Client::new(),
+            &url,
+            b"{}".to_vec(),
+            Some("k"),
+        )
+        .build()
+        .expect("request");
+        assert_eq!(
+            req.headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer k")
+        );
     }
 
     #[test]
