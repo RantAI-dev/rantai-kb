@@ -52,8 +52,9 @@ pub struct PageDescriberSettings {
 
 /// What a reply means: a description, or nothing worth describing.
 ///
-/// `NONE` (trimmed, case-insensitive) and an empty reply are `None`; anything
-/// else is the trimmed description. A model that says "NONE." gets `Some`, which
+/// `NONE` (trimmed, case-insensitive) is `None`; anything else is the trimmed
+/// description. The HTTP adapter never calls this with an empty reply: that is
+/// an error there, not an answer. A model that says "NONE." gets `Some`, which
 /// is the honest reading — the sentinel is exact.
 #[must_use]
 pub fn parse_description(raw: &str) -> Option<String> {
@@ -159,6 +160,21 @@ impl PageDescriber for HttpPageDescriber {
                             .pointer("/choices/0/message/content")
                             .and_then(|c| c.as_str())
                             .unwrap_or_default();
+                        // An empty reply is a failure, not "no visuals": a
+                        // thinking model that spends `max_tokens` on reasoning
+                        // returns no text (finish_reason "length"), and reading
+                        // that as `None` once cached every page of ViDoRe HR as
+                        // having nothing to describe. Only an explicit NONE is.
+                        if text.trim().is_empty() {
+                            let finish = reply
+                                .pointer("/choices/0/finish_reason")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("unknown");
+                            return Err(PortError::Malformed(format!(
+                                "page describe: empty reply (finish_reason {finish}); \
+                                 a thinking model may need KB_PAGE_CAPTION_NO_REASONING=true"
+                            )));
+                        }
                         return Ok(parse_description(text));
                     }
                 }
@@ -289,10 +305,21 @@ mod tests {
             fake("NONE").await,
             fake(" none \n").await,
             fake("None").await,
-            fake("").await,
         ] {
             let describer = HttpPageDescriber::new(settings(url, false)).unwrap();
             assert_eq!(describer.describe(&page(1)).await.unwrap(), None);
+        }
+    }
+
+    /// A thinking model that runs out of tokens returns no text; that must be a
+    /// visible failure (and never cached), not "this page has no visuals".
+    #[tokio::test]
+    async fn an_empty_reply_is_an_error_not_no_visuals() {
+        for reply in ["", "  \n "] {
+            let (url, _) = fake(reply).await;
+            let describer = HttpPageDescriber::new(settings(url, false)).unwrap();
+            let err = describer.describe(&page(1)).await.unwrap_err();
+            assert!(err.to_string().contains("empty reply"), "{err}");
         }
     }
 
