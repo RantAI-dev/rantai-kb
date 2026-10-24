@@ -97,3 +97,9 @@ Score blending (Bruch et al. 2023 found it often beats RRF once tuned) does not 
 shipped rank-based blend stays. Caveat: the "run score" side is itself an RRF score of the text
 and page arms, because the text arm's raw scores are not saved in the eval runs; a score-based
 fusion of the raw arms (cosine, BM25, rerank) is untested.
+
+**Page-rerank depth.** From the same cache: depth 10 / 20 / 30 give 0.687 / 0.705 / 0.704 with
+the blend re-tuned by CV (voyage). With the shipped blend fixed (w=0.7, k=1, full data, not
+held out), depth 20 is 0.006 below depth 30 for both rerankers (voyage 0.705 vs 0.711, Nemotron
+0.699 vs 0.705). `KB_PAGE_RERANK_DEPTH` stays 30; 20 is an option to cut rerank cost by a
+third if the blend is re-tuned for it.
