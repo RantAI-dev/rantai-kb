@@ -110,6 +110,9 @@ pub struct Config {
     pub cache: Option<CacheConfig>,
     /// The page-image arm (`KB_PAGE_EMBEDDING_MODEL`). `None` turns it off.
     pub pages: Option<PageArmSettings>,
+    /// The deployment tier preset that shaped this config (`KB_TIER`), with
+    /// the variables it filled. `None` when no tier is set.
+    pub tier: Option<crate::tier::TierPlan>,
 }
 
 /// Page-image arm wiring: which multimodal embedder, how pages are rendered,
@@ -370,17 +373,42 @@ impl Config {
     where
         F: Fn(&str) -> Option<String>,
     {
+        // `KB_TIER` (docs/kb-tiers.md) is a preset: it fills role defaults for
+        // variables the operator did not set. Resolve what it will fill first,
+        // then read everything through the overlay, so a preset-filled value
+        // behaves exactly like one written in the environment.
+        let tier = crate::tier::Tier::from_lookup(&lookup)?;
+        let tier_plan = tier.map(|tier| crate::tier::TierPlan::resolve(tier, &lookup));
+        let lookup = crate::tier::with_preset(tier, &lookup);
+
         let database_url = Self::required_var(&lookup, "DATABASE_URL")?;
         let surreal = Self::surreal_from_lookup(&lookup)?;
 
         let embedding_api_key = lookup("KB_EMBEDDING_API_KEY")
             .filter(|s| !s.trim().is_empty())
-            .or_else(|| lookup("OPENROUTER_API_KEY").filter(|s| !s.trim().is_empty()));
+            .or_else(|| {
+                // The OpenRouter key may pay for embeddings, unless the tier
+                // points the embedder at the operator's own hardware: never
+                // send a hosted key to a loopback or LAN endpoint. An unset
+                // tier keeps today's fallback.
+                tier.is_none_or(crate::tier::Tier::needs_openrouter_key)
+                    .then(|| lookup("OPENROUTER_API_KEY"))
+                    .flatten()
+                    .filter(|s| !s.trim().is_empty())
+            });
 
         if embedding_api_key.is_none() {
-            bail!(
-                "missing required environment variable: OPENROUTER_API_KEY (or KB_EMBEDDING_API_KEY)"
-            );
+            match tier {
+                Some(crate::tier::Tier::Cloud) => bail!(
+                    "KB_TIER=cloud needs OPENROUTER_API_KEY (or KB_EMBEDDING_API_KEY): \
+                     the tier's embedder and reranker run at OpenRouter"
+                ),
+                // A local tier embeds on the operator's own hardware; no key.
+                Some(_) => {}
+                None => bail!(
+                    "missing required environment variable: OPENROUTER_API_KEY (or KB_EMBEDDING_API_KEY)"
+                ),
+            }
         }
 
         let embedding_base_url = lookup("KB_EMBEDDING_BASE_URL")
@@ -657,7 +685,16 @@ impl Config {
             worker,
             version,
             request_timeout: Duration::from_secs(30),
+            tier: tier_plan,
         })
+    }
+
+    /// Print one INFO line describing what `KB_TIER` filled. A no-op without a
+    /// tier, so an unset `KB_TIER` logs exactly what it logged before.
+    pub fn log_tier(&self) {
+        if let Some(plan) = self.tier.as_ref() {
+            plan.log();
+        }
     }
 }
 
@@ -735,15 +772,31 @@ where
             model: model.unwrap_or_else(|| "nvidia/llama-nemotron-rerank-1b-v2".into()),
         }),
         "cohere" => {
-            let api_key = api_key.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "KB_RERANK_API_KEY or COHERE_API_KEY is required for cohere reranker"
-                )
-            })?;
+            let endpoint = base_url;
+            // OpenRouter's rerank router takes the Cohere request shape; the
+            // cloud tier points this adapter at it with the same key that pays
+            // for embeddings. Only that host receives that key.
+            let openrouter = endpoint
+                .as_deref()
+                .is_some_and(|url| url.to_ascii_lowercase().contains("openrouter.ai"));
+            let api_key = api_key
+                .or_else(|| {
+                    if openrouter {
+                        lookup("OPENROUTER_API_KEY").filter(|s| !s.trim().is_empty())
+                    } else {
+                        None
+                    }
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "KB_RERANK_API_KEY or COHERE_API_KEY is required for cohere reranker \
+                         (OPENROUTER_API_KEY is used when KB_RERANK_BASE_URL is openrouter.ai)"
+                    )
+                })?;
             Ok(RerankerConfig::Cohere {
                 model: model.unwrap_or_else(|| "rerank-v3.5".into()),
                 api_key,
-                endpoint: base_url,
+                endpoint,
             })
         }
         _ => {
@@ -1127,5 +1180,244 @@ mod tests {
             err.to_string().contains("KB_PAGE_EMBEDDING_FORMAT"),
             "{err}"
         );
+    }
+
+    // --- KB_TIER presets (`docs/kb-tiers.md`) -------------------------------
+
+    fn tier_map() -> HashMap<&'static str, &'static str> {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("SURREAL_DB_URL", "http://localhost:8000");
+        map
+    }
+
+    fn resolved(map: &HashMap<&'static str, &'static str>) -> Config {
+        Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).expect("config loads")
+    }
+
+    /// The Qwen3 instruction the repo already uses (`docs/local-models.md`).
+    const QWEN3_INSTRUCTION: &str =
+        "Instruct: Given a question, retrieve passages that answer it\nQuery: ";
+
+    #[test]
+    fn test_unset_tier_resolves_exactly_like_todays_config() {
+        let mut map = tier_map();
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        let cfg = resolved(&map);
+        assert!(cfg.tier.is_none(), "no preset without KB_TIER");
+
+        // Today's defaults, one per role the preset touches. A preset that
+        // leaked in without `KB_TIER` would move at least one of these.
+        assert_eq!(cfg.embedder.model, "qwen/qwen3-embedding-8b");
+        assert_eq!(cfg.embedder.dimension, 4096);
+        assert_eq!(
+            cfg.embedder.base_url,
+            "https://openrouter.ai/api/v1/embeddings"
+        );
+        assert!(!cfg.embedder.send_input_type);
+        assert_eq!(cfg.embedder.query_prefix, "");
+        assert_eq!(cfg.embedder.batch_size, 32);
+        assert_eq!(cfg.embedder.embed_concurrency, 4);
+        assert_eq!(cfg.embedder.request_timeout, Duration::from_secs(15));
+        assert!(matches!(cfg.reranker, RerankerConfig::Disabled));
+        assert_eq!(cfg.engine.rerank_candidate_limit, 0);
+        assert_eq!(cfg.worker.concurrency, 1);
+        assert!(cfg.worker.entity_extraction_enabled);
+        assert!(cfg.pages.is_none());
+        assert_eq!(cfg.chunk_store_choice, ChunkStoreChoice::Surreal);
+
+        // The whole struct, against the same environment with every one of
+        // those values written out explicitly: still identical.
+        let mut explicit = map.clone();
+        explicit.insert("KB_EMBEDDING_MODEL", "qwen/qwen3-embedding-8b");
+        explicit.insert("KB_EMBEDDING_DIM", "4096");
+        explicit.insert(
+            "KB_EMBEDDING_BASE_URL",
+            "https://openrouter.ai/api/v1/embeddings",
+        );
+        explicit.insert("KB_EMBEDDING_INPUT_TYPE", "false");
+        explicit.insert("KB_EMBEDDING_QUERY_PREFIX", "");
+        explicit.insert("KB_EMBEDDING_BATCH_SIZE", "32");
+        explicit.insert("KB_EMBEDDING_CONCURRENCY", "4");
+        explicit.insert("KB_EMBEDDING_TIMEOUT_MS", "15000");
+        explicit.insert("KB_RERANK_ENABLED", "false");
+        explicit.insert("KB_RERANK_CANDIDATE_LIMIT", "0");
+        explicit.insert("KB_INGEST_CONCURRENCY", "1");
+        explicit.insert("KB_ENTITY_EXTRACTION_ENABLED", "true");
+        explicit.insert("KB_CHUNK_STORE", "surreal");
+        assert_eq!(
+            format!("{cfg:#?}"),
+            format!("{:#?}", resolved(&explicit)),
+            "unset tier must resolve exactly like today's explicit settings"
+        );
+    }
+
+    #[test]
+    fn test_each_tier_fills_its_role_defaults() {
+        // (tier, embedding concurrency, chunk-rerank candidates, page arm on)
+        let rows = [
+            ("lite", 1u32, None, false),
+            ("desk", 2, Some(10u32), false),
+            ("studio", 4, Some(20), false),
+            ("station", 8, Some(30), false),
+            ("cloud", 4, Some(20), true),
+        ];
+        for (tier, concurrency, candidates, page_arm) in rows {
+            let mut map = tier_map();
+            if tier == "cloud" {
+                map.insert("OPENROUTER_API_KEY", "test-key");
+            }
+            map.insert("KB_TIER", tier);
+            let cfg = resolved(&map);
+            let plan = cfg.tier.as_ref().expect("tier plan recorded");
+            assert_eq!(plan.tier.as_str(), tier);
+            assert!(!plan.filled.is_empty(), "{tier} filled nothing");
+
+            assert_eq!(cfg.embedder.dimension, 1024, "{tier}");
+            assert_eq!(cfg.embedder.embed_concurrency, concurrency, "{tier}");
+            assert_eq!(
+                cfg.engine.rerank_candidate_limit,
+                candidates.unwrap_or(0),
+                "{tier}"
+            );
+            assert_eq!(cfg.pages.is_some(), page_arm, "{tier}");
+
+            if tier == "cloud" {
+                assert_eq!(cfg.embedder.model, "voyageai/voyage-multimodal-3.5");
+                assert!(cfg.embedder.send_input_type, "voyage wants input_type");
+                assert_eq!(cfg.chunk_store_choice, ChunkStoreChoice::Qdrant);
+                let pages = cfg.pages.as_ref().expect("cloud page arm");
+                assert_eq!(pages.embedder.model, "voyageai/voyage-multimodal-3.5");
+                assert_eq!(pages.embedder.dimension, 1024);
+                assert!(pages.arm.rerank.is_some(), "cloud page rerank on");
+                match &cfg.reranker {
+                    RerankerConfig::Cohere {
+                        model,
+                        api_key,
+                        endpoint,
+                    } => {
+                        assert_eq!(model, "voyageai/rerank-2.5");
+                        assert_eq!(api_key, "test-key", "one OpenRouter key");
+                        assert_eq!(
+                            endpoint.as_deref(),
+                            Some("https://openrouter.ai/api/v1/rerank")
+                        );
+                    }
+                    other => panic!("cloud reranker should be cohere-shaped, got {other:?}"),
+                }
+            } else {
+                assert_eq!(cfg.embedder.model, "Qwen/Qwen3-Embedding-0.6B");
+                assert_eq!(cfg.embedder.base_url, "http://127.0.0.1:8081/v1/embeddings");
+                assert_eq!(cfg.embedder.query_prefix, QWEN3_INSTRUCTION);
+                assert_eq!(cfg.embedder.request_timeout, Duration::from_secs(120));
+                assert_eq!(cfg.chunk_store_choice, ChunkStoreChoice::Surreal);
+                assert!(
+                    cfg.embedder.api_key.is_none(),
+                    "{tier} must not need a paid key"
+                );
+                if tier == "lite" {
+                    assert!(matches!(cfg.reranker, RerankerConfig::Disabled));
+                    assert_eq!(cfg.embedder.batch_size, 16);
+                    assert_eq!(cfg.worker.concurrency, 1);
+                    assert!(!cfg.worker.entity_extraction_enabled);
+                } else {
+                    assert_eq!(cfg.embedder.batch_size, 32);
+                    match &cfg.reranker {
+                        RerankerConfig::Tei { base_url, model } => {
+                            assert_eq!(base_url, "http://127.0.0.1:8082");
+                            assert_eq!(model, "BAAI/bge-reranker-v2-m3");
+                        }
+                        other => panic!("{tier} reranker should be TEI bge, got {other:?}"),
+                    }
+                    assert!(cfg.worker.entity_extraction_enabled);
+                }
+            }
+
+            // Every variable the plan reports was really unset by the operator.
+            assert!(
+                plan.filled.iter().all(|(name, _)| !map.contains_key(name)),
+                "{tier} claims to have filled an explicit variable"
+            );
+        }
+    }
+
+    #[test]
+    fn test_an_explicit_variable_overrides_the_tier_preset() {
+        let mut map = tier_map();
+        map.insert("KB_TIER", "lite");
+        map.insert("KB_EMBEDDING_MODEL", "operator/model");
+        map.insert("KB_EMBED_CONCURRENCY", "6");
+        map.insert("KB_INGEST_CONCURRENCY", "3");
+        // Present but empty: explicit, so the preset does not fill it and the
+        // setting's own default applies.
+        map.insert("KB_ENTITY_EXTRACTION_ENABLED", "");
+        let cfg = resolved(&map);
+
+        assert_eq!(cfg.embedder.model, "operator/model");
+        assert_eq!(cfg.embedder.embed_concurrency, 6);
+        assert_eq!(cfg.worker.concurrency, 3);
+        assert!(
+            cfg.worker.entity_extraction_enabled,
+            "an empty explicit value suppresses the preset"
+        );
+        let plan = cfg.tier.as_ref().expect("tier plan");
+        for overridden in [
+            "KB_EMBEDDING_MODEL",
+            "KB_EMBED_CONCURRENCY",
+            "KB_INGEST_CONCURRENCY",
+            "KB_ENTITY_EXTRACTION_ENABLED",
+        ] {
+            assert!(
+                !plan.filled.iter().any(|(name, _)| *name == overridden),
+                "{overridden} was set explicitly and must not be reported as filled"
+            );
+        }
+        // Values the operator did not touch still come from the tier.
+        assert_eq!(cfg.embedder.dimension, 1024);
+        assert!(
+            plan.filled
+                .iter()
+                .any(|(name, _)| *name == "KB_EMBEDDING_DIM")
+        );
+    }
+
+    #[test]
+    fn test_cloud_without_an_openrouter_key_names_the_tier_and_the_variable() {
+        let mut map = tier_map();
+        map.insert("KB_TIER", "cloud");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("cloud"), "{message}");
+        assert!(message.contains("OPENROUTER_API_KEY"), "{message}");
+    }
+
+    #[test]
+    fn test_unknown_tier_is_an_error_listing_the_valid_values() {
+        let mut map = tier_map();
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_TIER", "workstation");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("KB_TIER"), "{message}");
+        assert!(message.contains("workstation"), "{message}");
+        for valid in ["lite", "desk", "studio", "station", "cloud"] {
+            assert!(message.contains(valid), "{message} omits {valid}");
+        }
+    }
+
+    #[test]
+    fn test_the_tier_log_line_keeps_secrets_out() {
+        let mut map = tier_map();
+        map.insert("KB_TIER", "cloud");
+        map.insert("OPENROUTER_API_KEY", "sk-or-secret-value");
+        let cfg = resolved(&map);
+        let plan = cfg.tier.as_ref().expect("tier plan");
+        let line = plan
+            .filled
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert!(!line.contains("sk-or-secret-value"), "{line}");
     }
 }

@@ -12,6 +12,7 @@ pub mod events;
 pub mod routes;
 pub mod runtime;
 pub mod state;
+pub mod tier;
 
 pub use boundary::{ADAPTER_CRATES, INNER_CRATES};
 pub use cli::{CliError, dispatch};

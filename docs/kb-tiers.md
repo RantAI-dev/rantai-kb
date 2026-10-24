@@ -144,6 +144,75 @@ A tier is a **preset**: it fills in role defaults; any explicit `KB_*` setting w
 start and `kb-server setup` check the VRAM budget and warn, or refuse, when a combination
 can't fit next to the chat LLM.
 
+### `KB_TIER` (text roles, implemented 2026-10-24)
+
+`KB_TIER` fills a role default for every variable the operator did not set. It is not a mode
+switch: the resolved config is exactly what the operator would have written by hand.
+
+- **An explicit environment variable always wins.** A variable that is present counts as
+  explicit even when empty: `KB_RERANK_ENABLED=` suppresses the preset for the reranker and
+  falls back to that setting's own default.
+- **Unset `KB_TIER` resolves exactly as before** — proven by
+  `test_unset_tier_resolves_exactly_like_todays_config` in
+  `rust/crates/kb-server/src/config.rs`, which compares the full resolved config.
+- An unknown value is a startup error listing the five names.
+- Startup logs one INFO line with the tier and every variable it filled, so an operator can see
+  what the preset did. Values are model names and numbers; key-shaped names are redacted.
+- `kb-server apply-schema` resolves the tier too, so the SurrealDB vector index is built at the
+  width the server will store.
+
+Only **text roles** are filled today: no local multimodal (Qwen3-VL) embedder or reranker is
+wired yet, so the local tiers leave the page-image arm off. An operator who runs the vLLM page
+embedder sets `KB_PAGE_EMBEDDING_MODEL` / `KB_PAGE_EMBEDDING_FORMAT=vllm` by hand, and that wins
+over the tier. Lite's concurrency and batch numbers are **placeholders** until the 2-core
+measurement (build order 5); the Desk / Studio / Station rerank widths are estimates.
+
+| Variable | lite | desk | studio | station | cloud |
+|---|---|---|---|---|---|
+| `KB_EMBEDDING_MODEL` | `Qwen/Qwen3-Embedding-0.6B` | same | same | same | `voyageai/voyage-multimodal-3.5` |
+| `KB_EMBEDDING_DIM` | 1024 | 1024 | 1024 | 1024 | 1024 |
+| `KB_EMBEDDING_BASE_URL` | `http://127.0.0.1:8081/v1/embeddings` | same | same | same | OpenRouter (built-in default) |
+| `KB_EMBEDDING_QUERY_PREFIX` | Qwen3 instruction¹ | same | same | same | — |
+| `KB_EMBEDDING_TIMEOUT_MS` | 120000 | same | same | same | — |
+| `KB_EMBEDDING_INPUT_TYPE` | — | — | — | — | `true` |
+| `KB_EMBED_CONCURRENCY` | 1 | 2 | 4 | 8 | — |
+| `KB_EMBEDDING_BATCH_SIZE` | 16 | — | — | — | — |
+| `KB_INGEST_CONCURRENCY` | 1 | — | — | — | — |
+| `KB_ENTITY_EXTRACTION_ENABLED` | `false` | — | — | — | — |
+| `KB_RERANK_ENABLED` | `false` | `true` | `true` | `true` | `true` |
+| `KB_RERANK_PROVIDER` | — | `tei` | `tei` | `tei` | `cohere` |
+| `KB_RERANK_BASE_URL` | — | `http://127.0.0.1:8082` | same | same | `https://openrouter.ai/api/v1/rerank` |
+| `KB_RERANK_MODEL` | — | `BAAI/bge-reranker-v2-m3` | same | same | `voyageai/rerank-2.5` |
+| `KB_RERANK_CANDIDATE_LIMIT` | — | 10 | 20 | 30 | 20 |
+| `KB_PAGE_EMBEDDING_MODEL` | — | — | — | — | `voyageai/voyage-multimodal-3.5` |
+| `KB_PAGE_EMBEDDING_DIM` | — | — | — | — | 1024 |
+| `KB_PAGE_RERANK` | `false` | `false` | `false` | `false` | `true` |
+| `KB_CHUNK_STORE` | — | — | — | — | `qdrant` |
+
+¹ `Instruct: Given a question, retrieve passages that answer it\nQuery: ` — the same string
+`rust/scripts/stack-up.sh` and `docs/local-models.md` already use.
+
+A dash means the preset leaves the setting alone, so that setting's own default applies.
+`same` means the value in lite's column.
+
+- The local text stack is what we can run today (`docs/local-models.md`):
+  Qwen3-Embedding-0.6B at an OpenAI-compatible endpoint, bge-reranker-v2-m3 at a local
+  `/rerank`. Local tiers need **no paid key**: the embedder sends no `Authorization` header
+  unless `KB_EMBEDDING_API_KEY` is set, and a hosted `OPENROUTER_API_KEY` is never sent to a
+  loopback or LAN endpoint.
+- Cloud drives the embedder and the reranker from one `OPENROUTER_API_KEY` (or
+  `KB_EMBEDDING_API_KEY`); missing it is a config error naming the tier and the variable. The
+  Cohere-shaped rerank adapter accepts that key only when `KB_RERANK_BASE_URL` is an
+  `openrouter.ai` URL.
+- Cloud also selects `KB_CHUNK_STORE=qdrant` because the page arm only exists on Qdrant. To keep
+  chunks in SurrealDB, set `KB_CHUNK_STORE=surreal` and `KB_PAGE_EMBEDDING_MODEL=` (empty).
+- The preset fills embedding concurrency as `KB_EMBED_CONCURRENCY`, the name Bun reads, which
+  Rust honours when `KB_EMBEDDING_CONCURRENCY` is unset. That way it can never shadow an
+  operator's `KB_EMBEDDING_CONCURRENCY`.
+- bge is a poor page reranker (`docs/eval-ab/vidore3-hr-en-night`, "bge should not rerank
+  pages"), so every local tier sets `KB_PAGE_RERANK=false`; it only matters when the page arm
+  is on.
+
 The caption role points at the app's chat LLM with a **priority queue**: it writes
 descriptions when the LLM is idle and backs off while users are chatting.
 
@@ -162,8 +231,11 @@ Status as of 2026-10-24:
 1. ✅ Content-addressed disk cache for embeddings, extraction and page vectors
    (`kb-cache`, `KB_CACHE_DIR`). A repeat ViDoRe run went from 1,686 s to 24 s with zero
    provider calls. Captions are not cached yet; there is no caption role yet.
-2. ⏸ `KB_TIER` preset. Deferred until the roles it switches exist: a preset that points at
-   models kb-server cannot drive yet would be a setting that does nothing.
+2. ✅ `KB_TIER` preset, **text roles only** (`rust/crates/kb-server/src/tier.rs`): Lite–Station
+   point at the local Qwen3-Embedding-0.6B + bge stack, Cloud at voyage through OpenRouter.
+   Explicit env wins, unset `KB_TIER` is byte-identical to today, and startup logs what the
+   preset filled. Still deferred: the multimodal roles (Qwen3-VL embedder/reranker), so local
+   tiers keep the page arm off, and `kb-server setup` does not exist yet.
 3. ✅ measured, ❌ no gain: header/footer removal (`KB_STRIP_PAGE_FURNITURE`), −0.003
    [−0.013, +0.006] on ViDoRe HR. Off by default.
    ❌ dropped for retrieval: rebuilding tables in text. ViDoRe's own markdown, with real
