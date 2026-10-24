@@ -20,7 +20,8 @@
 #                                   # box). Needs KB_STACK_REMOTE_EMBED_URL (base URL, e.g.
 #                                   # http://host:8081) and KB_STACK_REMOTE_EMBED_KEY. Defaults
 #                                   # to Qwen3-Embedding-0.6B (dim 1024, Qwen3 query
-#                                   # instruction); KB_STACK_REMOTE_EMBED_MODEL / _DIM override.
+#                                   # instruction); KB_STACK_REMOTE_EMBED_MODEL / _DIM /
+#                                   # _QUERY_PREFIX / _PASSAGE_PREFIX override.
 #   KB_SERVER_BIN=.../release/kb-server  # a prebuilt binary (e.g. release, for latency runs)
 #   KB_STACK_RERANK=tei             # starts kb-smoke-tei-rerank (bge-reranker-v2-m3)
 #   KB_STACK_RERANK=remote          # a llama.cpp --reranking server elsewhere:
@@ -443,10 +444,12 @@ export KB_EMBEDDING_API_KEY="${KB_STACK_REMOTE_EMBED_KEY}"
 export KB_EMBEDDING_MODEL="${KB_STACK_REMOTE_EMBED_MODEL:-Qwen/Qwen3-Embedding-0.6B}"
 export KB_EMBEDDING_DIM="${KB_STACK_REMOTE_EMBED_DIM:-1024}"
 export KB_EMBEDDING_TIMEOUT_MS="${KB_STACK_REMOTE_EMBED_TIMEOUT_MS:-120000}"
-export KB_EMBEDDING_QUERY_PREFIX="Instruct: Given a question, retrieve passages that answer it
-Query: "
-export KB_EMBEDDING_PASSAGE_PREFIX=""
 EOF
+  # Prefixes: Qwen3's query instruction unless overridden (e5 models want
+  # "query: " / "passage: "). printf %q keeps spaces and newlines intact.
+  qp_default=$'Instruct: Given a question, retrieve passages that answer it\nQuery: '
+  printf 'export KB_EMBEDDING_QUERY_PREFIX=%q\n' "${KB_STACK_REMOTE_EMBED_QUERY_PREFIX-$qp_default}" >> "$STACK_ENV"
+  printf 'export KB_EMBEDDING_PASSAGE_PREFIX=%q\n' "${KB_STACK_REMOTE_EMBED_PASSAGE_PREFIX-}" >> "$STACK_ENV"
 elif [ "$KB_STACK_EMBEDDINGS" = "openrouter" ]; then
   chmod 600 "$STACK_ENV"
   cat >> "$STACK_ENV" <<EOF
