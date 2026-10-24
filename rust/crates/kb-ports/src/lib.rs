@@ -24,7 +24,7 @@ pub mod contract;
 pub use error::{EngineError, PortError, RetrievalDegrade};
 pub use graph::{EntityMentions, EntityUpsert, GraphStore, RelationUpsert, TenantGraph};
 pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
-pub use pages::{PageEmbedder, PageImage, PageRenderer, PageVisionScorer};
+pub use pages::{PageDescriber, PageEmbedder, PageImage, PageRenderer, PageVisionScorer};
 pub use retrieval::{
     ArmRanks, ArmScores, Candidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit,
     KeywordQuery, KeywordSemantics, RetrievalIndex, sort_candidates,

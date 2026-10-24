@@ -75,6 +75,22 @@ pub trait PageEmbedder: Send + Sync {
     fn dimension(&self) -> u32;
 }
 
+/// Writes a short text description of what a page's *visuals* show.
+///
+/// The page reranker and the text index both read text, so a chart or a table
+/// drawn as graphics is invisible to them. At ingest an opt-in stage asks a
+/// vision model to describe only those visuals; the description then joins the
+/// page's rerank text and the text index.
+///
+/// `None` means the page has no visual content worth describing (the model
+/// answered `NONE`), which is not an error. A failed call is a [`PortError`]:
+/// the caller leaves the page without a description and counts it.
+#[async_trait]
+pub trait PageDescriber: Send + Sync {
+    /// A description of the page's visuals, or `None` when there are none.
+    async fn describe(&self, page: &PageImage) -> Result<Option<String>, PortError>;
+}
+
 /// Scores page images against a query with a vision model.
 ///
 /// One call per query, the pages in the order given; the result is one 0-10

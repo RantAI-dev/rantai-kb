@@ -460,3 +460,92 @@ async fn a_repeated_rerank_is_served_from_disk_with_the_callers_ids() {
     assert_eq!(inner.calls.load(Ordering::SeqCst), 4);
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Answers with a fixed description (or `None`) and counts calls.
+struct AnswerDescriber {
+    calls: AtomicUsize,
+    answer: Option<&'static str>,
+}
+
+impl AnswerDescriber {
+    fn new(answer: Option<&'static str>) -> Self {
+        Self {
+            calls: AtomicUsize::new(0),
+            answer,
+        }
+    }
+}
+
+#[async_trait]
+impl kb_ports::PageDescriber for AnswerDescriber {
+    async fn describe(&self, _page: &kb_ports::PageImage) -> Result<Option<String>, PortError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.answer.map(str::to_string))
+    }
+}
+
+fn page_image(page: u32, bytes: &[u8]) -> kb_ports::PageImage {
+    kb_ports::PageImage {
+        page,
+        mime: "image/jpeg".into(),
+        bytes: bytes.to_vec(),
+        text: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn a_second_description_of_the_same_image_is_served_from_disk() {
+    use kb_ports::PageDescriber;
+    let root = temp_root();
+    let inner = Arc::new(AnswerDescriber::new(Some("A bar chart of revenue.")));
+    let fingerprint = "model-a|prompt=v1|reasoning=off";
+    let cached = crate::CachedPageDescriber::new(inner.clone(), DiskCache::new(&root), fingerprint);
+    let first = cached.describe(&page_image(0, &[1, 2, 3])).await.unwrap();
+    // A new wrapper on the same directory (a restart) and a different page
+    // number: same image bytes, same answer, no second paid call.
+    let restarted =
+        crate::CachedPageDescriber::new(inner.clone(), DiskCache::new(&root), fingerprint);
+    let second = restarted
+        .describe(&page_image(9, &[1, 2, 3]))
+        .await
+        .unwrap();
+    assert_eq!(first.as_deref(), Some("A bar chart of revenue."));
+    assert_eq!(second, first);
+    assert_eq!(inner.calls.load(Ordering::SeqCst), 1);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn a_page_with_no_visuals_remembers_that_too() {
+    use kb_ports::PageDescriber;
+    let root = temp_root();
+    let inner = Arc::new(AnswerDescriber::new(None));
+    let fingerprint = "model-a|prompt=v1|reasoning=off";
+    let cached = crate::CachedPageDescriber::new(inner.clone(), DiskCache::new(&root), fingerprint);
+    assert_eq!(
+        cached.describe(&page_image(0, &[4, 5])).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        cached.describe(&page_image(0, &[4, 5])).await.unwrap(),
+        None
+    );
+    assert_eq!(inner.calls.load(Ordering::SeqCst), 1, "None is cached");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn different_bytes_or_a_different_fingerprint_are_new_paid_calls() {
+    use kb_ports::PageDescriber;
+    let root = temp_root();
+    let inner = Arc::new(AnswerDescriber::new(Some("A chart.")));
+    let a =
+        crate::CachedPageDescriber::new(inner.clone(), DiskCache::new(&root), "model-a|prompt=v1");
+    a.describe(&page_image(0, &[1])).await.unwrap();
+    a.describe(&page_image(0, &[2])).await.unwrap();
+    let b =
+        crate::CachedPageDescriber::new(inner.clone(), DiskCache::new(&root), "model-b|prompt=v1");
+    b.describe(&page_image(0, &[1])).await.unwrap();
+    assert_eq!(inner.calls.load(Ordering::SeqCst), 3);
+    let _ = std::fs::remove_dir_all(root);
+}
