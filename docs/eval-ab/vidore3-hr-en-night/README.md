@@ -63,3 +63,29 @@ Cost of the two `voy-qp` arms: $0.49.
   a run on it had 0 degraded searches but was abandoned for time. Offline, Nemotron and
   voyage rerank-2.5 give the same page-rerank gain (0.705 vs 0.704).
 - `e8b-bge` here is the same-session 8B text + bge run (0.606) the offline replay used.
+
+## Local reranker: bge-reranker-v2-m3 on the RX 590 (`bge-qp-*`, 2026-10-24)
+
+Same stack as `voy-qp-*` (8B text with the Qwen3 query instruction, voyage text+image pages,
+all vectors from the disk cache), but bge on the LAN GPU does both the chunk rerank (top 20)
+and the page rerank (top 30). No paid reranker; 0 failed, 0 degraded in both arms.
+
+| Arm | Page nDCG@10 | Recall@10 | MRR@10 | Table | Chart | p50 / p95 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| `bge-qp-text` | 0.618 | 0.650 | 0.749 | 0.562 | 0.565 | 2,138 / 2,764 |
+| `bge-qp-ti-pr` | 0.628 | 0.686 | 0.731 | 0.606 | 0.589 | 12,723 / 16,148 |
+
+Paired deltas (95% bootstrap CI):
+
+- `bge-qp-text` vs `e8b-bge` (same, no query instruction): **+0.012 [+0.004, +0.021]**, the
+  same gain as with voyage rerank.
+- `bge-qp-ti-pr` vs `bge-qp-text`: +0.010 [−0.008, +0.029]. Recall@10 +0.036, but MRR@10
+  −0.018: pages are found, then ranked worse at the top.
+- vs voyage rerank-2.5: text −0.039 [−0.059, −0.021]; full stack **−0.080 [−0.100, −0.059]**.
+
+**Reading.** bge costs little as a chunk reranker but the page arm loses most of its gain under
+it: 0.628 live, below the offline fusion of the same inputs *without* any page rerank (0.655).
+The page rerank was tuned (w=0.7, k=1) and validated with Nemotron and voyage only; bge on
+3,000 characters of page text is the suspect. It is also slow on the RX 590: the page arm adds
+~10.6 s to the p50 (2.1 → 12.7 s); the query's page vector is cached, so that is almost all
+bge scoring 30 long page texts (inferred from the timings, not profiled).
