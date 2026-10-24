@@ -161,6 +161,9 @@ pub struct WorkerConfig {
     /// Strip running headers, footers and page numbers before chunking
     /// (`KB_STRIP_PAGE_FURNITURE`).
     pub strip_page_furniture: bool,
+    /// Run entity and relation extraction at all
+    /// (`KB_ENTITY_EXTRACTION_ENABLED`, default on).
+    pub entity_extraction_enabled: bool,
 }
 
 impl WorkerConfig {
@@ -174,6 +177,7 @@ impl WorkerConfig {
             max_attempts: self.max_attempts,
             reclaim_interval: Duration::from_millis(self.reclaim_ms),
             strip_page_furniture: self.strip_page_furniture,
+            entity_extraction_enabled: self.entity_extraction_enabled,
             ..IngestSettings::default()
         }
     }
@@ -210,6 +214,7 @@ where
             .unwrap_or(3_600_000)
             .max(1000),
         strip_page_furniture: bool_flag(lookup, "KB_STRIP_PAGE_FURNITURE", false),
+        entity_extraction_enabled: bool_flag(lookup, "KB_ENTITY_EXTRACTION_ENABLED", true),
     }
 }
 
