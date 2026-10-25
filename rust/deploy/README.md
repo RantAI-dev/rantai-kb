@@ -1,7 +1,7 @@
 # Deploying the Rust service with one command
 
-`rust/deploy/compose.yaml` runs a complete rantai-kb stack — Postgres, SurrealDB,
-S3 (rustfs), Qdrant, the models a tier needs, and the Rust `kb-server` — behind
+`rust/deploy/compose.yaml` runs a complete rantai-kb stack — Postgres, Qdrant,
+S3 (rustfs), the models a tier needs, and the Rust `kb-server` — behind
 one profile per deployment tier. `rust/scripts/kb-dev.sh` is the interface.
 
 This is the Rust service. The root `docker-compose.yml` still describes the
@@ -68,8 +68,8 @@ tier argument once `up` has run. `kb-dev.sh key` needs the stack running.
 
 One profile per tier; `up <tier>` starts that profile's model containers plus
 the shared stores. Only one tier runs at a time (they share the stores and the
-host port). Chunks live in Qdrant on every tier (`KB_CHUNK_STORE=qdrant`);
-SurrealDB holds the schema and entity graph.
+host port). Chunks, vectors, BM25 and page images live in Qdrant on every tier;
+Postgres holds documents, jobs, KBs, keys and the entity graph.
 
 | Tier | Model containers | Hardware | Measured (see below) |
 |---|---|---|---|
@@ -180,7 +180,7 @@ quickstart URL follow the same value.
 
 **`/health` stays unavailable.** `kb-dev.sh up` tails the kb-server log on
 timeout. Check `ps` and `logs`; the usual causes are a store that never became
-healthy (SurrealDB rocksdb on a read-only volume) or a model container that
+healthy (Postgres unreachable, or Qdrant not ready) or a model container that
 cannot download its model. `logs tei-lite` / `logs tei-embed-desk` shows the
 download.
 
@@ -197,6 +197,6 @@ outside the `rantai-kb-dev` compose project. Stop the Bun stack with
 port.
 
 **Everything, including volumes.** `kb-dev.sh down -v` removes only this
-project's network and the six named volumes (`pg-data`, `surreal-data`,
-`rustfs-data`, `qdrant-data`, `hf-models`, `kb-cache`). Use `docker volume ls
+project's network and the five named volumes (`pg-data`, `rustfs-data`,
+`qdrant-data`, `hf-models`, `kb-cache`). Use `docker volume ls
 --filter label=compose.project=rantai-kb-dev` to see them first.

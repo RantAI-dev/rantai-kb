@@ -15,7 +15,7 @@
 #     explicit (even empty) variable always wins over the KB_TIER preset.
 #   * Only kb-server publishes a host port (KB_PORT, default 8080). Stores and
 #     models are reachable on the compose network only.
-#   * Every tier stores chunks in Qdrant (KB_CHUNK_STORE=qdrant), so the Qdrant
+#   * Every tier stores chunks in Qdrant (the only chunk store), so the Qdrant
 #     service is not profile-gated.
 #   * Switching tiers changes the embedding dimension (384 for lite/lite-en,
 #     1024 for desk/studio/station/cloud): wipe the data with `kb-dev.sh down -v`
@@ -52,8 +52,6 @@ x-kb-server: &kb-server
   depends_on: &kb-stores
     postgres:
       condition: service_healthy
-    surrealdb:
-      condition: service_healthy
     rustfs:
       condition: service_healthy
     createbucket:
@@ -62,18 +60,12 @@ x-kb-server: &kb-server
       condition: service_healthy
   environment: &kb-env
     DATABASE_URL: postgresql://${POSTGRES_USER:-kb}:${POSTGRES_PASSWORD:-kb}@postgres:5432/${POSTGRES_DB:-rantai_kb}?schema=public
-    SURREAL_DB_URL: http://surrealdb:8000
-    SURREAL_DB_USER: ${SURREAL_DB_USER:-root}
-    SURREAL_DB_PASS: ${SURREAL_DB_PASS:-root}
-    SURREAL_DB_NAMESPACE: ${SURREAL_DB_NAMESPACE:-rantai}
-    SURREAL_DB_DATABASE: ${SURREAL_DB_DATABASE:-knowledge}
     S3_ENDPOINT: http://rustfs:9000
     S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-kbadmin}
     S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-kbsecret123}
     S3_BUCKET: ${S3_BUCKET:-rantai-kb}
     S3_ENABLE_PATH_STYLE: "1"
-    # Chunks, vectors and BM25 live in Qdrant on every tier.
-    KB_CHUNK_STORE: qdrant
+    # Chunks, vectors, BM25 and page images all live in Qdrant.
     QDRANT_GRPC_URL: http://qdrant:6334
     QDRANT_URL: http://qdrant:6333
     # Content-addressed embedding/extraction cache, on its own volume so a
@@ -108,23 +100,6 @@ services:
       - pg-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 10s
-
-  surrealdb:
-    # Pinned to v2: the client rejects the 3.x handshake. RocksDB (not memory),
-    # because documents' entity graph and schema must survive a restart.
-    image: surrealdb/surrealdb:v2
-    restart: unless-stopped
-    command: ["start", "--user", "${SURREAL_DB_USER:-root}", "--pass", "${SURREAL_DB_PASS:-root}", "rocksdb:/data/kb.db"]
-    user: root
-    volumes:
-      - surreal-data:/data
-    healthcheck:
-      # The image has no shell, so probe with the binary itself.
-      test: ["CMD", "/surreal", "is-ready", "--endpoint", "ws://127.0.0.1:8000"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -471,7 +446,6 @@ services:
 
 volumes:
   pg-data:
-  surreal-data:
   rustfs-data:
   qdrant-data:
   # One HF cache for every TEI container: a tier switch never re-downloads.
