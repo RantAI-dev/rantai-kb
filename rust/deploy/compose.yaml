@@ -1,0 +1,474 @@
+# A complete rantai-kb (Rust) stack, one profile per deployment tier.
+#
+#   cp rust/deploy/.env.example rust/deploy/.env   # optional; only cloud needs a key
+#   rust/scripts/kb-dev.sh up lite-en              # or lite | desk | studio | station | cloud
+#
+# This file replaces the frozen Bun stack (root docker-compose.yml) for everything
+# deployed from Rust. `rust/scripts/stack-up.sh` stays as the smoke/parity harness;
+# the facts below (images, credentials, TEI flags, env names) come from it.
+#
+# Design notes:
+#   * One kb-server service per tier (`kb-lite`, `kb-cloud`, …), each with its own
+#     KB_TIER and its own model containers, all sharing the `x-kb-server` anchor.
+#     A single service with interpolated env cannot work: the local tiers must
+#     point KB_EMBEDDING_BASE_URL at a compose hostname, cloud must not, and an
+#     explicit (even empty) variable always wins over the KB_TIER preset.
+#   * Only kb-server publishes a host port (KB_PORT, default 8080). Stores and
+#     models are reachable on the compose network only.
+#   * Every tier stores chunks in Qdrant (KB_CHUNK_STORE=qdrant), so the Qdrant
+#     service is not profile-gated.
+#   * Switching tiers changes the embedding dimension (384 for lite/lite-en,
+#     1024 for desk/studio/station/cloud): wipe the data with `kb-dev.sh down -v`
+#     before moving between lite class and the rest.
+
+name: rantai-kb-dev
+
+# ─── Shared kb-server half: image, published port, healthcheck, stores ───────
+
+x-kb-server: &kb-server
+  image: rantai-kb-rust:${KB_IMAGE_TAG:-dev}
+  build:
+    context: ../..
+    dockerfile: rust/Dockerfile
+    args:
+      # Keep a release build from saturating a shared machine. Unset = all cores.
+      CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-2}
+      KB_VERSION: ${KB_VERSION:-dev}
+  restart: unless-stopped
+  # Ingest can be mid-batch when the stack goes down; give it time to finish.
+  stop_grace_period: 30s
+  ports:
+    - "${KB_PORT:-8080}:8080"
+  volumes:
+    - kb-cache:/app/cache
+  healthcheck:
+    # /health answers 503 until Postgres and the vector store both answer, so a
+    # successful curl is a real readiness signal, not just a listening socket.
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 6
+    start_period: 30s
+  depends_on: &kb-stores
+    postgres:
+      condition: service_healthy
+    surrealdb:
+      condition: service_healthy
+    rustfs:
+      condition: service_healthy
+    createbucket:
+      condition: service_completed_successfully
+    qdrant:
+      condition: service_healthy
+  environment: &kb-env
+    DATABASE_URL: postgresql://${POSTGRES_USER:-kb}:${POSTGRES_PASSWORD:-kb}@postgres:5432/${POSTGRES_DB:-rantai_kb}?schema=public
+    SURREAL_DB_URL: http://surrealdb:8000
+    SURREAL_DB_USER: ${SURREAL_DB_USER:-root}
+    SURREAL_DB_PASS: ${SURREAL_DB_PASS:-root}
+    SURREAL_DB_NAMESPACE: ${SURREAL_DB_NAMESPACE:-rantai}
+    SURREAL_DB_DATABASE: ${SURREAL_DB_DATABASE:-knowledge}
+    S3_ENDPOINT: http://rustfs:9000
+    S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-kbadmin}
+    S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-kbsecret123}
+    S3_BUCKET: ${S3_BUCKET:-rantai-kb}
+    S3_ENABLE_PATH_STYLE: "1"
+    # Chunks, vectors and BM25 live in Qdrant on every tier.
+    KB_CHUNK_STORE: qdrant
+    QDRANT_GRPC_URL: http://qdrant:6334
+    QDRANT_URL: http://qdrant:6333
+    # Content-addressed embedding/extraction cache, on its own volume so a
+    # `down` without `-v` never re-embeds the same pages.
+    KB_CACHE_DIR: ${KB_CACHE_DIR:-/app/cache}
+    RUST_LOG: ${RUST_LOG:-info}
+
+# Extra settings every *local* tier gets. Zero-spend by default: entity
+# extraction is off, and when a developer turns it on the free heuristic
+# extractor runs instead of a paid OpenRouter call.
+x-kb-local-env: &kb-local-env
+  <<: *kb-env
+  KB_ENTITY_EXTRACTION_ENABLED: ${KB_ENTITY_EXTRACTION_ENABLED:-false}
+  KB_ENTITY_EXTRACTOR: ${KB_ENTITY_EXTRACTOR:-heuristic}
+  KB_GRAPH_STORE: ${KB_GRAPH_STORE:-none}
+  KB_GRAPH_ARM: ${KB_GRAPH_ARM:-false}
+  # Only spent if the two settings above are turned on (or the reranker is
+  # switched to the LLM provider). Empty means "no paid key in this container".
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+
+# ─── Shared stores ──────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kb}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kb}
+      POSTGRES_DB: ${POSTGRES_DB:-rantai_kb}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  surrealdb:
+    # Pinned to v2: the client rejects the 3.x handshake. RocksDB (not memory),
+    # because documents' entity graph and schema must survive a restart.
+    image: surrealdb/surrealdb:v2
+    restart: unless-stopped
+    command: ["start", "--user", "${SURREAL_DB_USER:-root}", "--pass", "${SURREAL_DB_PASS:-root}", "rocksdb:/data/kb.db"]
+    user: root
+    volumes:
+      - surreal-data:/data
+    healthcheck:
+      # The image has no shell, so probe with the binary itself.
+      test: ["CMD", "/surreal", "is-ready", "--endpoint", "ws://127.0.0.1:8000"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  rustfs:
+    # rustfs, not MinIO: quay.io/minio/minio now answers "unauthorized" to
+    # anonymous pulls. rustfs speaks the same S3 API and the same
+    # MINIO_ROOT_USER/PASSWORD variables (rust/scripts/stack-up.sh already uses it).
+    image: rustfs/rustfs:latest
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-kbadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-kbsecret123}
+      RUSTFS_VOLUMES: /data
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  createbucket:
+    # One-shot: creates the bucket an empty S3 has no way to create itself.
+    image: amazon/aws-cli:latest
+    restart: "no"
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-kbadmin}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-kbsecret123}
+      AWS_DEFAULT_REGION: ${S3_REGION:-us-east-1}
+    entrypoint: ["aws"]
+    command:
+      ["--endpoint-url", "http://rustfs:9000", "s3", "mb", "--ignore-existing", "s3://${S3_BUCKET:-rantai-kb}"]
+    depends_on:
+      rustfs:
+        condition: service_healthy
+
+  qdrant:
+    # The adapter uses the Query API with prefetch + RRF (needs >= 1.10).
+    image: qdrant/qdrant:v1.19.2
+    restart: unless-stopped
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # ─── lite: multilingual-e5-small on CPU ───────────────────────────────────
+
+  tei-lite:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+    profiles: ["lite"]
+    restart: unless-stopped
+    command:
+      ["--model-id", "intfloat/multilingual-e5-small", "--max-batch-tokens", "4096", "--max-client-batch-size", "32"]
+    volumes:
+      - hf-models:/data
+    environment:
+      # Measured on 2 cores (docs/eval-ab/lite-2core): the embedder must leave a
+      # core for kb-server, or ingest starves the API and status polls time out.
+      OMP_NUM_THREADS: ${KB_EMBED_THREADS:-1}
+      RAYON_NUM_THREADS: ${KB_EMBED_THREADS:-1}
+      MKL_NUM_THREADS: ${KB_EMBED_THREADS:-1}
+    # e5-small/MiniLM are compute-bound: ~95% of ingest is embedding, so this
+    # limit is what sets ingest speed. Raise both cpus knobs together on a
+    # bigger box (and KB_EMBED_THREADS with them).
+    cpus: ${KB_LITE_EMBED_CPUS:-1.0}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # First start downloads the model and warms the ONNX graph.
+      start_period: 900s
+
+  kb-lite:
+    <<: *kb-server
+    profiles: ["lite"]
+    environment:
+      <<: *kb-local-env
+      KB_TIER: lite
+      # Inside compose the tier's loopback default is wrong; this is the only
+      # tier-specific override. Setting KB_EMBEDDING_BASE_URL in .env wins.
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-lite:80/v1/embeddings}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
+    cpus: ${KB_LITE_SERVER_CPUS:-1.0}
+    depends_on:
+      <<: *kb-stores
+      tei-lite:
+        condition: service_healthy
+
+  # ─── lite-en: all-MiniLM-L6-v2 on CPU, English only ───────────────────────
+
+  tei-lite-en:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+    profiles: ["lite-en"]
+    restart: unless-stopped
+    command:
+      ["--model-id", "sentence-transformers/all-MiniLM-L6-v2", "--max-batch-tokens", "4096", "--max-client-batch-size", "32"]
+    volumes:
+      - hf-models:/data
+    environment:
+      OMP_NUM_THREADS: ${KB_EMBED_THREADS:-1}
+      RAYON_NUM_THREADS: ${KB_EMBED_THREADS:-1}
+      MKL_NUM_THREADS: ${KB_EMBED_THREADS:-1}
+    cpus: ${KB_LITE_EMBED_CPUS:-1.0}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 900s
+
+  kb-lite-en:
+    <<: *kb-server
+    profiles: ["lite-en"]
+    environment:
+      <<: *kb-local-env
+      KB_TIER: lite-en
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-lite-en:80/v1/embeddings}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
+    cpus: ${KB_LITE_SERVER_CPUS:-1.0}
+    depends_on:
+      <<: *kb-stores
+      tei-lite-en:
+        condition: service_healthy
+
+  # ─── desk / studio / station: Qwen3-Embedding-0.6B + bge reranker on GPU ───
+  #
+  # The same two TEI containers per tier; only the concurrency preset in
+  # KB_TIER differs. The TEI tags without a suffix are the CUDA images
+  # (`cpu-…`, `turing-…`, `rocm-…` are the alternatives).
+
+  tei-embed-desk:
+    image: ${TEI_GPU_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.8.1}
+    profiles: ["desk"]
+    restart: unless-stopped
+    command:
+      ["--model-id", "Qwen/Qwen3-Embedding-0.6B", "--max-batch-tokens", "8192", "--max-client-batch-size", "32"]
+    volumes:
+      - hf-models:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 900s
+
+  tei-rerank-desk:
+    image: ${TEI_GPU_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.8.1}
+    profiles: ["desk"]
+    restart: unless-stopped
+    command:
+      ["--model-id", "BAAI/bge-reranker-v2-m3", "--max-batch-tokens", "2048", "--max-client-batch-size", "64", "--auto-truncate"]
+    volumes:
+      - hf-models:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 900s
+
+  kb-desk:
+    <<: *kb-server
+    profiles: ["desk"]
+    environment:
+      <<: *kb-local-env
+      KB_TIER: desk
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-embed-desk:80/v1/embeddings}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
+      KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-tei}
+      KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://tei-rerank-desk:80}
+    depends_on:
+      <<: *kb-stores
+      tei-embed-desk:
+        condition: service_healthy
+      tei-rerank-desk:
+        condition: service_healthy
+
+  tei-embed-studio:
+    image: ${TEI_GPU_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.8.1}
+    profiles: ["studio"]
+    restart: unless-stopped
+    command:
+      ["--model-id", "Qwen/Qwen3-Embedding-0.6B", "--max-batch-tokens", "8192", "--max-client-batch-size", "32"]
+    volumes:
+      - hf-models:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 900s
+
+  tei-rerank-studio:
+    image: ${TEI_GPU_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.8.1}
+    profiles: ["studio"]
+    restart: unless-stopped
+    command:
+      ["--model-id", "BAAI/bge-reranker-v2-m3", "--max-batch-tokens", "2048", "--max-client-batch-size", "64", "--auto-truncate"]
+    volumes:
+      - hf-models:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 900s
+
+  kb-studio:
+    <<: *kb-server
+    profiles: ["studio"]
+    environment:
+      <<: *kb-local-env
+      KB_TIER: studio
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-embed-studio:80/v1/embeddings}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
+      KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-tei}
+      KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://tei-rerank-studio:80}
+    depends_on:
+      <<: *kb-stores
+      tei-embed-studio:
+        condition: service_healthy
+      tei-rerank-studio:
+        condition: service_healthy
+
+  tei-embed-station:
+    image: ${TEI_GPU_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.8.1}
+    profiles: ["station"]
+    restart: unless-stopped
+    command:
+      ["--model-id", "Qwen/Qwen3-Embedding-0.6B", "--max-batch-tokens", "8192", "--max-client-batch-size", "32"]
+    volumes:
+      - hf-models:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 900s
+
+  tei-rerank-station:
+    image: ${TEI_GPU_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.8.1}
+    profiles: ["station"]
+    restart: unless-stopped
+    command:
+      ["--model-id", "BAAI/bge-reranker-v2-m3", "--max-batch-tokens", "2048", "--max-client-batch-size", "64", "--auto-truncate"]
+    volumes:
+      - hf-models:/data
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 900s
+
+  kb-station:
+    <<: *kb-server
+    profiles: ["station"]
+    environment:
+      <<: *kb-local-env
+      KB_TIER: station
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-embed-station:80/v1/embeddings}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
+      KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-tei}
+      KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://tei-rerank-station:80}
+    depends_on:
+      <<: *kb-stores
+      tei-embed-station:
+        condition: service_healthy
+      tei-rerank-station:
+        condition: service_healthy
+
+  # ─── cloud: no local models; OpenRouter pays for embeddings + rerank ──────
+  #
+  # Nothing here overrides KB_EMBEDDING_BASE_URL / KB_RERANK_BASE_URL: the
+  # cloud preset leaves them at OpenRouter and the reranker at the Cohere shape
+  # OpenRouter's /rerank takes. `kb-dev.sh up cloud` refuses to run without
+  # OPENROUTER_API_KEY. The page-image arm is on (the tier preset sets it), which
+  # is why Qdrant runs on every tier.
+
+  kb-cloud:
+    <<: *kb-server
+    profiles: ["cloud"]
+    environment:
+      <<: *kb-env
+      KB_TIER: cloud
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+
+volumes:
+  pg-data:
+  surreal-data:
+  rustfs-data:
+  qdrant-data:
+  # One HF cache for every TEI container: a tier switch never re-downloads.
+  hf-models:
+  # Content-addressed embeddings/extraction (KB_CACHE_DIR), survives `down`.
+  kb-cache:
+

@@ -2,6 +2,8 @@ node_modules/
 dist/
 .env
 .env.local
+# rust/scripts/kb-dev.sh remembers the last-started tier here.
+rust/deploy/.tier
 *.log
 .DS_Store
 prisma/dev.db

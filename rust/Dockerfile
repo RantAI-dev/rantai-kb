@@ -10,6 +10,10 @@ RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
 WORKDIR /app/rust
+# Cargo's job count. Unset (the default) keeps cargo's own default (all cores);
+# a shared dev machine sets CARGO_BUILD_JOBS=2 (rust/deploy/compose.yaml does)
+# so a release build does not starve everything else running on the host.
+ARG CARGO_BUILD_JOBS
 COPY --from=planner /app/rust/recipe.json recipe.json
 # Build dependencies - this is the caching Docker layer
 RUN cargo chef cook --release --recipe-path recipe.json
@@ -37,9 +41,11 @@ ENV KB_VERSION=${KB_VERSION}
 ENV PDFIUM_DYNAMIC_LIB_PATH=/app/lib/libpdfium.so
 ENV KB_MIGRATIONS_DIR=/app/prisma/migrations
 
-# Ingest shells out to nothing, but PDFs and OCR benefit from fonts being present
+# Ingest shells out to nothing, but PDFs and OCR benefit from fonts being present.
+# curl is here for the container healthcheck (`GET /health`) and for an operator
+# who wants to probe the service from inside the image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates fonts-liberation \
+      ca-certificates fonts-liberation curl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -u 10001 -m -s /bin/sh appuser
@@ -48,7 +54,10 @@ COPY --from=builder /app/rust/target/release/kb-server /usr/local/bin/kb-server
 COPY --from=pdfium /pdfium/lib/libpdfium.so /app/lib/libpdfium.so
 COPY prisma/migrations /app/prisma/migrations
 
-RUN chown -R appuser:appuser /app
+# KB_CACHE_DIR lives here, and a named volume is mounted over it: creating the
+# directory in the image is what gives a fresh volume appuser's ownership
+# instead of root's (Docker copies the mountpoint's metadata from the image).
+RUN mkdir -p /app/cache && chown -R appuser:appuser /app
 
 USER appuser
 EXPOSE 8080

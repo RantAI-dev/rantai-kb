@@ -23,6 +23,18 @@ docker run -p 8080:8080 --env-file .env rantai-kb:rust
 
 The runtime image is built on `debian:bookworm-slim`, runs as non-root user `appuser` (uid 10001), includes liberation fonts and CA certificates, and bundles `libpdfium.so` dynamically loaded per `TARGETARCH`.
 
+For a complete stack (stores + models + kb-server) rather than a bare container, use the
+one-command dev deployment:
+
+```bash
+cp rust/deploy/.env.example rust/deploy/.env   # optional; only cloud needs a key
+rust/scripts/kb-dev.sh up lite-en              # lite | lite-en | desk | studio | station | cloud
+```
+
+It runs `rust/deploy/compose.yaml` under the compose project `rantai-kb-dev`, publishes only
+kb-server's port, and remembers the tier for `logs`/`status`/`key`/`down`. Tiers, measured
+numbers, upload/search examples, GPU notes and troubleshooting: [`deploy/README.md`](deploy/README.md).
+
 ---
 
 ## Testing & Parity Verification
