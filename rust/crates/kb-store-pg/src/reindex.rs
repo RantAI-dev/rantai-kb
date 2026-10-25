@@ -111,7 +111,7 @@ pub fn plan(documents: &[ReindexDocument]) -> BTreeMap<String, ReindexTenantCoun
 
 const SELECT_REINDEX_DOCUMENTS: &str = r#"
     SELECT d.id, d."tenantId", d.title, d.categories, d.subcategory, d.metadata,
-           d."s3Key", d."fileSize", d.mimeType,
+           d."s3Key", d."fileSize", d."mimeType",
            EXISTS (
                SELECT 1 FROM "IngestJob" j
                 WHERE j."documentId" = d.id
@@ -156,9 +156,15 @@ pub async fn list_documents(
             categories: row.try_get("categories").unwrap_or_default(),
             subcategory: row.try_get("subcategory").unwrap_or_default(),
             metadata: row.try_get("metadata").unwrap_or_default(),
-            s3_key: row.try_get("s3Key").unwrap_or_default(),
-            file_size: row.try_get("fileSize").unwrap_or_default(),
-            mime_type: row.try_get("mimeType").unwrap_or_default(),
+            s3_key: row
+                .try_get("s3Key")
+                .map_err(|e| PortError::Unavailable(format!("pg reindex s3Key: {e}")))?,
+            file_size: row
+                .try_get("fileSize")
+                .map_err(|e| PortError::Unavailable(format!("pg reindex fileSize: {e}")))?,
+            mime_type: row
+                .try_get("mimeType")
+                .map_err(|e| PortError::Unavailable(format!("pg reindex mimeType: {e}")))?,
             active_job: row.try_get("active_job").unwrap_or(false),
         });
     }

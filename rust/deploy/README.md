@@ -8,10 +8,13 @@ This is the Rust service. The root `docker-compose.yml` still describes the
 frozen Bun service and is not used here; `rust/scripts/stack-up.sh` remains the
 smoke/eval harness (it starts containers by hand, without compose).
 
-**Status (2026-10-25):** `docker compose config` passes for desk, studio, station and cloud, and
-`kb-dev.sh` refuses unknown tiers and cloud without a key. A full `up` → key → upload → search
-run has **not** been done yet (the build machine was out of memory); until it has, treat the
-profiles as a first draft and report what breaks.
+**Status (2026-10-25):** the `lite-en` profile was run end to end on a 2-core-class Linux host:
+`kb-dev.sh up lite-en --build` healthy in 3 min (image built from `rust/Dockerfile`), key created,
+two PDFs uploaded and ingested, `/v1/search` returned the right pages with no degrades, a second
+tenant's key saw 0 chunks and got 404 on the document, and `kb-server reindex` (dry run, then
+twice for real) re-ingested both documents with the Qdrant point count unchanged (188 → 188).
+`docker compose config` passes for desk, studio, station and cloud; those were not run (no NVIDIA
+GPU here; cloud is paid).
 
 ## Quickstart
 
