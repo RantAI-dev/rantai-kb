@@ -75,6 +75,9 @@ const LOCAL: &[(&str, &str)] = &[
     ("KB_EMBEDDING_BASE_URL", LOCAL_EMBEDDINGS),
     ("KB_EMBEDDING_TIMEOUT_MS", "120000"),
     ("KB_PAGE_RERANK", "false"),
+    // The default extractor is a paid OpenRouter call per document, and its
+    // output (SurrealDB entities) feeds no search arm. Off on every tier.
+    ("KB_ENTITY_EXTRACTION_ENABLED", "false"),
 ];
 
 /// Desk and up embed text with Qwen3-Embedding-0.6B on a GPU.
@@ -121,7 +124,7 @@ const LOCAL_RERANK: &[(&str, &str)] = &[
     ("KB_RERANK_MODEL", BGE_RERANKER),
 ];
 
-/// Lite: no reranker and no entity extraction, one embedding at a time.
+/// Lite: no reranker, one embedding at a time.
 ///
 /// Embedding concurrency is filled as `KB_EMBED_CONCURRENCY`, the name Bun
 /// reads, which the Rust config honours when `KB_EMBEDDING_CONCURRENCY` is
@@ -132,7 +135,6 @@ const LITE: &[(&str, &str)] = &[
     ("KB_EMBEDDING_BATCH_SIZE", "16"),
     ("KB_INGEST_CONCURRENCY", "1"),
     ("KB_RERANK_ENABLED", "false"),
-    ("KB_ENTITY_EXTRACTION_ENABLED", "false"),
 ];
 
 const DESK: &[(&str, &str)] = &[
@@ -167,6 +169,9 @@ const CLOUD: &[(&str, &str)] = &[
     ("KB_RERANK_BASE_URL", OPENROUTER_RERANK),
     ("KB_RERANK_MODEL", VOYAGE_RERANKER),
     ("KB_RERANK_CANDIDATE_LIMIT", "20"),
+    // Entity extraction is an LLM call per document (OpenRouter) whose output
+    // goes to SurrealDB, and no search arm reads it in Qdrant mode: pure spend.
+    ("KB_ENTITY_EXTRACTION_ENABLED", "false"),
 ];
 
 impl Tier {
@@ -415,6 +420,19 @@ mod tests {
             assert_eq!(lite_en(variable), lite(variable), "{variable}");
         }
         assert!(!Tier::LiteEn.needs_openrouter_key());
+    }
+
+    #[test]
+    fn no_tier_pays_for_entity_extraction_by_default() {
+        let none = |_: &str| None;
+        for name in TIER_NAMES {
+            let tier = Tier::parse(name).expect("known tier");
+            assert_eq!(
+                with_preset(Some(tier), &none)("KB_ENTITY_EXTRACTION_ENABLED").as_deref(),
+                Some("false"),
+                "{name}"
+            );
+        }
     }
 
     #[test]

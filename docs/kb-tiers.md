@@ -184,7 +184,7 @@ measurement (build order 5); the Desk / Studio / Station rerank widths are estim
 | `KB_EMBED_CONCURRENCY` | 1 | 2 | 4 | 8 | — |
 | `KB_EMBEDDING_BATCH_SIZE` | 16 | — | — | — | — |
 | `KB_INGEST_CONCURRENCY` | 1 | — | — | — | — |
-| `KB_ENTITY_EXTRACTION_ENABLED` | `false` | — | — | — | — |
+| `KB_ENTITY_EXTRACTION_ENABLED` | `false` | `false` | `false` | `false` | `false` (a paid LLM call per document; no search arm reads its output in Qdrant mode) |
 | `KB_RERANK_ENABLED` | `false` | `true` | `true` | `true` | `true` |
 | `KB_RERANK_PROVIDER` | — | `tei` | `tei` | `tei` | `cohere` |
 | `KB_RERANK_BASE_URL` | — | `http://127.0.0.1:8082` | same | same | `https://openrouter.ai/api/v1/rerank` |

@@ -1637,7 +1637,6 @@ mod tests {
                     assert!(matches!(cfg.reranker, RerankerConfig::Disabled));
                     assert_eq!(cfg.embedder.batch_size, 16);
                     assert_eq!(cfg.worker.concurrency, 1);
-                    assert!(!cfg.worker.entity_extraction_enabled);
                 } else {
                     assert_eq!(cfg.embedder.batch_size, 32);
                     match &cfg.reranker {
@@ -1647,8 +1646,9 @@ mod tests {
                         }
                         other => panic!("{tier} reranker should be TEI bge, got {other:?}"),
                     }
-                    assert!(cfg.worker.entity_extraction_enabled);
                 }
+                // Paid per document and read by no search arm: off everywhere.
+                assert!(!cfg.worker.entity_extraction_enabled, "{tier}");
             }
 
             // Every variable the plan reports was really unset by the operator.
