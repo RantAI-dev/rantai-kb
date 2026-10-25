@@ -51,6 +51,23 @@ claimed" to last "ingest finished" in the server log.
 | e5-small, `KB_EMBEDDING_MAX_CHARS=384` | 260 s | 4.27 | 0.509 | −0.036 [−0.057, −0.016] |
 | `minishlab/potion-multilingual-128M` (model2vec, static) | 21 s | 53 | 0.442 | −0.102 [−0.125, −0.080] |
 | floor: instant fake embedder | 17 s | 65 | — | — |
+| `sentence-transformers/all-MiniLM-L6-v2` (6 layers, English-only), full chunk | 282 s | 3.93 | 0.534 | −0.011 [−0.029, +0.008] |
+| same, 2 requests in flight | 289 s | 3.85 | 0.536 | — |
+| **all-MiniLM-L6-v2, `KB_EMBEDDING_MAX_CHARS=512`** | 173 s | **6.43** | 0.517 | −0.028 [−0.049, −0.007] |
+
+### Other small models (2026-10-25)
+
+Raw throughput on the same 2 pinned cores (`embed_bench.py`, 192 HR-sized chunks, batch 16,
+2 in flight): all-MiniLM-L6-v2 **23.6** chunks/s, multilingual-e5-small 9.5, `BAAI/bge-base-en-v1.5`
+3.7 (768-wide, 12 layers: slower than e5-small, so not run end to end).
+
+MiniLM-L6 has half of e5-small's layers, so it is ~2.5x faster at the same quality on English
+HR, and with the 512-char cap it clears **5 pages/s** (6.43). But it is English-only. On
+Indonesian MIRACL-id-50 it scores **0.679 vs 0.802** for e5-small
+(−0.123 [−0.187, −0.056]; run `lite-minilm-id50`). So it fits an English-only Lite deployment,
+not the multilingual default. The Lite preset stays e5-small; an English deployment can set
+`KB_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2`, empty prefixes and
+`KB_EMBEDDING_MAX_CHARS=512`.
 
 For scale: the fully local GPU text stack (Qwen3-0.6B + BM25 + bge reranker) scored 0.561 on HR.
 e5-small full-chunk Lite, with no reranker, is 0.016 behind it.
