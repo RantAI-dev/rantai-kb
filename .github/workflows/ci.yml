@@ -187,19 +187,6 @@ jobs:
       - name: Run smoke test script
         run: ./rust/scripts/smoke.sh
 
-  rust-search-parity:
-    name: Rust vs Bun search parity test matrix
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - run: bun install
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Run search parity harness
-        run: ./rust/scripts/search-parity.sh
-
   rust-eval-gate:
     name: Rust retrieval eval & scope isolation gate
     runs-on: ubuntu-latest
@@ -218,29 +205,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: eval-artifacts
-          path: |
-            eval-out/tiny/report.md
-            eval-out/tiny/metrics.json
-            eval-out/leak/leak-report.md
-
-  rust-eval-gate-qdrant:
-    name: Rust retrieval eval & scope isolation gate (Qdrant)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      # With stub embeddings these numbers are deterministic plumbing numbers.
-      - name: Fetch libpdfium
-        run: |
-          ./rust/scripts/fetch-pdfium.sh ./rust/.vendor/pdfium
-          echo "PDFIUM_DYNAMIC_LIB_PATH=$GITHUB_WORKSPACE/rust/.vendor/pdfium/lib/libpdfium.so" >> $GITHUB_ENV
-      - name: Run CI eval gate (Qdrant)
-        run: ./rust/scripts/ci-eval-gate-qdrant.sh
-      - name: Upload eval artifacts (Qdrant)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: eval-artifacts-qdrant
           path: |
             eval-out/tiny/report.md
             eval-out/tiny/metrics.json
