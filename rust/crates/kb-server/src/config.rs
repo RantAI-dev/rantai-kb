@@ -1718,7 +1718,7 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("KB_TIER"), "{message}");
         assert!(message.contains("workstation"), "{message}");
-        for valid in ["lite", "desk", "studio", "station", "cloud"] {
+        for valid in ["lite", "lite-en", "desk", "studio", "station", "cloud"] {
             assert!(message.contains(valid), "{message} omits {valid}");
         }
     }

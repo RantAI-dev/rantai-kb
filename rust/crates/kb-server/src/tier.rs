@@ -19,6 +19,7 @@ use anyhow::Result;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
     Lite,
+    LiteEn,
     Desk,
     Studio,
     Station,
@@ -26,10 +27,11 @@ pub enum Tier {
 }
 
 /// Every accepted `KB_TIER` value, in `docs/kb-tiers.md` order.
-pub const TIER_NAMES: [&str; 5] = ["lite", "desk", "studio", "station", "cloud"];
+pub const TIER_NAMES: [&str; 6] = ["lite", "lite-en", "desk", "studio", "station", "cloud"];
 
 const QWEN3_EMBEDDING: &str = "Qwen/Qwen3-Embedding-0.6B";
 const E5_SMALL_EMBEDDING: &str = "intfloat/multilingual-e5-small";
+const MINILM_EMBEDDING: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const BGE_RERANKER: &str = "BAAI/bge-reranker-v2-m3";
 const VOYAGE_EMBEDDING: &str = "voyageai/voyage-multimodal-3.5";
 const VOYAGE_RERANKER: &str = "voyageai/rerank-2.5";
@@ -92,6 +94,20 @@ const E5_SMALL_TEXT: &[(&str, &str)] = &[
     ("KB_EMBEDDING_DIM", "384"),
     ("KB_EMBEDDING_QUERY_PREFIX", "query: "),
     ("KB_EMBEDDING_PASSAGE_PREFIX", "passage: "),
+];
+
+/// Lite-en embeds text with all-MiniLM-L6-v2 (6 layers, English only) and
+/// gives the dense vector only the first 512 characters of each chunk; BM25 and
+/// the stored chunk keep the full text. Measured on 2 pinned cores
+/// (2026-10-25, ViDoRe HR, `docs/eval-ab/lite-2core`): 6.43 pages/s at page
+/// nDCG@10 0.517, against 1.55 pages/s at 0.545 for Lite's e5-small. On
+/// Indonesian (MIRACL-id-50) it scores 0.679 against 0.802, so it is for
+/// English-only deployments. MiniLM takes no prefixes, and the prefix
+/// settings already default to empty.
+const MINILM_TEXT: &[(&str, &str)] = &[
+    ("KB_EMBEDDING_MODEL", MINILM_EMBEDDING),
+    ("KB_EMBEDDING_DIM", "384"),
+    ("KB_EMBEDDING_MAX_CHARS", "512"),
 ];
 
 /// The chunk reranker Desk and up run: bge at the local `/rerank` endpoint.
@@ -159,6 +175,7 @@ impl Tier {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Lite => "lite",
+            Self::LiteEn => "lite-en",
             Self::Desk => "desk",
             Self::Studio => "studio",
             Self::Station => "station",
@@ -173,6 +190,7 @@ impl Tier {
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "lite" => Some(Self::Lite),
+            "lite-en" => Some(Self::LiteEn),
             "desk" => Some(Self::Desk),
             "studio" => Some(Self::Studio),
             "station" => Some(Self::Station),
@@ -219,6 +237,7 @@ impl Tier {
     fn tables(self) -> &'static [&'static [(&'static str, &'static str)]] {
         match self {
             Self::Lite => &[LOCAL, E5_SMALL_TEXT, LITE],
+            Self::LiteEn => &[LOCAL, MINILM_TEXT, LITE],
             Self::Desk => &[LOCAL, QWEN3_TEXT, LOCAL_RERANK, DESK],
             Self::Studio => &[LOCAL, QWEN3_TEXT, LOCAL_RERANK, STUDIO],
             Self::Station => &[LOCAL, QWEN3_TEXT, LOCAL_RERANK, STATION],
@@ -371,6 +390,31 @@ mod tests {
         for name in TIER_NAMES {
             assert!(err.contains(name), "{err} does not name {name}");
         }
+    }
+
+    #[test]
+    fn lite_en_is_lite_with_minilm_and_a_512_char_embedding_cap() {
+        let none = |_: &str| None;
+        let lite_en = with_preset(Some(Tier::LiteEn), &none);
+        let lite = with_preset(Some(Tier::Lite), &none);
+        assert_eq!(
+            lite_en("KB_EMBEDDING_MODEL").as_deref(),
+            Some("sentence-transformers/all-MiniLM-L6-v2")
+        );
+        assert_eq!(lite_en("KB_EMBEDDING_DIM").as_deref(), Some("384"));
+        assert_eq!(lite_en("KB_EMBEDDING_MAX_CHARS").as_deref(), Some("512"));
+        // MiniLM takes no e5 prefixes.
+        assert_eq!(lite_en("KB_EMBEDDING_QUERY_PREFIX"), None);
+        assert_eq!(lite_en("KB_EMBEDDING_PASSAGE_PREFIX"), None);
+        // Everything else is Lite's.
+        for variable in [
+            "KB_EMBEDDING_BASE_URL",
+            "KB_RERANK_ENABLED",
+            "KB_INGEST_CONCURRENCY",
+        ] {
+            assert_eq!(lite_en(variable), lite(variable), "{variable}");
+        }
+        assert!(!Tier::LiteEn.needs_openrouter_key());
     }
 
     #[test]

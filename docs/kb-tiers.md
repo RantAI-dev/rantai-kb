@@ -133,7 +133,7 @@ differs.
 
 | Setting | Values | Default |
 |---|---|---|
-| `KB_TIER` | `lite`, `desk`, `studio`, `station`, `cloud` | unset: today's explicit per-role settings |
+| `KB_TIER` | `lite`, `lite-en`, `desk`, `studio`, `station`, `cloud` | unset: today's explicit per-role settings |
 | `KB_PARSE_RESIDENCY` | `on-demand`, `always` | Desk `on-demand`, Studio and up `always` |
 | `KB_PARSE_IDLE_UNLOAD_S` | seconds | 300 |
 | `KB_CAPTION_RESIDENCY` | `on-demand`, `always` | same as parse |
@@ -197,6 +197,12 @@ A dash means the preset leaves the setting alone, so that setting's own default 
 `same` means the value in lite's column, unless it says otherwise. Lite's e5-small was chosen by
 measurement on 2 cores (`docs/eval-ab/lite-2core`); run its embedder with 1 thread so it leaves a
 core for kb-server.
+
+**`lite-en`** is Lite for English-only deployments: the same settings, but text is embedded with
+`sentence-transformers/all-MiniLM-L6-v2` (384-d, no prefixes) and the dense vector sees only the
+first 512 characters of each chunk (`KB_EMBEDDING_MAX_CHARS=512`; BM25 keeps the full text).
+On 2 cores it ingests ViDoRe HR at 6.43 pages/s (page nDCG@10 0.517) against Lite's 1.55 pages/s
+(0.545), but scores 0.679 vs 0.802 on Indonesian MIRACL-id-50, so it is not the default.
 
 - The local text stack is what we can run today (`docs/local-models.md`):
   Qwen3-Embedding-0.6B at an OpenAI-compatible endpoint, bge-reranker-v2-m3 at a local
