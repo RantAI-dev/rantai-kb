@@ -151,15 +151,20 @@ services:
 
   createbucket:
     # One-shot: creates the bucket an empty S3 has no way to create itself.
+    # Idempotent on purpose — a second `up` against an existing volume must not
+    # fail (kb-server waits for this to exit 0), so it checks first.
     image: amazon/aws-cli:latest
     restart: "no"
     environment:
       AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-kbadmin}
       AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-kbsecret123}
       AWS_DEFAULT_REGION: ${S3_REGION:-us-east-1}
-    entrypoint: ["aws"]
+      S3_BUCKET: ${S3_BUCKET:-rantai-kb}
+    entrypoint: ["/bin/sh", "-c"]
     command:
-      ["--endpoint-url", "http://rustfs:9000", "s3", "mb", "--ignore-existing", "s3://${S3_BUCKET:-rantai-kb}"]
+      - >-
+        aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket "$$S3_BUCKET" 2>/dev/null ||
+        aws --endpoint-url http://rustfs:9000 s3 mb "s3://$$S3_BUCKET"
     depends_on:
       rustfs:
         condition: service_healthy
@@ -188,15 +193,17 @@ services:
     volumes:
       - hf-models:/data
     environment:
-      # Measured on 2 cores (docs/eval-ab/lite-2core): the embedder must leave a
-      # core for kb-server, or ingest starves the API and status polls time out.
-      OMP_NUM_THREADS: ${KB_EMBED_THREADS:-1}
-      RAYON_NUM_THREADS: ${KB_EMBED_THREADS:-1}
-      MKL_NUM_THREADS: ${KB_EMBED_THREADS:-1}
+      # Thread count matched to the CPU limit below. Measured on 2 cores
+      # (docs/eval-ab/lite-2core): e5-small/MiniLM sharing both cores with
+      # kb-server keeps the API responsive (a 0.6B model did not).
+      OMP_NUM_THREADS: ${KB_EMBED_THREADS:-2}
+      RAYON_NUM_THREADS: ${KB_EMBED_THREADS:-2}
+      MKL_NUM_THREADS: ${KB_EMBED_THREADS:-2}
     # e5-small/MiniLM are compute-bound: ~95% of ingest is embedding, so this
-    # limit is what sets ingest speed. Raise both cpus knobs together on a
-    # bigger box (and KB_EMBED_THREADS with them).
-    cpus: ${KB_LITE_EMBED_CPUS:-1.0}
+    # limit sets ingest speed (e5-small: ~4.9 chunks/s per core on a 2016 Xeon).
+    # The 2-core numbers in docs/eval-ab/lite-2core used 2 cores shared with
+    # kb-server. On a bigger box raise KB_LITE_EMBED_CPUS and KB_EMBED_THREADS.
+    cpus: ${KB_LITE_EMBED_CPUS:-2.0}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
       interval: 10s
@@ -215,7 +222,7 @@ services:
       # tier-specific override. Setting KB_EMBEDDING_BASE_URL in .env wins.
       KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-lite:80/v1/embeddings}
       KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
-    cpus: ${KB_LITE_SERVER_CPUS:-1.0}
+    cpus: ${KB_LITE_SERVER_CPUS:-2.0}
     depends_on:
       <<: *kb-stores
       tei-lite:
@@ -232,10 +239,10 @@ services:
     volumes:
       - hf-models:/data
     environment:
-      OMP_NUM_THREADS: ${KB_EMBED_THREADS:-1}
-      RAYON_NUM_THREADS: ${KB_EMBED_THREADS:-1}
-      MKL_NUM_THREADS: ${KB_EMBED_THREADS:-1}
-    cpus: ${KB_LITE_EMBED_CPUS:-1.0}
+      OMP_NUM_THREADS: ${KB_EMBED_THREADS:-2}
+      RAYON_NUM_THREADS: ${KB_EMBED_THREADS:-2}
+      MKL_NUM_THREADS: ${KB_EMBED_THREADS:-2}
+    cpus: ${KB_LITE_EMBED_CPUS:-2.0}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
       interval: 10s
@@ -251,7 +258,7 @@ services:
       KB_TIER: lite-en
       KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-lite-en:80/v1/embeddings}
       KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
-    cpus: ${KB_LITE_SERVER_CPUS:-1.0}
+    cpus: ${KB_LITE_SERVER_CPUS:-2.0}
     depends_on:
       <<: *kb-stores
       tei-lite-en:

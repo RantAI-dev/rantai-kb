@@ -131,6 +131,11 @@ differs.
 
 ## Settings
 
+To run a tier locally, `rust/scripts/kb-dev.sh up <tier>` starts the stores, the tier's model
+containers and kb-server from `rust/deploy/compose.yaml`; see
+[`rust/deploy/README.md`](rust/deploy/README.md) for what each profile starts, the measured
+numbers and how to override a setting.
+
 | Setting | Values | Default |
 |---|---|---|
 | `KB_TIER` | `lite`, `lite-en`, `desk`, `studio`, `station`, `cloud` | unset: today's explicit per-role settings |

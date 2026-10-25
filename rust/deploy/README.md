@@ -73,22 +73,21 @@ SurrealDB holds the schema and entity graph.
 | `desk` | TEI CUDA, `Qwen/Qwen3-Embedding-0.6B` (1024-d) + `BAAI/bge-reranker-v2-m3` | NVIDIA 8 GB | **not measured on this hardware** — see `docs/kb-tiers.md` for estimates |
 | `studio` | same models, higher concurrency preset | NVIDIA 24 GB | not measured |
 | `station` | same models, higher concurrency preset | NVIDIA 48 GB | not measured |
-| `cloud` | none (OpenRouter: `voyage-multimodal-3.5` embeddings, `voyageai/rerank-2.5`); page-image arm on | any machine + `OPENROUTER_API_KEY` | not measured; **paid** |
+| `cloud` | none (OpenRouter: `voyage-multimodal-3.5` embeddings, `voyageai/rerank-2.5`); page-image arm on | any machine + `OPENROUTER_API_KEY` | ViDoRe HR page nDCG@10 **0.711** ([vidore3-hr-en-image](../../docs/eval-ab/vidore3-hr-en-image/)), ViDoRe CS **0.828** ([vidore3-cs-en-night](../../docs/eval-ab/vidore3-cs-en-night/)); **paid** per page and query |
 
 The measured rows come from
-[`docs/eval-ab/lite-2core`](../../docs/eval-ab/lite-2core/) (2 pinned cores, the
-embedder capped at one thread, a shared machine, so timings are upper bounds).
+[`docs/eval-ab/lite-2core`](../../docs/eval-ab/lite-2core/) (2 pinned cores; the
+MIRACL run capped the embedder at one thread, the HR runs did not).
 Tier definitions and the role each model plays are in
 [`docs/kb-tiers.md`](../../docs/kb-tiers.md). GPU numbers are deliberately left
 blank: none were run here.
 
-What the numbers mean for the compose stack: lite/lite-en give the embedder one
-CPU and kb-server one CPU (`KB_LITE_EMBED_CPUS`, `KB_LITE_SERVER_CPUS`,
-`KB_EMBED_THREADS` in `.env`). Embedding is ~95% of ingest, so that limit — not
-the disk or the databases — is what sets pages/s. On a bigger box raise both
-`cpus` limits together and keep the embedder below the core count, or the API
-starts timing out while ingest hogs the CPU (that is what the measurement found
-first).
+What the numbers mean for the compose stack: lite/lite-en let the embedder and kb-server
+each use up to 2 CPUs (`KB_LITE_EMBED_CPUS`, `KB_LITE_SERVER_CPUS`, `KB_EMBED_THREADS` in
+`.env`), the setup the 2-core HR numbers were measured with. Embedding is ~95% of ingest, so
+the embedder's CPU limit — not the disk or the databases — sets pages/s (e5-small scaled
+4.9 → 9.7 → 17.1 chunks/s on 1 → 2 → 4 cores). A 0.6B embedder on the same 2 cores starved
+the API; e5-small and MiniLM did not.
 
 `lite-en` is only for English corpora. MiniLM is ~2.5× faster than e5-small
 because it has half the layers; on Indonesian it loses 0.123 nDCG. For a mixed
