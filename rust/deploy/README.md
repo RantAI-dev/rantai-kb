@@ -8,6 +8,11 @@ This is the Rust service. The root `docker-compose.yml` still describes the
 frozen Bun service and is not used here; `rust/scripts/stack-up.sh` remains the
 smoke/parity harness (it starts containers by hand, without compose).
 
+**Status (2026-10-25):** `docker compose config` passes for desk, studio, station and cloud, and
+`kb-dev.sh` refuses unknown tiers and cloud without a key. A full `up` → key → upload → search
+run has **not** been done yet (the build machine was out of memory); until it has, treat the
+profiles as a first draft and report what breaks.
+
 ## Quickstart
 
 ```sh
