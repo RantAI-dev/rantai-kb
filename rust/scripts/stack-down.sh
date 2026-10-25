@@ -36,7 +36,7 @@ tmux kill-session -t "${STACK_NAME}-server" 2>/dev/null || true
 tmux kill-session -t "${STACK_NAME}-stub" 2>/dev/null || true
 
 containers=()
-for part in pg surreal rustfs tei-embed tei-rerank qdrant; do
+for part in pg rustfs tei-embed tei-rerank qdrant; do
   containers+=("${STACK_NAME}-${part}")
 done
 echo "removing containers ${containers[*]}"

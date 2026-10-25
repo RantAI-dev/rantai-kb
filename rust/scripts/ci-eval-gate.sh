@@ -2,29 +2,22 @@
 # Continuous integration retrieval quality and scope isolation gate.
 #
 # Runs the live smoke stack, runs kb-eval on fixtures/tiny, compares metrics
-# against the committed baseline (tiny-stub.metrics.json or tiny-stub-qdrant.metrics.json),
-# runs the cross-scope leak matrix, and verifies all artifacts are generated.
+# against the committed Qdrant baseline (tiny-stub-qdrant.metrics.json), runs
+# the cross-scope leak matrix, and verifies all artifacts are generated.
 #
-# Deterministic plumbing numbers: the smoke stack uses stub_embeddings (dim 8),
-# so results are reproducible and have zero external dependencies or API costs.
+# This is the Qdrant gate: Qdrant is the only chunk store, so there is no
+# second store-specific copy of this script. Deterministic plumbing numbers:
+# the smoke stack uses stub_embeddings (dim 8), so results are reproducible and
+# have zero external dependencies or API costs.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 REPO_ROOT="$(cd "$WORKSPACE_ROOT/.." && pwd)"
 
-KB_CHUNK_STORE="${KB_CHUNK_STORE:-surreal}"
 STACK_DIR="${KB_STACK_DIR:-/tmp/kb-stack}"
 EVAL_OUT_DIR="${KB_EVAL_OUT_DIR:-$REPO_ROOT/eval-out}"
-if [ -z "${KB_EVAL_BASELINE:-}" ]; then
-  if [ "$KB_CHUNK_STORE" = "qdrant" ]; then
-    BASELINE_FILE="$WORKSPACE_ROOT/crates/kb-eval/baselines/tiny-stub-qdrant.metrics.json"
-  else
-    BASELINE_FILE="$WORKSPACE_ROOT/crates/kb-eval/baselines/tiny-stub.metrics.json"
-  fi
-else
-  BASELINE_FILE="$KB_EVAL_BASELINE"
-fi
+BASELINE_FILE="${KB_EVAL_BASELINE:-$WORKSPACE_ROOT/crates/kb-eval/baselines/tiny-stub-qdrant.metrics.json}"
 MAX_DROP="${KB_EVAL_MAX_DROP:-0.02}"
 METRICS="${KB_EVAL_METRICS:-ndcg,hit1,recall}"
 
@@ -45,8 +38,8 @@ if [ -z "${PDFIUM_DYNAMIC_LIB_PATH:-}" ]; then
 fi
 echo "Using PDFIUM_DYNAMIC_LIB_PATH=$PDFIUM_DYNAMIC_LIB_PATH"
 
-echo "=== 2. Starting kb-smoke stack (store: $KB_CHUNK_STORE) ==="
-KB_CHUNK_STORE="$KB_CHUNK_STORE" "$SCRIPT_DIR/stack-up.sh"
+echo "=== 2. Starting kb-smoke stack (Qdrant) ==="
+"$SCRIPT_DIR/stack-up.sh"
 # shellcheck disable=SC1090
 source "$STACK_DIR/stack.env"
 
@@ -99,4 +92,4 @@ test -f "$EVAL_OUT_DIR/tiny/report.md"
 test -f "$EVAL_OUT_DIR/tiny/metrics.json"
 test -f "$EVAL_OUT_DIR/leak/leak-report.md"
 echo "All eval gate artifacts verified."
-echo "Evaluation gate PASSED (store: $KB_CHUNK_STORE)."
+echo "Evaluation gate PASSED (Qdrant)."

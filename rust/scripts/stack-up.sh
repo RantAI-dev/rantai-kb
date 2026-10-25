@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Bring up the kb-smoke stack and leave it running.
 #
-# Real Postgres 16 + SurrealDB v2 + S3 (rustfs) + an embedder (stub dim 8 or TEI dim 1024) +
+# Real Postgres 16 + Qdrant + S3 (rustfs) + an embedder (stub dim 8 or TEI dim 1024) +
 # kb-server, on the ports smoke.sh uses. Idempotent: re-running it while the
 # stack is up is a no-op that re-prints where things are.
 #
@@ -28,14 +28,14 @@
 #                                   # KB_STACK_REMOTE_RERANK_URL (base, e.g. http://host:8082),
 #                                   # key KB_STACK_REMOTE_RERANK_KEY (default: the embed key),
 #                                   # KB_STACK_RERANK_CANDIDATES (default 10) reranked per query
-#   KB_STACK_QDRANT=1               # starts kb-smoke-qdrant (Qdrant v1.19.2; HTTP 6333, gRPC 6334)
+#   KB_STACK_QDRANT=1               # accepted for old callers; Qdrant now always starts
 #   KB_STACK_GRAPH=1                # ingest writes the Postgres entity graph, with the free
 #                                   # heuristic extractor instead of the OpenRouter one
 #   KB_STACK_GRAPH_ARM=1            # the graph retrieval arm runs on /v1/search
-#   KB_STACK_PAGE_ARM=1             # the page-image arm runs (needs KB_CHUNK_STORE=qdrant):
-#                                   # its embedder is the stub's /page-embeddings, which gives
-#                                   # every page and query one vector — a scope test fixture
-#                                   # (`eval leak --pdf`), not a retrieval-quality setting
+#   KB_STACK_PAGE_ARM=1             # the page-image arm runs: its embedder is the stub's
+#                                   # /page-embeddings, which gives every page and query one
+#                                   # vector — a scope test fixture (`eval leak --pdf`), not a
+#                                   # retrieval-quality setting
 #   KB_STACK_NAME=kb-leak           # container / tmux-session prefix (default kb-smoke), so a
 #                                   # second stack (own KB_STACK_DIR and *_PORTs) can run
 #                                   # beside the default one without either removing the other
@@ -62,7 +62,6 @@ REPO_ROOT="$(cd "$WORKSPACE_ROOT/.." && pwd)"
 
 STACK_NAME="${KB_STACK_NAME:-kb-smoke}"
 PG_CONTAINER="${STACK_NAME}-pg"
-SURREAL_CONTAINER="${STACK_NAME}-surreal"
 RUSTFS_CONTAINER="${STACK_NAME}-rustfs"
 TEI_EMBED_CONTAINER="${STACK_NAME}-tei-embed"
 TEI_RERANK_CONTAINER="${STACK_NAME}-tei-rerank"
@@ -71,7 +70,6 @@ SERVER_SESSION="${STACK_NAME}-server"
 STUB_SESSION="${STACK_NAME}-stub"
 
 PG_PORT="${KB_STACK_PG_PORT:-15432}"
-SURREAL_PORT="${KB_STACK_SURREAL_PORT:-18000}"
 S3_PORT="${KB_STACK_S3_PORT:-19000}"
 STUB_PORT="${KB_STACK_STUB_PORT:-19111}"
 SERVER_PORT="${KB_STACK_SERVER_PORT:-18080}"
@@ -86,7 +84,6 @@ QDRANT_GRPC_PORT="${KB_STACK_QDRANT_GRPC_PORT:-16334}"
 # 1.16 / 1.19 respectively. 1.19.2 is the current release (2026-10-16).
 QDRANT_IMAGE="${KB_STACK_QDRANT_IMAGE:-qdrant/qdrant:v1.19.2}"
 
-KB_CHUNK_STORE="${KB_CHUNK_STORE:-surreal}"
 KB_STACK_EMBEDDINGS="${KB_STACK_EMBEDDINGS:-stub}"
 # Entity-graph ingest and the graph retrieval arm, both off by default so the
 # gate stacks keep behaving exactly as they did before the graph existed.
@@ -95,10 +92,6 @@ KB_STACK_GRAPH_ARM="${KB_STACK_GRAPH_ARM:-0}"
 KB_STACK_PAGE_ARM="${KB_STACK_PAGE_ARM:-0}"
 KB_STACK_RESTART_SERVER="${KB_STACK_RESTART_SERVER:-0}"
 KB_STACK_RERANK="${KB_STACK_RERANK:-none}"
-if [ "$KB_CHUNK_STORE" = "qdrant" ]; then
-  KB_STACK_QDRANT=1
-fi
-KB_STACK_QDRANT="${KB_STACK_QDRANT:-0}"
 KB_STACK_INGEST_POLL_MS="${KB_STACK_INGEST_POLL_MS:-500}"
 KB_MODELS_CACHE="${KB_MODELS_CACHE:-$HOME/.cache/kb-models}"
 
@@ -146,10 +139,6 @@ write_page_env() {
   grep -v -E '^export (KB_PAGE_|PDFIUM_DYNAMIC_LIB_PATH)' "$STACK_ENV" > "$STACK_ENV.new" || true
   mv "$STACK_ENV.new" "$STACK_ENV"
   if [ "$KB_STACK_PAGE_ARM" = "1" ]; then
-    if [ "$KB_CHUNK_STORE" != "qdrant" ]; then
-      echo "KB_STACK_PAGE_ARM=1 needs KB_CHUNK_STORE=qdrant: the page index is a Qdrant collection" >&2
-      exit 1
-    fi
     cat >> "$STACK_ENV" <<PAGE_ENV
 export KB_PAGE_EMBEDDING_MODEL="stub-page"
 export KB_PAGE_EMBEDDING_BASE_URL="http://127.0.0.1:${STUB_PORT}/page-embeddings"
@@ -229,7 +218,7 @@ free -h
 
 echo "=== 1. Starting ${STACK_NAME} base containers ==="
 # Only ${STACK_NAME}-* names. Nothing else on this host is ours.
-docker rm -f "$PG_CONTAINER" "$SURREAL_CONTAINER" "$RUSTFS_CONTAINER" "$TEI_EMBED_CONTAINER" "$TEI_RERANK_CONTAINER" "$QDRANT_CONTAINER" >/dev/null 2>&1 || true
+docker rm -f "$PG_CONTAINER" "$RUSTFS_CONTAINER" "$TEI_EMBED_CONTAINER" "$TEI_RERANK_CONTAINER" "$QDRANT_CONTAINER" >/dev/null 2>&1 || true
 
 docker run -d --name "$PG_CONTAINER" \
   -p "${PG_PORT}:5432" \
@@ -237,10 +226,6 @@ docker run -d --name "$PG_CONTAINER" \
   -e POSTGRES_PASSWORD=kb \
   -e POSTGRES_DB=rantai_kb \
   postgres:16 >/dev/null
-
-docker run -d --name "$SURREAL_CONTAINER" \
-  -p "${SURREAL_PORT}:8000" \
-  surrealdb/surrealdb:v2 start --user root --pass root memory >/dev/null
 
 docker run -d --name "$RUSTFS_CONTAINER" \
   -p "${S3_PORT}:9000" \
@@ -251,14 +236,6 @@ docker run -d --name "$RUSTFS_CONTAINER" \
 echo "Waiting for Postgres to be ready..."
 for _ in {1..60}; do
   if docker exec "$PG_CONTAINER" pg_isready -U kb >/dev/null 2>&1; then
-    break
-  fi
-  sleep 1
-done
-
-echo "Waiting for SurrealDB to be ready..."
-for _ in {1..60}; do
-  if curl -s "http://127.0.0.1:${SURREAL_PORT}/health" >/dev/null 2>&1; then
     break
   fi
   sleep 1
@@ -278,30 +255,26 @@ docker run --rm --network host \
   -e AWS_SECRET_ACCESS_KEY=kbsecret123 \
   amazon/aws-cli:latest --endpoint-url "http://127.0.0.1:${S3_PORT}" s3 mb s3://rantai-kb >/dev/null
 
-if [ "$KB_STACK_QDRANT" = "1" ]; then
-  # Opt-in (docs/plan-best-multimodal-kb.md step L.2): Qdrant is the store the
-  # engine will move to, but nothing is switched over to it in this round, so CI
-  # never starts it and the default stack is unchanged.
-  echo "Starting Qdrant (${QDRANT_IMAGE}) http ${QDRANT_HTTP_PORT} / grpc ${QDRANT_GRPC_PORT}..."
-  docker run -d --name "$QDRANT_CONTAINER" \
-    -p "${QDRANT_HTTP_PORT}:6333" \
-    -p "${QDRANT_GRPC_PORT}:6334" \
-    "$QDRANT_IMAGE" >/dev/null
+# Qdrant is the only chunk store, so it is not optional.
+echo "Starting Qdrant (${QDRANT_IMAGE}) http ${QDRANT_HTTP_PORT} / grpc ${QDRANT_GRPC_PORT}..."
+docker run -d --name "$QDRANT_CONTAINER" \
+  -p "${QDRANT_HTTP_PORT}:6333" \
+  -p "${QDRANT_GRPC_PORT}:6334" \
+  "$QDRANT_IMAGE" >/dev/null
 
-  for _ in {1..60}; do
-    if curl -s "http://127.0.0.1:${QDRANT_HTTP_PORT}/readyz" >/dev/null 2>&1; then
-      break
-    fi
-    sleep 1
-  done
-
-  if ! curl -sf "http://127.0.0.1:${QDRANT_HTTP_PORT}/readyz" >/dev/null 2>&1; then
-    echo "Qdrant did not come up ready; container logs:" >&2
-    docker logs "$QDRANT_CONTAINER" | tail -n 30 >&2 || true
-    exit 1
+for _ in {1..60}; do
+  if curl -s "http://127.0.0.1:${QDRANT_HTTP_PORT}/readyz" >/dev/null 2>&1; then
+    break
   fi
-  echo "Qdrant ready on 127.0.0.1:${QDRANT_HTTP_PORT}"
+  sleep 1
+done
+
+if ! curl -sf "http://127.0.0.1:${QDRANT_HTTP_PORT}/readyz" >/dev/null 2>&1; then
+  echo "Qdrant did not come up ready; container logs:" >&2
+  docker logs "$QDRANT_CONTAINER" | tail -n 30 >&2 || true
+  exit 1
 fi
+echo "Qdrant ready on 127.0.0.1:${QDRANT_HTTP_PORT}"
 
 echo "=== 2. Building binaries (before memory-heavy models start) ==="
 if [ "$KB_STACK_EMBEDDINGS" = "stub" ] || [ "$KB_STACK_PAGE_ARM" = "1" ]; then
@@ -384,18 +357,12 @@ fi
 cat > "$STACK_ENV" <<EOF
 # Generated by rust/scripts/stack-up.sh — source this, do not edit.
 export DATABASE_URL="postgresql://kb:kb@127.0.0.1:${PG_PORT}/rantai_kb?schema=public"
-export SURREAL_DB_URL="http://127.0.0.1:${SURREAL_PORT}"
-export SURREAL_DB_USER="root"
-export SURREAL_DB_PASS="root"
-export SURREAL_DB_NAMESPACE="rantai"
-export SURREAL_DB_DATABASE="knowledge"
 export S3_ENDPOINT="http://127.0.0.1:${S3_PORT}"
 export S3_ACCESS_KEY_ID="kbadmin"
 export S3_SECRET_ACCESS_KEY="kbsecret123"
 export S3_BUCKET="rantai-kb"
 export S3_ENABLE_PATH_STYLE="1"
 export KB_ENTITY_EXTRACTION_ENABLED="false"
-export KB_CHUNK_STORE="${KB_CHUNK_STORE}"
 export KB_WORKER_ENABLED="true"
 export KB_INGEST_POLL_MS="${KB_STACK_INGEST_POLL_MS}"
 export KB_INGEST_CONCURRENCY="${KB_STACK_INGEST_CONCURRENCY:-1}"
@@ -406,7 +373,6 @@ export KB_STACK_DIR="$STACK_DIR"
 export KB_STACK_BASE_URL="http://127.0.0.1:${SERVER_PORT}"
 export KB_SERVER_BIN="$KB_SERVER_BIN"
 export KB_STACK_PG_CONTAINER="$PG_CONTAINER"
-export KB_STACK_SURREAL_CONTAINER="$SURREAL_CONTAINER"
 export KB_STACK_RUSTFS_CONTAINER="$RUSTFS_CONTAINER"
 export KB_STACK_TEI_EMBED_CONTAINER="$TEI_EMBED_CONTAINER"
 export KB_STACK_TEI_RERANK_CONTAINER="$TEI_RERANK_CONTAINER"
@@ -416,15 +382,11 @@ EOF
 write_graph_env
 write_page_env
 
-# QDRANT_URL is exported only when Qdrant was actually started, so a script that
-# sources stack.env cannot be handed a URL that answers nothing.
-if [ "$KB_STACK_QDRANT" = "1" ]; then
-  cat >> "$STACK_ENV" <<EOF
+cat >> "$STACK_ENV" <<EOF
 export QDRANT_URL="http://127.0.0.1:${QDRANT_HTTP_PORT}"
 export QDRANT_GRPC_URL="http://127.0.0.1:${QDRANT_GRPC_PORT}"
 export KB_STACK_QDRANT_CONTAINER="$QDRANT_CONTAINER"
 EOF
-fi
 
 if [ "$KB_STACK_EMBEDDINGS" = "tei" ]; then
   cat >> "$STACK_ENV" <<EOF
@@ -550,7 +512,7 @@ fi
 echo ""
 echo "${STACK_NAME} stack is up."
 echo "  kb-server   http://127.0.0.1:${SERVER_PORT}  (pid $(cat "$SERVER_PID_FILE"), log $SERVER_LOG)"
-echo "  postgres    127.0.0.1:${PG_PORT}   surreal 127.0.0.1:${SURREAL_PORT}   s3 127.0.0.1:${S3_PORT}"
+echo "  postgres    127.0.0.1:${PG_PORT}   qdrant 127.0.0.1:${QDRANT_HTTP_PORT}   s3 127.0.0.1:${S3_PORT}"
 if [ "$KB_STACK_EMBEDDINGS" = "tei" ]; then
   echo "  tei-embed   http://127.0.0.1:${TEI_EMBED_PORT} (dim 1024, Qwen3-Embedding-0.6B)"
 elif [ "$KB_STACK_EMBEDDINGS" = "remote" ]; then
@@ -564,8 +526,6 @@ fi
 if [ "$KB_STACK_PAGE_ARM" = "1" ]; then
   echo "  page arm    stub-page via http://127.0.0.1:${STUB_PORT}/page-embeddings (dim 8, one vector for all)"
 fi
-if [ "$KB_STACK_QDRANT" = "1" ]; then
-  echo "  qdrant      http://127.0.0.1:${QDRANT_HTTP_PORT} (grpc 127.0.0.1:${QDRANT_GRPC_PORT}, ${QDRANT_IMAGE})"
-fi
+echo "  qdrant      http://127.0.0.1:${QDRANT_HTTP_PORT} (grpc 127.0.0.1:${QDRANT_GRPC_PORT}, ${QDRANT_IMAGE})"
 echo "  source $STACK_ENV"
 echo "  $SCRIPT_DIR/stack-down.sh   # stop"

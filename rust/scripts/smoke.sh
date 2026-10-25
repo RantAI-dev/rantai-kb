@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # End-to-end smoke test for rantai-kb (Rust service).
-# Real Postgres 16 + SurrealDB v2 + S3 (rustfs), stub embeddings (dim 8).
+# Real Postgres 16 + Qdrant + S3 (rustfs), stub embeddings (dim 8).
 #
 # The stack itself lives in `stack-up.sh` / `stack-down.sh`, so the same live
 # server can be measured by `kb-server eval` or `kb-server eval leak` while it
