@@ -1,7 +1,7 @@
 //! Port definitions (driven traits). The engine and CLI interact with external
 //! systems solely through these interfaces.
 //!
-//! Every external dependency — Postgres, SurrealDB, object storage, embedding,
+//! Every external dependency — Postgres, Qdrant, object storage, embedding,
 //! reranking, text extraction — sits behind a trait here.
 
 use async_trait::async_trait;
@@ -224,9 +224,12 @@ pub trait DocumentStore: Send + Sync {
     }
 }
 
-/// Chunk store: vector + BM25 + neighbours + figure co-retrieval over the
-/// SurrealDB `document_chunk` table. Every method takes a scope so a tenant
-/// leak is a type error.
+/// Legacy chunk-store port: vector + BM25 + neighbours + figure co-retrieval.
+/// Every method takes a scope so a tenant leak is a type error.
+///
+/// Superseded by [`crate::RetrievalIndex`], which is what server and engine use.
+/// It remains only because the in-process test fake implements it; no production
+/// adapter does.
 #[async_trait]
 pub trait ChunkStore: Send + Sync {
     /// Cosine search by precomputed query embedding. Returns up to `limit`
@@ -263,7 +266,7 @@ pub trait ChunkStore: Send + Sync {
     ///
     /// Record ids are `${document_id}_${i}` by index, so a re-run of the same
     /// batch replaces rather than duplicates. `embedding_model` is stored only
-    /// when present, because SurrealDB rejects a literal NULL for `option<T>`.
+    /// when present.
     async fn store_chunks(
         &self,
         document_id: &DocumentId,
@@ -271,8 +274,8 @@ pub trait ChunkStore: Send + Sync {
         embedding_model: Option<&str>,
     ) -> Result<(), PortError>;
 
-    /// Chunk counts per document, from SurrealDB `document_chunk`. Missing ids
-    /// are absent from the result and count as 0 at the call site.
+    /// Chunk counts per document. Missing ids are absent from the result and
+    /// count as 0 at the call site.
     async fn chunk_counts(
         &self,
         document_ids: &[DocumentId],

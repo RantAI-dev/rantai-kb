@@ -8,7 +8,7 @@ use crate::ids::{DocumentId, TenantId};
 /// Errors emitted by port implementations (stores, embedders, rerankers).
 #[derive(Debug, Error)]
 pub enum PortError {
-    /// External service (Postgres, SurrealDB, LLM provider) is unreachable
+    /// External service (Postgres, Qdrant, LLM provider) is unreachable
     /// or returned an error status code.
     #[error("backend unavailable: {0}")]
     Unavailable(String),

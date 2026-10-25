@@ -4,7 +4,7 @@
 //! runs every query, and turns the results into standard metrics with bootstrap
 //! confidence intervals. Nothing here knows which storage or inference backend
 //! answered — the HTTP API is the only contract, so the same harness measures
-//! SurrealDB today and Qdrant tomorrow.
+//! the Qdrant-backed Rust service as it measured the SurrealDB-backed Bun one.
 //!
 //! The crate is three pure pieces and one thin client:
 //!

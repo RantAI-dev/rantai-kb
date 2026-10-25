@@ -8,8 +8,8 @@
 //!
 //! # Why this port exists
 //!
-//! `docs/architecture-target.md` §11: the entity graph moves out of SurrealDB
-//! into three Postgres tables, and the traversal happens in Rust in memory
+//! `docs/architecture-target.md` §11: the entity graph lives in three Postgres
+//! tables and the traversal happens in Rust in memory
 //! ([`kb_core::graph`]). This is the seam. The engine asks for a tenant's edges
 //! under a [`DocumentScope`]; an adapter returns them; the walk is storage-free.
 //!

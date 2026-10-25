@@ -2,8 +2,7 @@
 //!
 //! Everything here is black-box, exactly like the eval harness: the only thing
 //! it knows is the public API of a running `kb-server`. That is the point —
-//! the same probe runs against SurrealDB today and against the Qdrant +
-//! Postgres-graph backend later without a line changed.
+//! the same probe runs against any backend without a line changed.
 //!
 //! Nothing here decides what a leak is ([`crate::leak`] does), which is why a
 //! fake server can be made to leak in a test and have the instrument say so.

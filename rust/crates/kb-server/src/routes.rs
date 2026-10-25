@@ -1002,7 +1002,7 @@ pub struct DeleteQuery {
 /// Resolve a document id inside the caller's tenant, or 404.
 ///
 /// Every document-addressed route goes through this one helper: the id is
-/// caller-supplied and SurrealDB has no tenant of its own, so nothing that keys
+/// caller-supplied and the chunk store has no tenant of its own, so nothing that keys
 /// on an id may run before the tenant check.
 pub(crate) async fn find_visible_document(
     state: &AppState,

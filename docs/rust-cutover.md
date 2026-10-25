@@ -2,6 +2,56 @@
 
 This runbook guides operators through rolling out the Rust implementation of `rantai-kb` into production, operating in a mixed fleet alongside the Bun service, and rolling back if necessary.
 
+> **2026-10-25: SurrealDB was removed from the Rust service.** Rust is
+> Qdrant-only for chunks, vectors, BM25 and page images. Bun still uses
+> SurrealDB and is unchanged. The two runtimes share Postgres (documents, jobs,
+> KBs, keys, entity graph) and the HTTP API, **not** the chunk store. Read §0
+> before using any older section of this runbook.
+
+## 0. SurrealDB removed (2026-10-25)
+
+The decision is final: Qdrant is the only chunk store for Rust. `KB_CHUNK_STORE`
+is no longer a switch — leaving it unset and setting `qdrant` both mean Qdrant,
+and any other value fails at boot with a message naming the removal and
+`kb-server reindex`. The `kb-store-surreal` crate, the SurrealDB entity write in
+ingest, every `SURREAL_*` variable, the compose service and the Rust CI
+dependency are gone.
+
+Why a reindex instead of a data migration: the originals are in S3 and the
+document rows are in Postgres, so the chunks can be rebuilt exactly by
+re-ingesting them. Reading SurrealDB from Rust would keep two chunk-store
+clients alive indefinitely to move data once.
+
+### Cutover procedure
+
+1. **Point Rust at the same Postgres and S3** the Bun service uses, and at a
+   reachable Qdrant (`QDRANT_GRPC_URL`). Unset `KB_CHUNK_STORE` (or set
+   `qdrant`). Start Rust with the worker on (`KB_WORKER_ENABLED=true`).
+2. **Dry run.** `kb-server reindex --dry-run` prints live documents per tenant,
+   how many will be queued, and how many are skipped because they have no
+   `s3Key` (no original to rebuild from) or already have a pending/processing
+   job. Resolve the blocked rows before a real run.
+3. **Reindex.** `kb-server reindex` (optionally `--tenant <id>`) queues one
+   normal ingest job per queueable document. The existing worker claims them,
+   reads the S3 original, and writes chunks/vectors/BM25/page images to Qdrant.
+   Nothing about the ingest path is special-cased.
+4. **Watch the queue** through `GET /v1/jobs/:id` or the worker log until the
+   jobs finish; then run `GET /v1/search` on the documents you expect and check
+   `degrades` is empty.
+5. **Switch search traffic to Rust** once the index answers. Keep Bun running
+   (and its SurrealDB store intact) until the new answers are verified.
+
+**Cost.** On a paid tier step 3 re-embeds every chunk. That is charged per
+input unless `KB_CACHE_DIR` already holds those embeddings; set the cache before
+the first run and keep `KB_EMBEDDING_MODEL`/`KB_EMBEDDING_DIM` unchanged. Local
+tiers pay in CPU time instead.
+
+**What was deleted with the shared store.** `rust/scripts/mixed-fleet.sh` and
+`rust/scripts/search-parity.sh` are gone: both asserted that Bun and Rust read
+and wrote one shared chunk store, and no such store exists. References to them
+below are historical and describe how the shared-Postgres contract was checked
+while it existed. The `KB_CHUNK_STORE=surreal` path is not a fallback.
+
 ---
 
 ## 1. Prerequisites
@@ -10,7 +60,7 @@ Before starting cutover, ensure the following infrastructure and settings are ve
 
 1. **Databases**:
    - **PostgreSQL 16**: Accessible via `DATABASE_URL`.
-   - **SurrealDB v2 (2.x)**: Accessible via `SURREAL_DB_URL` over HTTP (e.g. `http://surreal:8000`). Note: The Rust service communicates via SurrealDB's HTTP `/sql` endpoint, whereas Bun uses WebSocket `/rpc`. SurrealDB v2 serves both on port 8000.
+   - **Qdrant**: Accessible via `QDRANT_GRPC_URL` (default `http://127.0.0.1:16334`). The Rust service creates its collections at boot; `kb-server apply-schema` does the same without serving. Existing Bun data is rebuilt from S3 with `kb-server reindex` (§0), not read from SurrealDB.
 2. **Object Storage**:
    - S3-compatible bucket (`S3_BUCKET`, default `rantai-kb`) with read/write access.
 3. **Inference Providers**:
@@ -22,7 +72,7 @@ Before starting cutover, ensure the following infrastructure and settings are ve
 
 ## 2. Migration Ownership
 
-The PostgreSQL schema and SurrealDB vector definitions are shared between Bun and Rust.
+The PostgreSQL schema is shared between Bun and Rust. The chunk store is not: Bun writes SurrealDB, Rust writes Qdrant.
 
 ### PostgreSQL Migrations
 
@@ -31,69 +81,81 @@ The PostgreSQL schema and SurrealDB vector definitions are shared between Bun an
 - **Locking**: A PostgreSQL session advisory lock (`7241331885`) prevents race conditions between multiple booting containers.
 - **Idempotency**: Already-applied migrations are safely skipped.
 - **Ownership**: Both `bunx prisma migrate deploy` and `kb-server migrate` agree on what is applied. Either binary can manage migrations.
-- **One ledger, and Rust reads Prisma's rows**: Prisma creates `_prisma_migrations` with `timestamptz` timestamp columns, so the Rust runner asks for its applied/unapplied decision in SQL (`"finished_at" IS NOT NULL AND "rolled_back_at" IS NULL`) and decodes only the `TEXT` checksum. Decoding those timestamps in Rust cannot work against both engines — `DateTime<Utc>` fails on a timestamp without a zone and `NaiveDateTime` fails on one with — and the failure was silent, because the error was swallowed into "not applied" and every run re-applied every migration. `rust/scripts/mixed-fleet.sh` now runs Prisma's deploy **first**, on an empty database, and requires the Rust runner to then apply zero migrations, so a regression here fails the gate instead of a rolling deploy.
+- **One ledger, and Rust reads Prisma's rows**: Prisma creates `_prisma_migrations` with `timestamptz` timestamp columns, so the Rust runner asks for its applied/unapplied decision in SQL (`"finished_at" IS NOT NULL AND "rolled_back_at" IS NULL`) and decodes only the `TEXT` checksum. Decoding those timestamps in Rust cannot work against both engines — `DateTime<Utc>` fails on a timestamp without a zone and `NaiveDateTime` fails on one with — and the failure was silent, because the error was swallowed into "not applied" and every run re-applied every migration. Before it was removed with the shared chunk store, `rust/scripts/mixed-fleet.sh` ran Prisma's deploy **first**, on an empty database, and required the Rust runner to then apply zero migrations, so a regression here failed the gate instead of a rolling deploy.
 
 ### Entity graph tables (`20261017120000_graph_tables`)
 
-The entity graph moves out of SurrealDB into four plain Postgres tables — `KbEntity`, `KbMention`, `KbRelation`, `KbGraphVersion` — with the traversal done in Rust over a CSR (`docs/architecture-target.md` §11, step L.3).
+The entity graph lives in four plain Postgres tables — `KbEntity`, `KbMention`, `KbRelation`, `KbGraphVersion` — with the traversal done in Rust over a CSR (`docs/architecture-target.md` §11, step L.3). Since 2026-10-25 it is the only entity store in Rust; ingest extraction and the intelligence route both use it.
 
-- **Additive, and proven to be.** The migration creates four new tables and their indexes. It alters no existing table, column, index or constraint. `rust/scripts/mixed-fleet.sh` asserts this rather than assuming it: Prisma's own engine applies both migrations from an empty database, the four graph tables are counted inside the container, and the Rust runner must then apply none of them.
+- **Additive, and proven to be.** The migration creates four new tables and their indexes. It alters no existing table, column, index or constraint. Before its removal with the shared chunk store, `rust/scripts/mixed-fleet.sh` asserted this rather than assuming it: Prisma's own engine applied both migrations from an empty database, the four graph tables were counted inside the container, and the Rust runner had to apply none of them.
 - **Bun does not read them yet.** Nothing in `src/` touches these tables, so a Bun instance and a Rust instance write to the same Postgres without seeing each other's graph rows. `docs/eval-baseline.md` §"GraphStore (L.3a)" has the measurements.
 - **The scope rule is enforced in SQL, not in Rust.** Both graph reads carry `"documentId" = ANY(<scope>)`, so a relation extracted from a document the caller cannot see is never fetched and therefore cannot become a *path* through the graph. Filtering results instead of rows would still leak the existence and shape of an out-of-scope document: two visible entities joined only by an out-of-scope relation would become connected. `kb_ports::graph_contract` tests that case directly (`no_path_through_an_out_of_scope_document`) rather than inferring it.
 - **Ids are derived, not generated.** An entity id is `sha256("kb-entity", tenant, key)` and a relation id `sha256("kb-relation", tenant, src, dst, type, document)`, so re-ingesting a document replaces rows instead of adding a second set, and two runs of the same ingest write byte-identical rows. A `uuid()` default would make every re-ingest a different row set.
 
-### SurrealDB DDL
+### Qdrant collections
 
-- The vector schema is applied via `kb-server apply-schema` (or `scripts/apply-vector-schema.ts`).
-- All statements use `IF NOT EXISTS` and are idempotent.
-- **Important**: Vector index dimension is set at creation time by `KB_EMBEDDING_DIM`. Do not change embedding dimensions without re-indexing chunks.
+- `kb-server apply-schema` creates the chunk collection (`chunks__<model>__<dim>`) and, when
+  `KB_PAGE_EMBEDDING_MODEL` is set, the page collection (`pages__chunks__<model>__<dim>`).
+  `serve` does the same on boot, so a fresh deployment needs no separate DDL step.
+- The dense width comes from `KB_EMBEDDING_DIM` (or the tier preset); the sparse vector and
+  payload indexes are created with the collection. Creation is idempotent.
+- **Important**: the width is fixed when the collection is created. Changing embedding models
+  or dimensions creates a new collection; re-ingest the corpus (`kb-server reindex`) into it.
 
 ---
 
-## 3. Mixed-Fleet Rolling Deployment
+## 3. Rolling deployment (Qdrant-only, from 2026-10-25)
 
-Rust and Bun services are fully bidirectional-compatible and can run concurrently against the same databases and object storage during a phased rollout.
+The shared-Postgres contract still holds: Rust and Bun can run against the same
+Postgres (documents, jobs, KBs, keys) and the same S3 bucket, and either worker
+claims jobs with `FOR UPDATE SKIP LOCKED`. The chunk index is separate, which
+changes the phase order.
 
-### Phase 1: Deploy Rust Ingest Workers
+### Phase 1: Build the Qdrant index
 
-Deploy Rust instances configured as worker-only or dual API/worker:
+Deploy Rust with the worker on and run the §0 reindex. Do **not** run a Bun
+worker during this phase: a Bun worker would claim the reindexed jobs and write
+their chunks to SurrealDB, leaving Rust with no index for those documents.
+The API can stay on Bun (`KB_WORKER_ENABLED=false` there) while Rust only runs
+the worker.
 
-```bash
-# Example Rust Worker instance
-export KB_WORKER_ENABLED="true"
-kb-server serve
-```
+### Phase 2: Route read/search traffic to Rust
 
-Meanwhile, Bun instances can have worker disabled if desired (`KB_WORKER_ENABLED=false`).
-Jobs enqueued by Bun API instances are claimed via `FOR UPDATE SKIP LOCKED` by the Rust worker, extracted with Rust parsers and PDFium, embedded, and stored in SurrealDB.
+Point `GET /v1/*` and `POST /v1/search` at Rust. Check that documents ingested
+before the cutover answer from Qdrant and that `degrades` is empty. API keys
+created by either runtime authenticate on both, because they live in Postgres.
 
-### Phase 2: Route Read & Search Traffic to Rust
+There is no live Bun-vs-Rust parity matrix any more: the two runtimes no longer
+share a store, so a diff would compare two different indexes. Rust's own
+retrieval and leak gates are `rust/scripts/ci-eval-gate.sh` and
+`cargo test -p kb-store-qdrant --features integration`.
 
-Route HTTP traffic (`GET /v1/*`, `POST /v1/search`) through your load balancer to Rust replicas (`PORT=8080`).
+### Phase 3: Route write traffic to Rust
 
-- Validated: SurrealDB chunks created by either Bun or Rust are retrievable by both runtimes.
-- Validated: API keys created by either Bun (`bun scripts/create-api-key.ts`) or Rust (`kb-server create-api-key`) authenticate seamlessly on both runtimes.
-- **Search Parity Verification**: Run `./rust/scripts/search-parity.sh` to execute the full search parity test matrix (29 test cases covering queries, `hybrid: true/false/omitted`, `maxChunks` 1/3/8/50, `format: "context"`, `documentIds`, `knowledgeBaseIds`, and `category` filters) verifying zero JSON diffs between Bun and Rust on the same storage state.
-
-### Phase 3: Route Write Traffic to Rust
-
-Route `POST /v1/documents`, `PATCH`, and `DELETE` requests to Rust replicas.
-Verify SSE progress frames on `GET /v1/events`.
+Move `POST /v1/documents`, `PATCH` and `DELETE` to Rust and verify SSE progress
+on `GET /v1/events`. New uploads are ingested into Qdrant from here on.
 
 ### Phase 4: Retire Bun
 
-Once 100% of traffic is handled by Rust replicas and no errors are observed in metrics, Bun containers may be stopped and removed.
+Once all traffic is on Rust and the Qdrant index has been verified, stop the Bun
+containers. Keep the SurrealDB data until the rollback window in §4 closes; it
+is the only copy of Bun's chunk index.
 
 ---
 
 ## 4. Rollback Plan
 
-If an unforeseen issue occurs with the Rust runtime:
-
-1. **Zero Data Transformation Needed**: Because Rust writes standard PostgreSQL rows, identical SurrealDB `document_chunk` structures, and standard S3 object keys (`documents/{tenantId}/{documentId}/raw`), the data stored by Rust is 100% readable by Bun.
-2. **Immediate Traffic Switch**: Update the load balancer or DNS to route incoming requests back to the Bun container instances (`bun src/server.ts`).
-3. **Worker Switch**: Ensure `KB_WORKER_ENABLED=true` on Bun instances so the Bun ingest loop claims any pending jobs.
-4. **No Schema Rollback**: No database downgrades or schema rollbacks are required.
+1. **Before Rust has ingested anything new**, roll back by switching traffic
+   back to Bun and re-enabling its worker. Bun's SurrealDB store is untouched,
+   so its answers are exactly what they were.
+2. **After Rust has ingested or reindexed documents**, Bun cannot serve those
+   chunks: Rust wrote them to Qdrant and Bun cannot read Qdrant. The documents
+   and originals are safe in Postgres and S3, but rolling back means Bun has to
+   re-ingest them (`POST /v1/documents` again, or a rebuild into SurrealDB),
+   which may re-embed. Decide the rollback window before starting §0 and keep
+   the SurrealDB volume until it closes.
+3. **No schema rollback**: the Postgres migrations are additive and shared; do
+   not downgrade them.
 
 ---
 
@@ -173,7 +235,7 @@ In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.d
   0 hits over 240 probes, with the `documentIds` branch (vector-only in both
   runtimes) and the figure arm reported UNTESTED rather than passing.
 - **Page-image arm row** (Rust only; Bun has no page arm): run on a stack with
-  the arm on (`KB_CHUNK_STORE=qdrant KB_STACK_PAGE_ARM=1 rust/scripts/stack-up.sh`)
+  the arm on (`KB_STACK_PAGE_ARM=1 rust/scripts/stack-up.sh`)
   and a PDF corpus (`kb-server eval leak --pdf …`). The stub's
   `/page-embeddings` gives every page and query one vector, so every foreign
   page is a perfect match and only the scope keeps it out. 2026-10-23: 0 leaks

@@ -66,16 +66,17 @@ impl AppState {
         // The graph store shares the pool the rest of the process already holds:
         // three Postgres tables are not worth a second connection pool. It backs
         // both the graph arm and the intelligence route.
-        let (graph, entities): (Option<Arc<dyn GraphStore>>, Option<Arc<dyn EntityStore>>) =
-            match config.graph_store {
-                crate::config::GraphStoreChoice::None => (None, None),
-                crate::config::GraphStoreChoice::Pg => {
-                    let store = Arc::new(kb_store_pg::PgGraphStore::from_pool(pool.clone()));
-                    let graph: Arc<dyn GraphStore> = store.clone();
-                    let entities: Arc<dyn EntityStore> = store;
-                    (Some(graph), Some(entities))
-                }
-            };
+        let pg_graph: Option<Arc<kb_store_pg::PgGraphStore>> = match config.graph_store {
+            crate::config::GraphStoreChoice::None => None,
+            crate::config::GraphStoreChoice::Pg => {
+                Some(Arc::new(kb_store_pg::PgGraphStore::from_pool(pool.clone())))
+            }
+        };
+        let graph: Option<Arc<dyn GraphStore>> = pg_graph
+            .as_ref()
+            .map(|store| Arc::clone(store) as Arc<dyn GraphStore>);
+        let entities: Option<Arc<dyn EntityStore>> =
+            pg_graph.map(|store| store as Arc<dyn EntityStore>);
         let graph_arm = match (config.graph_arm.enabled, &graph) {
             (true, Some(store)) => Some(Arc::new(kb_engine::GraphArm::new(
                 Arc::clone(store),

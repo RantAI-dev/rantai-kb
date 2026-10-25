@@ -108,7 +108,7 @@ pub struct RetrievalOutcome {
     pub degrades: Vec<RetrievalDegrade>,
     /// What each stage cost. Always present: a request nobody times is a
     /// request nobody can make faster, and the numbers are the only evidence
-    /// the move off SurrealDB can be judged by.
+    /// a retrieval change can be judged by.
     pub timings: StageTimings,
 }
 

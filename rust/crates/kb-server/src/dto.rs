@@ -16,8 +16,9 @@ pub fn parse_json<T: DeserializeOwned + Default>(body: &[u8]) -> T {
     serde_json::from_slice(body).unwrap_or_default()
 }
 
-/// The SurrealDB table every chunk lives in, and the prefix of every chunk id
-/// the API emits.
+/// The wire prefix every chunk id carries (`document_chunk`): the table name
+/// Bun's SurrealDB `RecordId` renders with. Rust keeps that spelling for API
+/// compatibility even though chunks live in Qdrant.
 const CHUNK_TABLE: &str = "document_chunk";
 
 /// A chunk id as a client sees it: `document_chunk:⟨{bare}⟩`.
@@ -25,7 +26,7 @@ const CHUNK_TABLE: &str = "document_chunk";
 /// The `RetrievalIndex` port's [`kb_ports::ChunkId`] is the bare ident
 /// `{document_id}_{chunk_index}` — that is what the store is queried with and
 /// what every adapter hands back — but the API is a drop-in for Bun, and Bun
-/// serialises a SurrealDB `RecordId` with `toString()`, which is
+/// serialises its SurrealDB `RecordId` with `toString()`, which is
 /// `document_chunk:⟨…⟩` (U+27E8 / U+27E9). The wrapper is therefore applied
 /// here, once, at the wire boundary, and *not* in the port: a client that
 /// stored an id from a search response must be able to send it back to a route
@@ -43,9 +44,9 @@ pub fn chunk_id_for_client(id: &str) -> String {
 /// The bare ident inside a chunk id, whichever form a client sent.
 ///
 /// Accepts both shapes a caller can hold: Bun's `document_chunk:⟨{bare}⟩` and
-/// the bare `{bare}` this service's own ports speak. SurrealDB may also render
-/// the ident with backticks (`` document_chunk:`{bare}` ``) depending on the
-/// HTTP vs RPC endpoint, so that shape is accepted too.
+/// the bare `{bare}` this service's own ports speak. The Bun-compatible shape
+/// may also arrive with backticks (`` document_chunk:`{bare}` ``) from a client
+/// that read it over SurrealDB's RPC endpoint, so that shape is accepted too.
 ///
 /// This is the *only* place the wrapper is removed. Callers that hold a chunk
 /// id from a request or a URL split it here and pass the bare ident to the
@@ -586,7 +587,7 @@ mod tests {
 
     #[test]
     fn a_chunk_id_is_buns_record_id_on_the_wire() {
-        // Bun serialises SurrealDB's `RecordId` with `toString()`, i.e.
+        // Bun serialises its `RecordId` with `toString()`, i.e.
         // `document_chunk:⟨{bare}⟩`. The port speaks the bare ident, so the
         // wrapper is applied at this boundary and nowhere else.
         let dto = ChunkDto::from(hit(false, None));
@@ -596,9 +597,9 @@ mod tests {
 
     #[test]
     fn a_client_chunk_id_is_accepted_in_either_form() {
-        // Whatever a caller holds — Bun's wrapper, the bare ident, or
-        // SurrealDB's backticked rendering — resolves to the same bare ident
-        // the store keys on.
+        // Whatever a caller holds — Bun's wrapper, the bare ident, or a
+        // backticked rendering — resolves to the same bare ident the store
+        // keys on.
         for id in [
             "document_chunk:⟨d_0⟩",
             "document_chunk:`d_0`",

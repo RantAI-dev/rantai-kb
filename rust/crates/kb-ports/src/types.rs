@@ -7,8 +7,8 @@ pub use kb_core::intelligence::{Entity, Relation};
 use crate::ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 
 /// Chunk type as understood by retrieval, rendering and the policy in
-/// `kb-core`. Stored in SurrealDB as a string field (`metadata.chunkType`)
-/// and carried on the wire as an enum so the boundary is explicit.
+/// `kb-core`. Stored as a string field (`metadata.chunkType`) and carried on
+/// the wire as an enum so the boundary is explicit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkType {
@@ -61,8 +61,7 @@ impl ChunkType {
 }
 
 /// Metadata carried alongside a chunk at search time. Mirrors what the
-/// ingestion path writes into `metadata.{section,page,chunkType,...}` in
-/// SurrealDB.
+/// ingestion path writes into `metadata.{section,page,chunkType,...}`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ChunkMetadata {
     pub section: Option<String>,
@@ -92,20 +91,18 @@ pub struct Chunk {
 
 /// A chunk on its way into the vector store.
 ///
-/// `metadata` is the object stored verbatim in SurrealDB's `metadata` column,
-/// so it carries the field names the Bun chunker writes (`documentTitle`,
-/// `category`, `section`, `chunkIndex`, `chunkType`, …) rather than the
-/// read-shape of [`ChunkMetadata`]. Keeping it opaque is what lets a Rust
-/// worker write chunks the Bun retrieval path reads back unchanged.
+/// `metadata` is the object stored verbatim, so it carries the field names the
+/// chunker writes (`documentTitle`, `category`, `section`, `chunkIndex`,
+/// `chunkType`, …) rather than the read-shape of [`ChunkMetadata`]. Keeping it
+/// opaque is what lets an adapter store and return the same fields unchanged.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChunkToStore {
     pub content: String,
     pub chunk_index: u32,
     pub embedding: Vec<f32>,
     pub metadata: serde_json::Value,
-    /// Written to the `contextual_prefix` column when present. SurrealDB
-    /// rejects an explicit NULL for `option<string>`, so the adapter omits the
-    /// assignment instead.
+    /// Written to the `contextual_prefix` field when present; absent rather
+    /// than null when it is not.
     pub contextual_prefix: Option<String>,
 }
 
@@ -252,11 +249,10 @@ pub struct FigureGateCandidate {
 
 /// One way a chunk can reach a search answer.
 ///
-/// The wire vocabulary, not the store's: Qdrant's dense and sparse vectors,
-/// SurrealDB's `vector::similarity` and `@@`, and the two engine phases that add
-/// a chunk the arms never scored. Ordered by how early in the pipeline the arm
-/// runs, because [`RetrievalProvenance::arms`] is emitted in this order and a
-/// caller must not have to sort before comparing.
+/// The wire vocabulary, not the store's: dense and sparse vectors, and the two
+/// engine phases that add a chunk the arms never scored. Ordered by how early
+/// in the pipeline the arm runs, because [`RetrievalProvenance::arms`] is
+/// emitted in this order and a caller must not have to sort before comparing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProvenanceArm {
@@ -539,11 +535,11 @@ pub struct PatchDocument {
     pub knowledge_base_ids: Option<Vec<KnowledgeBaseId>>,
 }
 
-/// One stored chunk as the document-detail route returns it: the SurrealDB
-/// record id, the position in the document, and the read-shape metadata.
+/// One stored chunk as the document-detail route returns it: the store id, the
+/// position in the document, and the read-shape metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredChunk {
-    /// SurrealDB record id, rendered as a string (the Bun client does the same).
+    /// Store id, rendered as a string (the Bun client does the same).
     pub id: String,
     pub chunk_index: u32,
     pub content: String,
@@ -763,9 +759,9 @@ mod provenance_tests {
 
     #[test]
     fn the_wire_vocabulary_is_the_store_agnostic_one() {
-        // Qdrant calls its arms "dense" and "sparse"; SurrealDB calls them
-        // `vector::similarity` and `@@`. The response must not leak either
-        // store's naming into a contract two runtimes share.
+        // Qdrant calls its arms "dense" and "sparse"; the legacy SurrealDB
+        // adapter called them `vector::similarity` and `@@`. The response must
+        // not leak either store's naming into a contract two runtimes share.
         assert_eq!(serde_json::to_value(ProvenanceArm::Dense).unwrap(), "dense");
         assert_eq!(
             serde_json::to_value(ProvenanceArm::Sparse).unwrap(),

@@ -6,19 +6,20 @@ Instructions for any coding agent working in this repo (Claude Code, OpenCode, A
 
 rantai-kb is a standalone document ingest and retrieval service: upload a file, it is extracted,
 chunked, embedded and indexed; `/v1/search` returns scoped context with sources and figures.
-Two runtimes share one database and must stay compatible:
+Two runtimes share the Postgres tables and the API shape:
 
-- **Bun/TS** (`src/`): the current production service.
+- **Bun/TS** (`src/`): the frozen production service.
 - **Rust** (`rust/crates/`): the port that replaces it. Hexagonal: `kb-core` (pure logic) ←
-  `kb-ports` (interfaces) ← adapters (`kb-inference`, `kb-store-pg`, `kb-store-surreal`,
+  `kb-ports` (interfaces) ← adapters (`kb-inference`, `kb-store-pg`, `kb-store-qdrant`,
   `kb-store-blob`, `kb-extract`) and `kb-engine` (pipelines) ← `kb-server` (composition root).
 
 **All new work happens in Rust.** Bun is frozen: no features, no refactors. Touch it only if
 the user asks for a specific fix.
 
-Stores: Postgres (documents, jobs, KBs, keys; Prisma migrations), SurrealDB v2 (chunks, vectors,
-BM25, entities), S3-compatible blobs. Docs: `docs/porting-plan.md`, `docs/rust-cutover.md`,
-`rust/README.md`, `rust/NOTES.md`.
+Stores: Postgres (documents, jobs, KBs, keys, and the entity graph when `KB_GRAPH_STORE=pg`;
+Prisma migrations), Qdrant (chunks, vectors, BM25, page images — the only chunk store), and
+S3-compatible blobs. Docs: `docs/porting-plan.md`, `docs/rust-cutover.md`, `rust/README.md`,
+`rust/NOTES.md`.
 
 ## Commands
 
@@ -29,7 +30,7 @@ BM25, entities), S3-compatible blobs. Docs: `docs/porting-plan.md`, `docs/rust-c
 | Rust format / lint | `cargo fmt --all --manifest-path rust/Cargo.toml --check` · `cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings` |
 | Rust tests | `cargo test --manifest-path rust/Cargo.toml --workspace` (needs libpdfium: `./rust/scripts/fetch-pdfium.sh ./rust/.vendor/pdfium`) |
 | Rust boundary | `cargo run --manifest-path rust/Cargo.toml -p kb-server -- check-boundary` |
-| Live checks | `rust/scripts/smoke.sh` · `rust/scripts/mixed-fleet.sh` · `rust/scripts/search-parity.sh` |
+| Live checks | `rust/scripts/smoke.sh` · `rust/scripts/ci-eval-gate.sh` |
 
 ## Working rules
 
@@ -40,9 +41,13 @@ BM25, entities), S3-compatible blobs. Docs: `docs/porting-plan.md`, `docs/rust-c
    session with uncommitted work and no note of it. Do not push or open PRs unless asked.
 3. **Respect the boundaries.** `kb-core` does no I/O; `kb-engine` knows ports, never adapter
    names. Both boundary checks must pass.
-4. **Rust ↔ Bun compatibility is a contract.** Shared tables, record ids, job queue and API
-   shapes must interoperate (`mixed-fleet.sh`). Where Rust deliberately differs from Bun (e.g.
-   the BM25 scope fix), say so in `docs/rust-cutover.md` and in `search-parity.sh`.
+4. **Rust ↔ Bun share Postgres and the API, not the chunk store.** The PostgreSQL tables
+   (documents, jobs, KBs, keys), their record ids, the job queue and the HTTP shapes must
+   interoperate, so a key minted by one runtime works on the other and either worker can claim
+   either job. The chunk store is **not** shared: Rust is Qdrant-only and Bun keeps its own
+   SurrealDB store. Production data written by Bun is moved to Qdrant with
+   `kb-server reindex` (rebuild from the S3 originals), not by reading SurrealDB. Where Rust
+   deliberately differs from Bun (e.g. the BM25 scope fix), say so in `docs/rust-cutover.md`.
 5. **Tenant scope is sacred.** Every retrieval arm (vector, BM25, entity, figure, neighbour)
    must be filtered to the caller's visible documents. Add a test for any new arm.
 6. **A failed search is not an empty result.** Degrade visibly (`degrades`), never silently.

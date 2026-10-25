@@ -1,9 +1,9 @@
 //! The `RetrievalIndex` contract suite.
 //!
-//! One set of properties, run against every adapter: the in-memory reference,
-//! Qdrant, and the legacy SurrealDB store. This is the file that makes the
-//! Surreal → Qdrant move provably safe, and it exists because the two failures
-//! we have actually hit were invisible in every other test:
+//! One set of properties, run against every adapter: the in-memory reference
+//! and Qdrant. This is the file that makes a chunk-store change provably safe,
+//! and it exists because the two failures we have actually hit were invisible
+//! in every other test:
 //!
 //! * **A scope escape.** `bm25_search_global` had no scope parameter, so another
 //!   tenant's chunks were ranked and returned, and the caller filtered them out.
@@ -26,8 +26,7 @@
 //! ```
 //!
 //! Adapters that cannot give a fresh index (one live database) should pass a
-//! factory that creates a fresh namespace or collection, as the SurrealDB
-//! adapter does with its own database.
+//! factory that creates a fresh namespace or collection, as Qdrant does.
 
 use kb_core::sparse::encode_document;
 

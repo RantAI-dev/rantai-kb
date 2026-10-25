@@ -700,9 +700,9 @@ impl ChunkStore for FakeChunkStore {
         let Some(chunks) = stored.get(document_id) else {
             return Ok(Vec::new());
         };
-        // `ChunkToStore.metadata` is the SurrealDB metadata object verbatim, so
-        // the read shape is derived from it the same way the Surreal adapter
-        // derives it, and the record id follows the store's own naming.
+        // `ChunkToStore.metadata` is the stored metadata object verbatim, so
+        // the read shape is derived from it the same way an adapter derives
+        // it, and the id follows the store's own naming.
         let mut out: Vec<StoredChunk> = chunks
             .iter()
             .map(|c| {

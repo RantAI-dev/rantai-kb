@@ -2,7 +2,7 @@
 //!
 //! Wrapping `String` rather than `Uuid` keeps these types cheap to construct
 //! for tests and consistent with the schema columns (which are `String` in
-//! Prisma and `string` in SurrealQL).
+//! Prisma, and encoded as strings by the Qdrant payload).
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -33,7 +33,7 @@ impl fmt::Display for TenantId {
 }
 
 /// Document id. Postgres `Document.id`, also used as the `document_id` filter
-/// on the SurrealDB chunk store.
+/// in the Qdrant payload and every chunk-store query.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct DocumentId(pub String);
@@ -57,8 +57,8 @@ impl fmt::Display for DocumentId {
     }
 }
 
-/// Chunk id. The SurrealDB `document_chunk.id`, written by ingest as
-/// `{documentId}_{chunkIndex}`.
+/// Chunk id. Written by ingest as `{documentId}_{chunkIndex}` and encoded by
+/// each adapter into its own point id.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ChunkId(pub String);

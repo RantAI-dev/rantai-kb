@@ -4,7 +4,7 @@
 #   rust/scripts/kb-dev.sh up lite-en              # or lite | desk | studio | station | cloud
 #
 # This file replaces the frozen Bun stack (root docker-compose.yml) for everything
-# deployed from Rust. `rust/scripts/stack-up.sh` stays as the smoke/parity harness;
+# deployed from Rust. `rust/scripts/stack-up.sh` stays as the smoke/eval harness;
 # the facts below (images, credentials, TEI flags, env names) come from it.
 #
 # Design notes:

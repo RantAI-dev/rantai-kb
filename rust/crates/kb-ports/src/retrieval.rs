@@ -16,13 +16,13 @@
 //! # Why keyword semantics are a declared capability, not an assumption
 //!
 //! Sparse keyword search is OR-of-terms: a question matches a document when
-//! they share *any* term, scored by BM25. SurrealDB's `@@` operator is
-//! boolean AND, so a natural-language question containing "siapakah" or "?"
-//! returns zero hits — nDCG@10 0.414 against 0.744 for an independent BM25
-//! (`docs/findings-bm25-collapse.md`). An adapter whose backend is AND-only
-//! says so through [`IndexCapabilities::sparse`] instead of the caller
-//! guessing, and the contract suite skips the OR-semantics test for it with the
-//! reason printed.
+//! they share *any* term, scored by BM25. The legacy SurrealDB adapter's `@@`
+//! operator was boolean AND, so a natural-language question containing
+//! "siapakah" or "?" returned zero hits — nDCG@10 0.414 against 0.744 for an
+//! independent BM25 (`docs/findings-bm25-collapse.md`). An adapter whose
+//! backend is AND-only says so through [`IndexCapabilities::sparse`] instead of
+//! the caller guessing, and the contract suite skips the OR-semantics test for
+//! it with the reason printed.
 
 use async_trait::async_trait;
 use kb_core::sparse::SparseVector;
@@ -54,7 +54,7 @@ pub struct HybridQuery {
 /// index with its own text analyzer consumes [`terms`], because it will
 /// re-analyse the text with *its* rules — and those rules are the thing
 /// [`IndexCapabilities::sparse`] is reporting on. Carrying both is what lets one
-/// port serve Qdrant and SurrealDB without either one re-deriving the other's
+/// port serve more than one backend without any of them re-deriving another's
 /// vocabulary.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct KeywordQuery {
@@ -138,9 +138,8 @@ pub struct ArmRanks {
 /// the rest through [`IndexCapabilities`].
 #[derive(Debug, Clone)]
 pub struct IndexUnit {
-    /// Stable unit id. The adapter encodes it (UUIDv5 for Qdrant, a record id
-    /// for SurrealDB); the engine only guarantees it is stable and unique per
-    /// tenant.
+    /// Stable unit id. The adapter encodes it (UUIDv5 for Qdrant); the engine
+    /// only guarantees it is stable and unique per tenant.
     pub id: ChunkId,
     pub document_id: DocumentId,
     pub tenant: TenantId,
@@ -192,7 +191,7 @@ pub enum KeywordSemantics {
     /// sparse vectors with `Modifier::Idf` do.
     AnyTerm,
     /// Boolean AND: every query term must be present, or no hit at all. What
-    /// SurrealDB's `@@` does. Declared honestly by the legacy adapter.
+    /// the legacy SurrealDB adapter did; no current adapter declares it.
     AllTerms,
 }
 
@@ -203,11 +202,9 @@ pub struct IndexCapabilities {
     /// Width of the dense vectors, or `None` when there is no dense arm.
     ///
     /// `None` means "no dense arm". A backend that *has* the arm but cannot read
-    /// its own width back — SurrealDB fixes the dimension at `DEFINE INDEX`
-    /// time and the client never sees it — reports the width it was configured
-    /// with. Collapsing the two cases into one number would make an adapter skip
-    /// tests it can actually run, which is how a contract suite quietly stops
-    /// testing things.
+    /// its own width back reports the width it was configured with. Collapsing
+    /// the two cases into one number would make an adapter skip tests it can
+    /// actually run, which is how a contract suite quietly stops testing things.
     pub dense_dims: Option<u32>,
     /// Keyword arm and its matching semantics. `None` = no keyword arm.
     pub sparse: Option<KeywordSemantics>,
@@ -249,8 +246,8 @@ impl IndexCapabilities {
     }
 }
 
-/// The retrieval port. Implemented by the in-memory reference, by Qdrant, and —
-/// during migration — by the legacy SurrealDB store.
+/// The retrieval port. Implemented by the in-memory reference and by Qdrant,
+/// the only production chunk store since 2026-10-25.
 ///
 /// Read methods take a [`DocumentScope`] and must never return a unit outside
 /// it. That is the whole contract, and it is what the contract suite exists to

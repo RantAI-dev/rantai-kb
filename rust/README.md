@@ -1,7 +1,7 @@
 | `KB_FIGURE_VLM_TOPN` | Top candidate figures evaluated by figure gate | `5` |
 | `KB_FIGURE_VLM_MAX` | Maximum number of candidate figures accepted | `2` |
 | `KB_FIGURE_VLM_TIMEOUT_MS` | Figure gate evaluation timeout in ms | `15000` |
-| **Qdrant Store (Opt-in)** | | |
+| **Qdrant Store (the only chunk store)** | | |
 | `QDRANT_GRPC_URL` | Qdrant gRPC endpoint (e.g. `http://127.0.0.1:16334`) | `http://127.0.0.1:16334` |
 | `QDRANT_URL` | Alternative Qdrant URL if gRPC URL is unset | `http://127.0.0.1:16334` |
 | `QDRANT_API_KEY` | Optional Qdrant API key | `None` |
@@ -37,7 +37,7 @@ numbers, upload/search examples, GPU notes and troubleshooting: [`deploy/README.
 
 ---
 
-## Testing & Parity Verification
+## Testing & Live Verification
 
 ### 1. Workspace Unit & Integration Tests
 ```bash
@@ -46,33 +46,30 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ### 2. Live Smoke Test
-Runs Postgres 16, SurrealDB v2, S3 (RustFS), and stub embeddings to execute an end-to-end ingest, chunking, SSE events, search, detail, list, and soft/hard delete cycle:
+Runs Postgres 16, Qdrant, S3 (RustFS), and stub embeddings to execute an end-to-end ingest, chunking, SSE events, search, detail, list, and soft/hard delete cycle:
 ```bash
 ./rust/scripts/smoke.sh
 ```
 
-### 3. Bidirectional Search Parity Matrix
-Validates 100% search response parity between TypeScript (Bun) and Rust running against the same database and storage:
+### 3. Retrieval Eval & Scope Gate
+The Qdrant retrieval-quality and cross-scope leak gate (the same one CI runs):
 ```bash
-./rust/scripts/search-parity.sh
+./rust/scripts/ci-eval-gate.sh
 ```
-Runs a matrix of search bodies (queries, hybrid true/false/omitted, maxChunks 1/3/8/50, format "context", documentIds, knowledgeBaseIds, and categories), diffing normalized JSON responses (`jq -S`, rounded to 4 decimal places) and requiring 0 diffs.
+
+Bun and Rust no longer share a chunk store, so there is no live search-parity harness. Bun
+reads and writes SurrealDB; Rust reads and writes Qdrant. Production migration is
+`kb-server reindex` (see below).
 
 ### 4. Adapter Contract Tests
 
-The shared `RetrievalIndex` contract suite (`kb-ports/contract`) runs against storage engines:
+The shared `RetrievalIndex` contract suite (`kb-ports/contract`) runs against Qdrant:
 
-- **Legacy SurrealDB adapter**:
-  ```bash
-  rust/scripts/stack-up.sh && source /tmp/kb-stack/stack.env
-  KB_SURREAL_CONTRACT=1 cargo test -p kb-store-surreal --features integration --test retrieval_index_contract -- --nocapture
-  ```
-- **Qdrant adapter**:
-  The suite requires `KB_QDRANT_CONTRACT=1` and fails loudly if run without the env var set:
-  ```bash
-  KB_STACK_QDRANT=1 rust/scripts/stack-up.sh
-  KB_QDRANT_CONTRACT=1 cargo test -p kb-store-qdrant --features integration --test retrieval_index_contract -- --nocapture
-  ```
+The suite requires `KB_QDRANT_CONTRACT=1` and fails loudly if run without the env var set:
+```bash
+rust/scripts/stack-up.sh
+KB_QDRANT_CONTRACT=1 cargo test -p kb-store-qdrant --features integration --test retrieval_index_contract -- --nocapture
+```
 
 ### 5. Qdrant exact-vs-HNSW benchmark
 
@@ -82,7 +79,7 @@ measurement rather than a pass/fail check, so it is `#[ignore]`d and needs a
 live Qdrant:
 
 ```bash
-KB_STACK_QDRANT=1 rust/scripts/stack-up.sh
+rust/scripts/stack-up.sh
 cargo test -p kb-store-qdrant --features integration --test exact_vs_hnsw -- --ignored --nocapture
 rust/scripts/stack-down.sh
 ```

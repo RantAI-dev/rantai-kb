@@ -163,7 +163,7 @@ switch: the resolved config is exactly what the operator would have written by h
 - An unknown value is a startup error listing the five names.
 - Startup logs one INFO line with the tier and every variable it filled, so an operator can see
   what the preset did. Values are model names and numbers; key-shaped names are redacted.
-- `kb-server apply-schema` resolves the tier too, so the SurrealDB vector index is built at the
+- `kb-server apply-schema` resolves the tier too, so the Qdrant collections are created at the
   width the server will store.
 
 Only **text roles** are filled today: no local multimodal (Qwen3-VL) embedder or reranker is
@@ -184,7 +184,7 @@ measurement (build order 5); the Desk / Studio / Station rerank widths are estim
 | `KB_EMBED_CONCURRENCY` | 1 | 2 | 4 | 8 | — |
 | `KB_EMBEDDING_BATCH_SIZE` | 16 | — | — | — | — |
 | `KB_INGEST_CONCURRENCY` | 1 | — | — | — | — |
-| `KB_ENTITY_EXTRACTION_ENABLED` | `false` | `false` | `false` | `false` | `false` (a paid LLM call per document; no search arm reads its output in Qdrant mode) |
+| `KB_ENTITY_EXTRACTION_ENABLED` | `false` | `false` | `false` | `false` | `false` (a paid LLM call per document; only written to the Postgres graph when `KB_GRAPH_STORE=pg`) |
 | `KB_RERANK_ENABLED` | `false` | `true` | `true` | `true` | `true` |
 | `KB_RERANK_PROVIDER` | — | `tei` | `tei` | `tei` | `cohere` |
 | `KB_RERANK_BASE_URL` | — | `http://127.0.0.1:8082` | same | same | `https://openrouter.ai/api/v1/rerank` |
@@ -193,7 +193,6 @@ measurement (build order 5); the Desk / Studio / Station rerank widths are estim
 | `KB_PAGE_EMBEDDING_MODEL` | — | — | — | — | `voyageai/voyage-multimodal-3.5` |
 | `KB_PAGE_EMBEDDING_DIM` | — | — | — | — | 1024 |
 | `KB_PAGE_RERANK` | `false` | `false` | `false` | `false` | `true` |
-| `KB_CHUNK_STORE` | — | — | — | — | `qdrant` |
 
 ¹ `Instruct: Given a question, retrieve passages that answer it\nQuery: ` — the same string
 `rust/scripts/stack-up.sh` and `docs/local-models.md` already use.
@@ -218,8 +217,8 @@ On 2 cores it ingests ViDoRe HR at 6.43 pages/s (page nDCG@10 0.517) against Lit
   `KB_EMBEDDING_API_KEY`); missing it is a config error naming the tier and the variable. The
   Cohere-shaped rerank adapter accepts that key only when `KB_RERANK_BASE_URL` is an
   `openrouter.ai` URL.
-- Cloud also selects `KB_CHUNK_STORE=qdrant` because the page arm only exists on Qdrant. To keep
-  chunks in SurrealDB, set `KB_CHUNK_STORE=surreal` and `KB_PAGE_EMBEDDING_MODEL=` (empty).
+- Qdrant is the only chunk store (SurrealDB was removed on 2026-10-25), so no tier selects a
+  store. `KB_PAGE_EMBEDDING_MODEL=` (empty) is how an operator drops the cloud page arm.
 - The preset fills embedding concurrency as `KB_EMBED_CONCURRENCY`, the name Bun reads, which
   Rust honours when `KB_EMBEDDING_CONCURRENCY` is unset. That way it can never shadow an
   operator's `KB_EMBEDDING_CONCURRENCY`.
