@@ -2,7 +2,7 @@
 //! graph.
 //!
 //! All three take a caller-supplied document id, and all three resolve it
-//! through Postgres *before* touching object storage or SurrealDB. That check
+//! through Postgres *before* touching object storage or the entity graph. That check
 //! is the whole tenant boundary here: neither store has a tenant of its own, so
 //! an id that reached them unchecked would read another tenant's bytes or graph.
 
@@ -164,11 +164,18 @@ pub async fn get_document_intelligence(
         return Err(ApiError::missing_scope("kb:read"));
     }
     let doc = crate::routes::find_visible_document(&state, &auth, &id).await?;
-    let data = state
-        .entities
-        .get_document_intelligence(&doc.id)
-        .await
-        .map_err(ApiError::from)?;
+    let data = match state.entities.as_ref() {
+        Some(entities) => entities
+            .get_document_intelligence(&auth.tenant_id, &doc.id)
+            .await
+            .map_err(ApiError::from)?,
+        // No graph store configured (`KB_GRAPH_STORE` unset): there is no
+        // extraction to report. An empty 200 is the honest answer, not a 500.
+        None => kb_ports::DocumentIntelligenceData {
+            entities: Vec::new(),
+            relations: Vec::new(),
+        },
+    };
 
     let entity_types: std::collections::HashSet<&str> =
         data.entities.iter().map(|e| e.r#type.as_str()).collect();

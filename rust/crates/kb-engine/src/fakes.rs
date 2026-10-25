@@ -17,19 +17,6 @@ pub type ProgressCall = (String, String, u32);
 /// `(job_id, step, progress, step_current, step_total)` recorded by
 /// [`FakeJobStore::update_detailed`].
 pub type DetailedProgressCall = (String, String, u32, Option<u32>, Option<u32>);
-/// `(document_id, id, name, type, confidence, metadata)` recorded by
-/// [`FakeEntityStore::upsert_entity`].
-pub type UpsertedEntity = (
-    DocumentId,
-    String,
-    String,
-    String,
-    f32,
-    Option<serde_json::Value>,
-);
-/// `(source, target, type, confidence, document_id, description)` recorded by
-/// [`FakeEntityStore::relate`].
-pub type StoredRelation = (String, String, String, f32, DocumentId, Option<String>);
 
 /// Timestamp the fakes stamp on every row they create.
 const FAKE_TIMESTAMP: &str = "2026-01-01T00:00:00.000Z";
@@ -45,14 +32,13 @@ use kb_ports::{
     ArmRanks, ArmScores, AuthContext, BlobStore, Candidate, CategoryRecord, Chunk, ChunkId,
     ChunkMetadata, ChunkStore, ChunkToStore, ChunkType, CreateCategory, CreateJobInput,
     CreateKnowledgeBase, DocumentDownloadMeta, DocumentId, DocumentIntelligenceData, DocumentMeta,
-    DocumentScope, DocumentStore, Embedder, Entity, EntityExtractor, EntityStore, EntityView,
+    DocumentScope, DocumentStore, Embedder, Entity, EntityExtractor, EntityStore,
     ExtractionOptions, ExtractionResult, Extractor, FigureGate, FigureGateCandidate, Fusion,
     HybridQuery, IndexCapabilities, IndexUnit, JobRecord, JobStore, JobView, KnowledgeBaseId,
     KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor, NewDocument, PatchCategory,
     PatchDocument, PatchKnowledgeBase, PortError, ProgressSink, QueryEmbedding, ReapableJob,
-    Relation, RelationView, RerankCandidate, RerankResult, Reranker, RetrievalIndex,
-    RetryJobOutcome, ScopeRequest, SearchHit, StoredChunk, TenantId, adapter::ScopeToken,
-    sort_candidates,
+    Relation, RerankCandidate, RerankResult, Reranker, RetrievalIndex, RetryJobOutcome,
+    ScopeRequest, SearchHit, StoredChunk, TenantId, adapter::ScopeToken, sort_candidates,
 };
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -1572,103 +1558,33 @@ impl Extractor for FakeExtractor {
     }
 }
 
-/// Fake in-memory entity store.
+/// Fake document-intelligence reader.
+///
+/// The write half of the port is gone with SurrealDB: ingest writes entities
+/// through `GraphStore`, and tests assert there. This fake only answers the
+/// intelligence route.
 #[derive(Clone, Default)]
 pub struct FakeEntityStore {
-    pub upserted_entities: Arc<RwLock<Vec<UpsertedEntity>>>,
-    pub relations: Arc<RwLock<Vec<StoredRelation>>>,
     pub intelligences: Arc<RwLock<HashMap<DocumentId, DocumentIntelligenceData>>>,
-    pub fail_upsert: Arc<AtomicBool>,
 }
 
 #[async_trait]
 impl EntityStore for FakeEntityStore {
-    async fn upsert_entity(
-        &self,
-        document_id: &DocumentId,
-        sanitized_name: &str,
-        name: &str,
-        entity_type: &str,
-        confidence: f32,
-        metadata: Option<&serde_json::Value>,
-    ) -> Result<(), PortError> {
-        if self.fail_upsert.load(Ordering::Relaxed) {
-            return Err(PortError::Unavailable(
-                "forced entity upsert failure".into(),
-            ));
-        }
-        self.upserted_entities.write().unwrap().push((
-            document_id.clone(),
-            sanitized_name.to_string(),
-            name.to_string(),
-            entity_type.to_string(),
-            confidence,
-            metadata.cloned(),
-        ));
-        Ok(())
-    }
-
-    async fn relate_entities(
-        &self,
-        source_id: &str,
-        rel_type: &str,
-        target_id: &str,
-        confidence: f32,
-        document_id: &DocumentId,
-        context: Option<&str>,
-    ) -> Result<(), PortError> {
-        self.relations.write().unwrap().push((
-            source_id.to_string(),
-            rel_type.to_string(),
-            target_id.to_string(),
-            confidence,
-            document_id.clone(),
-            context.map(|s| s.to_string()),
-        ));
-        Ok(())
-    }
-
     async fn get_document_intelligence(
         &self,
+        _tenant: &TenantId,
         document_id: &DocumentId,
     ) -> Result<DocumentIntelligenceData, PortError> {
-        if let Some(data) = self.intelligences.read().unwrap().get(document_id) {
-            return Ok(data.clone());
-        }
-        let entities: Vec<EntityView> = self
-            .upserted_entities
+        Ok(self
+            .intelligences
             .read()
             .unwrap()
-            .iter()
-            .filter(|(doc, ..)| doc == document_id)
-            .map(|(_, id, name, etype, conf, meta)| EntityView {
-                id: id.clone(),
-                name: name.clone(),
-                r#type: etype.clone(),
-                confidence: *conf,
-                metadata: meta.clone().unwrap_or_else(|| serde_json::json!({})),
-            })
-            .collect();
-        let relations: Vec<RelationView> = self
-            .relations
-            .read()
-            .unwrap()
-            .iter()
-            .filter(|(_, _, _, _, doc, _)| doc == document_id)
-            .map(|(from, rel, to, conf, _, ctx)| RelationView {
-                id: format!("{from}-{rel}-{to}"),
-                from_id: from.clone(),
-                out: to.clone(),
-                relation_type: rel.clone(),
-                confidence: *conf,
-                metadata: serde_json::json!({ "context": ctx }),
-            })
-            .collect();
-
-        Ok(DocumentIntelligenceData {
-            entities,
-            relations,
-        })
+            .get(document_id)
+            .cloned()
+            .unwrap_or(DocumentIntelligenceData {
+                entities: Vec::new(),
+                relations: Vec::new(),
+            }))
     }
 }
 

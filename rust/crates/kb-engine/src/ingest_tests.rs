@@ -17,8 +17,9 @@ use kb_ports::{
 use super::*;
 use crate::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityExtractor,
-    FakeEntityStore, FakeExtractor, FakeJobStore,
+    FakeExtractor, FakeJobStore,
 };
+use crate::in_memory_graph_store::InMemoryGraphStore;
 use crate::ingest::HEARTBEAT_INTERVAL;
 
 const TENANT: &str = "tenant-1";
@@ -783,7 +784,6 @@ Alice works at Acme Corp."
 
     let fake_extractor = Arc::new(FakeExtractor::returning_result(extract_result));
 
-    let entity_store = Arc::new(FakeEntityStore::default());
     let entity_extractor = Arc::new(FakeEntityExtractor::default());
     *entity_extractor.entities.write().unwrap() = vec![
         Entity {
@@ -828,8 +828,8 @@ Alice works at Acme Corp."
             ..IngestSettings::default()
         },
     )
-    .with_entity_store(entity_store.clone())
-    .with_entity_extractor(entity_extractor.clone());
+    .with_entity_extractor(entity_extractor.clone())
+    .with_graph_store(Arc::new(InMemoryGraphStore::new()));
 
     let mut j = job();
     j.params = Some(serde_json::json!({
@@ -889,29 +889,7 @@ Alice works at Acme Corp."
     );
     assert_eq!(figs[0]["type"], "chart");
 
-    // 4. Check entity upserts and relations
-    let upserts = entity_store.upserted_entities.read().unwrap();
-    assert_eq!(upserts.len(), 2);
-    assert!(
-        upserts
-            .iter()
-            .any(|(_, san, name, typ, ..)| san == "alice" && name == "Alice" && typ == "PERSON")
-    );
-    assert!(
-        upserts
-            .iter()
-            .any(|(_, san, name, typ, ..)| san == "acme_corp"
-                && name == "Acme Corp"
-                && typ == "ORGANIZATION")
-    );
-
-    let rels = entity_store.relations.read().unwrap();
-    assert_eq!(rels.len(), 1);
-    assert_eq!(rels[0].0, "entity:doc_1_alice");
-    assert_eq!(rels[0].1, "WORKS_AT");
-    assert_eq!(rels[0].2, "entity:doc_1_acme_corp");
-
-    // 5. Check progress step sequence
+    // 4. Check progress step sequence
     let progress = jobs.progress.read().unwrap();
     let steps: Vec<&str> = progress.iter().map(|(_, step, _)| step.as_str()).collect();
     assert!(steps.contains(&"extracting"));
@@ -952,7 +930,8 @@ async fn test_ingest_worker_entity_extractor_failure_is_non_fatal() {
         Arc::new(FakeEmbedder::default()),
         IngestSettings::default(),
     )
-    .with_entity_extractor(entity_extractor);
+    .with_entity_extractor(entity_extractor)
+    .with_graph_store(Arc::new(InMemoryGraphStore::new()));
 
     jobs.push(job());
     let outcome = worker.run_job(job()).await;
@@ -996,20 +975,19 @@ async fn test_ingest_worker_embed_failure_marks_job_and_document_failed() {
 
 // ── the graph store dual-write ──────────────────────────────────────────────────
 //
-// Ingest writes the same extraction to SurrealDB and to the graph store. The
-// SurrealDB half is unchanged and is covered by the tests above; what is new is
-// that the graph half happens at all, that a re-ingest replaces rather than
+// Ingest writes one extraction to the Postgres graph. These tests cover that
+// the graph half happens at all, that a re-ingest replaces rather than
 // accumulates, and that a broken graph store costs the document nothing.
 
 mod graph_write {
     use super::*;
 
     use kb_ports::{
-        ChunkId, DocumentScope, EntityExtractor, EntityMentions, EntityStore, EntityUpsert,
-        GraphStore, RelationUpsert, TenantGraph,
+        ChunkId, DocumentScope, EntityExtractor, EntityMentions, EntityUpsert, GraphStore,
+        RelationUpsert, TenantGraph,
     };
 
-    use crate::fakes::{FakeDocumentStore, FakeEntityExtractor, FakeEntityStore, make_fake_scope};
+    use crate::fakes::{FakeDocumentStore, FakeEntityExtractor, make_fake_scope};
     use crate::in_memory_graph_store::InMemoryGraphStore;
 
     /// Text with two real names in it, so the graph has an edge and two mentions.
@@ -1060,7 +1038,6 @@ Acme Corp also sponsors the Bandung workshop run by Alice.";
         chunks: Arc<FakeChunkStore>,
         blobs: Arc<FakeBlobStore>,
         graph: Arc<InMemoryGraphStore>,
-        entities: Arc<FakeEntityStore>,
         extractor: Arc<FakeEntityExtractor>,
     }
 
@@ -1077,7 +1054,6 @@ Acme Corp also sponsors the Bandung workshop run by Alice.";
             chunks,
             blobs,
             graph: Arc::new(InMemoryGraphStore::new()),
-            entities: Arc::new(FakeEntityStore::default()),
             extractor: entity_extractor(),
         }
     }
@@ -1092,7 +1068,6 @@ Acme Corp also sponsors the Bandung workshop run by Alice.";
             Arc::new(FakeEmbedder::default()),
             IngestSettings::default(),
         )
-        .with_entity_store(Arc::clone(&f.entities) as Arc<dyn EntityStore>)
         .with_entity_extractor(Arc::clone(&f.extractor) as Arc<dyn EntityExtractor>)
         .with_graph_store(graph)
     }
@@ -1102,25 +1077,15 @@ Acme Corp also sponsors the Bandung workshop run by Alice.";
     }
 
     #[tokio::test]
-    async fn the_same_extraction_reaches_both_the_surreal_rows_and_the_graph() {
+    async fn the_extraction_reaches_the_graph() {
         let f = fixture().await;
         let graph: Arc<dyn GraphStore> = f.graph.clone();
         f.jobs.push(job());
 
         assert!(worker(&f, Arc::clone(&graph)).run_once().await.unwrap());
 
-        // SurrealDB, unchanged: the TS ids and the lowercase sanitised names.
-        let upserts = f.entities.upserted_entities.read().unwrap();
-        assert_eq!(upserts.len(), 2);
-        assert!(
-            upserts
-                .iter()
-                .any(|(_, sanitised, _, _, _, _)| sanitised == "acme_corp")
-        );
-        assert_eq!(f.entities.relations.read().unwrap().len(), 1);
-
-        // The graph, keyed the other way: one tenant-wide key per entity, with the
-        // chunks that mention it.
+        // The graph, keyed tenant-wide: one key per entity, with the chunks
+        // that mention it.
         assert_eq!(
             f.graph.entity_keys(&tenant()),
             vec!["acme corp".to_string(), "alice".to_string()]
@@ -1261,8 +1226,7 @@ Acme Corp also sponsors the Bandung workshop run by Alice.";
         assert_eq!(finished.len(), 1);
         assert!(finished[0].success, "{:?}", finished[0]);
 
-        // Chunks went in, and the SurrealDB entities went in too: the failure is
-        // confined to the graph.
+        // Chunks went in, and the graph failure is confined to the graph.
         let stored = f.chunks.stored_chunks.read().unwrap();
         assert!(
             !stored
@@ -1270,8 +1234,6 @@ Acme Corp also sponsors the Bandung workshop run by Alice.";
                 .is_none_or(Vec::is_empty),
             "the chunks never landed: the graph failure took the index with it"
         );
-        drop(stored);
-        assert_eq!(f.entities.upserted_entities.read().unwrap().len(), 2);
     }
 
     #[tokio::test]
@@ -1287,12 +1249,10 @@ Acme Corp also sponsors the Bandung workshop run by Alice.";
             Arc::new(FakeEmbedder::default()),
             IngestSettings::default(),
         )
-        .with_entity_store(Arc::clone(&f.entities) as Arc<dyn EntityStore>)
         .with_entity_extractor(Arc::clone(&f.extractor) as Arc<dyn EntityExtractor>);
 
         assert!(worker.run_once().await.unwrap());
         assert!(f.graph.entity_keys(&tenant()).is_empty());
-        assert_eq!(f.entities.upserted_entities.read().unwrap().len(), 2);
     }
 
     #[tokio::test]

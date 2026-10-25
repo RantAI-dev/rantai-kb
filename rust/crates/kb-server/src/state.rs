@@ -20,8 +20,10 @@ pub const DEFAULT_VERSION: &str = "dev";
 pub struct AppState {
     pub documents: Arc<dyn DocumentStore>,
     pub index: Arc<dyn kb_ports::RetrievalIndex>,
-    /// Entity and relation graph in SurrealDB, read by the intelligence route.
-    pub entities: Arc<dyn EntityStore>,
+    /// The document-intelligence read path, backed by the Postgres entity
+    /// graph. `None` when `KB_GRAPH_STORE` is unset: there is no graph, so the
+    /// route returns an empty view rather than inventing one.
+    pub entities: Option<Arc<dyn EntityStore>>,
     /// The Postgres entity graph the retrieval arm walks, when one is configured
     /// (`KB_GRAPH_STORE`). `None` means there is no graph, and the arm is off.
     pub graph: Option<Arc<dyn GraphStore>>,
@@ -44,7 +46,7 @@ pub struct AppState {
 pub struct StateParts {
     pub documents: Arc<dyn DocumentStore>,
     pub index: Arc<dyn kb_ports::RetrievalIndex>,
-    pub entities: Arc<dyn EntityStore>,
+    pub entities: Option<Arc<dyn EntityStore>>,
     pub graph: Option<Arc<dyn GraphStore>>,
     pub graph_arm: Option<Arc<kb_engine::GraphArm>>,
     pub blob: Arc<dyn BlobStore>,
@@ -62,13 +64,18 @@ impl AppState {
             .await
             .map_err(|e| anyhow::anyhow!("pg: {e}"))?;
         // The graph store shares the pool the rest of the process already holds:
-        // three Postgres tables are not worth a second connection pool.
-        let graph: Option<Arc<dyn GraphStore>> = match config.graph_store {
-            crate::config::GraphStoreChoice::None => None,
-            crate::config::GraphStoreChoice::Pg => {
-                Some(Arc::new(kb_store_pg::PgGraphStore::from_pool(pool.clone())))
-            }
-        };
+        // three Postgres tables are not worth a second connection pool. It backs
+        // both the graph arm and the intelligence route.
+        let (graph, entities): (Option<Arc<dyn GraphStore>>, Option<Arc<dyn EntityStore>>) =
+            match config.graph_store {
+                crate::config::GraphStoreChoice::None => (None, None),
+                crate::config::GraphStoreChoice::Pg => {
+                    let store = Arc::new(kb_store_pg::PgGraphStore::from_pool(pool.clone()));
+                    let graph: Arc<dyn GraphStore> = store.clone();
+                    let entities: Arc<dyn EntityStore> = store;
+                    (Some(graph), Some(entities))
+                }
+            };
         let graph_arm = match (config.graph_arm.enabled, &graph) {
             (true, Some(store)) => Some(Arc::new(kb_engine::GraphArm::new(
                 Arc::clone(store),
@@ -107,33 +114,25 @@ impl AppState {
         let documents: Arc<dyn DocumentStore> =
             Arc::new(kb_store_pg::PgDocumentStore::from_pool(pool.clone()));
         let jobs: Arc<dyn JobStore> = Arc::new(kb_store_pg::PgJobStore::from_pool(pool));
-        let index: Arc<dyn kb_ports::RetrievalIndex> = match config.chunk_store_choice {
-            crate::config::ChunkStoreChoice::Surreal => {
-                let store = kb_store_surreal::SurrealChunkStore::new(config.surreal.clone())
-                    .map_err(|e| anyhow::anyhow!("surreal: {e}"))?;
-                Arc::new(store)
-            }
-            crate::config::ChunkStoreChoice::Qdrant => {
-                let collection = config
-                    .qdrant_collection_override
-                    .unwrap_or_else(|| config.qdrant.collection_name());
-                let client = config
-                    .qdrant
-                    .client()
-                    .map_err(|e| anyhow::anyhow!("qdrant client: {e}"))?;
-                kb_store_qdrant::create_collection(&client, &config.qdrant, &collection)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("qdrant create collection: {e}"))?;
-                let q_index =
-                    kb_store_qdrant::QdrantIndex::new_with_collection(config.qdrant, collection)
-                        .map_err(|e| anyhow::anyhow!("qdrant index: {e}"))?;
-                Arc::new(q_index)
-            }
+        let index: Arc<dyn kb_ports::RetrievalIndex> = {
+            let collection = config
+                .qdrant_collection_override
+                .clone()
+                .unwrap_or_else(|| config.qdrant.collection_name());
+            let client = config
+                .qdrant
+                .client()
+                .map_err(|e| anyhow::anyhow!("qdrant client: {e}"))?;
+            kb_store_qdrant::create_collection(&client, &config.qdrant, &collection)
+                .await
+                .map_err(|e| anyhow::anyhow!("qdrant create collection: {e}"))?;
+            let q_index = kb_store_qdrant::QdrantIndex::new_with_collection(
+                config.qdrant.clone(),
+                collection,
+            )
+            .map_err(|e| anyhow::anyhow!("qdrant index: {e}"))?;
+            Arc::new(q_index)
         };
-        let entities: Arc<dyn EntityStore> = Arc::new(
-            kb_store_surreal::SurrealChunkStore::new(config.surreal.clone())
-                .map_err(|e| anyhow::anyhow!("surreal entities: {e}"))?,
-        );
         let mut embedder: Arc<dyn Embedder> = Arc::new(
             kb_inference::EmbedderImpl::new(embedder_settings_from(config.embedder.clone()))
                 .map_err(|e| anyhow::anyhow!("embedder: {e}"))?,
@@ -202,7 +201,7 @@ impl AppState {
     }
 
     /// Construct a state from explicit adapters. Used in tests so they don't
-    /// have to stand up Postgres/Surreal.
+    /// have to stand up Postgres/Qdrant.
     #[must_use]
     pub fn from_parts(
         parts: StateParts,
@@ -277,11 +276,14 @@ impl AppState {
             self.embedder.clone(),
             settings,
         )
-        .with_entity_store(self.entities.clone())
-        .with_entity_extractor(entity_extractor)
         .with_progress_sink(Arc::clone(&self.events) as Arc<dyn kb_ports::ProgressSink>);
         if let Some(graph) = self.graph.as_ref() {
-            worker = worker.with_graph_store(Arc::clone(graph));
+            // Entity extraction has exactly one destination now: the Postgres
+            // graph. With no graph there is nowhere to put the result, so the
+            // extractor is not built and no paid call is made.
+            worker = worker
+                .with_graph_store(Arc::clone(graph))
+                .with_entity_extractor(entity_extractor);
         }
         if let (Some(arm), Some(pages)) =
             (self.engine.inputs.page_arm.as_ref(), config.pages.as_ref())

@@ -301,34 +301,22 @@ pub trait ChunkStore: Send + Sync {
     ) -> Result<Vec<SearchHit>, PortError>;
 }
 
-/// Storage port for document intelligence entities and relations in SurrealDB.
+/// Read side of the document intelligence API: the entities and relations one
+/// document contributed to the Postgres entity graph (`KB_GRAPH_STORE=pg`).
+///
+/// Writes go through [`GraphStore`], the one entity store Rust has; there is no
+/// second, chunk-store-shaped entity destination. This port stays separate
+/// because the intelligence route wants a document's own view, while ingest and
+/// retrieval speak in entity keys and scoped graphs.
 #[async_trait]
 pub trait EntityStore: Send + Sync {
-    /// Upsert an entity for a document.
-    async fn upsert_entity(
-        &self,
-        document_id: &DocumentId,
-        sanitized_name: &str,
-        name: &str,
-        entity_type: &str,
-        confidence: f32,
-        metadata: Option<&serde_json::Value>,
-    ) -> Result<(), PortError>;
-
-    /// Relate two entities with a directed edge.
-    async fn relate_entities(
-        &self,
-        source_id: &str,
-        rel_type: &str,
-        target_id: &str,
-        confidence: f32,
-        document_id: &DocumentId,
-        context: Option<&str>,
-    ) -> Result<(), PortError>;
-
-    /// Retrieve extracted entities and relations for a document.
+    /// Retrieve extracted entities and relations for one document.
+    ///
+    /// Tenant-scoped: a document id from another tenant returns empty rather
+    /// than its rows.
     async fn get_document_intelligence(
         &self,
+        tenant: &TenantId,
         document_id: &DocumentId,
     ) -> Result<DocumentIntelligenceData, PortError>;
 }

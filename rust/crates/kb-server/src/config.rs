@@ -8,15 +8,7 @@ use kb_extract::ExtractConfig;
 use kb_inference::{ExpansionSettings, ExtractorSettings};
 use kb_store_blob::S3Settings;
 use kb_store_pg::PgSettings;
-use kb_store_surreal::SurrealSettings;
 use serde::{Deserialize, Serialize};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum ChunkStoreChoice {
-    #[default]
-    Surreal,
-    Qdrant,
-}
 
 /// Which [`kb_ports::EntityExtractor`] ingest uses (`KB_ENTITY_EXTRACTOR`).
 ///
@@ -81,9 +73,7 @@ impl Default for GraphArmSettings {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind_addr: String,
-    pub chunk_store_choice: ChunkStoreChoice,
     pub pg: PgSettings,
-    pub surreal: SurrealSettings,
     pub qdrant: kb_store_qdrant::QdrantSettings,
     pub qdrant_collection_override: Option<String>,
     pub s3: S3Settings,
@@ -358,32 +348,34 @@ impl Config {
         })
     }
 
-    /// SurrealDB settings from the environment, for both `serve` and
-    /// `apply-schema`.
+    /// Qdrant settings from the environment, and the collection override.
     ///
-    /// # Errors
-    ///
-    /// Fails when `SURREAL_DB_URL` is unset or blank.
-    pub fn surreal_from_lookup<F>(lookup: F) -> Result<SurrealSettings>
+    /// Read separately from [`Config::from_lookup`] so `apply-schema` can create
+    /// the collections without an inference provider: a Qdrant collection needs
+    /// the model slug and the width, not an API key.
+    pub fn qdrant_from_lookup<F>(
+        lookup: &F,
+        model_slug: &str,
+    ) -> (kb_store_qdrant::QdrantSettings, Option<String>)
     where
         F: Fn(&str) -> Option<String>,
     {
-        let url = Self::required_var(&lookup, "SURREAL_DB_URL")?;
-        let username = lookup("SURREAL_DB_USER").filter(|s| !s.trim().is_empty());
-        let password = lookup("SURREAL_DB_PASS").filter(|s| !s.trim().is_empty());
-        let namespace = lookup("SURREAL_DB_NAMESPACE").unwrap_or_else(|| "rantai".into());
-        let database = lookup("SURREAL_DB_DATABASE").unwrap_or_else(|| "knowledge".into());
-        Ok(SurrealSettings {
+        let url = lookup("QDRANT_GRPC_URL")
+            .or_else(|| lookup("QDRANT_URL"))
+            .unwrap_or_else(|| "http://127.0.0.1:16334".to_string());
+        let api_key = lookup("QDRANT_API_KEY").filter(|s| !s.trim().is_empty());
+        let collection_override = lookup("QDRANT_COLLECTION").filter(|s| !s.trim().is_empty());
+        let settings = kb_store_qdrant::QdrantSettings {
             url,
-            namespace,
-            database,
-            username,
-            password,
-            request_timeout: Duration::from_secs(10),
-            // The vector index is defined at this width, and the client cannot
-            // read it back, so the RetrievalIndex capabilities need it here.
-            embedding_dims: Self::embedding_dim(&lookup),
-        })
+            api_key,
+            model_slug: model_slug.to_string(),
+            dense_dims: Some(Self::embedding_dim(lookup)),
+            hnsw_m: 16,
+            hnsw_ef_construct: 100,
+            request_timeout: Duration::from_secs(30),
+            upsert_batch: 256,
+        };
+        (settings, collection_override)
     }
 
     /// Embedding width (`KB_EMBEDDING_DIM`, 4096 by default).
@@ -423,7 +415,19 @@ impl Config {
         let lookup = crate::tier::with_preset(tier, &lookup);
 
         let database_url = Self::required_var(&lookup, "DATABASE_URL")?;
-        let surreal = Self::surreal_from_lookup(&lookup)?;
+        // Qdrant is the only chunk store since 2026-10-25. An old deployment
+        // that still says `KB_CHUNK_STORE=surreal` must stop here rather than
+        // start with an empty index and answer every search with nothing.
+        match lookup("KB_CHUNK_STORE").map(|v| v.trim().to_lowercase()) {
+            None => {}
+            Some(v) if v.is_empty() || v == "qdrant" => {}
+            Some(other) => bail!(
+                "KB_CHUNK_STORE={other:?} is not supported: SurrealDB was removed and Qdrant \
+                 is the only chunk store. Unset KB_CHUNK_STORE, then run \
+                 `kb-server reindex --dry-run` and `kb-server reindex` to rebuild Qdrant \
+                 from the originals in S3 (see docs/rust-cutover.md)."
+            ),
+        }
 
         let embedding_api_key = lookup("KB_EMBEDDING_API_KEY")
             .filter(|s| !s.trim().is_empty())
@@ -561,27 +565,8 @@ impl Config {
 
         let extract = ExtractConfig::from_lookup(&lookup);
 
-        let chunk_store_choice = match lookup("KB_CHUNK_STORE").as_deref() {
-            Some("qdrant") => ChunkStoreChoice::Qdrant,
-            _ => ChunkStoreChoice::Surreal,
-        };
-
-        let qdrant_url = lookup("QDRANT_GRPC_URL")
-            .or_else(|| lookup("QDRANT_URL"))
-            .unwrap_or_else(|| "http://127.0.0.1:16334".to_string());
-        let qdrant_api_key = lookup("QDRANT_API_KEY").filter(|s| !s.trim().is_empty());
-        let qdrant_collection_override =
-            lookup("QDRANT_COLLECTION").filter(|s| !s.trim().is_empty());
-        let qdrant = kb_store_qdrant::QdrantSettings {
-            url: qdrant_url,
-            api_key: qdrant_api_key,
-            model_slug: embedding_model.clone(),
-            dense_dims: Some(embedding_dim),
-            hnsw_m: 16,
-            hnsw_ef_construct: 100,
-            request_timeout: Duration::from_secs(30),
-            upsert_batch: 256,
-        };
+        let (qdrant, qdrant_collection_override) =
+            Self::qdrant_from_lookup(&lookup, &embedding_model);
 
         let entity = ExtractorSettings::from_lookup(&lookup);
         let entity_extractor = match lookup("KB_ENTITY_EXTRACTOR")
@@ -659,9 +644,6 @@ impl Config {
                 None
             }
             Some(model) => {
-                if chunk_store_choice != ChunkStoreChoice::Qdrant {
-                    bail!("KB_PAGE_EMBEDDING_MODEL needs KB_CHUNK_STORE=qdrant");
-                }
                 let api_key = lookup("KB_PAGE_EMBEDDING_API_KEY")
                     .filter(|s| !s.trim().is_empty())
                     .or_else(|| lookup("OPENROUTER_API_KEY").filter(|s| !s.trim().is_empty()));
@@ -847,12 +829,10 @@ impl Config {
         Ok(Config {
             pages,
             cache,
-            chunk_store_choice,
             qdrant,
             qdrant_collection_override,
             bind_addr,
             pg,
-            surreal,
             s3,
             embedder,
             reranker,
@@ -1007,7 +987,6 @@ mod tests {
     #[test]
     fn test_missing_required_database_url_fails() {
         let mut map = HashMap::new();
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map.insert("OPENROUTER_API_KEY", "test-key");
 
         let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
@@ -1015,20 +994,31 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_required_surreal_url_fails() {
+    fn test_surreal_chunk_store_is_rejected_with_the_reindex_path() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
         map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_CHUNK_STORE", "surreal");
 
         let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
-        assert!(err.to_string().contains("SURREAL_DB_URL"));
+        let message = err.to_string();
+        assert!(message.contains("KB_CHUNK_STORE"), "{message}");
+        assert!(message.contains("SurrealDB was removed"), "{message}");
+        assert!(message.contains("kb-server reindex"), "{message}");
+
+        // Empty and "qdrant" are both fine; Qdrant is the only store either way.
+        for value in ["", "qdrant", "QDRANT"] {
+            let mut map = map.clone();
+            map.insert("KB_CHUNK_STORE", value);
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .unwrap_or_else(|err| panic!("KB_CHUNK_STORE={value:?} was rejected: {err}"));
+        }
     }
 
     #[test]
     fn test_missing_api_key_fails() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
 
         let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
         assert!(err.to_string().contains("OPENROUTER_API_KEY"));
@@ -1038,11 +1028,6 @@ mod tests {
     fn test_config_reads_every_documented_variable_by_name() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://user:pass@localhost/custom_pg");
-        map.insert("SURREAL_DB_URL", "http://custom-surreal:8000");
-        map.insert("SURREAL_DB_USER", "custom_surreal_user");
-        map.insert("SURREAL_DB_PASS", "custom_surreal_pass");
-        map.insert("SURREAL_DB_NAMESPACE", "custom_ns");
-        map.insert("SURREAL_DB_DATABASE", "custom_db");
         map.insert(
             "KB_EMBEDDING_BASE_URL",
             "https://api.custom.ai/v1/embeddings",
@@ -1101,11 +1086,6 @@ mod tests {
             cfg.pg.database_url,
             "postgres://user:pass@localhost/custom_pg"
         );
-        assert_eq!(cfg.surreal.url, "http://custom-surreal:8000");
-        assert_eq!(cfg.surreal.username.as_deref(), Some("custom_surreal_user"));
-        assert_eq!(cfg.surreal.password.as_deref(), Some("custom_surreal_pass"));
-        assert_eq!(cfg.surreal.namespace, "custom_ns");
-        assert_eq!(cfg.surreal.database, "custom_db");
         assert_eq!(cfg.embedder.base_url, "https://api.custom.ai/v1/embeddings");
         assert_eq!(cfg.embedder.api_key.as_deref(), Some("custom-embed-key"));
         assert_eq!(cfg.embedder.model, "custom-model-v2");
@@ -1173,7 +1153,6 @@ mod tests {
     fn test_defaults_match_typescript_config() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map.insert("OPENROUTER_API_KEY", "test-key");
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
@@ -1208,7 +1187,6 @@ mod tests {
     fn test_worker_knobs_keep_the_typescript_floors() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map.insert("OPENROUTER_API_KEY", "test-key");
         // Values below the floor are raised, exactly like `Math.max`.
         map.insert("KB_INGEST_CONCURRENCY", "0");
@@ -1238,7 +1216,6 @@ mod tests {
     fn test_cache_dir_is_off_by_default_and_scopes_the_embedding_fingerprint() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map.insert("OPENROUTER_API_KEY", "test-key");
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
@@ -1276,7 +1253,6 @@ mod tests {
     fn test_embedder_timeout_and_concurrency_are_tunable() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map.insert("OPENROUTER_API_KEY", "test-key");
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
@@ -1303,7 +1279,6 @@ mod tests {
     fn test_path_style_can_be_disabled() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map.insert("OPENROUTER_API_KEY", "test-key");
         map.insert("S3_ENABLE_PATH_STYLE", "0");
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
@@ -1315,7 +1290,6 @@ mod tests {
     fn test_non_integer_setting_fails_with_name() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map.insert("OPENROUTER_API_KEY", "test-key");
         map.insert("KB_DEFAULT_MAX_CHUNKS", "many");
         let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
@@ -1325,7 +1299,6 @@ mod tests {
     fn page_arm_map() -> HashMap<&'static str, &'static str> {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map.insert("OPENROUTER_API_KEY", "test-key");
         map.insert("KB_CHUNK_STORE", "qdrant");
         map.insert("KB_PAGE_EMBEDDING_MODEL", "Qwen/Qwen3-VL-Embedding-2B");
@@ -1356,7 +1329,6 @@ mod tests {
     fn test_chunking_and_embedding_cap_default_to_today_and_are_tunable() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map.insert("OPENROUTER_API_KEY", "test-key");
         let load = |map: &HashMap<&'static str, &'static str>| {
             Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
@@ -1485,7 +1457,6 @@ mod tests {
     fn test_page_vision_rerank_needs_the_page_arm() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map.insert("OPENROUTER_API_KEY", "test-key");
         map.insert("KB_PAGE_VISION_RERANK_MODEL", "qwen/qwen3.7-flash");
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
@@ -1498,7 +1469,6 @@ mod tests {
     fn tier_map() -> HashMap<&'static str, &'static str> {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map
     }
 
@@ -1535,7 +1505,6 @@ mod tests {
         assert_eq!(cfg.worker.concurrency, 1);
         assert!(cfg.worker.entity_extraction_enabled);
         assert!(cfg.pages.is_none());
-        assert_eq!(cfg.chunk_store_choice, ChunkStoreChoice::Surreal);
 
         // The whole struct, against the same environment with every one of
         // those values written out explicitly: still identical.
@@ -1555,7 +1524,6 @@ mod tests {
         explicit.insert("KB_RERANK_CANDIDATE_LIMIT", "0");
         explicit.insert("KB_INGEST_CONCURRENCY", "1");
         explicit.insert("KB_ENTITY_EXTRACTION_ENABLED", "true");
-        explicit.insert("KB_CHUNK_STORE", "surreal");
         assert_eq!(
             format!("{cfg:#?}"),
             format!("{:#?}", resolved(&explicit)),
@@ -1597,7 +1565,6 @@ mod tests {
             if tier == "cloud" {
                 assert_eq!(cfg.embedder.model, "voyageai/voyage-multimodal-3.5");
                 assert!(cfg.embedder.send_input_type, "voyage wants input_type");
-                assert_eq!(cfg.chunk_store_choice, ChunkStoreChoice::Qdrant);
                 let pages = cfg.pages.as_ref().expect("cloud page arm");
                 assert_eq!(pages.embedder.model, "voyageai/voyage-multimodal-3.5");
                 assert_eq!(pages.embedder.dimension, 1024);
@@ -1628,7 +1595,6 @@ mod tests {
                 }
                 assert_eq!(cfg.embedder.base_url, "http://127.0.0.1:8081/v1/embeddings");
                 assert_eq!(cfg.embedder.request_timeout, Duration::from_secs(120));
-                assert_eq!(cfg.chunk_store_choice, ChunkStoreChoice::Surreal);
                 assert!(
                     cfg.embedder.api_key.is_none(),
                     "{tier} must not need a paid key"
@@ -1834,7 +1800,6 @@ mod tests {
     fn test_page_caption_needs_the_page_arm() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
-        map.insert("SURREAL_DB_URL", "http://localhost:8000");
         map.insert("OPENROUTER_API_KEY", "test-key");
         map.insert("KB_PAGE_CAPTION_MODEL", "qwen/qwen3.7-flash");
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))

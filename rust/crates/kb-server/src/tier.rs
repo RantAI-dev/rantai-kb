@@ -76,7 +76,7 @@ const LOCAL: &[(&str, &str)] = &[
     ("KB_EMBEDDING_TIMEOUT_MS", "120000"),
     ("KB_PAGE_RERANK", "false"),
     // The default extractor is a paid OpenRouter call per document, and its
-    // output (SurrealDB entities) feeds no search arm. Off on every tier.
+    // output (the Postgres entity graph) feeds no search arm. Off on every tier.
     ("KB_ENTITY_EXTRACTION_ENABLED", "false"),
 ];
 
@@ -153,14 +153,12 @@ const STATION: &[(&str, &str)] = &[
 ];
 
 /// Cloud: one hosted embedder for text and pages, voyage's reranker over the
-/// same OpenRouter key. The page arm needs Qdrant, so the preset selects it;
-/// set `KB_PAGE_EMBEDDING_MODEL=` (empty) and `KB_CHUNK_STORE=surreal` to drop
-/// the arm and keep chunks in SurrealDB.
+/// same OpenRouter key. Qdrant is the only chunk store, so the page arm has
+/// nothing to select; set `KB_PAGE_EMBEDDING_MODEL=` (empty) to drop the arm.
 const CLOUD: &[(&str, &str)] = &[
     ("KB_EMBEDDING_MODEL", VOYAGE_EMBEDDING),
     ("KB_EMBEDDING_DIM", "1024"),
     ("KB_EMBEDDING_INPUT_TYPE", "true"),
-    ("KB_CHUNK_STORE", "qdrant"),
     ("KB_PAGE_EMBEDDING_MODEL", VOYAGE_EMBEDDING),
     ("KB_PAGE_EMBEDDING_DIM", "1024"),
     ("KB_PAGE_RERANK", "true"),
@@ -170,7 +168,8 @@ const CLOUD: &[(&str, &str)] = &[
     ("KB_RERANK_MODEL", VOYAGE_RERANKER),
     ("KB_RERANK_CANDIDATE_LIMIT", "20"),
     // Entity extraction is an LLM call per document (OpenRouter) whose output
-    // goes to SurrealDB, and no search arm reads it in Qdrant mode: pure spend.
+    // goes only to the Postgres graph when `KB_GRAPH_STORE=pg`: pure spend
+    // otherwise.
     ("KB_ENTITY_EXTRACTION_ENABLED", "false"),
 ];
 

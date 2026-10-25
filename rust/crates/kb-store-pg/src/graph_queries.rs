@@ -186,3 +186,30 @@ pub const SELECT_SCOPED_ENTITY_MENTIONS: &str = r#"
      WHERE m."tenantId" = $1 AND e."key" = $2 AND m."documentId" = ANY($3)
      ORDER BY m."chunkId"
 "#;
+
+/// Entities one document contributed, for its intelligence view.
+///
+/// `DISTINCT` because an entity mentioned in several chunks of the document has
+/// one row per mention in `KbMention`, and the view wants the entity once.
+pub const SELECT_DOCUMENT_INTELLIGENCE_ENTITIES: &str = r#"
+    SELECT DISTINCT e."id" AS id, e."key" AS entity_key, e."name" AS name,
+           e."type" AS entity_type, e."aliases" AS aliases
+      FROM "KbEntity" e
+      JOIN "KbMention" m ON m."entityId" = e."id" AND m."tenantId" = e."tenantId"
+     WHERE m."tenantId" = $1 AND m."documentId" = $2
+     ORDER BY e."key"
+"#;
+
+/// Relations one document contributed, with both endpoints resolved to keys.
+///
+/// Tenant and document are both predicates, so a relation cannot be read from a
+/// document the caller cannot see even if its id leaks.
+pub const SELECT_DOCUMENT_INTELLIGENCE_RELATIONS: &str = r#"
+    SELECT r."id" AS id, src."key" AS src_key, dst."key" AS dst_key,
+           r."type" AS relation_type, r."weight" AS weight
+      FROM "KbRelation" r
+      JOIN "KbEntity" src ON src."id" = r."srcEntityId" AND src."tenantId" = r."tenantId"
+      JOIN "KbEntity" dst ON dst."id" = r."dstEntityId" AND dst."tenantId" = r."tenantId"
+     WHERE r."tenantId" = $1 AND r."documentId" = $2
+     ORDER BY r."id"
+"#;

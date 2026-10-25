@@ -1,8 +1,7 @@
 //! The operational commands, checked without a database.
 //!
 //! What can be wrong before a socket is opened is checked here: which
-//! migrations exist, that their checksum is the one Prisma computes, that the
-//! SurrealDB DDL is the TypeScript script's statement for statement, and that
+//! migrations exist, that their checksum is the one Prisma computes, and that
 //! the CLI argument shape still matches `scripts/create-api-key.ts`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -55,24 +54,29 @@ fn a_migration_checksum_is_the_sha256_of_the_file_on_disk() {
 }
 
 #[test]
-fn the_vector_schema_is_the_typescript_statement_set_at_the_configured_width() {
-    let dim = Config::embedding_dim(&|k: &str| (k == "KB_EMBEDDING_DIM").then(|| "8".to_string()));
-    assert_eq!(dim, 8);
-    let statements = kb_store_surreal::schema::schema_statements(dim);
-    let expected = [
-        "DEFINE TABLE IF NOT EXISTS document_chunk SCHEMALESS;",
-        "DEFINE FIELD IF NOT EXISTS document_id ON document_chunk TYPE string;",
-        "DEFINE FIELD IF NOT EXISTS content ON document_chunk TYPE string;",
-        "DEFINE FIELD IF NOT EXISTS chunk_index ON document_chunk TYPE int;",
-        "DEFINE FIELD IF NOT EXISTS embedding ON document_chunk TYPE array<float>;",
-        "DEFINE FIELD IF NOT EXISTS contextual_prefix ON document_chunk TYPE option<string>;",
-        "DEFINE FIELD IF NOT EXISTS embedding_model ON document_chunk TYPE option<string>;",
-        "DEFINE INDEX IF NOT EXISTS document_id_idx ON document_chunk FIELDS document_id;",
-        "DEFINE ANALYZER IF NOT EXISTS kb_en TOKENIZERS class FILTERS lowercase, snowball(english);",
-        "DEFINE INDEX IF NOT EXISTS content_search_idx ON document_chunk FIELDS content SEARCH ANALYZER kb_en BM25(1.2, 0.75) HIGHLIGHTS;",
-        "DEFINE INDEX IF NOT EXISTS embedding_idx ON document_chunk FIELDS embedding HNSW DIMENSION 8 DIST COSINE;",
-    ];
-    assert_eq!(statements, expected);
+fn the_qdrant_collection_name_is_the_model_and_the_width() {
+    let (settings, override_name) = Config::qdrant_from_lookup(
+        &|k: &str| (k == "KB_EMBEDDING_DIM").then(|| "8".to_string()),
+        "stub",
+    );
+    assert_eq!(settings.dense_dims, Some(8));
+    assert_eq!(settings.url, "http://127.0.0.1:16334");
+    assert_eq!(settings.collection_name(), "chunks__stub__8");
+    assert_eq!(override_name, None);
+
+    let (settings, override_name) = Config::qdrant_from_lookup(
+        &|k: &str| {
+            (k == "KB_EMBEDDING_DIM")
+                .then(|| "1024".to_string())
+                .or_else(|| (k == "QDRANT_COLLECTION").then(|| "operator_chunks".to_string()))
+        },
+        "Qwen/Qwen3-Embedding-0.6B",
+    );
+    assert_eq!(override_name.as_deref(), Some("operator_chunks"));
+    assert_eq!(
+        settings.collection_name(),
+        "chunks__qwen-qwen3-embedding-0-6b__1024"
+    );
 }
 
 #[test]
@@ -93,22 +97,81 @@ fn the_cli_only_needs_a_database_url_for_database_commands() {
 }
 
 #[test]
-fn surreal_settings_keep_their_typescript_defaults() {
-    let surreal = Config::surreal_from_lookup(|k: &str| {
-        (k == "SURREAL_DB_URL").then(|| "http://surreal:8000".to_string())
-    })
-    .expect("surreal settings");
-    assert_eq!(surreal.url, "http://surreal:8000");
-    assert_eq!(surreal.namespace, "rantai");
-    assert_eq!(surreal.database, "knowledge");
-    assert!(surreal.username.is_none());
-    assert!(surreal.password.is_none());
-}
-
-#[test]
 fn a_missing_database_url_names_the_variable() {
     let err = Config::pg_from_lookup(|_: &str| None).unwrap_err();
     assert!(err.to_string().contains("DATABASE_URL"));
-    let err = Config::surreal_from_lookup(|_: &str| None).unwrap_err();
-    assert!(err.to_string().contains("SURREAL_DB_URL"));
+}
+
+fn reindex_args(list: &[&str]) -> Vec<String> {
+    list.iter().map(|value| (*value).to_string()).collect()
+}
+
+#[test]
+fn reindex_parses_a_tenant_and_a_dry_run() {
+    let parsed = kb_server::ReindexArgs::parse(&reindex_args(&[])).expect("parse");
+    assert_eq!(parsed.tenant, None);
+    assert!(!parsed.dry_run);
+
+    let parsed =
+        kb_server::ReindexArgs::parse(&reindex_args(&["--tenant", "acme"])).expect("parse");
+    assert_eq!(parsed.tenant.as_deref(), Some("acme"));
+    assert!(!parsed.dry_run);
+
+    let parsed = kb_server::ReindexArgs::parse(&reindex_args(&["--dry-run", "--tenant", "acme"]))
+        .expect("parse");
+    assert_eq!(parsed.tenant.as_deref(), Some("acme"));
+    assert!(parsed.dry_run);
+}
+
+#[test]
+fn reindex_rejects_a_missing_tenant_value_or_an_unknown_flag() {
+    for args in [
+        vec!["--tenant"],
+        vec!["--tenant", "--dry-run"],
+        vec!["--tenant", ""],
+        vec!["acme"],
+        vec!["--dry_run"],
+        vec!["--tenant", "a", "--tenant", "b"],
+    ] {
+        let err = kb_server::ReindexArgs::parse(&reindex_args(&args)).unwrap_err();
+        assert!(matches!(err, kb_server::CliError::Usage(_)), "{args:?}");
+    }
+}
+
+#[test]
+fn reindex_counts_one_tenant_and_skips_what_cannot_be_rebuilt() {
+    use kb_ports::{DocumentId, TenantId};
+    use kb_store_pg::reindex::{ReindexDocument, plan};
+
+    let document = |id: &str, s3_key: Option<&str>, active_job: bool| ReindexDocument {
+        tenant_id: TenantId::new_unchecked("acme"),
+        document_id: DocumentId::new_unchecked(id),
+        title: id.to_string(),
+        categories: Vec::new(),
+        subcategory: None,
+        metadata: None,
+        s3_key: s3_key.map(str::to_string),
+        file_size: None,
+        mime_type: None,
+        active_job,
+    };
+    let documents = vec![
+        document("d1", Some("documents/acme/d1/one.pdf"), false),
+        document("d2", None, false),
+        document("d3", Some("documents/acme/d3/three.pdf"), true),
+    ];
+    let counts = plan(&documents);
+    let acme = &counts["acme"];
+    assert_eq!(acme.documents, 3);
+    assert_eq!(acme.queued, 1);
+    assert_eq!(acme.skipped_without_original, 1);
+    assert_eq!(acme.skipped_active_job, 1);
+
+    // Exactly the queueable row names the file the worker will read.
+    let queueable: Vec<&str> = documents
+        .iter()
+        .filter(|doc| doc.is_queueable())
+        .filter_map(|doc| doc.filename().as_deref().map(|_| doc.document_id.as_str()))
+        .collect();
+    assert_eq!(queueable, vec!["d1"]);
 }

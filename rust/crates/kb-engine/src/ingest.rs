@@ -23,9 +23,8 @@ use kb_core::{
 };
 use kb_ports::{
     BlobStore, ChunkId, ChunkType, DocumentId, DocumentStore, Embedder, EntityExtractor,
-    EntityStore, EntityUpsert, ExtractedFigure, ExtractionOptions, Extractor, GraphStore,
-    IndexUnit, JobRecord, JobStore, PortError, ProgressSink, RelationUpsert, RetrievalIndex,
-    asset_path,
+    EntityUpsert, ExtractedFigure, ExtractionOptions, Extractor, GraphStore, IndexUnit, JobRecord,
+    JobStore, PortError, ProgressSink, RelationUpsert, RetrievalIndex, asset_path,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
@@ -164,12 +163,9 @@ pub struct IngestWorker {
     blobs: Arc<dyn BlobStore>,
     extractor: Arc<dyn Extractor>,
     embedder: Arc<dyn Embedder>,
-    entities: Option<Arc<dyn EntityStore>>,
     entity_extractor: Option<Arc<dyn EntityExtractor>>,
-    /// The Postgres entity graph, when one is configured. Written as a second
-    /// destination for the *same* extraction, never instead of it: SurrealDB
-    /// keeps its rows because Bun and `/v1/documents/:id/intelligence` read
-    /// them, and the graph tables exist so the graph arm has something to walk.
+    /// The Postgres entity graph, when one is configured. The only destination
+    /// for entity extraction; with no graph there is no extraction at all.
     graph: Option<Arc<dyn GraphStore>>,
     /// The page-image arm's ingest side, when configured.
     page_ingest: Option<Arc<crate::page_arm::PageIngest>>,
@@ -201,7 +197,6 @@ impl IngestWorker {
             blobs,
             extractor,
             embedder,
-            entities: None,
             entity_extractor: None,
             graph: None,
             page_ingest: None,
@@ -211,38 +206,19 @@ impl IngestWorker {
         }
     }
 
-    /// Equip the worker with entity storage and extraction ports.
-    #[must_use]
-    pub fn with_entities(
-        mut self,
-        entities: Arc<dyn EntityStore>,
-        extractor: Arc<dyn EntityExtractor>,
-    ) -> Self {
-        self.entities = Some(entities);
-        self.entity_extractor = Some(extractor);
-        self
-    }
-
-    /// Equip the worker with an entity store.
-    #[must_use]
-    pub fn with_entity_store(mut self, entities: Arc<dyn EntityStore>) -> Self {
-        self.entities = Some(entities);
-        self
-    }
-
     /// Equip the worker with an entity extractor.
+    ///
+    /// Extraction writes only to the graph store, so it is attached together
+    /// with [`IngestWorker::with_graph_store`]; a worker with an extractor and no
+    /// graph does no extraction.
     #[must_use]
     pub fn with_entity_extractor(mut self, extractor: Arc<dyn EntityExtractor>) -> Self {
         self.entity_extractor = Some(extractor);
         self
     }
 
-    /// Equip the worker with a graph store, so the same extraction also lands in
-    /// the entity graph the graph arm walks.
-    ///
-    /// Independent of [`IngestWorker::with_entity_store`] on purpose: the two are
-    /// different stores with different readers, and a deployment may legitimately
-    /// have one without the other.
+    /// Equip the worker with a graph store, so entity extraction lands in the
+    /// entity graph the graph arm and the intelligence route read.
     #[must_use]
     pub fn with_graph_store(mut self, graph: Arc<dyn GraphStore>) -> Self {
         self.graph = Some(graph);
@@ -560,16 +536,8 @@ impl IngestWorker {
                     &flags,
                 )
                 .await;
-                self.extract_and_store_entities(
-                    job,
-                    document_id,
-                    &content,
-                    &chunks,
-                    use_combined,
-                    started,
-                    &flags,
-                )
-                .await;
+                self.extract_and_store_entities(job, document_id, &content, &chunks, use_combined)
+                    .await;
             }
         }
 
@@ -988,15 +956,11 @@ impl IngestWorker {
         }
     }
 
-    /// Extract entities and relations once, then write them to every store that
-    /// wants them. Non-fatal on failure: logs a warning and continues.
+    /// Extract entities and relations, then write them to the Postgres graph.
     ///
-    /// One extraction, two destinations. The SurrealDB write is unchanged — same
-    /// ids, same order, same skips — because Bun reads those rows and so does the
-    /// intelligence route, and AGENTS rule 4 makes them a contract. The graph
-    /// write is additive and best-effort: a graph that fails to load must not
-    /// cost the document its search index.
-    #[allow(clippy::too_many_arguments)]
+    /// Non-fatal on failure: logs a warning and continues. With no graph
+    /// configured there is nowhere to put the result, so no extraction runs at
+    /// all — a paid extraction whose output no store can hold is pure spend.
     async fn extract_and_store_entities(
         &self,
         job: &JobRecord,
@@ -1004,9 +968,10 @@ impl IngestWorker {
         content: &str,
         chunks: &[Chunk],
         use_combined: bool,
-        started: Instant,
-        flags: &ProgressFlags,
     ) {
+        if self.graph.is_none() {
+            return;
+        }
         let Some((entities, relations)) = self
             .extract_entities(job, content, document_id, use_combined)
             .await
@@ -1014,8 +979,6 @@ impl IngestWorker {
             return;
         };
 
-        self.store_entities_surreal(job, document_id, &entities, &relations, started, flags)
-            .await;
         self.store_entities_graph(job, document_id, chunks, &entities, &relations)
             .await;
     }
@@ -1075,140 +1038,6 @@ impl IngestWorker {
         Some((entities, relations))
     }
 
-    /// Write entities and relations to SurrealDB, exactly as before the graph
-    /// store existed. Nothing here changes shape, id or ordering.
-    async fn store_entities_surreal(
-        &self,
-        job: &JobRecord,
-        document_id: &DocumentId,
-        entities: &[kb_core::Entity],
-        relations: &[kb_core::Relation],
-        started: Instant,
-        flags: &ProgressFlags,
-    ) {
-        let Some(store) = &self.entities else {
-            return;
-        };
-
-        let total_entities = entities.len() as u32;
-        let mut entity_idx: u32 = 0;
-        let mut entity_id_map: HashMap<String, String> = HashMap::new();
-
-        for entity in entities.iter() {
-            entity_idx = entity_idx.saturating_add(1);
-            self.progress(
-                job,
-                StepProgress::at(IngestStep::ExtractingEntities, entity_idx, total_entities),
-                started,
-                flags,
-            )
-            .await;
-
-            let sanitized_name: String = entity
-                .name
-                .to_lowercase()
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-                .collect();
-            let entity_id = format!("entity:{document_id}_{sanitized_name}");
-
-            if let Err(e) = store
-                .upsert_entity(
-                    document_id,
-                    &sanitized_name,
-                    &entity.name,
-                    &entity.entity_type,
-                    entity.confidence,
-                    entity.metadata.as_ref(),
-                )
-                .await
-            {
-                tracing::warn!("[kb-ingest] Failed to upsert entity {entity_id}: {e}");
-            }
-
-            entity_id_map.insert(entity.name.to_lowercase(), entity_id);
-        }
-
-        if !relations.is_empty() {
-            let mut stored_count = 0;
-            let mut skipped_count = 0;
-            for relation in relations.iter() {
-                let source_name = relation
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.get("source_entity"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_lowercase();
-                let target_name = relation
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.get("target_entity"))
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_lowercase();
-                let source_id = entity_id_map.get(&source_name);
-                let target_id = entity_id_map.get(&target_name);
-
-                let (Some(source_id), Some(target_id)) = (source_id, target_id) else {
-                    skipped_count += 1;
-                    continue;
-                };
-
-                let raw_rel = if relation.relation_type.trim().is_empty() {
-                    "RELATED_TO"
-                } else {
-                    relation.relation_type.as_str()
-                };
-                let rel_type: String = raw_rel
-                    .to_uppercase()
-                    .chars()
-                    .map(|c| {
-                        if c.is_ascii_alphanumeric() || c == '_' {
-                            c
-                        } else {
-                            '_'
-                        }
-                    })
-                    .collect();
-                let rel_type = rel_type.trim_matches('_');
-                let rel_type = if rel_type.is_empty() {
-                    "RELATED_TO"
-                } else {
-                    rel_type
-                };
-
-                let context = relation
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.get("context"))
-                    .and_then(Value::as_str);
-
-                if let Err(e) = store
-                    .relate_entities(
-                        source_id,
-                        rel_type,
-                        target_id,
-                        relation.confidence,
-                        document_id,
-                        context,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        "[kb-ingest] Failed to create relation {source_id} ->{rel_type}-> {target_id}: {e}"
-                    );
-                } else {
-                    stored_count += 1;
-                }
-            }
-            tracing::info!(
-                "[kb-ingest] Relations: {stored_count} stored, {skipped_count} skipped (no matching entity), {} total",
-                relations.len()
-            );
-        }
-    }
-
     /// Write the same extraction to the graph store: the document's entities with
     /// their chunk mentions, then its relations.
     ///
@@ -1216,8 +1045,7 @@ impl IngestWorker {
     /// The alternative — failing the job — turns a degraded graph into an
     /// unsearchable document, which is a much worse outcome than a search that
     /// quietly has one arm fewer. AGENTS rule 6 wants that visible, and a
-    /// `warn!` with the document id is how the SurrealDB write above has always
-    /// reported the same class of failure.
+    /// `warn!` with the document id is how every graph failure is reported.
     ///
     /// **Replace, not merge.** A re-ingest deletes this document's graph first.
     /// Without that, a document re-ingested with different content keeps every

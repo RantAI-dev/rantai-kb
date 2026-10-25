@@ -23,8 +23,9 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use kb_core::graph::{Csr, Edge, NodeMap};
 use kb_ports::{
-    ChunkId, DocumentId, DocumentScope, EntityMentions, EntityUpsert, GraphStore, PortError,
-    RelationUpsert, TenantGraph, TenantId,
+    ChunkId, DocumentId, DocumentIntelligenceData, DocumentScope, EntityMentions, EntityStore,
+    EntityUpsert, EntityView, GraphStore, PortError, RelationUpsert, RelationView, TenantGraph,
+    TenantId,
 };
 
 /// One stored entity. The port's `key` is the identity; `name` and `aliases` are
@@ -423,5 +424,75 @@ impl GraphStore for InMemoryGraphStore {
             .await?
             .chunks_for(key)
             .to_vec())
+    }
+}
+
+#[async_trait]
+impl EntityStore for InMemoryGraphStore {
+    /// The same document view the Postgres adapter returns, over the same data.
+    ///
+    /// The in-memory store has no confidence or free-form metadata either, so
+    /// entities report `1.0` and relations their edge weight — the contract the
+    /// two adapters share is "which entities and edges did this document
+    /// contribute", not a score.
+    async fn get_document_intelligence(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+    ) -> Result<DocumentIntelligenceData, PortError> {
+        let tenants = self.tenants.read().map_err(|_| {
+            PortError::Unavailable("in-memory graph store lock poisoned".to_string())
+        })?;
+        let Some(data) = tenants.get(tenant) else {
+            return Ok(DocumentIntelligenceData {
+                entities: Vec::new(),
+                relations: Vec::new(),
+            });
+        };
+
+        let mut entities = Vec::new();
+        for (key, entity) in &data.entities {
+            let mentioned = data
+                .mentions
+                .get(key)
+                .is_some_and(|mentions| mentions.values().any(|doc| doc == document_id));
+            if mentioned {
+                entities.push(EntityView {
+                    id: key.clone(),
+                    name: entity.name.clone(),
+                    r#type: entity.entity_type.clone(),
+                    confidence: 1.0,
+                    metadata: serde_json::json!({
+                        "key": key,
+                        "aliases": entity.aliases,
+                    }),
+                });
+            }
+        }
+
+        let relations = data
+            .relations
+            .iter()
+            .filter(|relation| &relation.document_id == document_id)
+            .map(|relation| RelationView {
+                id: format!(
+                    "{}|{}|{}|{}",
+                    relation.src_key,
+                    relation.relation_type,
+                    relation.dst_key,
+                    relation.document_id
+                ),
+                from_id: relation.src_key.clone(),
+                out: relation.dst_key.clone(),
+                relation_type: relation.relation_type.clone(),
+                confidence: relation.weight,
+                metadata: serde_json::json!({}),
+            })
+            .collect();
+
+        Ok(DocumentIntelligenceData {
+            entities,
+            relations,
+        })
     }
 }

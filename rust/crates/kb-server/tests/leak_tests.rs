@@ -321,7 +321,7 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
         StateParts {
             documents: Arc::new(documents),
             index,
-            entities: Arc::new(entities),
+            entities: Some(Arc::new(entities)),
             graph: None,
             graph_arm: None,
             blob: Arc::new(blobs),

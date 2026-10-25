@@ -351,7 +351,7 @@ async fn a_hit_from_an_adapter_that_reports_no_arm_omits_the_field() {
         StateParts {
             documents: Arc::new(h.documents.clone()),
             index: Arc::new(NoArmIndex(h.chunks.clone())),
-            entities: Arc::new(h.entities.clone()),
+            entities: Some(Arc::new(h.entities.clone())),
             graph: None,
             graph_arm: None,
             blob: Arc::new(h.blobs.clone()),

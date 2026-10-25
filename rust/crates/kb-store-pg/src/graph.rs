@@ -26,8 +26,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use async_trait::async_trait;
 use kb_core::graph::{Csr, Edge, NodeMap};
 use kb_ports::{
-    ChunkId, DocumentId, DocumentScope, EntityMentions, EntityUpsert, GraphStore, PortError,
-    RelationUpsert, TenantGraph, TenantId,
+    ChunkId, DocumentId, DocumentIntelligenceData, DocumentScope, EntityMentions, EntityStore,
+    EntityUpsert, EntityView, GraphStore, PortError, RelationUpsert, RelationView, TenantGraph,
+    TenantId,
 };
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -35,6 +36,7 @@ use sqlx::{PgPool, Row};
 use crate::graph_queries::{
     BUMP_VERSION, COUNT_EXISTING_ENTITIES, DELETE_DOCUMENT_MENTIONS, DELETE_DOCUMENT_RELATIONS,
     DELETE_ORPHANED_ENTITIES, INSERT_MENTION, INSERT_RELATION,
+    SELECT_DOCUMENT_INTELLIGENCE_ENTITIES, SELECT_DOCUMENT_INTELLIGENCE_RELATIONS,
     SELECT_DOCUMENT_MENTIONED_ENTITY_IDS, SELECT_SCOPED_ENTITIES, SELECT_SCOPED_ENTITY_LABELS,
     SELECT_SCOPED_ENTITY_MENTIONS, SELECT_SCOPED_MENTION_ROWS, SELECT_SCOPED_RELATION_ROWS,
     SELECT_VERSION, UPSERT_ENTITY,
@@ -629,6 +631,89 @@ impl GraphStore for PgGraphStore {
     }
 }
 
+#[async_trait]
+impl EntityStore for PgGraphStore {
+    /// `GET /v1/documents/:id/intelligence` from the graph tables.
+    ///
+    /// The graph does not store an extractor confidence or free-form metadata
+    /// (a Postgres row is an assertion, not a scored candidate), so entities
+    /// report `confidence: 1.0` and relations their stored edge weight. Both
+    /// queries filter on tenant *and* document: the route has already checked
+    /// visibility, and this keeps the read safe on its own.
+    async fn get_document_intelligence(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+    ) -> Result<DocumentIntelligenceData, PortError> {
+        let entity_rows = sqlx::query(SELECT_DOCUMENT_INTELLIGENCE_ENTITIES)
+            .bind(tenant.as_str())
+            .bind(document_id.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg intelligence entities: {e}")))?;
+        let relation_rows = sqlx::query(SELECT_DOCUMENT_INTELLIGENCE_RELATIONS)
+            .bind(tenant.as_str())
+            .bind(document_id.as_str())
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg intelligence relations: {e}")))?;
+
+        let mut entities = Vec::with_capacity(entity_rows.len());
+        for row in &entity_rows {
+            let id: String = row
+                .try_get("id")
+                .map_err(|e| PortError::Unavailable(format!("pg intelligence entity id: {e}")))?;
+            let key: String = row
+                .try_get("entity_key")
+                .map_err(|e| PortError::Unavailable(format!("pg intelligence entity key: {e}")))?;
+            let name: String = row
+                .try_get("name")
+                .map_err(|e| PortError::Unavailable(format!("pg intelligence entity name: {e}")))?;
+            let entity_type: String = row
+                .try_get("entity_type")
+                .map_err(|e| PortError::Unavailable(format!("pg intelligence entity type: {e}")))?;
+            let aliases: Vec<String> = row.try_get("aliases").unwrap_or_default();
+            entities.push(EntityView {
+                id,
+                name,
+                r#type: entity_type,
+                confidence: 1.0,
+                metadata: serde_json::json!({ "key": key, "aliases": aliases }),
+            });
+        }
+
+        let mut relations = Vec::with_capacity(relation_rows.len());
+        for row in &relation_rows {
+            let id: String = row
+                .try_get("id")
+                .map_err(|e| PortError::Unavailable(format!("pg intelligence relation id: {e}")))?;
+            let src_key: String = row.try_get("src_key").map_err(|e| {
+                PortError::Unavailable(format!("pg intelligence relation src: {e}"))
+            })?;
+            let dst_key: String = row.try_get("dst_key").map_err(|e| {
+                PortError::Unavailable(format!("pg intelligence relation dst: {e}"))
+            })?;
+            let relation_type: String = row.try_get("relation_type").map_err(|e| {
+                PortError::Unavailable(format!("pg intelligence relation type: {e}"))
+            })?;
+            let weight: f64 = row.try_get("weight").unwrap_or(1.0);
+            relations.push(RelationView {
+                id,
+                from_id: src_key,
+                out: dst_key,
+                relation_type,
+                confidence: weight as f32,
+                metadata: serde_json::json!({}),
+            });
+        }
+
+        Ok(DocumentIntelligenceData {
+            entities,
+            relations,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,6 +754,12 @@ mod tests {
         assert!(SELECT_SCOPED_ENTITIES.contains(r#""documentId" = ANY($2)"#));
         assert!(SELECT_SCOPED_ENTITY_LABELS.contains(r#""documentId" = ANY($2)"#));
         assert!(SELECT_SCOPED_ENTITY_MENTIONS.contains(r#""documentId" = ANY($3)"#));
+        // The intelligence view is tenant *and* document scoped: a document id
+        // alone must never be enough to read another tenant's entities.
+        assert!(SELECT_DOCUMENT_INTELLIGENCE_ENTITIES.contains(r#"m."tenantId" = $1"#));
+        assert!(SELECT_DOCUMENT_INTELLIGENCE_ENTITIES.contains(r#"m."documentId" = $2"#));
+        assert!(SELECT_DOCUMENT_INTELLIGENCE_RELATIONS.contains(r#"r."tenantId" = $1"#));
+        assert!(SELECT_DOCUMENT_INTELLIGENCE_RELATIONS.contains(r#"r."documentId" = $2"#));
     }
 
     #[test]

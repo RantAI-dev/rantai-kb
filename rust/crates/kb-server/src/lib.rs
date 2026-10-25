@@ -15,7 +15,7 @@ pub mod state;
 pub mod tier;
 
 pub use boundary::{ADAPTER_CRATES, INNER_CRATES};
-pub use cli::{CliError, dispatch};
+pub use cli::{CliError, ReindexArgs, dispatch};
 pub use config::{Config, WorkerConfig};
 pub use dto::{ChunkDto, RetrievalDto, SearchRequestDto, SearchResponseDto, SourceDto};
 pub use events::EventBus;

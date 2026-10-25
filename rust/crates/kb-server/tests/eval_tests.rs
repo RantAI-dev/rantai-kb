@@ -139,7 +139,7 @@ async fn serve() -> String {
         StateParts {
             documents: Arc::new(documents),
             index: Arc::new(chunks),
-            entities: Arc::new(entities),
+            entities: Some(Arc::new(entities)),
             graph: None,
             graph_arm: None,
             blob: Arc::new(blobs),

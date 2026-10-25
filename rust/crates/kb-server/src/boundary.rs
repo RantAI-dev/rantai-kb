@@ -6,7 +6,7 @@
 //! a manifest, so this check reads `cargo metadata` and fails if one ever is.
 //!
 //! ```text
-//! kb-core  ←  kb-ports  ←  kb-inference · kb-store-pg · kb-store-surreal · kb-store-blob · kb-store-qdrant · kb-cache
+//! kb-core  ←  kb-ports  ←  kb-inference · kb-store-pg · kb-store-qdrant · kb-store-blob · kb-cache
 //!                       ←  kb-extract
 //!                       ←  kb-engine  ←  kb-server (composition root)
 //! ```
@@ -32,7 +32,6 @@ pub const INNER_CRATES: &[&str] = &["kb-core", "kb-ports", "kb-extract", "kb-eng
 pub const ADAPTER_CRATES: &[&str] = &[
     "kb-inference",
     "kb-store-pg",
-    "kb-store-surreal",
     "kb-store-blob",
     "kb-store-qdrant",
     "kb-cache",
@@ -58,7 +57,6 @@ pub const BLACK_BOX_FORBIDDEN: &[&str] = &[
     "kb-extract",
     "kb-inference",
     "kb-store-pg",
-    "kb-store-surreal",
     "kb-store-blob",
     "kb-store-qdrant",
     "kb-cache",

@@ -56,7 +56,7 @@ impl Harness {
             StateParts {
                 documents: Arc::new(documents.clone()),
                 index: Arc::new(chunks.clone()),
-                entities: Arc::new(entities.clone()),
+                entities: Some(Arc::new(entities.clone())),
                 graph: None,
                 graph_arm: None,
                 blob: Arc::new(blobs.clone()),
