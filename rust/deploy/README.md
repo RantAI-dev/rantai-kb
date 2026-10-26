@@ -97,6 +97,31 @@ the embedder's CPU limit — not the disk or the databases — sets pages/s (e5-
 4.9 → 9.7 → 17.1 chunks/s on 1 → 2 → 4 cores). A 0.6B embedder on the same 2 cores starved
 the API; e5-small and MiniLM did not.
 
+### What `lite-en` uses (measured 2026-10-26)
+
+The 14 ViDoRe HR PDFs (1,110 pages, 51 MB, 4,931 chunks) were ingested through the compose
+stack, followed by the 318 HR queries. `docker stats` was sampled roughly every 3 s
+(CPU is % of one core):
+
+| Container | Idle RAM | Ingest CPU avg / peak | Ingest RAM peak | Search CPU peak | Search RAM peak | Disk after ingest |
+|---|---|---|---|---|---|---|
+| tei-lite-en (MiniLM) | 188 MiB | 181% / 201% | 299 MiB | 113% | 298 MiB | 87 MB model |
+| kb-lite-en | 4 MiB | 7% / 104% | 120 MiB | 52% | 120 MiB | — |
+| qdrant | 46 MiB | 1% / 8% | 95 MiB | 139% | 208 MiB | 38 MB |
+| rustfs (S3) | 90 MiB | 2% / 71% | 161 MiB | 5% | 134 MiB | 51 MB (originals) |
+| postgres | 31 MiB | 6% / 19% | 40 MiB | 20% | 52 MiB | 49 MB |
+| **Total** | **~360 MiB** | **~2 cores** | **~715 MiB** | | **~810 MiB** | **~225 MB + 2.5 GB images** |
+
+- Ingest took 172 s for 1,110 pages, which is **6.45 pages/s**. The embedder used both of
+  its cores the whole time; everything else stayed under 10% on average.
+- Search with one client gave 30 queries/s (p50 32 ms, p95 45 ms) with 0 degraded and 0
+  empty results. A second pass with 4 clients reached 126 queries/s, but it repeated the
+  same queries, so the query-embedding cache made it look faster than it really is.
+- Minimum: 2 CPU cores and 2 GB RAM (the stack peaks near 0.8 GiB, plus the OS), with 5 GB
+  of disk. Recommended: 4 cores, so the API and Qdrant don't compete with the embedder.
+  Pages/s grows with the embedder's cores.
+- `lite` (e5-small) was not measured here.
+
 `lite-en` is only for English corpora. MiniLM is ~2.5× faster than e5-small
 because it has half the layers; on Indonesian it loses 0.123 nDCG. For a mixed
 or non-English corpus use `lite`.
