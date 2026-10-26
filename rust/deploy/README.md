@@ -120,7 +120,11 @@ stack, followed by the 318 HR queries. `docker stats` was sampled roughly every 
 - Minimum: 2 CPU cores and 2 GB RAM (the stack peaks near 0.8 GiB, plus the OS), with 5 GB
   of disk. Recommended: 4 cores, so the API and Qdrant don't compete with the embedder.
   Pages/s grows with the embedder's cores.
-- `lite` (e5-small) was not measured here.
+- `lite` (e5-small), same corpus and method: 733 s for 1,110 pages (**1.51 pages/s**). The
+  embedder used 916 MiB idle and peaked at 1,326 MiB, because e5-small's multilingual vocabulary
+  is large. The whole stack peaked at about 1.8 GiB, and the other four containers looked like
+  they do under `lite-en`. Search with one client: 22 queries/s, p50 44 ms, p95 60 ms, 0 degraded.
+  Minimum: 2 cores and 4 GB RAM.
 
 `lite-en` is only for English corpora. MiniLM is ~2.5× faster than e5-small
 because it has half the layers; on Indonesian it loses 0.123 nDCG. For a mixed
