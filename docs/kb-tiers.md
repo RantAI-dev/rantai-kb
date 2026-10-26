@@ -31,12 +31,12 @@ Metal); that is accepted for the chat model only.
 | Role | Lite | Desk (8 GB) | Studio (24 GB) | Station | Cloud |
 |---|---|---|---|---|---|
 | Chat LLM (the app's) | elsewhere | Bonsai-2-9B (2.0–2.6 GB + 0.6 GB vision), 5 users | Bonsai-2-27B (6.0–7.2 GB + 0.6 GB vision), 5 users | 32–35B × 5 users, or 8–9B × 20 users | API |
-| Embedding (text + page images, one space) | multilingual-e5-small on CPU (measured: `docs/eval-ab/lite-2core`) | Qwen3-VL-Embedding-2B, 8-bit | Qwen3-VL-Embedding-2B, full precision | Qwen3-VL-Embedding-8B | voyage-multimodal-3.5 or gemini-embedding-2 |
-| Reranker | tiny text reranker, or none | Qwen3-VL-Reranker-2B, 8-bit | Qwen3-VL-Reranker-2B, full precision | Qwen3-VL-Reranker-8B | voyage rerank-2.5 / cohere rerank-4 / qwen3-reranker-8b |
+| Embedding (text + page images, one space) | multilingual-e5-small on CPU (measured: `docs/eval-ab/lite-2core`) | Qwen3-Embedding-0.6B, text only (decided 2026-10-26) | Qwen3-VL-Embedding-2B, full precision | Qwen3-VL-Embedding-8B | voyage-multimodal-3.5 or gemini-embedding-2 |
+| Reranker | tiny text reranker, or none | bge-reranker-v2-m3 (text) | Qwen3-VL-Reranker-2B, full precision | Qwen3-VL-Reranker-8B | voyage rerank-2.5 / cohere rerank-4 / qwen3-reranker-8b |
 | Digital PDF text | pdfium text layer | text layer | text layer | text layer | text layer |
 | Scans / complex pages | PP-OCRv6 (ONNX, CPU) | PaddleOCR-VL-1.6, loaded during ingest | PaddleOCR-VL-1.6, resident | MinerU2.5-Pro / PaddleOCR-VL | Mistral OCR |
 | Charts / figures | small VLM on figure crops, background queue | chat LLM's vision, idle time | chat LLM's vision | chat LLM's vision | Gemini Flash |
-| Page-image search | optional tiny model (colSmol-256M), off by default | yes (same embedder) | yes | yes | yes |
+| Page-image search | optional tiny model (colSmol-256M), off by default | off (text-only embedder) | yes | yes | yes |
 | Est. VRAM chat / KB | — | ~3.5 / ~4.5 GB (tight) | ~9 / ~10 GB | ~26 / ~20 GB on 48 GB | — |
 
 ### Lite: cheapest tool per page
@@ -57,9 +57,13 @@ On 1–2 cores no model is fast enough to run on every page, so ingest routes **
 |---|---:|
 | Bonsai-2-9B + vision | 2.6–3.2 GB |
 | KV cache, 5 users (hybrid attention, 8 of 32 layers keep KV) | ~0.5–1 GB |
-| Qwen3-VL-Embedding-2B Q8 | ~2.2 GB |
-| Qwen3-VL-Reranker-2B Q8 | ~2.2 GB |
-| **Total** | **~7.5–8.6 GB** |
+| Qwen3-Embedding-0.6B fp16 (TEI CUDA, incl. runtime) | ~2 GB |
+| bge-reranker-v2-m3 fp16 (TEI CUDA, incl. runtime) | ~1.7 GB |
+| **Total** | **~6.8–7.9 GB** |
+
+Desk keeps the text-only Qwen3-Embedding-0.6B (decided 2026-10-26): it is what the compose
+profile ships, it runs on TEI, and it leaves ~0.7 GB more slack than the 2B multimodal pair.
+The cost is no page-image search on Desk; Studio and Station keep the multimodal plan.
 
 If it doesn't fit when measured: reranker at 6-bit first, then fewer rerank candidates. The
 parser does not stay resident unless the operator asks for it.
