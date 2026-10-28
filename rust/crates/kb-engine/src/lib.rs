@@ -105,12 +105,17 @@ pub struct EngineSettings {
     pub hybrid_bm25_enabled: bool,
     /// Whether reranker is enabled (`KB_RERANK_ENABLED`). Default false.
     pub rerank_enabled: bool,
+    /// The RRF constant that fuses the vector and keyword arms (`KB_RRF_K`).
+    /// 60 won live with the local embedder (commit 4c01a7d); 2 won offline
+    /// with e5-large on MIRACL-id, so it is a per-deployment choice.
+    pub rrf_k: u32,
 }
 
 impl Default for EngineSettings {
     fn default() -> Self {
         Self {
             candidate_pool_size: 20,
+            rrf_k: 60,
             rerank_candidate_limit: 0,
             rerank_char_budget: 0,
             rerank_timeout_ms: 20_000,
@@ -247,6 +252,7 @@ impl Engine {
             max_chunks,
             min_similarity: self.settings.min_similarity,
             candidate_pool_size: self.settings.candidate_pool_size,
+            rrf_k: self.settings.rrf_k,
             rerank_candidate_limit: self.settings.rerank_candidate_limit,
             rerank_char_budget: self.settings.rerank_char_budget,
             rerank_timeout_ms: self.settings.rerank_timeout_ms,

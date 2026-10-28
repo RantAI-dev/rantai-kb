@@ -472,6 +472,10 @@ impl Config {
         let default_max_chunks = int_var(&lookup, "KB_DEFAULT_MAX_CHUNKS", 8)?;
         let neighbour_window = int_var(&lookup, "KB_NEIGHBOR_WINDOW", 1)?;
         let rerank_initial_k = int_var(&lookup, "KB_RERANK_INITIAL_K", 20)?;
+        // RRF constant for the vector + keyword fusion. 60 is the measured local
+        // default (4c01a7d); a deployment whose embedder prefers a sharper
+        // fusion (k=2 won offline with e5-large on MIRACL-id) sets it here.
+        let rrf_k: u32 = int_var(&lookup, "KB_RRF_K", 60u32)?.max(1);
         let rerank_final_k = int_var(&lookup, "KB_RERANK_FINAL_K", 5)?;
         let figure_limit = int_var(&lookup, "KB_FIGURE_MAX_PER_ANSWER", 3)?;
         let query_expansion_enabled = bool_flag(&lookup, "KB_QUERY_EXPANSION_ENABLED", false);
@@ -494,6 +498,7 @@ impl Config {
 
         let engine = EngineSettings {
             candidate_pool_size: rerank_initial_k,
+            rrf_k,
             rerank_candidate_limit,
             rerank_char_budget,
             rerank_timeout_ms,
@@ -1071,6 +1076,26 @@ mod tests {
 
         let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
         assert!(err.to_string().contains("DATABASE_URL"));
+    }
+
+    #[test]
+    fn test_rrf_k_defaults_to_60_and_is_settable() {
+        let load = |rrf: Option<&'static str>| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            if let Some(v) = rrf {
+                map.insert("KB_RRF_K", v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .engine
+                .rrf_k
+        };
+        assert_eq!(load(None), 60);
+        assert_eq!(load(Some("2")), 2);
+        // RRF divides by k + rank; zero is clamped rather than allowed.
+        assert_eq!(load(Some("0")), 1);
     }
 
     #[test]

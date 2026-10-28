@@ -28,6 +28,8 @@ pub struct RetrievalOptions {
     pub max_chunks: u32,
     pub min_similarity: f32,
     pub candidate_pool_size: u32,
+    /// RRF constant for the two-arm fusion (`EngineSettings::rrf_k`).
+    pub rrf_k: u32,
     pub rerank_candidate_limit: u32,
     pub rerank_char_budget: usize,
     pub rerank_timeout_ms: u64,
@@ -57,6 +59,7 @@ impl fmt::Debug for RetrievalOptions {
             .field("max_chunks", &self.max_chunks)
             .field("min_similarity", &self.min_similarity)
             .field("candidate_pool_size", &self.candidate_pool_size)
+            .field("rrf_k", &self.rrf_k)
             .field("rerank_candidate_limit", &self.rerank_candidate_limit)
             .field("rerank_char_budget", &self.rerank_char_budget)
             .field("rerank_timeout_ms", &self.rerank_timeout_ms)
@@ -82,6 +85,7 @@ impl Default for RetrievalOptions {
             max_chunks: 8,
             min_similarity: 0.30,
             candidate_pool_size: 20,
+            rrf_k: 60,
             rerank_candidate_limit: 0,
             rerank_char_budget: 0,
             rerank_timeout_ms: 20_000,
@@ -567,7 +571,9 @@ pub async fn execute_pipeline(
             sparse: Some(sparse.clone()),
             per_arm_k: pool_size as usize,
             k: pool_size as usize,
-            fusion: Fusion::Rrf { k: 60 },
+            fusion: Fusion::Rrf {
+                k: opts.rrf_k.max(1),
+            },
         };
         match index.search(&hybrid, scope).await {
             Ok(c) => Ok(c),
