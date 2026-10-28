@@ -332,6 +332,7 @@ async fn search(
                 h.chunk.document_title = meta.title.clone();
                 h.chunk.categories = meta.categories.clone();
                 h.chunk.subcategory = meta.subcategory.clone();
+                h.chunk.external_ref = meta.external_ref.clone();
             }
         }
         let vector_results = hits.len();
@@ -566,6 +567,10 @@ pub struct ListDocumentsQuery {
     /// Bun/TS name (camelCase), used by existing clients.
     #[serde(alias = "knowledge_base_ids", rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Option<String>,
+    /// Exact-match filter on `Document.externalRef` (R1, additive). Scoped to
+    /// the caller's tenant and to live rows, like every other list filter.
+    #[serde(rename = "externalRef")]
+    pub external_ref: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -585,6 +590,9 @@ pub struct DocumentSummary {
     #[serde(rename = "fileSize")]
     pub file_size: Option<i32>,
     pub status: String,
+    /// Additive: the caller's opaque document reference, or null.
+    #[serde(rename = "externalRef")]
+    pub external_ref: Option<String>,
     #[serde(rename = "createdAt")]
     pub created_at: String,
     #[serde(rename = "knowledgeBaseIds")]
@@ -628,7 +636,12 @@ async fn list_documents(
     };
     let docs = state
         .documents
-        .list(&auth.tenant_id, limit, &kb_filter)
+        .list(
+            &auth.tenant_id,
+            limit,
+            &kb_filter,
+            q.external_ref.as_deref(),
+        )
         .await
         .map_err(ApiError::from)?;
     let documents = docs
@@ -641,6 +654,7 @@ async fn list_documents(
             file_type: d.file_type,
             file_size: d.file_size,
             status: d.status,
+            external_ref: d.external_ref,
             created_at: d.created_at,
             knowledge_base_ids: d.knowledge_base_ids,
         })

@@ -6,7 +6,7 @@
 mod harness;
 
 use axum::http::StatusCode;
-use kb_ports::{DocumentId, TenantId};
+use kb_ports::{DocumentId, DocumentStore, TenantId};
 
 use harness::*;
 
@@ -32,6 +32,11 @@ async fn list_wraps_documents_in_the_bun_envelope() {
     assert_eq!(first["fileType"], "application/pdf");
     assert_eq!(first["fileSize"], 12);
     assert_eq!(first["status"], "ready");
+    assert_eq!(
+        first["externalRef"],
+        serde_json::Value::Null,
+        "the field is additive on every list row, null when the document has none"
+    );
     assert_eq!(first["createdAt"], "2026-01-01T00:00:00.000Z");
     assert_eq!(first["knowledgeBaseIds"], serde_json::json!([]));
     // The list select does not carry these; a client must not see them here.
@@ -384,6 +389,96 @@ async fn knowledge_base_list_uses_the_bun_envelope() {
     assert_eq!(bases[0]["description"], "first");
     assert_eq!(bases[0]["color"], "#fff");
     assert_eq!(bases[0]["documentCount"], 2);
+}
+
+#[tokio::test]
+async fn list_filters_by_external_ref_and_never_crosses_the_tenant() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    h.with_tenant(OTHER);
+
+    let mut mine = doc_meta("doc-a", "Mine");
+    mine.external_ref = Some("ku-1".into());
+    let mut other_ref = doc_meta("doc-a-2", "Other ref");
+    other_ref.external_ref = Some("ku-2".into());
+    let unrelated = doc_meta("doc-a-3", "No ref");
+    let mut theirs = doc_meta("doc-b", "Theirs");
+    theirs.external_ref = Some("ku-1".into());
+
+    h.documents.insert_doc(TenantId(TENANT.to_string()), mine);
+    h.documents
+        .insert_doc(TenantId(TENANT.to_string()), other_ref);
+    h.documents
+        .insert_doc(TenantId(TENANT.to_string()), unrelated);
+    h.documents.insert_doc(TenantId(OTHER.to_string()), theirs);
+
+    let response = h
+        .send("GET", "/v1/documents?externalRef=ku-1", &tenant_key(TENANT))
+        .await;
+    let body = json_body(response).await;
+    let documents = body["documents"].as_array().expect("documents");
+    assert_eq!(documents.len(), 1, "{body}");
+    assert_eq!(documents[0]["id"], "doc-a");
+    assert_eq!(documents[0]["externalRef"], "ku-1");
+
+    // The other tenant's document carries the same externalRef and must stay
+    // invisible: the filter is an extra predicate, never a replacement for the
+    // tenant one.
+    let response = h
+        .send("GET", "/v1/documents?externalRef=ku-1", &tenant_key(OTHER))
+        .await;
+    let body = json_body(response).await;
+    let documents = body["documents"].as_array().expect("documents");
+    assert_eq!(documents.len(), 1, "{body}");
+    assert_eq!(documents[0]["id"], "doc-b");
+}
+
+#[tokio::test]
+async fn list_external_ref_excludes_soft_deleted_documents() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    let mut doc = doc_meta("doc-1", "Deleted");
+    doc.external_ref = Some("ku-1".into());
+    h.documents.insert_doc(TenantId(TENANT.to_string()), doc);
+
+    let deleted = h
+        .documents
+        .soft_delete(&TenantId(TENANT.to_string()), &DocumentId("doc-1".into()))
+        .await
+        .unwrap();
+    assert!(deleted);
+
+    let response = h
+        .send("GET", "/v1/documents?externalRef=ku-1", &tenant_key(TENANT))
+        .await;
+    let body = json_body(response).await;
+    assert_eq!(body["documents"], serde_json::json!([]), "{body}");
+}
+
+#[tokio::test]
+async fn list_external_ref_combines_with_knowledge_bases_and_limit() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    let mut in_kb = doc_meta("doc-in", "In");
+    in_kb.external_ref = Some("ku-1".into());
+    in_kb.knowledge_base_ids = vec!["kb-1".into()];
+    let mut out_kb = doc_meta("doc-out", "Out");
+    out_kb.external_ref = Some("ku-1".into());
+    out_kb.knowledge_base_ids = vec!["kb-2".into()];
+    h.documents.insert_doc(TenantId(TENANT.to_string()), in_kb);
+    h.documents.insert_doc(TenantId(TENANT.to_string()), out_kb);
+
+    let response = h
+        .send(
+            "GET",
+            "/v1/documents?externalRef=ku-1&knowledgeBaseIds=kb-1&limit=1",
+            &tenant_key(TENANT),
+        )
+        .await;
+    let body = json_body(response).await;
+    let documents = body["documents"].as_array().expect("documents");
+    assert_eq!(documents.len(), 1, "{body}");
+    assert_eq!(documents[0]["id"], "doc-in");
 }
 
 fn chunk_to_store(content: &str, index: u32) -> kb_ports::ChunkToStore {

@@ -98,11 +98,16 @@ pub trait DocumentStore: Send + Sync {
 
     /// List documents visible to the tenant (optionally filtered). Used by
     /// `GET /v1/documents`.
+    ///
+    /// `external_ref` filters on an exact match of `Document.externalRef`; the
+    /// filter is always combined with the tenant and soft-delete filters, so a
+    /// caller can never see another tenant's document by guessing its ref.
     async fn list(
         &self,
         tenant: &TenantId,
         limit: u32,
         knowledge_base_ids: &[KnowledgeBaseId],
+        external_ref: Option<&str>,
     ) -> Result<Vec<DocumentMeta>, PortError>;
 
     /// List knowledge bases visible to the tenant.

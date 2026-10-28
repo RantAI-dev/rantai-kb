@@ -59,6 +59,7 @@ fn hit(
             id: ChunkId(id.to_string()),
             document_id: DocumentId(doc_id.to_string()),
             document_title: title.to_string(),
+            external_ref: None,
             content: content.to_string(),
             chunk_type: ChunkType::Text,
             metadata: ChunkMetadata {

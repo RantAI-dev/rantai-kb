@@ -5,6 +5,7 @@ pub const MAX_LIMIT: u32 = 200;
 
 pub const SELECT_BY_ID: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
+           d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
            d.metadata,
@@ -21,6 +22,7 @@ pub const SELECT_BY_ID: &str = r#"
 /// hard-delete path looks a document up this way.
 pub const SELECT_BY_ID_WITH_DELETED: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
+           d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
            d.metadata,
@@ -35,6 +37,7 @@ pub const SELECT_BY_ID_WITH_DELETED: &str = r#"
 
 pub const SELECT_ALIVE_BY_IDS: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
+           d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
            d.metadata,
@@ -51,6 +54,7 @@ pub const SELECT_ALIVE_BY_IDS: &str = r#"
 
 pub const SELECT_DOCS_TENANT_ONLY: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
+           d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
            d.metadata,
@@ -61,12 +65,14 @@ pub const SELECT_DOCS_TENANT_ONLY: &str = r#"
            0::bigint AS chunk_count
       FROM "Document" d
      WHERE d."tenantId" = $1 AND d."deletedAt" IS NULL
+       AND ($3::text IS NULL OR d."externalRef" = $3)
      ORDER BY d."createdAt" DESC
      LIMIT $2
 "#;
 
 pub const SELECT_DOCS_WITH_KB: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
+           d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
            d.metadata,
@@ -78,6 +84,7 @@ pub const SELECT_DOCS_WITH_KB: &str = r#"
       FROM "Document" d
      WHERE d."tenantId" = $1
        AND d."deletedAt" IS NULL
+       AND ($4::text IS NULL OR d."externalRef" = $4)
        AND EXISTS (SELECT 1 FROM "DocumentGroup" gf
                     WHERE gf."documentId" = d.id AND gf."knowledgeBaseId" = ANY($2::text[]))
      ORDER BY d."createdAt" DESC

@@ -85,6 +85,7 @@ pub fn make_fake_hit(
             id: ChunkId(id.to_string()),
             document_id: DocumentId(doc_id.to_string()),
             document_title: title.to_string(),
+            external_ref: None,
             content: content.to_string(),
             chunk_type: ChunkType::Text,
             metadata: ChunkMetadata {
@@ -286,6 +287,7 @@ impl DocumentStore for FakeDocumentStore {
         tenant: &TenantId,
         limit: u32,
         knowledge_base_ids: &[KnowledgeBaseId],
+        external_ref: Option<&str>,
     ) -> Result<Vec<DocumentMeta>, PortError> {
         let map = self.docs.read().unwrap();
         let list = map.get(tenant).cloned().unwrap_or_default();
@@ -299,6 +301,7 @@ impl DocumentStore for FakeDocumentStore {
                         .iter()
                         .any(|id| knowledge_base_ids.iter().any(|k| k.0 == *id))
             })
+            .filter(|d| external_ref.is_none_or(|r| d.external_ref.as_deref() == Some(r)))
             .collect();
         Ok(filtered.into_iter().take(limit as usize).collect())
     }
@@ -389,6 +392,7 @@ impl DocumentStore for FakeDocumentStore {
             categories: doc.categories.clone(),
             subcategory: doc.subcategory.clone(),
             status: doc.status.clone(),
+            external_ref: doc.external_ref.clone(),
             chunk_count: 0,
             // The upload route stores the original's MIME type; `fileType` is
             // only filled in by the worker after extraction.

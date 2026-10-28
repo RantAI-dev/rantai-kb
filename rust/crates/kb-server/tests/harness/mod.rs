@@ -200,6 +200,7 @@ pub fn doc_meta(id: &str, title: &str) -> DocumentMeta {
         categories: vec![],
         subcategory: None,
         status: "ready".to_string(),
+        external_ref: None,
         chunk_count: 0,
         file_type: Some("application/pdf".to_string()),
         file_size: Some(12),

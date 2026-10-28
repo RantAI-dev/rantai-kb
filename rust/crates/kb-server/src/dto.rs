@@ -373,6 +373,9 @@ pub struct ChunkDto {
     pub document_id: String,
     #[serde(rename = "documentTitle")]
     pub document_title: String,
+    /// Additive (R2): the externalRef of the chunk's document, or null.
+    #[serde(rename = "externalRef", default)]
+    pub external_ref: Option<String>,
     pub categories: Vec<String>,
     pub subcategory: Option<String>,
     pub section: Option<String>,
@@ -484,6 +487,7 @@ impl From<SearchHit> for ChunkDto {
             content: hit.chunk.content,
             document_id: hit.chunk.document_id.0,
             document_title: hit.chunk.document_title,
+            external_ref: hit.chunk.external_ref,
             categories: hit.chunk.categories,
             subcategory: hit.chunk.subcategory,
             section: null_if_empty(hit.chunk.metadata.section),
@@ -566,6 +570,7 @@ mod tests {
                 id: kb_ports::ChunkId("c-1".to_string()),
                 document_id: kb_ports::DocumentId("d-1".to_string()),
                 document_title: "Doc".to_string(),
+                external_ref: None,
                 content: "body".to_string(),
                 chunk_type: kb_ports::ChunkType::Text,
                 metadata: kb_ports::ChunkMetadata {
@@ -703,6 +708,7 @@ mod tests {
                 "content",
                 "documentId",
                 "documentTitle",
+                "externalRef",
                 "id",
                 "page",
                 "retrieval",
@@ -775,8 +781,8 @@ mod tests {
         assert!(value.get("retrieval").is_none(), "{value}");
         assert_eq!(
             value.as_object().map(serde_json::Map::len),
-            Some(11),
-            "without provenance a chunk is exactly the Bun object: {value}"
+            Some(12),
+            "without provenance a chunk is exactly the Bun object plus externalRef: {value}"
         );
     }
 

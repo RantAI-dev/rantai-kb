@@ -71,6 +71,7 @@ fn doc(id: &str, title: &str, kb: &str, category: &str) -> DocumentMeta {
         categories: vec![category.to_string()],
         subcategory: None,
         status: "ready".to_string(),
+        external_ref: None,
         chunk_count: 2,
         file_type: Some("text/markdown".to_string()),
         file_size: Some(1024),
@@ -89,6 +90,7 @@ fn hit(id: &str, doc_id: &str, content: &str, chunk_index: u32, similarity: f32)
             id: ChunkId(id.to_string()),
             document_id: DocumentId(doc_id.to_string()),
             document_title: doc_id.to_string(),
+            external_ref: None,
             content: content.to_string(),
             chunk_type: kb_ports::ChunkType::Text,
             metadata: ChunkMetadata {

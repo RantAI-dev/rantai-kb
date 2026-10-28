@@ -80,6 +80,10 @@ pub struct Chunk {
     pub id: ChunkId,
     pub document_id: DocumentId,
     pub document_title: String,
+    /// The document's `externalRef`, resolved from the document record at the
+    /// same time as `document_title`. `None` when the document carries none.
+    #[serde(default)]
+    pub external_ref: Option<String>,
     pub content: String,
     pub chunk_type: ChunkType,
     pub metadata: ChunkMetadata,
@@ -420,6 +424,10 @@ pub struct DocumentMeta {
     pub categories: Vec<String>,
     pub subcategory: Option<String>,
     pub status: String,
+    /// The caller's opaque reference (`Document.externalRef`), echoed on the
+    /// document list and on every search chunk of this document.
+    #[serde(default)]
+    pub external_ref: Option<String>,
     pub chunk_count: u32,
     pub file_type: Option<String>,
     pub file_size: Option<i32>,

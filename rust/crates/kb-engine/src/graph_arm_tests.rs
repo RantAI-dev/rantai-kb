@@ -42,6 +42,7 @@ fn doc(id: &str) -> DocumentMeta {
         categories: vec![],
         subcategory: None,
         status: "ready".to_string(),
+        external_ref: None,
         chunk_count: 1,
         file_type: None,
         file_size: None,

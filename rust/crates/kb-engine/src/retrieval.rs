@@ -223,6 +223,7 @@ fn candidate_to_hit_with(c: Candidate, retrieval: Option<RetrievalProvenance>) -
             id: c.unit_id,
             document_id: c.document_id,
             document_title: String::new(),
+            external_ref: None,
             content: c.content,
             chunk_type: c.chunk_type,
             metadata: ChunkMetadata {
@@ -373,6 +374,7 @@ pub async fn enrich_titles_cached(
             h.chunk.document_title = meta.title.clone();
             h.chunk.categories = meta.categories.clone();
             h.chunk.subcategory = meta.subcategory.clone();
+            h.chunk.external_ref = meta.external_ref.clone();
         }
     }
 }
@@ -954,6 +956,7 @@ pub async fn execute_pipeline(
                             if let Some(t) = titled.get(&h.chunk.id) {
                                 h.chunk.document_title.clone_from(&t.chunk.document_title);
                                 h.chunk.categories.clone_from(&t.chunk.categories);
+                                h.chunk.external_ref.clone_from(&t.chunk.external_ref);
                             }
                         }
                     }

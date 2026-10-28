@@ -289,6 +289,7 @@ async fn retrieval_is_the_only_new_key_and_the_old_fields_are_unchanged() {
             "content",
             "documentId",
             "documentTitle",
+            "externalRef",
             "id",
             "page",
             "retrieval",

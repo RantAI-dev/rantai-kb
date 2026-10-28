@@ -79,6 +79,7 @@ fn document() -> DocumentMeta {
         categories: vec!["finance".to_string()],
         subcategory: Some("q3".to_string()),
         status: "processing".to_string(),
+        external_ref: None,
         chunk_count: 0,
         file_type: None,
         file_size: None,

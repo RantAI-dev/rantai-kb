@@ -162,6 +162,7 @@ async fn test_search_happy_path_fields() {
             categories: vec!["guide".into()],
             subcategory: None,
             status: "ready".into(),
+            external_ref: None,
             chunk_count: 1,
             file_type: None,
             file_size: None,
@@ -217,6 +218,72 @@ async fn test_search_happy_path_fields() {
     assert!(context.contains("Happy path content line"));
 }
 
+#[tokio::test]
+async fn test_search_chunks_carry_the_documents_external_ref() {
+    let harness = Harness::new();
+    let tenant = TenantId("tenant-1".into());
+    harness
+        .documents
+        .insert_api_key("valid-key", tenant.clone());
+    harness.documents.insert_doc(
+        tenant,
+        DocumentMeta {
+            id: DocumentId("doc-1".into()),
+            title: "KU Document".into(),
+            categories: vec![],
+            subcategory: None,
+            status: "ready".into(),
+            external_ref: Some("ku-42".into()),
+            chunk_count: 1,
+            file_type: None,
+            file_size: None,
+            mime_type: None,
+            s3_key: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+            knowledge_base_ids: vec![],
+            metadata: None,
+        },
+    );
+    harness
+        .chunks
+        .bm25_hits
+        .write()
+        .unwrap()
+        .push(make_fake_hit(
+            "c_1",
+            "doc-1",
+            "KU Document",
+            "The knowledge unit body",
+            0,
+            0.0,
+        ));
+
+    let request = Request::builder()
+        .uri("/v1/search")
+        .method("POST")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer valid-key")
+        .body(Body::from(r#"{"query": "knowledge unit"}"#))
+        .unwrap();
+    let response = harness.app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let chunks = body["chunks"].as_array().expect("chunks");
+    assert_eq!(chunks.len(), 1, "{body}");
+    assert_eq!(
+        chunks[0]["externalRef"], "ku-42",
+        "a chunk names the KU its document came from: {body}"
+    );
+    // Additive only: every Bun key is still there.
+    assert_eq!(chunks[0]["documentId"], "doc-1");
+    assert_eq!(chunks[0]["documentTitle"], "KU Document");
+}
+
 /// A harness with one tenant, one document and two arms' worth of hits, ready
 /// for a timing assertion.
 fn timing_harness() -> Harness {
@@ -233,6 +300,7 @@ fn timing_harness() -> Harness {
             categories: vec![],
             subcategory: None,
             status: "READY".into(),
+            external_ref: None,
             chunk_count: 1,
             file_type: None,
             file_size: None,
@@ -544,6 +612,7 @@ async fn test_tenant_b_key_searching_fakes_with_tenant_a_docs_gets_zero_results(
             categories: vec![],
             subcategory: None,
             status: "ready".into(),
+            external_ref: None,
             chunk_count: 1,
             file_type: None,
             file_size: None,
@@ -619,6 +688,7 @@ fn delete_test_doc(id: &str) -> DocumentMeta {
         categories: vec![],
         subcategory: None,
         status: "READY".into(),
+        external_ref: None,
         chunk_count: 0,
         file_type: None,
         file_size: None,

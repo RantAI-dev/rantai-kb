@@ -306,6 +306,7 @@ impl DocumentStore for PgDocumentStore {
         tenant: &TenantId,
         limit: u32,
         knowledge_base_ids: &[KnowledgeBaseId],
+        external_ref: Option<&str>,
     ) -> Result<Vec<DocumentMeta>, PortError> {
         let limit = (limit.clamp(1, MAX_LIMIT)) as i64;
 
@@ -313,6 +314,7 @@ impl DocumentStore for PgDocumentStore {
             sqlx::query(SELECT_DOCS_TENANT_ONLY)
                 .bind(tenant.0.as_str())
                 .bind(limit)
+                .bind(external_ref)
                 .fetch_all(&self.pool)
                 .await
         } else {
@@ -321,6 +323,7 @@ impl DocumentStore for PgDocumentStore {
                 .bind(tenant.0.as_str())
                 .bind(&ids)
                 .bind(limit)
+                .bind(external_ref)
                 .fetch_all(&self.pool)
                 .await
         }
