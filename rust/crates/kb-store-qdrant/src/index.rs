@@ -12,7 +12,6 @@ use kb_ports::{
     sort_candidates,
 };
 use qdrant_client::Qdrant;
-use qdrant_client::qdrant::Fusion as QdrantFusion;
 use qdrant_client::qdrant::{
     CountPointsBuilder, DeletePointsBuilder, NamedVectors, PointId, PointStruct,
     PrefetchQueryBuilder, Query, QueryBatchPointsBuilder, QueryPointsBuilder, ScrollPointsBuilder,
@@ -423,6 +422,12 @@ impl RetrievalIndex for QdrantIndex {
         let is_rrf = matches!(query.fusion, PortFusion::Rrf { .. });
 
         if is_rrf {
+            // Two searches, fused here. The fused score has always been computed
+            // in this process from each arm's rank (so ties break on unit id and
+            // the constant is ours, not Qdrant's k=2); Qdrant's own RRF query only
+            // chose which candidates got scored, and cost two more searches. The
+            // candidate set is now the union of both arms, which is what
+            // `InMemoryIndex` (the reference) fuses over.
             let dense_q = with_params(
                 QueryPointsBuilder::new(&self.collection)
                     .using(DENSE_VECTOR)
@@ -432,105 +437,71 @@ impl RetrievalIndex for QdrantIndex {
                     .with_payload(true),
                 &dense_params,
             );
-
             let sparse_q = QueryPointsBuilder::new(&self.collection)
                 .using(SPARSE_VECTOR)
-                .query(VectorInput::new_sparse(
-                    sparse_indices.clone(),
-                    sparse_values.clone(),
-                ))
-                .filter(filter.clone())
-                .limit(per_arm_k)
-                .with_payload(false);
-
-            let rrf_q = QueryPointsBuilder::new(&self.collection)
-                .query(Query::new_fusion(QdrantFusion::Rrf))
-                .add_prefetch(with_params(
-                    PrefetchQueryBuilder::default()
-                        .using(DENSE_VECTOR)
-                        .query(Query::new_nearest(dense_vec.clone()))
-                        .filter(filter.clone())
-                        .limit(per_arm_k),
-                    &dense_params,
-                ))
-                .add_prefetch(
-                    PrefetchQueryBuilder::default()
-                        .using(SPARSE_VECTOR)
-                        .query(VectorInput::new_sparse(sparse_indices, sparse_values))
-                        .filter(filter.clone())
-                        .limit(per_arm_k),
-                )
+                .query(VectorInput::new_sparse(sparse_indices, sparse_values))
                 .filter(filter)
                 .limit(per_arm_k)
                 .with_payload(true);
-
             let batch = QueryBatchPointsBuilder::new(
                 &self.collection,
-                vec![dense_q.build(), sparse_q.build(), rrf_q.build()],
+                vec![dense_q.build(), sparse_q.build()],
             );
             let batch_resp = self.client.query_batch(batch).await.map_err(map)?;
-
             // Ranks come from [`ranked_arm`], not from the order the store
             // answered in: two ingests of the same corpus produce the same scores
             // but can hand back tied points in different orders, and RRF turns
             // that reshuffle into a different answer.
-            let dense_map = batch_resp
+            let dense_points = batch_resp
                 .result
                 .first()
-                .map(|dense_res| rank_map(&scored_points(&dense_res.result)))
+                .map(|r| scored_points(&r.result))
                 .unwrap_or_default();
-            let sparse_map = batch_resp
+            let sparse_points = batch_resp
                 .result
                 .get(1)
-                .map(|sparse_res| rank_map(&scored_points(&sparse_res.result)))
+                .map(|r| scored_points(&r.result))
                 .unwrap_or_default();
-
+            let dense_map = rank_map(&dense_points);
+            let sparse_map = rank_map(&sparse_points);
             let rrf_k = match query.fusion {
                 PortFusion::Rrf { k } => k,
                 PortFusion::None => 60,
             };
-
+            // Each point once, payload from whichever arm returned it first.
+            let mut seen: HashSet<PointId> = HashSet::new();
             let mut candidates = Vec::new();
-            if let Some(rrf_res) = batch_resp.result.get(2) {
-                for p in &rrf_res.result {
-                    let (dense_score, dense_rank) =
-                        p.id.as_ref()
-                            .and_then(|id| dense_map.get(id))
-                            .map(|(s, r)| (Some(*s), Some(*r)))
-                            .unwrap_or((None, None));
-                    let (sparse_score, sparse_rank) =
-                        p.id.as_ref()
-                            .and_then(|id| sparse_map.get(id))
-                            .map(|(s, r)| (Some(*s), Some(*r)))
-                            .unwrap_or((None, None));
-
-                    let mut fused = 0.0f32;
-                    if let Some(r) = dense_rank {
-                        fused += 1.0 / (rrf_k as f32 + r as f32 + 1.0);
-                    }
-                    if let Some(r) = sparse_rank {
-                        fused += 1.0 / (rrf_k as f32 + r as f32 + 1.0);
-                    }
-                    if dense_rank.is_none() && sparse_rank.is_none() {
-                        fused = p.score;
-                    }
-
-                    let scores = ArmScores {
-                        dense: dense_score,
-                        sparse: sparse_score,
-                        fused,
-                    };
-                    let ranks = ArmRanks {
-                        dense: dense_rank,
-                        sparse: sparse_rank,
-                        fused: 0,
-                    };
-                    if let Some(c) = candidate_from(&p.payload, scores, ranks) {
-                        candidates.push(c);
-                    }
+            for p in dense_points.iter().chain(sparse_points.iter()) {
+                if !seen.insert(p.id.clone()) {
+                    continue;
+                }
+                let (dense_score, dense_rank) = dense_map
+                    .get(&p.id)
+                    .map_or((None, None), |(s, r)| (Some(*s), Some(*r)));
+                let (sparse_score, sparse_rank) = sparse_map
+                    .get(&p.id)
+                    .map_or((None, None), |(s, r)| (Some(*s), Some(*r)));
+                let mut fused = 0.0f32;
+                if let Some(r) = dense_rank {
+                    fused += 1.0 / (rrf_k as f32 + r as f32 + 1.0);
+                }
+                if let Some(r) = sparse_rank {
+                    fused += 1.0 / (rrf_k as f32 + r as f32 + 1.0);
+                }
+                let scores = ArmScores {
+                    dense: dense_score,
+                    sparse: sparse_score,
+                    fused,
+                };
+                let ranks = ArmRanks {
+                    dense: dense_rank,
+                    sparse: sparse_rank,
+                    fused: 0,
+                };
+                if let Some(c) = candidate_from(&p.payload, scores, ranks) {
+                    candidates.push(c);
                 }
             }
-
             sort_candidates(&mut candidates);
             candidates.truncate(query.k);
             Ok(candidates)
