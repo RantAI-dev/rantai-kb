@@ -14,7 +14,7 @@ use crate::ExtractError;
 use crate::pdfium::{get_pdf_page_count, get_pdfium, render_pdf_page_to_png};
 
 const DEFAULT_VISION_MODEL: &str = "google/gemini-2.5-flash";
-const OPENROUTER_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+pub const OPENROUTER_VISION_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 const OCR_PROMPT: &str = r"Analyze this document image and extract all text.
 
@@ -50,7 +50,7 @@ impl OpenRouterVisionProvider {
         }
 
         let model = model.unwrap_or_else(|| DEFAULT_VISION_MODEL.to_string());
-        let base_url = base_url.unwrap_or_else(|| OPENROUTER_API_URL.to_string());
+        let base_url = base_url.unwrap_or_else(|| OPENROUTER_VISION_URL.to_string());
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(3 * 60))
             .build()

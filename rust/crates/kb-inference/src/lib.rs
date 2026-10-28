@@ -22,14 +22,14 @@ pub use heuristic_extractor::{HeuristicExtractor, HeuristicExtractorSettings};
 pub use llm_extractor::{ExtractorSettings, LlmCombinedExtractor};
 /// Type alias for ExtractorSettings.
 pub type ExtractorConfig = ExtractorSettings;
-pub use llm_reranker::LlmReranker;
+pub use llm_reranker::{LlmReranker, OPENROUTER_CHAT_URL};
 pub use page_describer::{
     DEFAULT_PAGE_CAPTION_BASE_URL, HttpPageDescriber, PAGE_DESCRIBE_PROMPT,
     PAGE_DESCRIBE_PROMPT_VERSION, PageDescriberSettings,
 };
 pub use page_embedder::{HttpPageEmbedder, PageEmbedFormat, PageEmbedderSettings};
 pub use query_expansion::{ExpansionSettings, QueryExpander};
-pub use rerankers::{CohereReranker, TeiReranker, VllmReranker};
+pub use rerankers::{CohereReranker, DEFAULT_COHERE_ENDPOINT, TeiReranker, VllmReranker};
 pub use vision_scorer::{
     DEFAULT_VISION_BASE_URL, HttpPageVisionScorer, VISION_PROMPT_VERSION, VisionScorerSettings,
 };

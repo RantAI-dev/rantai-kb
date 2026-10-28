@@ -5,6 +5,9 @@
 //! every input, so missing items are appended in input order at score 0 so the
 //! engine can still map every candidate id.
 
+/// Cohere's hosted rerank endpoint, used when no explicit endpoint is set.
+pub const DEFAULT_COHERE_ENDPOINT: &str = "https://api.cohere.com/v2/rerank";
+
 use async_trait::async_trait;
 use kb_ports::{PortError, RerankCandidate, RerankResult, Reranker};
 use serde::{Deserialize, Serialize};
@@ -360,9 +363,7 @@ impl CohereReranker {
             .timeout(Duration::from_secs(20))
             .build()
             .map_err(|e| PortError::Unavailable(format!("reqwest builder: {e}")))?;
-        let ep = endpoint
-            .unwrap_or("https://api.cohere.com/v2/rerank")
-            .to_string();
+        let ep = endpoint.unwrap_or(DEFAULT_COHERE_ENDPOINT).to_string();
         Ok(Self {
             name: model.to_string(),
             model: model.to_string(),

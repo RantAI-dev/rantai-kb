@@ -39,6 +39,13 @@ pub struct AppState {
     pub events: Arc<EventBus>,
     pub engine: Engine,
     pub version: String,
+    /// `KB_TIER` name (`lite`, `cloud`, …), or `None` when no tier is set.
+    /// Reported by `GET /health`.
+    pub tier: Option<String>,
+    /// Hosts of configured model endpoints that are not local, sorted and
+    /// de-duplicated. Reported by `GET /health` so a caller can refuse to send
+    /// content that would leave the platform.
+    pub egress: Vec<String>,
 }
 
 /// Adapters a caller supplies. Grouped so tests can build a state from fakes
@@ -60,6 +67,13 @@ impl AppState {
     /// Build state from a typed config, connecting every adapter once so the
     /// process shares a single Postgres pool.
     pub async fn from_config(config: crate::Config) -> anyhow::Result<Self> {
+        // Both are pure reads of the resolved config; take them before any
+        // field is moved into an adapter.
+        let tier = config
+            .tier
+            .as_ref()
+            .map(|plan| plan.tier.as_str().to_string());
+        let egress = config.egress_hosts();
         let pool = kb_store_pg::connect_pool(&config.pg)
             .await
             .map_err(|e| anyhow::anyhow!("pg: {e}"))?;
@@ -198,6 +212,8 @@ impl AppState {
             events: EventBus::new(),
             engine,
             version: config.version,
+            tier,
+            egress,
         })
     }
 
@@ -232,6 +248,10 @@ impl AppState {
             events: parts.events,
             engine,
             version: parts.version,
+            // Hand-built test states carry no config, so nothing can leave the
+            // process through a model endpoint they did not configure.
+            tier: None,
+            egress: Vec::new(),
         }
     }
 

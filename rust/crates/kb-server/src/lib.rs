@@ -7,6 +7,7 @@ pub mod boundary;
 pub mod cli;
 pub mod config;
 pub mod dto;
+pub mod egress;
 pub mod error;
 pub mod events;
 pub mod routes;

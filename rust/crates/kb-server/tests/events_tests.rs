@@ -247,6 +247,10 @@ async fn health_reports_both_checks_and_the_version() {
     assert_eq!(body["checks"]["postgres"], true);
     assert_eq!(body["checks"]["vectors"], true);
     assert_eq!(body["version"], "test");
+    // R3 additive fields. A test state has no resolved config, so the honest
+    // answer is "no tier, nothing can leave this process".
+    assert_eq!(body["tier"], serde_json::Value::Null);
+    assert_eq!(body["egress"], serde_json::json!([]));
 }
 
 #[tokio::test]

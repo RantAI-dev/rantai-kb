@@ -182,6 +182,10 @@ pub struct HealthResponse {
     pub ok: bool,
     pub checks: HealthChecks,
     pub version: String,
+    /// Additive (R3): the `KB_TIER` preset name, or null when none is set.
+    pub tier: Option<String>,
+    /// Additive (R3): non-local model-endpoint hosts, sorted and de-duplicated.
+    pub egress: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -201,6 +205,8 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
         ok,
         checks: HealthChecks { postgres, vectors },
         version: state.version.clone(),
+        tier: state.tier.clone(),
+        egress: state.egress.clone(),
     };
     let status = if ok {
         StatusCode::OK

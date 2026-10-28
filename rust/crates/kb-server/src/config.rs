@@ -857,6 +857,86 @@ impl Config {
             plan.log();
         }
     }
+
+    /// Every base URL this resolved config can send document or query content
+    /// to, in role order. Features that are off contribute nothing: a disabled
+    /// reranker, the page arm without a model, entity extraction without a
+    /// graph store, and an extraction chain with no configured parser.
+    #[must_use]
+    pub fn outbound_content_urls(&self) -> Vec<String> {
+        let mut urls = vec![self.embedder.base_url.clone()];
+
+        match &self.reranker {
+            RerankerConfig::Disabled => {}
+            RerankerConfig::Llm { .. } => {
+                urls.push(kb_inference::OPENROUTER_CHAT_URL.to_string());
+            }
+            RerankerConfig::Tei { base_url, .. } | RerankerConfig::Vllm { base_url, .. } => {
+                urls.push(base_url.clone());
+            }
+            RerankerConfig::Cohere { endpoint, .. } => urls.push(
+                endpoint
+                    .clone()
+                    .unwrap_or_else(|| kb_inference::DEFAULT_COHERE_ENDPOINT.to_string()),
+            ),
+        }
+
+        if self.expansion.enabled {
+            urls.push(self.expansion.endpoint.clone());
+        }
+
+        if let Some(pages) = self.pages.as_ref() {
+            urls.push(pages.embedder.base_url.clone());
+            if let Some(vision) = pages.vision.as_ref() {
+                urls.push(vision.scorer.base_url.clone());
+            }
+            if let Some(caption) = pages.caption.as_ref() {
+                urls.push(caption.describer.base_url.clone());
+            }
+        }
+
+        if self.worker.enabled {
+            // Mirrors `kb_extract::build_production_extractor`: a layout parser
+            // exists only when its URL or key is present, and vision OCR only
+            // with an OpenRouter key.
+            let enabled = |name: &str| {
+                self.extract
+                    .layout_extractor_order
+                    .iter()
+                    .any(|n| n == name)
+            };
+            if enabled("sidecar") && !self.extract.mineru_base_url.trim().is_empty() {
+                urls.push(self.extract.mineru_base_url.clone());
+            }
+            if enabled("mineru-api") && !self.extract.mineru_api_key.trim().is_empty() {
+                urls.push(self.extract.mineru_api_base.clone());
+            }
+            if enabled("mistral") && !self.extract.mistral_ocr_key.trim().is_empty() {
+                urls.push(self.extract.mistral_ocr_base.clone());
+            }
+            if !self.extract.openrouter_api_key.trim().is_empty() {
+                urls.push(kb_extract::OPENROUTER_VISION_URL.to_string());
+            }
+            // The LLM entity extractor is built (and paid for) only when the
+            // worker writes to a graph store, and only when it is switched on.
+            if self.entity_extractor == EntityExtractorChoice::Llm
+                && self.worker.entity_extraction_enabled
+                && self.graph_store == GraphStoreChoice::Pg
+            {
+                urls.push(self.entity.base_url.clone());
+            }
+        }
+
+        urls
+    }
+
+    /// Hosts from [`outbound_content_urls`](Self::outbound_content_urls) that
+    /// are not on this platform, sorted and de-duplicated. Reported by
+    /// `GET /health` as `egress`.
+    #[must_use]
+    pub fn egress_hosts(&self) -> Vec<String> {
+        crate::egress::non_local_hosts(self.outbound_content_urls())
+    }
 }
 
 fn bool_flag<F>(lookup: &F, name: &str, default: bool) -> bool
@@ -1623,6 +1703,36 @@ mod tests {
                 "{tier} claims to have filled an explicit variable"
             );
         }
+    }
+
+    /// R3: the two documented examples, measured on the resolved config.
+    #[test]
+    fn test_egress_is_the_cloud_host_and_nothing_for_local_tiers() {
+        let mut cloud = tier_map();
+        cloud.insert("OPENROUTER_API_KEY", "test-key");
+        cloud.insert("KB_TIER", "cloud");
+        assert_eq!(resolved(&cloud).egress_hosts(), vec!["openrouter.ai"]);
+
+        for tier in ["lite", "lite-en"] {
+            let mut map = tier_map();
+            map.insert("KB_TIER", tier);
+            assert!(
+                resolved(&map).egress_hosts().is_empty(),
+                "{tier} sent content off host"
+            );
+        }
+    }
+
+    /// A local tier that points one role at a hosted endpoint reports it, so the
+    /// answer follows the resolved config rather than the tier name.
+    #[test]
+    fn test_local_tier_with_a_hosted_role_reports_the_host() {
+        let mut map = tier_map();
+        map.insert("KB_TIER", "lite");
+        map.insert("KB_RERANK_ENABLED", "true");
+        map.insert("KB_RERANK_PROVIDER", "vllm");
+        map.insert("KB_RERANK_BASE_URL", "https://rerank.example.com");
+        assert_eq!(resolved(&map).egress_hosts(), vec!["rerank.example.com"]);
     }
 
     #[test]

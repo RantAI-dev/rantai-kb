@@ -63,6 +63,7 @@ pub use mineru_api::MineruApiExtractor;
 pub use mistral::MistralOcrExtractor;
 pub use ods::parse_ods;
 pub use odt::parse_odt;
+pub use openrouter_vision::OPENROUTER_VISION_URL;
 pub use openrouter_vision::OpenRouterVisionProvider;
 pub use page_render::PdfiumPageRenderer;
 pub use pdfium::{
