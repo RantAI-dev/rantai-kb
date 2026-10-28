@@ -54,6 +54,16 @@ Other useful routes: `GET /health`, `GET /v1/documents`, `GET /v1/documents/:id`
 `GET /v1/documents/:id/raw`, `GET /v1/formats`, `GET /v1/events` (SSE ingest
 progress), `GET /v1/jobs/:id`. A key with no `--scopes` may read and write.
 
+For engine clients that map hits back to their own records:
+`GET /v1/documents?externalRef=<ref>` filters the list to the caller tenant's
+live documents with that exact `externalRef` (composable with `limit` and
+`knowledgeBaseIds`), every document list row carries `externalRef`, and every
+`/v1/search` chunk carries the `externalRef` of its document. `GET /health` and
+`GET /v1/health` also report `tier` (the `KB_TIER` preset, or `null`) and
+`egress`, the sorted hosts of configured model endpoints that are not local
+(loopback, RFC1918, link-local, `fc00::/7`, or a single-label compose name);
+`cloud` reports `["openrouter.ai"]`, `lite`/`lite-en` report `[]`.
+
 Everyday commands:
 
 ```sh

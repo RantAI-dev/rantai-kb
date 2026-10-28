@@ -384,6 +384,37 @@ path.**
 
 ---
 
+### 13. Additive: `externalRef` and health egress (2026-10-28)
+
+MOCO-KF uses rantai-kb as an alternative vector-plane engine. It uploads each
+Knowledge Unit as a small markdown document with `externalRef = <ku_id>`, maps
+search hits back to KUs, re-indexes a KU idempotently, and refuses to send
+content to a deployment that would forward it off-host. Three additive fields
+serve that, with no schema change:
+
+- **`GET /v1/documents?externalRef=<ref>`** returns only the caller tenant's
+  live documents whose `Document.externalRef` is exactly `<ref>`. The filter
+  composes with `limit` and `knowledgeBaseIds`; the tenant and `deletedAt`
+  predicates stay in the same SQL query, so the ref can never widen scope.
+  Every list row now carries `externalRef: string | null`.
+- **`POST /v1/search`** adds `externalRef: string | null` to every chunk. It is
+  resolved from the document record at the same point as `documentTitle`
+  (`kb-engine/src/retrieval.rs::enrich_titles_cached`, and the `documentIds`
+  branch in `kb-server/src/routes.rs`), not stored in the Qdrant payload, so old
+  points need no reindex and yield `null` rather than an error.
+- **`GET /health`** (and `/v1/health`) adds `tier` (`KB_TIER`, or `null`) and
+  `egress`: the sorted, de-duplicated hosts of configured outbound model
+  endpoints that are **not** local. Local means loopback, RFC1918,
+  link-local, `fc00::/7`, or a single-label hostname such as `tei-lite`;
+  disabled features contribute nothing. The classifier is pure
+  (`kb-server/src/egress.rs`) and tested per address family and URL shape.
+  `cloud` reports `["openrouter.ai"]`; `lite` and `lite-en` report `[]`.
+
+Bun produces none of these fields. A client diffing the two runtimes should
+ignore them, as it already ignores `retrieval` (§5).
+
+---
+
 ## 6. Shared Known Issues
 
 ### Duplicate Chunks Across Retrieval Arms (Bun only; Rust merges — §12)
