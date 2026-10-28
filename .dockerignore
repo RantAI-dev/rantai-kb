@@ -6,3 +6,7 @@ dist/
 .DS_Store
 prisma/dev.db
 .git
+
+target/
+rust/target/
+rust/.vendor/

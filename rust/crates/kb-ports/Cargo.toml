@@ -1,0 +1,24 @@
+[package]
+name = "kb-ports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kb-core = { path = "../kb-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+
+[features]
+# Enabled only by DocumentStore adapters and engine test fakes. See src/scope.rs.
+scope-adapter = []
+# The RetrievalIndex contract suite. Implies `scope-adapter`, because the suite
+# builds DocumentScopes itself to prove that no adapter escapes one.
+contract = ["scope-adapter"]

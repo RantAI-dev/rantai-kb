@@ -1,0 +1,3 @@
+cs-voy-text: 848 s wall (ingest + queries)
+cs-vmm-ti-pr: 729 s wall (ingest + queries)
+cs-vmm-text: 34 s wall (ingest + queries)

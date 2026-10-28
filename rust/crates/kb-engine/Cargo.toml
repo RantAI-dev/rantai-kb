@@ -1,0 +1,32 @@
+[package]
+name = "kb-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+test-utils = ["kb-ports/scope-adapter"]
+
+[dependencies]
+kb-ports = { path = "../kb-ports" }
+kb-core = { path = "../kb-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+
+
+[dev-dependencies]
+# Test builds of kb-engine need the scope adapter token for its fakes, and the
+# contract suite so the in-memory reference index is held to the same
+# properties as every real adapter.
+kb-ports = { path = "../kb-ports", features = ["scope-adapter", "contract"] }

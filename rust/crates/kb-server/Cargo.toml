@@ -1,0 +1,46 @@
+[package]
+name = "kb-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kb-ports = { path = "../kb-ports" }
+kb-core = { path = "../kb-core" }
+kb-inference = { path = "../kb-inference" }
+kb-store-pg = { path = "../kb-store-pg" }
+kb-store-qdrant = { path = "../kb-store-qdrant" }
+kb-store-blob = { path = "../kb-store-blob" }
+kb-extract = { path = "../kb-extract" }
+kb-cache = { path = "../kb-cache" }
+kb-engine = { path = "../kb-engine" }
+kb-eval = { path = "../kb-eval" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+kb-ports = { path = "../kb-ports" }
+kb-engine = { path = "../kb-engine", features = ["test-utils"] }
+kb-eval = { path = "../kb-eval" }
+# The leak matrix drives kb-eval as a black-box HTTP client, so its test needs
+# the same client library kb-eval uses.
+reqwest = { workspace = true }
+tokio = { workspace = true }

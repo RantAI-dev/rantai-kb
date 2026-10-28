@@ -1,0 +1,531 @@
+#!/usr/bin/env bash
+# Bring up the kb-smoke stack and leave it running.
+#
+# Real Postgres 16 + Qdrant + S3 (rustfs) + an embedder (stub dim 8 or TEI dim 1024) +
+# kb-server, on the ports smoke.sh uses. Idempotent: re-running it while the
+# stack is up is a no-op that re-prints where things are.
+#
+#   rust/scripts/stack-up.sh        # start, or say "already up"
+#   source /tmp/kb-stack/stack.env  # DATABASE_URL, S3_*, PORT, KB_SERVER_BIN…
+#   rust/scripts/stack-down.sh      # stop everything this script started
+#
+# Opt-in modes:
+#   KB_STACK_EMBEDDINGS=tei         # starts kb-smoke-tei-embed (Qwen3-Embedding-0.6B, dim 1024)
+#   KB_STACK_EMBEDDINGS=openrouter  # no local model: embeddings come from OpenRouter (PAID,
+#                                   # needs OPENROUTER_API_KEY). KB_STACK_OR_MODEL (default
+#                                   # qwen/qwen3-embedding-8b), KB_STACK_OR_DIM (4096),
+#                                   # KB_STACK_OR_QUERY_PREFIX / KB_STACK_OR_PASSAGE_PREFIX.
+#   KB_STACK_EMBEDDINGS=remote      # no local model: an OpenAI-compatible embeddings server
+#                                   # already running elsewhere (e.g. llama.cpp on a LAN GPU
+#                                   # box). Needs KB_STACK_REMOTE_EMBED_URL (base URL, e.g.
+#                                   # http://host:8081) and KB_STACK_REMOTE_EMBED_KEY. Defaults
+#                                   # to Qwen3-Embedding-0.6B (dim 1024, Qwen3 query
+#                                   # instruction); KB_STACK_REMOTE_EMBED_MODEL / _DIM /
+#                                   # _QUERY_PREFIX / _PASSAGE_PREFIX override.
+#   KB_SERVER_BIN=.../release/kb-server  # a prebuilt binary (e.g. release, for latency runs)
+#   KB_STACK_RERANK=tei             # starts kb-smoke-tei-rerank (bge-reranker-v2-m3)
+#   KB_STACK_RERANK=remote          # a llama.cpp --reranking server elsewhere:
+#                                   # KB_STACK_REMOTE_RERANK_URL (base, e.g. http://host:8082),
+#                                   # key KB_STACK_REMOTE_RERANK_KEY (default: the embed key),
+#                                   # KB_STACK_RERANK_CANDIDATES (default 10) reranked per query
+#   KB_STACK_QDRANT=1               # accepted for old callers; Qdrant now always starts
+#   KB_STACK_GRAPH=1                # ingest writes the Postgres entity graph, with the free
+#                                   # heuristic extractor instead of the OpenRouter one
+#   KB_STACK_GRAPH_ARM=1            # the graph retrieval arm runs on /v1/search
+#   KB_STACK_PAGE_ARM=1             # the page-image arm runs: its embedder is the stub's
+#                                   # /page-embeddings, which gives every page and query one
+#                                   # vector — a scope test fixture (`eval leak --pdf`), not a
+#                                   # retrieval-quality setting
+#   KB_STACK_NAME=kb-leak           # container / tmux-session prefix (default kb-smoke), so a
+#                                   # second stack (own KB_STACK_DIR and *_PORTs) can run
+#                                   # beside the default one without either removing the other
+#   KB_STACK_CACHE_DIR=~/.cache/kb-cache  # disk cache for embeddings + extraction (KB_CACHE_DIR);
+#                                   # KB_STACK_EMBED_CACHE_TAG scopes it (e.g. "q8-rx590")
+#   KB_STACK_SERVER_ENV="KB_X=1 KB_Y=2"  # extra server settings, written into stack.env
+#   KB_STACK_RESTART_SERVER=1       # with the stack already up, re-apply the
+#                                   # options and restart kb-server only. The
+#                                   # containers and their data are untouched.
+#
+# `KB_STACK_GRAPH=1` also turns entity extraction back on, which the default
+# stack keeps off because it costs money: the default extractor is an OpenRouter
+# call. With the graph on, `KB_ENTITY_EXTRACTOR=heuristic` replaces it, so the
+# whole stack stays at zero spend.
+#
+# ONLY the `$KB_STACK_NAME-*` (default `kb-smoke-*`) containers belong to this stack. This machine runs
+# other people's containers (ClickHouse, Postgres); `stack-down.sh` never names
+# anything else, and neither should any script that sources stack.env.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$WORKSPACE_ROOT/.." && pwd)"
+
+STACK_NAME="${KB_STACK_NAME:-kb-smoke}"
+PG_CONTAINER="${STACK_NAME}-pg"
+RUSTFS_CONTAINER="${STACK_NAME}-rustfs"
+TEI_EMBED_CONTAINER="${STACK_NAME}-tei-embed"
+TEI_RERANK_CONTAINER="${STACK_NAME}-tei-rerank"
+QDRANT_CONTAINER="${STACK_NAME}-qdrant"
+SERVER_SESSION="${STACK_NAME}-server"
+STUB_SESSION="${STACK_NAME}-stub"
+
+PG_PORT="${KB_STACK_PG_PORT:-15432}"
+S3_PORT="${KB_STACK_S3_PORT:-19000}"
+STUB_PORT="${KB_STACK_STUB_PORT:-19111}"
+SERVER_PORT="${KB_STACK_SERVER_PORT:-18080}"
+TEI_EMBED_PORT="${KB_STACK_TEI_EMBED_PORT:-18081}"
+TEI_RERANK_PORT="${KB_STACK_TEI_RERANK_PORT:-18082}"
+QDRANT_HTTP_PORT="${KB_STACK_QDRANT_HTTP_PORT:-16333}"
+QDRANT_GRPC_PORT="${KB_STACK_QDRANT_GRPC_PORT:-16334}"
+
+# Pinned. The Qdrant adapter (kb-store-qdrant) targets the Query API with
+# `prefetch` + RRF fusion, which needs >= 1.10, and the tiered-multitenancy and
+# per-tenant `idf` corpus-filter notes in docs/architecture-target.md §2 want
+# 1.16 / 1.19 respectively. 1.19.2 is the current release (2026-10-16).
+QDRANT_IMAGE="${KB_STACK_QDRANT_IMAGE:-qdrant/qdrant:v1.19.2}"
+
+KB_STACK_EMBEDDINGS="${KB_STACK_EMBEDDINGS:-stub}"
+# Entity-graph ingest and the graph retrieval arm, both off by default so the
+# gate stacks keep behaving exactly as they did before the graph existed.
+KB_STACK_GRAPH="${KB_STACK_GRAPH:-0}"
+KB_STACK_GRAPH_ARM="${KB_STACK_GRAPH_ARM:-0}"
+KB_STACK_PAGE_ARM="${KB_STACK_PAGE_ARM:-0}"
+KB_STACK_RESTART_SERVER="${KB_STACK_RESTART_SERVER:-0}"
+KB_STACK_RERANK="${KB_STACK_RERANK:-none}"
+KB_STACK_INGEST_POLL_MS="${KB_STACK_INGEST_POLL_MS:-500}"
+KB_MODELS_CACHE="${KB_MODELS_CACHE:-$HOME/.cache/kb-models}"
+
+STACK_DIR="${KB_STACK_DIR:-/tmp/kb-stack}"
+STACK_ENV="$STACK_DIR/stack.env"
+STUB_PID_FILE="$STACK_DIR/stub.pid"
+SERVER_PID_FILE="$STACK_DIR/server.pid"
+STUB_LOG="$STACK_DIR/stub.log"
+SERVER_LOG="$STACK_DIR/server.log"
+
+KB_SERVER_BIN="${KB_SERVER_BIN:-$WORKSPACE_ROOT/target/debug/kb-server}"
+STUB_BIN="$WORKSPACE_ROOT/target/debug/examples/stub_embeddings"
+
+# Apply the entity-graph options to stack.env.
+#
+# Idempotent, and idempotent for a reason: stack.env is *sourced*, not parsed, so
+# a later `export` wins and a stale one from a previous run would silently
+# survive. The earlier block is stripped rather than appended-to.
+write_graph_env() {
+  grep -v -E '^export KB_(GRAPH_|ENTITY_EXTRACTOR)' "$STACK_ENV" > "$STACK_ENV.new" || true
+  mv "$STACK_ENV.new" "$STACK_ENV"
+  if [ "$KB_STACK_GRAPH" = "1" ]; then
+    cat >> "$STACK_ENV" <<GRAPH_ENV
+export KB_ENTITY_EXTRACTION_ENABLED="true"
+export KB_GRAPH_STORE="pg"
+export KB_ENTITY_EXTRACTOR="heuristic"
+GRAPH_ENV
+  fi
+  if [ "$KB_STACK_GRAPH_ARM" = "1" ]; then
+    if [ "$KB_STACK_GRAPH" != "1" ]; then
+      echo "KB_STACK_GRAPH_ARM=1 needs KB_STACK_GRAPH=1: an arm with no graph behind it returns nothing" >&2
+      exit 1
+    fi
+    cat >> "$STACK_ENV" <<GRAPH_ENV
+export KB_GRAPH_ARM="1"
+GRAPH_ENV
+  fi
+}
+
+# Apply the page-image-arm option to stack.env, idempotently for the same reason
+# as the graph options. The arm's embedder is the stub's /page-embeddings, at
+# the stub's dimension; libpdfium is pinned by path because the server renders
+# pages with it and a server started under tmux has no useful cwd to search.
+write_page_env() {
+  grep -v -E '^export (KB_PAGE_|PDFIUM_DYNAMIC_LIB_PATH)' "$STACK_ENV" > "$STACK_ENV.new" || true
+  mv "$STACK_ENV.new" "$STACK_ENV"
+  if [ "$KB_STACK_PAGE_ARM" = "1" ]; then
+    cat >> "$STACK_ENV" <<PAGE_ENV
+export KB_PAGE_EMBEDDING_MODEL="stub-page"
+export KB_PAGE_EMBEDDING_BASE_URL="http://127.0.0.1:${STUB_PORT}/page-embeddings"
+export KB_PAGE_EMBEDDING_API_KEY="stub"
+export KB_PAGE_EMBEDDING_DIM="8"
+PAGE_ENV
+    if [ -z "${PDFIUM_DYNAMIC_LIB_PATH:-}" ] && [ -f "$WORKSPACE_ROOT/.vendor/pdfium/lib/libpdfium.so" ]; then
+      echo "export PDFIUM_DYNAMIC_LIB_PATH=\"$WORKSPACE_ROOT/.vendor/pdfium/lib/libpdfium.so\"" >> "$STACK_ENV"
+    elif [ -n "${PDFIUM_DYNAMIC_LIB_PATH:-}" ]; then
+      echo "export PDFIUM_DYNAMIC_LIB_PATH=\"$PDFIUM_DYNAMIC_LIB_PATH\"" >> "$STACK_ENV"
+    fi
+  fi
+}
+
+start_stub() {
+  echo "Starting stub embedding server on port ${STUB_PORT}..."
+  if command -v tmux >/dev/null 2>&1; then
+    tmux kill-session -t "$STUB_SESSION" 2>/dev/null || true
+    tmux new-session -d -s "$STUB_SESSION" "bash -c 'echo \$\$ > \"$STUB_PID_FILE\" && exec \"$STUB_BIN\" \"127.0.0.1:${STUB_PORT}\" 8 > \"$STUB_LOG\" 2>&1'"
+  else
+    nohup "$STUB_BIN" "127.0.0.1:${STUB_PORT}" 8 > "$STUB_LOG" 2>&1 &
+    echo $! > "$STUB_PID_FILE"
+  fi
+
+  for _ in {1..30}; do
+    if curl -s "http://127.0.0.1:${STUB_PORT}/health" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.5
+  done
+  echo "stub embeddings on 127.0.0.1:${STUB_PORT} (pid $(cat "$STUB_PID_FILE"))"
+}
+
+alive() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+
+read_pid() { [ -f "$1" ] && cat "$1" || true; }
+
+if alive "$(read_pid "$SERVER_PID_FILE")"; then
+  if [ "$KB_STACK_RESTART_SERVER" = "1" ]; then
+    # The containers and the data they hold are left alone on purpose: the
+    # graph-arm comparison needs the *same* corpus ingested once, queried twice.
+    # Tearing the stack down would drop the Postgres volume and the ingest with
+    # it, which is an hour of CPU for nothing.
+    write_graph_env
+    write_page_env
+    if [ "$KB_STACK_PAGE_ARM" = "1" ] && ! alive "$(read_pid "$STUB_PID_FILE")"; then
+      [ -f "$STUB_BIN" ] || cargo build -p kb-server --example stub_embeddings --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
+      start_stub
+    fi
+    tmux kill-session -t "$SERVER_SESSION" 2>/dev/null || true
+    kill "$(read_pid "$SERVER_PID_FILE")" 2>/dev/null || true
+    sleep 1
+    if command -v tmux >/dev/null 2>&1; then
+      tmux new-session -d -s "$SERVER_SESSION" "bash -c 'source \"$STACK_ENV\" && echo \$\$ > \"$SERVER_PID_FILE\" && exec \"$KB_SERVER_BIN\" serve > \"$SERVER_LOG\" 2>&1'"
+    else
+      nohup "$KB_SERVER_BIN" serve > "$SERVER_LOG" 2>&1 &
+      echo $! > "$SERVER_PID_FILE"
+    fi
+    for _ in {1..60}; do
+      curl -s "http://127.0.0.1:${SERVER_PORT}/health" | grep -q '"ok":true' && break
+      sleep 0.5
+    done
+    echo "${STACK_NAME} kb-server restarted with the current KB_STACK_* options"
+    echo "source $STACK_ENV   # then rust/scripts/stack-down.sh to stop it"
+    exit 0
+  fi
+  echo "${STACK_NAME} stack already up: kb-server on http://127.0.0.1:${SERVER_PORT} (pid $(read_pid "$SERVER_PID_FILE"))"
+  echo "source $STACK_ENV   # then rust/scripts/stack-down.sh to stop it"
+  exit 0
+fi
+
+mkdir -p "$STACK_DIR"
+rm -f "$STUB_PID_FILE" "$SERVER_PID_FILE"
+
+echo "Host memory status:"
+free -h
+
+echo "=== 1. Starting ${STACK_NAME} base containers ==="
+# Only ${STACK_NAME}-* names. Nothing else on this host is ours.
+docker rm -f "$PG_CONTAINER" "$RUSTFS_CONTAINER" "$TEI_EMBED_CONTAINER" "$TEI_RERANK_CONTAINER" "$QDRANT_CONTAINER" >/dev/null 2>&1 || true
+
+docker run -d --name "$PG_CONTAINER" \
+  -p "${PG_PORT}:5432" \
+  -e POSTGRES_USER=kb \
+  -e POSTGRES_PASSWORD=kb \
+  -e POSTGRES_DB=rantai_kb \
+  postgres:16 >/dev/null
+
+docker run -d --name "$RUSTFS_CONTAINER" \
+  -p "${S3_PORT}:9000" \
+  -e MINIO_ROOT_USER=kbadmin \
+  -e MINIO_ROOT_PASSWORD=kbsecret123 \
+  rustfs/rustfs:latest >/dev/null
+
+echo "Waiting for Postgres to be ready..."
+for _ in {1..60}; do
+  if docker exec "$PG_CONTAINER" pg_isready -U kb >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+echo "Waiting for RustFS (S3) to be ready..."
+for _ in {1..60}; do
+  if curl -s "http://127.0.0.1:${S3_PORT}/minio/health/ready" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+echo "Creating S3 bucket rantai-kb..."
+docker run --rm --network host \
+  -e AWS_ACCESS_KEY_ID=kbadmin \
+  -e AWS_SECRET_ACCESS_KEY=kbsecret123 \
+  amazon/aws-cli:latest --endpoint-url "http://127.0.0.1:${S3_PORT}" s3 mb s3://rantai-kb >/dev/null
+
+# Qdrant is the only chunk store, so it is not optional.
+echo "Starting Qdrant (${QDRANT_IMAGE}) http ${QDRANT_HTTP_PORT} / grpc ${QDRANT_GRPC_PORT}..."
+docker run -d --name "$QDRANT_CONTAINER" \
+  -p "${QDRANT_HTTP_PORT}:6333" \
+  -p "${QDRANT_GRPC_PORT}:6334" \
+  "$QDRANT_IMAGE" >/dev/null
+
+for _ in {1..60}; do
+  if curl -s "http://127.0.0.1:${QDRANT_HTTP_PORT}/readyz" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+if ! curl -sf "http://127.0.0.1:${QDRANT_HTTP_PORT}/readyz" >/dev/null 2>&1; then
+  echo "Qdrant did not come up ready; container logs:" >&2
+  docker logs "$QDRANT_CONTAINER" | tail -n 30 >&2 || true
+  exit 1
+fi
+echo "Qdrant ready on 127.0.0.1:${QDRANT_HTTP_PORT}"
+
+echo "=== 2. Building binaries (before memory-heavy models start) ==="
+if [ "$KB_STACK_EMBEDDINGS" = "stub" ] || [ "$KB_STACK_PAGE_ARM" = "1" ]; then
+  [ -f "$STUB_BIN" ] || cargo build -p kb-server --example stub_embeddings --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
+fi
+[ -f "$KB_SERVER_BIN" ] || cargo build -p kb-server --bin kb-server --manifest-path "$WORKSPACE_ROOT/Cargo.toml"
+
+echo "=== 3. Starting models ==="
+if [ "$KB_STACK_EMBEDDINGS" = "tei" ]; then
+  echo "Starting TEI embeddings (Qwen/Qwen3-Embedding-0.6B) on port ${TEI_EMBED_PORT}..."
+  docker run -d --name "$TEI_EMBED_CONTAINER" \
+    -p "${TEI_EMBED_PORT}:80" \
+    -v "${KB_MODELS_CACHE}:/data" \
+    ghcr.io/huggingface/text-embeddings-inference:cpu-latest \
+    --model-id Qwen/Qwen3-Embedding-0.6B --max-batch-tokens 4096 --max-client-batch-size 32 >/dev/null
+
+  echo "Waiting for TEI embedding server to be ready (CPU warmup may take ~2 minutes)..."
+  for _ in {1..300}; do
+    if curl -s "http://127.0.0.1:${TEI_EMBED_PORT}/health" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+
+  if ! curl -s "http://127.0.0.1:${TEI_EMBED_PORT}/health" >/dev/null 2>&1; then
+    echo "TEI embedding server did not come up healthy; container logs:" >&2
+    docker logs "$TEI_EMBED_CONTAINER" | tail -n 30 >&2 || true
+    exit 1
+  fi
+  echo "TEI embedding server ready on 127.0.0.1:${TEI_EMBED_PORT}"
+elif [ "$KB_STACK_EMBEDDINGS" = "remote" ]; then
+  if [ -z "${KB_STACK_REMOTE_EMBED_URL:-}" ] || [ -z "${KB_STACK_REMOTE_EMBED_KEY:-}" ]; then
+    echo "KB_STACK_EMBEDDINGS=remote needs KB_STACK_REMOTE_EMBED_URL and KB_STACK_REMOTE_EMBED_KEY" >&2
+    exit 1
+  fi
+  if ! curl -s -m 5 "${KB_STACK_REMOTE_EMBED_URL%/}/health" >/dev/null 2>&1; then
+    echo "remote embedder ${KB_STACK_REMOTE_EMBED_URL} does not answer /health" >&2
+    exit 1
+  fi
+  echo "Embeddings from ${KB_STACK_REMOTE_EMBED_URL}; no local model started."
+elif [ "$KB_STACK_EMBEDDINGS" = "openrouter" ]; then
+  if [ -z "${OPENROUTER_API_KEY:-}" ]; then
+    echo "KB_STACK_EMBEDDINGS=openrouter needs OPENROUTER_API_KEY in the environment" >&2
+    exit 1
+  fi
+  echo "Embeddings from OpenRouter (${KB_STACK_OR_MODEL:-qwen/qwen3-embedding-8b}); no local model started."
+else
+  start_stub
+fi
+# The page arm's embedder is the stub too, whatever embeds the text.
+if [ "$KB_STACK_PAGE_ARM" = "1" ] && [ "$KB_STACK_EMBEDDINGS" != "stub" ]; then
+  start_stub
+fi
+
+if [ "$KB_STACK_RERANK" = "tei" ]; then
+  echo "Starting TEI reranker (BAAI/bge-reranker-v2-m3) on port ${TEI_RERANK_PORT}..."
+  docker run -d --name "$TEI_RERANK_CONTAINER" \
+    -p "${TEI_RERANK_PORT}:80" \
+    -v "${KB_MODELS_CACHE}:/data" \
+    ghcr.io/huggingface/text-embeddings-inference:cpu-latest \
+    --model-id BAAI/bge-reranker-v2-m3 --max-batch-tokens 2048 --max-client-batch-size 64 --auto-truncate >/dev/null
+
+  echo "Waiting for TEI reranker server to be ready (CPU warmup may take ~2 minutes)..."
+  for _ in {1..300}; do
+    if curl -s "http://127.0.0.1:${TEI_RERANK_PORT}/health" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+
+  if ! curl -s "http://127.0.0.1:${TEI_RERANK_PORT}/health" >/dev/null 2>&1; then
+    echo "TEI reranker server did not come up healthy; container logs:" >&2
+    docker logs "$TEI_RERANK_CONTAINER" | tail -n 30 >&2 || true
+    exit 1
+  fi
+  echo "TEI reranker server ready on 127.0.0.1:${TEI_RERANK_PORT}"
+fi
+
+# Every connection string the stack uses, in one file other scripts can source.
+cat > "$STACK_ENV" <<EOF
+# Generated by rust/scripts/stack-up.sh — source this, do not edit.
+export DATABASE_URL="postgresql://kb:kb@127.0.0.1:${PG_PORT}/rantai_kb?schema=public"
+export S3_ENDPOINT="http://127.0.0.1:${S3_PORT}"
+export S3_ACCESS_KEY_ID="kbadmin"
+export S3_SECRET_ACCESS_KEY="kbsecret123"
+export S3_BUCKET="rantai-kb"
+export S3_ENABLE_PATH_STYLE="1"
+export KB_ENTITY_EXTRACTION_ENABLED="false"
+export KB_WORKER_ENABLED="true"
+export KB_INGEST_POLL_MS="${KB_STACK_INGEST_POLL_MS}"
+export KB_INGEST_CONCURRENCY="${KB_STACK_INGEST_CONCURRENCY:-1}"
+export PORT="${SERVER_PORT}"
+export KB_MIGRATIONS_DIR="$REPO_ROOT/prisma/migrations"
+export RUST_LOG="info,kb_server=debug,kb_store_blob=debug,kb_engine=debug"
+export KB_STACK_DIR="$STACK_DIR"
+export KB_STACK_BASE_URL="http://127.0.0.1:${SERVER_PORT}"
+export KB_SERVER_BIN="$KB_SERVER_BIN"
+export KB_STACK_PG_CONTAINER="$PG_CONTAINER"
+export KB_STACK_RUSTFS_CONTAINER="$RUSTFS_CONTAINER"
+export KB_STACK_TEI_EMBED_CONTAINER="$TEI_EMBED_CONTAINER"
+export KB_STACK_TEI_RERANK_CONTAINER="$TEI_RERANK_CONTAINER"
+export KB_STACK_NAME="$STACK_NAME"
+EOF
+
+write_graph_env
+write_page_env
+
+cat >> "$STACK_ENV" <<EOF
+export QDRANT_URL="http://127.0.0.1:${QDRANT_HTTP_PORT}"
+export QDRANT_GRPC_URL="http://127.0.0.1:${QDRANT_GRPC_PORT}"
+export KB_STACK_QDRANT_CONTAINER="$QDRANT_CONTAINER"
+EOF
+
+if [ "$KB_STACK_EMBEDDINGS" = "tei" ]; then
+  cat >> "$STACK_ENV" <<EOF
+export KB_EMBEDDING_BASE_URL="http://127.0.0.1:${TEI_EMBED_PORT}/v1/embeddings"
+export KB_EMBEDDING_API_KEY="local-tei"
+export KB_EMBEDDING_MODEL="Qwen/Qwen3-Embedding-0.6B"
+export KB_EMBEDDING_DIM="1024"
+export KB_EMBEDDING_QUERY_PREFIX="Instruct: Given a question, retrieve passages that answer it
+Query: "
+export KB_EMBEDDING_PASSAGE_PREFIX=""
+EOF
+elif [ "$KB_STACK_EMBEDDINGS" = "remote" ]; then
+  chmod 600 "$STACK_ENV"
+  cat >> "$STACK_ENV" <<EOF
+export KB_EMBEDDING_BASE_URL="${KB_STACK_REMOTE_EMBED_URL%/}/v1/embeddings"
+export KB_EMBEDDING_API_KEY="${KB_STACK_REMOTE_EMBED_KEY}"
+export KB_EMBEDDING_MODEL="${KB_STACK_REMOTE_EMBED_MODEL:-Qwen/Qwen3-Embedding-0.6B}"
+export KB_EMBEDDING_DIM="${KB_STACK_REMOTE_EMBED_DIM:-1024}"
+export KB_EMBEDDING_TIMEOUT_MS="${KB_STACK_REMOTE_EMBED_TIMEOUT_MS:-120000}"
+EOF
+  # Prefixes: Qwen3's query instruction unless overridden (e5 models want
+  # "query: " / "passage: "). printf %q keeps spaces and newlines intact.
+  qp_default=$'Instruct: Given a question, retrieve passages that answer it\nQuery: '
+  printf 'export KB_EMBEDDING_QUERY_PREFIX=%q\n' "${KB_STACK_REMOTE_EMBED_QUERY_PREFIX-$qp_default}" >> "$STACK_ENV"
+  printf 'export KB_EMBEDDING_PASSAGE_PREFIX=%q\n' "${KB_STACK_REMOTE_EMBED_PASSAGE_PREFIX-}" >> "$STACK_ENV"
+elif [ "$KB_STACK_EMBEDDINGS" = "openrouter" ]; then
+  chmod 600 "$STACK_ENV"
+  cat >> "$STACK_ENV" <<EOF
+export KB_EMBEDDING_BASE_URL="https://openrouter.ai/api/v1/embeddings"
+export KB_EMBEDDING_API_KEY="${OPENROUTER_API_KEY:-}"
+export KB_EMBEDDING_MODEL="${KB_STACK_OR_MODEL:-qwen/qwen3-embedding-8b}"
+export KB_EMBEDDING_DIM="${KB_STACK_OR_DIM:-4096}"
+export KB_EMBEDDING_QUERY_PREFIX="${KB_STACK_OR_QUERY_PREFIX:-}"
+export KB_EMBEDDING_PASSAGE_PREFIX="${KB_STACK_OR_PASSAGE_PREFIX:-}"
+EOF
+else
+  cat >> "$STACK_ENV" <<EOF
+export KB_EMBEDDING_BASE_URL="http://127.0.0.1:${STUB_PORT}/embeddings"
+export KB_EMBEDDING_API_KEY="stub"
+export KB_EMBEDDING_MODEL="stub"
+export KB_EMBEDDING_DIM="8"
+export KB_EMBEDDING_QUERY_PREFIX=""
+export KB_EMBEDDING_PASSAGE_PREFIX=""
+EOF
+fi
+
+if [ "$KB_STACK_RERANK" = "tei" ]; then
+  cat >> "$STACK_ENV" <<EOF
+export KB_RERANK_ENABLED="true"
+export KB_RERANK_PROVIDER="tei"
+export KB_RERANK_BASE_URL="http://127.0.0.1:${TEI_RERANK_PORT}"
+export KB_RERANK_MODEL="BAAI/bge-reranker-v2-m3"
+export KB_RERANK_API_KEY="unused-for-tei"
+EOF
+elif [ "$KB_STACK_RERANK" = "remote" ]; then
+  # llama.cpp's /v1/rerank takes the Cohere request shape, so the cohere
+  # adapter talks to it; KB_RERANK_BASE_URL is that adapter's full endpoint.
+  cat >> "$STACK_ENV" <<EOF
+export KB_RERANK_ENABLED="true"
+export KB_RERANK_PROVIDER="cohere"
+export KB_RERANK_BASE_URL="${KB_STACK_REMOTE_RERANK_URL%/}/v1/rerank"
+export KB_RERANK_MODEL="${KB_STACK_REMOTE_RERANK_MODEL:-BAAI/bge-reranker-v2-m3}"
+export KB_RERANK_API_KEY="${KB_STACK_REMOTE_RERANK_KEY:-${KB_STACK_REMOTE_EMBED_KEY:-}}"
+export KB_RERANK_CANDIDATE_LIMIT="${KB_STACK_RERANK_CANDIDATES:-10}"
+export KB_RERANK_TIMEOUT_MS="${KB_STACK_RERANK_TIMEOUT_MS:-20000}"
+EOF
+else
+  cat >> "$STACK_ENV" <<EOF
+export KB_RERANK_ENABLED="false"
+EOF
+fi
+
+# KB_STACK_SERVER_ENV: extra server settings for one run, space-separated
+# NAME=value pairs (e.g. "KB_STRIP_PAGE_FURNITURE=1"). Written into stack.env,
+# because a server started under tmux does not inherit this shell's exports.
+for kv in ${KB_STACK_SERVER_ENV:-}; do
+  case "$kv" in
+    [A-Z_]*=*) printf 'export %s=%q\n' "${kv%%=*}" "${kv#*=}" >> "$STACK_ENV" ;;
+    *) echo "KB_STACK_SERVER_ENV: ignoring '$kv' (want NAME=value)" >&2 ;;
+  esac
+done
+
+# KB_STACK_CACHE_DIR: the server's content-addressed disk cache (KB_CACHE_DIR).
+# It lives outside the stack dir, so it survives stack-down and every eval arm
+# reuses embeddings and extractions it has already paid for.
+if [ -n "${KB_STACK_CACHE_DIR:-}" ]; then
+  mkdir -p "$KB_STACK_CACHE_DIR"
+  cat >> "$STACK_ENV" <<EOF
+export KB_CACHE_DIR="$KB_STACK_CACHE_DIR"
+export KB_EMBEDDING_CACHE_TAG="${KB_STACK_EMBED_CACHE_TAG:-}"
+EOF
+fi
+
+# shellcheck disable=SC1090
+source "$STACK_ENV"
+
+echo "=== 4. Migrations and vector schema ==="
+"$KB_SERVER_BIN" migrate | tail -n 1
+"$KB_SERVER_BIN" apply-schema | tail -n 1
+
+echo "=== 5. Starting kb-server ==="
+if command -v tmux >/dev/null 2>&1; then
+  tmux kill-session -t "$SERVER_SESSION" 2>/dev/null || true
+  tmux new-session -d -s "$SERVER_SESSION" "bash -c 'source \"$STACK_ENV\" && echo \$\$ > \"$SERVER_PID_FILE\" && exec \"$KB_SERVER_BIN\" serve > \"$SERVER_LOG\" 2>&1'"
+else
+  nohup "$KB_SERVER_BIN" serve > "$SERVER_LOG" 2>&1 &
+  echo $! > "$SERVER_PID_FILE"
+fi
+
+for _ in {1..60}; do
+  if curl -s "http://127.0.0.1:${SERVER_PORT}/health" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+done
+
+if ! curl -s "http://127.0.0.1:${SERVER_PORT}/health" | grep -q '"ok":true'; then
+  echo "kb-server did not come up healthy; last lines of $SERVER_LOG:" >&2
+  tail -n 40 "$SERVER_LOG" >&2 || true
+  exit 1
+fi
+
+echo ""
+echo "${STACK_NAME} stack is up."
+echo "  kb-server   http://127.0.0.1:${SERVER_PORT}  (pid $(cat "$SERVER_PID_FILE"), log $SERVER_LOG)"
+echo "  postgres    127.0.0.1:${PG_PORT}   qdrant 127.0.0.1:${QDRANT_HTTP_PORT}   s3 127.0.0.1:${S3_PORT}"
+if [ "$KB_STACK_EMBEDDINGS" = "tei" ]; then
+  echo "  tei-embed   http://127.0.0.1:${TEI_EMBED_PORT} (dim 1024, Qwen3-Embedding-0.6B)"
+elif [ "$KB_STACK_EMBEDDINGS" = "remote" ]; then
+  echo "  remote-embed ${KB_STACK_REMOTE_EMBED_URL}"
+else
+  echo "  stub-embed  http://127.0.0.1:${STUB_PORT} (dim 8)"
+fi
+if [ "$KB_STACK_RERANK" = "tei" ]; then
+  echo "  tei-rerank  http://127.0.0.1:${TEI_RERANK_PORT} (bge-reranker-v2-m3)"
+fi
+if [ "$KB_STACK_PAGE_ARM" = "1" ]; then
+  echo "  page arm    stub-page via http://127.0.0.1:${STUB_PORT}/page-embeddings (dim 8, one vector for all)"
+fi
+echo "  qdrant      http://127.0.0.1:${QDRANT_HTTP_PORT} (grpc 127.0.0.1:${QDRANT_GRPC_PORT}, ${QDRANT_IMAGE})"
+echo "  source $STACK_ENV"
+echo "  $SCRIPT_DIR/stack-down.sh   # stop"

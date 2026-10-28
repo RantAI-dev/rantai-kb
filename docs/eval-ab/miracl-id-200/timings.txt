@@ -1,0 +1,9 @@
+old: 670 s wall (ingest + queries)
+new: 722 s wall (ingest + queries)
+fusion-only: 693 s wall (ingest + queries)
+k60: 569 s wall (ingest + queries)
+k60-bge10: 163 s for 200 queries
+k60-bge20: 287 s for 200 queries
+k60-qwen20: 671 s for 200 queries
+final: 577 s wall (ingest + queries)
+final-bge20: 297 s for 200 queries

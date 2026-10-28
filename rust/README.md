@@ -1,0 +1,89 @@
+| `KB_FIGURE_VLM_TOPN` | Top candidate figures evaluated by figure gate | `5` |
+| `KB_FIGURE_VLM_MAX` | Maximum number of candidate figures accepted | `2` |
+| `KB_FIGURE_VLM_TIMEOUT_MS` | Figure gate evaluation timeout in ms | `15000` |
+| **Qdrant Store (the only chunk store)** | | |
+| `QDRANT_GRPC_URL` | Qdrant gRPC endpoint (e.g. `http://127.0.0.1:16334`) | `http://127.0.0.1:16334` |
+| `QDRANT_URL` | Alternative Qdrant URL if gRPC URL is unset | `http://127.0.0.1:16334` |
+| `QDRANT_API_KEY` | Optional Qdrant API key | `None` |
+| `KB_QDRANT_CONTRACT` | Set to `1` to run the `RetrievalIndex` contract test suite against live Qdrant | `None` |
+
+---
+
+## Docker
+
+Multi-stage build with `cargo-chef` dependency caching:
+
+```bash
+# Build local amd64 image
+docker build -t rantai-kb:rust -f rust/Dockerfile .
+
+# Run container
+docker run -p 8080:8080 --env-file .env rantai-kb:rust
+```
+
+The runtime image is built on `debian:bookworm-slim`, runs as non-root user `appuser` (uid 10001), includes liberation fonts and CA certificates, and bundles `libpdfium.so` dynamically loaded per `TARGETARCH`.
+
+For a complete stack (stores + models + kb-server) rather than a bare container, use the
+one-command dev deployment:
+
+```bash
+cp rust/deploy/.env.example rust/deploy/.env   # optional; only cloud needs a key
+rust/scripts/kb-dev.sh up lite-en              # lite | lite-en | desk | studio | station | cloud
+```
+
+It runs `rust/deploy/compose.yaml` under the compose project `rantai-kb-dev`, publishes only
+kb-server's port, and remembers the tier for `logs`/`status`/`key`/`down`. Tiers, measured
+numbers, upload/search examples, GPU notes and troubleshooting: [`deploy/README.md`](deploy/README.md).
+
+---
+
+## Testing & Live Verification
+
+### 1. Workspace Unit & Integration Tests
+```bash
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
+
+### 2. Live Smoke Test
+Runs Postgres 16, Qdrant, S3 (RustFS), and stub embeddings to execute an end-to-end ingest, chunking, SSE events, search, detail, list, and soft/hard delete cycle:
+```bash
+./rust/scripts/smoke.sh
+```
+
+### 3. Retrieval Eval & Scope Gate
+The Qdrant retrieval-quality and cross-scope leak gate (the same one CI runs):
+```bash
+./rust/scripts/ci-eval-gate.sh
+```
+
+Bun and Rust no longer share a chunk store, so there is no live search-parity harness. Bun
+reads and writes SurrealDB; Rust reads and writes Qdrant. Production migration is
+`kb-server reindex` (see below).
+
+### 4. Adapter Contract Tests
+
+The shared `RetrievalIndex` contract suite (`kb-ports/contract`) runs against Qdrant:
+
+The suite requires `KB_QDRANT_CONTRACT=1` and fails loudly if run without the env var set:
+```bash
+rust/scripts/stack-up.sh
+KB_QDRANT_CONTRACT=1 cargo test -p kb-store-qdrant --features integration --test retrieval_index_contract -- --nocapture
+```
+
+### 5. Qdrant exact-vs-HNSW benchmark
+
+The number behind `kb_store_qdrant::index::EXACT_SEARCH_THRESHOLD` — the point
+count below which the dense arm scans exactly instead of walking the graph. A
+measurement rather than a pass/fail check, so it is `#[ignore]`d and needs a
+live Qdrant:
+
+```bash
+rust/scripts/stack-up.sh
+cargo test -p kb-store-qdrant --features integration --test exact_vs_hnsw -- --ignored --nocapture
+rust/scripts/stack-down.sh
+```
+
+It builds 1.5k / 15k / 50k 1024-dim points, runs 50 queries each in both modes,
+and prints latency plus HNSW `recall@20` against the exact ranking. Results and
+the decision they justify: `docs/eval-baseline.md` §7.5.3.
