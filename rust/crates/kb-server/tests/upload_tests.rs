@@ -132,6 +132,7 @@ async fn upload_binds_only_knowledge_bases_the_key_may_use() {
         vec!["kb:read".into(), "kb:write".into()],
         vec![kb_ports::KnowledgeBaseId("kb-allowed".into())],
     );
+    seed_kbs(&h, TENANT, &["kb-allowed", "kb-denied"]);
 
     let response = h
         .send_multipart(
@@ -239,4 +240,79 @@ async fn upload_body_limit_is_derived_from_the_max_file_size() {
     let max_file = kb_core::policy::MimeRegistry::kb_max_file_bytes() as usize;
     assert!(limit > max_file);
     assert!(limit - max_file <= 4 * 1024 * 1024, "slack stays bounded");
+}
+
+fn seed_kbs(h: &Harness, tenant: &str, ids: &[&str]) {
+    h.documents.kb_records.write().unwrap().insert(
+        TenantId(tenant.to_string()),
+        ids.iter()
+            .map(|id| kb_ports::KnowledgeBaseRecord {
+                id: kb_ports::KnowledgeBaseId((*id).into()),
+                tenant_id: TenantId(tenant.to_string()),
+                name: (*id).into(),
+                description: None,
+                color: None,
+                created_at: "2026-01-01T00:00:00.000Z".into(),
+                updated_at: "2026-01-01T00:00:00.000Z".into(),
+            })
+            .collect(),
+    );
+}
+
+#[tokio::test]
+async fn upload_into_another_tenants_or_an_unknown_knowledge_base_is_a_400_and_stores_nothing() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    h.with_tenant("tenant-b");
+    seed_kbs(&h, TENANT, &["kb-mine"]);
+    seed_kbs(&h, "tenant-b", &["kb-theirs"]);
+
+    for (requested, label) in [
+        ("kb-theirs", "another tenant's knowledge base"),
+        ("kb-missing", "a knowledge base that does not exist"),
+        ("kb-mine,kb-theirs", "a mix of own and foreign"),
+    ] {
+        let response = h
+            .send_multipart(
+                "/v1/documents",
+                &tenant_key(TENANT),
+                vec![
+                    ("knowledgeBaseIds", requested.to_string()),
+                    ("file", "notes.txt\u{1}hello".to_string()),
+                ],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{label}");
+        let body = json_body(response).await;
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Unknown knowledgeBaseIds"),
+            "{label}: {body}"
+        );
+    }
+    // Nothing was written: no document row, no blob, for either tenant.
+    {
+        let docs = h.documents.docs.read().unwrap();
+        assert!(docs.values().all(Vec::is_empty), "no document rows");
+        assert!(h.blobs.objects.read().unwrap().is_empty(), "no blobs");
+    }
+
+    // The tenant's own knowledge base still works.
+    let response = h
+        .send_multipart(
+            "/v1/documents",
+            &tenant_key(TENANT),
+            vec![
+                ("knowledgeBaseIds", "kb-mine".to_string()),
+                ("file", "notes.txt\u{1}hello".to_string()),
+            ],
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(
+        json_body(response).await["knowledgeBaseIds"],
+        serde_json::json!(["kb-mine"])
+    );
 }

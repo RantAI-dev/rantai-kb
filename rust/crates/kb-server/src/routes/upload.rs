@@ -114,6 +114,30 @@ pub async fn ingest_document(
         .map(str::to_string);
     let figure_mode = parse_figure_mode(upload.field("figures"));
     let knowledge_base_ids = requested_knowledge_bases(&auth, upload.field("knowledgeBaseIds"));
+    // Every requested knowledge base must belong to the caller's tenant. Without
+    // this, a foreign id hit the DocumentGroup foreign key: another tenant's KB
+    // accepted the link (its documentCount moved), and a non-existent one
+    // surfaced as a 500, which told the caller which ids exist. Checked before
+    // the blob is stored so a rejected upload leaves nothing behind. Unknown and
+    // foreign ids get the same answer on purpose.
+    if !knowledge_base_ids.is_empty() {
+        let owned = state
+            .documents
+            .filter_owned_kb_ids(&auth.tenant_id, &knowledge_base_ids)
+            .await
+            .map_err(ApiError::from)?;
+        let unknown: Vec<&str> = knowledge_base_ids
+            .iter()
+            .filter(|k| !owned.contains(k))
+            .map(|k| k.0.as_str())
+            .collect();
+        if !unknown.is_empty() {
+            return Err(ApiError::BadRequest(format!(
+                "Unknown knowledgeBaseIds: {}",
+                unknown.join(", ")
+            )));
+        }
+    }
 
     let document_id = DocumentId::new_unchecked(Uuid::new_v4().to_string());
     let s3_key = document_path(Some(&auth.tenant_id.0), &document_id.0, &upload.file_name);

@@ -413,6 +413,23 @@ serve that, with no schema change:
 Bun produces none of these fields. A client diffing the two runtimes should
 ignore them, as it already ignores `retrieval` (§5).
 
+### 14. Deliberate Difference: Upload Rejects Knowledge Bases the Tenant Does Not Own (2026-10-28)
+
+`POST /v1/documents` with `knowledgeBaseIds` now answers **400** `Unknown knowledgeBaseIds: …`
+when any id is not a knowledge base of the caller's tenant, and stores nothing (no blob, no
+row, no job). Before, the ids went straight into `DocumentGroup`, and found live on the
+compose stack:
+- another tenant's id was **accepted**: the document was linked into that tenant's knowledge
+  base and its `documentCount` moved (content did not leak; search and list stay
+  tenant-scoped);
+- a non-existent id hit the foreign key and returned **500**, so 202 vs 500 told a caller
+  which ids exist.
+
+Unknown and foreign ids get the same answer on purpose. `PATCH /v1/documents/:id` already
+dropped foreign ids (`filter_owned_kb_ids`); upload now checks the same thing, but rejects
+instead of dropping, because a document silently left out of the base it was meant for is
+a failure the caller cannot see. Bun still has the old behaviour.
+
 ---
 
 ## 6. Shared Known Issues
