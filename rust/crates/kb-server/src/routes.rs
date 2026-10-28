@@ -396,7 +396,11 @@ async fn search(
                 // `finish_search`, which is the only place that can measure them.
                 stats: Some(search_stats(StageTimingsDto::default(), 0, 0)),
                 note: None,
-                degrades: Vec::new(),
+                // Nothing was searched, and an empty list here looks exactly
+                // like "no matches". A client that sent `hybrid: true` expecting
+                // hybrid retrieval (one did: the MOCO-KF adapter) must be told,
+                // so the stub degrades visibly instead of answering silently.
+                degrades: vec![HYBRID_STUB_DEGRADE.to_string()],
             },
             route_sw,
         ));
@@ -435,6 +439,12 @@ async fn search(
     }
     Ok(finish_search(response, route_sw))
 }
+
+/// What the `hybrid: true` stub reports. The standard search already fuses the
+/// vector and keyword arms, so the fix for the caller is to omit the flag.
+pub(crate) const HYBRID_STUB_DEGRADE: &str = "hybrid: `hybrid: true` selects the legacy \
+Bun stub, which does not search; omit the flag (the default search already fuses the vector \
+and keyword arms)";
 
 /// The Bun-shaped `stats` for a set of stage timings.
 ///

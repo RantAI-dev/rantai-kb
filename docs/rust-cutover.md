@@ -430,6 +430,15 @@ dropped foreign ids (`filter_owned_kb_ids`); upload now checks the same thing, b
 instead of dropping, because a document silently left out of the base it was meant for is
 a failure the caller cannot see. Bun still has the old behaviour.
 
+### 15. Deliberate Difference: The `hybrid: true` Stub Says It Did Not Search (2026-10-28)
+
+`POST /v1/search` with `hybrid: true` is the Bun stub: it runs nothing and answers an empty
+`results`/`sources` shape. Rust keeps that shape but adds one `degrades` entry telling the
+caller to omit the flag, because an empty answer from a search that never ran looks exactly
+like "no matches" (AGENTS.md rule 6). The MOCO-KF adapter sent the flag in its first live run
+and got empty results for every query; the default search already fuses the vector and
+keyword arms. Bun answers without the degrade.
+
 ---
 
 ## 6. Shared Known Issues

@@ -482,6 +482,14 @@ async fn the_hybrid_stub_reports_the_same_stats_shape_with_zeros() {
     assert!(body["stats"]["stageTimingsMs"]["arms"].as_f64().unwrap() >= 0.0);
     assert_eq!(body["stats"]["totalResults"], 0);
     assert!(body["stats"]["stageTimingsMs"]["total"].as_f64().unwrap() > 0.0);
+    // Nothing was searched, so the empty answer must say so (a failed search is
+    // not an empty result).
+    let degrades = body["degrades"].as_array().expect("degrades present");
+    assert_eq!(degrades.len(), 1, "{body}");
+    assert!(
+        degrades[0].as_str().unwrap().contains("omit the flag"),
+        "{body}"
+    );
 }
 
 /// The `documentIds` branch runs its own, shorter pipeline; it reports its own
