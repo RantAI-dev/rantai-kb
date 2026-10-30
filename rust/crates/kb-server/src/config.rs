@@ -919,6 +919,12 @@ impl Config {
             if enabled("mistral") && !self.extract.mistral_ocr_key.trim().is_empty() {
                 urls.push(self.extract.mistral_ocr_base.clone());
             }
+            // The local OCR adapter is not order-gated: when its URL is set it
+            // is also the chain's final fallback (see `build_page_ocr`), so a
+            // scanned page can reach it whatever the order says.
+            if !self.extract.ocr_base_url.trim().is_empty() {
+                urls.push(self.extract.ocr_base_url.clone());
+            }
             if !self.extract.openrouter_api_key.trim().is_empty() {
                 urls.push(kb_extract::OPENROUTER_VISION_URL.to_string());
             }
@@ -1758,6 +1764,30 @@ mod tests {
         map.insert("KB_RERANK_PROVIDER", "vllm");
         map.insert("KB_RERANK_BASE_URL", "https://rerank.example.com");
         assert_eq!(resolved(&map).egress_hosts(), vec!["rerank.example.com"]);
+    }
+
+    /// The OCR endpoint is content egress like any other role: local stays
+    /// local, and a hosted one is reported so a caller can refuse.
+    #[test]
+    fn test_the_ocr_endpoint_is_classified_as_egress() {
+        let mut local = tier_map();
+        local.insert("KB_TIER", "lite");
+        local.insert(
+            "KB_OCR_BASE_URL",
+            "http://127.0.0.1:8000/v1/chat/completions",
+        );
+        assert!(
+            resolved(&local).egress_hosts().is_empty(),
+            "a loopback OCR endpoint sends nothing off host"
+        );
+
+        let mut hosted = tier_map();
+        hosted.insert("KB_TIER", "lite");
+        hosted.insert(
+            "KB_OCR_BASE_URL",
+            "https://ocr.example.com/v1/chat/completions",
+        );
+        assert_eq!(resolved(&hosted).egress_hosts(), vec!["ocr.example.com"]);
     }
 
     #[test]
