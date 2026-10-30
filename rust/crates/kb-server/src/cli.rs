@@ -25,11 +25,15 @@ use crate::config::Config;
 pub enum CliError {
     #[error(
         "{0}\n\nusage: kb-server \
-         <serve|create-api-key|apply-schema|migrate|reindex|eval|bench|check-boundary>"
+         <serve|create-api-key|apply-schema|migrate|reindex|setup|eval|bench|check-boundary>"
     )]
     Usage(String),
     #[error("{0}")]
     Failed(String),
+    /// A child process failed: exit with its own code rather than folding it
+    /// into a generic 1 (`setup --start` runs `kb-dev.sh up`).
+    #[error("exited with status {0}")]
+    Exit(u8),
 }
 
 impl From<kb_ports::PortError> for CliError {
@@ -57,6 +61,7 @@ pub async fn dispatch(args: &[String]) -> Result<(), CliError> {
         Some("apply-schema") => apply_schema().await,
         Some("migrate") => migrate().await,
         Some("reindex") => reindex(&args[1..]).await,
+        Some("setup") => crate::setup::run(&args[1..]).await,
         Some("check-boundary") => check_boundary(),
         Some("eval") => eval(&args[1..]).await,
         Some("bench") => bench(&args[1..]).await,
@@ -85,6 +90,10 @@ USAGE
     kb-server reindex [--tenant <id>] [--dry-run]
                                                Re-queue ingest for every live document so Qdrant
                                                is rebuilt from the originals in S3 (see below)
+    kb-server setup [--tier T] [--detect-only] [--check]
+                                               Detect the hardware, check the VRAM budget and
+                                               model licences, write rust/deploy/.env (see
+                                               `kb-server setup --help`)
     kb-server eval --base-url URL --dataset DIR  Measure retrieval quality
     kb-server eval score --qrels F --run F       Score an existing run offline
     kb-server eval compare --baseline F --current F  Compare two runs against a baseline

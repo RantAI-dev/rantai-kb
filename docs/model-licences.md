@@ -23,6 +23,7 @@ change; MinerU's did.
 |---|---|---|---|
 | Qwen/Qwen3-Embedding-0.6B / 4B / 8B | 0.6–8B | Apache-2.0 | 🟢 |
 | intfloat/multilingual-e5-small / base / large-instruct | 118M–560M | MIT | 🟢 |
+| sentence-transformers/all-MiniLM-L6-v2 | 22M | Apache-2.0 | 🟢 (English only; Lite-en) |
 | ibm-granite/granite-embedding-97m-multilingual-r2, -311m-multilingual-r2, -107m-multilingual | 97–311M | Apache-2.0 | 🟢 |
 | BAAI/bge-m3 | 568M | MIT | 🟢 |
 | Alibaba-NLP/gte-multilingual-base | 305M | Apache-2.0 | 🟢 |

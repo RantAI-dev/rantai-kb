@@ -19,10 +19,21 @@ GPU here; cloud is paid).
 ## Quickstart
 
 ```sh
-cp rust/deploy/.env.example rust/deploy/.env    # optional; only cloud needs a key
+rust/scripts/kb-dev.sh setup                    # detect the hardware, write .env + .tier
 rust/scripts/kb-dev.sh up lite-en               # CPU only; lite | lite-en | desk | studio | station | cloud
 rust/scripts/kb-dev.sh key my-tenant            # prints a key — copy it
 ```
+
+`setup` is the only command that needs no Docker: it reads the hardware (NVIDIA via
+`nvidia-smi`, Apple silicon via `sysctl`, CPU/RAM), suggests a tier, compares it to the
+VRAM estimates in [`docs/kb-tiers.md`](../../docs/kb-tiers.md), gates the models on
+[`docs/model-licences.md`](../../docs/model-licences.md), and writes `rust/deploy/.env`
+plus `rust/deploy/.tier` for `up` to read. It never starts, downloads or probes anything
+unless asked, and it never overwrites an existing `.env` without `--overwrite`. See
+[`kb-server setup`](#kb-server-setup) below.
+
+The manual route still works: `cp rust/deploy/.env.example rust/deploy/.env` (optional;
+only cloud needs a key).
 
 `up` builds the image if it is missing, starts the stores, waits for `/health`,
 and prints the URL. Then upload a file and search it:
@@ -67,6 +78,8 @@ live documents with that exact `externalRef` (composable with `limit` and
 Everyday commands:
 
 ```sh
+rust/scripts/kb-dev.sh setup             # detect, budget/licence check, write .env
+rust/scripts/kb-dev.sh setup --check     # probe the configured models and stores
 rust/scripts/kb-dev.sh status            # GET /health
 rust/scripts/kb-dev.sh ps                # containers for the current tier
 rust/scripts/kb-dev.sh logs -f kb-lite-en
@@ -76,6 +89,62 @@ rust/scripts/kb-dev.sh down -v           # stop and delete all data + volumes
 
 The tier is remembered in `rust/deploy/.tier`, so the commands above need no
 tier argument once `up` has run. `kb-dev.sh key` needs the stack running.
+
+## `kb-server setup`
+
+`rust/scripts/kb-dev.sh setup [flags]` runs `kb-server setup` from the repo root
+(or the binary in `KB_SERVER_BIN`). It is a planner and a config writer, not a
+launcher: Postgres, Qdrant, Docker and the models do not have to be running.
+
+```sh
+rust/scripts/kb-dev.sh setup --detect-only        # print detection + the plan, write nothing
+rust/scripts/kb-dev.sh setup                      # write rust/deploy/.env and .tier
+rust/scripts/kb-dev.sh setup --tier cloud --accept-licence voyageai/voyage-multimodal-3.5 \
+  --accept-licence voyageai/rerank-2.5 --openrouter-key-env OPENROUTER_API_KEY
+rust/scripts/kb-dev.sh setup --start              # write, then run `up <tier>`
+```
+
+What it does:
+
+1. **Detects** each NVIDIA GPU (`nvidia-smi --query-gpu=name,memory.total`), Apple
+   silicon (`uname` + `sysctl hw.memsize` + the CPU brand, unified memory), CPU
+   cores and RAM (`/proc/meminfo`, `available_parallelism`). An AMD/other or
+   virtual display is reported as an unsupported accelerator and treated as CPU.
+2. **Suggests a tier**: NVIDIA ≥48 GB → station, ≥24 → studio, ≥8 → desk; Apple
+   unified ≥128 → station, ≥32 → studio, ≥16 → desk; otherwise `lite`
+   (`lite-en` with `--english`). `cloud` is only ever chosen explicitly, because
+   it spends money on every page and query. With several NVIDIA cards the
+   **largest** one is used: compose reserves one GPU per model container, so
+   cards do not pool.
+3. **Checks the budget** against the estimates in
+   [`docs/kb-tiers.md`](../../docs/kb-tiers.md) (they are estimates, and the
+   output says so). A tier that does not fit, or a desk/studio/station choice on
+   a box with no NVIDIA GPU, is refused unless `--force`.
+4. **Gates the licences** from [`docs/model-licences.md`](../../docs/model-licences.md):
+   a 🔴 model is refused, a 🟡 one needs `--accept-licence <model>`, and the 🟢
+   list is printed. A model with no table entry is refused too, so a new preset
+   model cannot skip the review.
+5. **Writes `rust/deploy/.env`** from `.env.example` and `rust/deploy/.tier`.
+   Only operator-level keys are written (`KB_TIER`, `KB_PORT`, `KB_CACHE_DIR`,
+   keys, the caption endpoint); the tier preset fills the model roles, so no
+   preset value is duplicated into the file. Secrets are written empty unless
+   `--write-secrets` is passed, and a value is never printed.
+6. **Prints the next step** — `rust/scripts/kb-dev.sh up <tier>` — and runs it
+   with `--start`.
+
+`setup --check` loads the env file plus the process environment (process wins,
+like compose) with the tier preset applied, then makes **one real request per
+configured role**: an embedding of `ping`, a rerank of two documents, the page
+embedder, the caption endpoint, `GET /v1/models` for OCR, and TCP/HTTP
+reachability for Postgres, Qdrant and S3. It prints role, host (no credentials),
+status and latency, and exits non-zero if a required role fails. A paid host
+(`openrouter.ai`, `api.mistral.ai`, voyage, Cohere) is **skipped** unless
+`--check-paid` is passed: a health check must not spend money.
+
+Not built yet, and deliberately not pretended: **model download and start** are
+done by the containers on first start (`up` waits up to 15 minutes for the TEI
+healthchecks), not by `setup`; and `KB_PARSE_RESIDENCY` / `KB_CAPTION_RESIDENCY`
+and the caption priority queue do not exist, so setup does not ask about them.
 
 ## Tiers
 
