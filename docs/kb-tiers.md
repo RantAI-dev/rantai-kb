@@ -107,6 +107,52 @@ GPU, so the request shape and ordering are covered by unit tests in
 throughput with Qwen3-VL-Embedding-2B on vLLM are unverified. Do not quote a local-tier
 page-retrieval number from this path until it has run on Desk/Studio hardware.
 
+## Local OCR (PaddleOCR-VL / PP-OCRv6)
+
+Scanned and complex pages are OCRed by a **local** model on every local tier: PaddleOCR-VL-1.6
+under vLLM (Desk/Studio/Station) or `llama.cpp` (Apple, CPU), and PP-OCRv6 on Lite through a
+sidecar that speaks the same shape. The adapter (`kb_extract::PageOcrExtractor`) renders each
+PDF page with pdfium at `KB_OCR_DPI`, sends **one chat request per page** (image part first,
+then the task prefix, `temperature: 0`) and keeps page order into the chunker's page map. Image
+uploads (`png`, `jpg`, `tif`) are a document of one page.
+
+```sh
+# Desk / Studio / Station (vLLM; PaddleOCR-VL selects its task with the prompt prefix)
+vllm serve PaddlePaddle/PaddleOCR-VL-1.6 --trust-remote-code
+
+# Apple / CPU (llama.cpp, the GGUF build)
+llama-server -m PaddleOCR-VL-1.6-Q8_0.gguf --host 127.0.0.1 --port 8000
+
+# point kb-server at either one; `ocr` also works as a name in
+# KB_LAYOUT_EXTRACTOR_ORDER when you want OCR ahead of another parser
+KB_OCR_BASE_URL=http://127.0.0.1:8000/v1/chat/completions
+KB_OCR_MODEL=PaddlePaddle/PaddleOCR-VL-1.6
+```
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `KB_OCR_BASE_URL` | full URL of `/v1/chat/completions`; empty turns the adapter off | empty (off) |
+| `KB_OCR_MODEL` | model name the server serves | `PaddlePaddle/PaddleOCR-VL-1.6` |
+| `KB_OCR_API_KEY` | optional bearer token; never filled from `OPENROUTER_API_KEY` | empty (no header) |
+| `KB_OCR_PROMPT` | task prefix (PaddleOCR-VL: `OCR:`, `Table Recognition:`, …) | `OCR:` |
+| `KB_OCR_DPI` | page render resolution | `150` |
+| `KB_OCR_CONCURRENCY` | page requests in flight | `2` |
+| `KB_OCR_TIMEOUT_MS` | timeout per page request | `120000` |
+| `KB_OCR_MAX_TOKENS` | `max_tokens` per page | `4096` |
+
+When `KB_OCR_BASE_URL` is set it also replaces OpenRouter vision as the OCR path for image
+uploads and as the layout chain's final fallback, so no page leaves the host. Unset, everything
+resolves exactly as before. A page that still fails after its retries fails the extraction with
+its page number rather than producing a document with a silently missing page. Answers are
+cached under `KB_CACHE_DIR` with the rest of the extraction, keyed by model, prompt, DPI and
+endpoint.
+
+**Status: mock-tested.** The request shape, ordering, retries, `Authorization` rule and the
+`ocr`/OpenRouter precedence are covered by tests in
+`rust/crates/kb-extract/src/page_ocr.rs` and `builder.rs`; end-to-end OCR quality and
+throughput with PaddleOCR-VL-1.6 on real hardware are not measured yet. PP-OCRv6 on Lite is not
+built (sidecar pending).
+
 ## The one-model-per-role rule
 
 One multimodal embedder puts text chunks, page images and the query in **one vector space**:
@@ -147,6 +193,7 @@ numbers and how to override a setting.
 | `KB_PARSE_IDLE_UNLOAD_S` | seconds | 300 |
 | `KB_CAPTION_RESIDENCY` | `on-demand`, `always` | same as parse |
 | `KB_CAPTION_*` | endpoint of the chat LLM used as the captioner | — |
+| `KB_OCR_*` | local OCR endpoint, model, prompt, DPI, concurrency and limits | off (`KB_OCR_BASE_URL` unset) |
 | `KB_CACHE_DIR` | directory for content-addressed caches | unset: no cache |
 
 A tier is a **preset**: it fills in role defaults; any explicit `KB_*` setting wins. Server
