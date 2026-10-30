@@ -649,9 +649,6 @@ impl Config {
                 None
             }
             Some(model) => {
-                let api_key = lookup("KB_PAGE_EMBEDDING_API_KEY")
-                    .filter(|s| !s.trim().is_empty())
-                    .or_else(|| lookup("OPENROUTER_API_KEY").filter(|s| !s.trim().is_empty()));
                 let format = match lookup("KB_PAGE_EMBEDDING_FORMAT")
                     .map(|v| v.trim().to_lowercase())
                     .as_deref()
@@ -664,6 +661,17 @@ impl Config {
                         "KB_PAGE_EMBEDDING_FORMAT must be \"openrouter\" or \"vllm\", got {other:?}"
                     ),
                 };
+                // The OpenRouter key only ever goes to the OpenRouter shape: a
+                // local vLLM page embedder (Studio/Station) gets its own key or
+                // none, never the paid one.
+                let api_key = lookup("KB_PAGE_EMBEDDING_API_KEY")
+                    .filter(|s| !s.trim().is_empty())
+                    .or_else(|| match format {
+                        kb_inference::PageEmbedFormat::OpenRouter => {
+                            lookup("OPENROUTER_API_KEY").filter(|s| !s.trim().is_empty())
+                        }
+                        kb_inference::PageEmbedFormat::VllmChat => None,
+                    });
                 let vision_timeout = Duration::from_millis(
                     int_var(&lookup, "KB_PAGE_VISION_RERANK_TIMEOUT_MS", 8_000u64)?.max(100),
                 );
@@ -1648,8 +1656,8 @@ mod tests {
         let rows = [
             ("lite", 1u32, None, false),
             ("desk", 2, Some(10u32), false),
-            ("studio", 4, Some(20), false),
-            ("station", 8, Some(30), false),
+            ("studio", 4, Some(20), true),
+            ("station", 8, Some(30), true),
             ("cloud", 4, Some(20), true),
         ];
         for (tier, concurrency, candidates, page_arm) in rows {
@@ -1716,13 +1724,45 @@ mod tests {
                     assert_eq!(cfg.worker.concurrency, 1);
                 } else {
                     assert_eq!(cfg.embedder.batch_size, 32);
-                    match &cfg.reranker {
-                        RerankerConfig::Tei { base_url, model } => {
+                    match (tier, &cfg.reranker) {
+                        ("desk", RerankerConfig::Tei { base_url, model }) => {
                             assert_eq!(base_url, "http://127.0.0.1:8082");
                             assert_eq!(model, "BAAI/bge-reranker-v2-m3");
                         }
-                        other => panic!("{tier} reranker should be TEI bge, got {other:?}"),
+                        ("studio" | "station", RerankerConfig::Vllm { base_url, model }) => {
+                            assert_eq!(base_url, "http://127.0.0.1:8082");
+                            let size = if tier == "studio" { "2B" } else { "8B" };
+                            assert_eq!(model, &format!("Qwen/Qwen3-VL-Reranker-{size}"));
+                        }
+                        (_, other) => panic!("{tier} has the wrong reranker: {other:?}"),
                     }
+                    if let Some(pages) = cfg.pages.as_ref() {
+                        let (model, dim) = if tier == "studio" {
+                            ("Qwen/Qwen3-VL-Embedding-2B", 2048)
+                        } else {
+                            ("Qwen/Qwen3-VL-Embedding-8B", 4096)
+                        };
+                        assert_eq!(pages.embedder.model, model);
+                        assert_eq!(pages.embedder.dimension, dim);
+                        assert_eq!(
+                            pages.embedder.format,
+                            kb_inference::PageEmbedFormat::VllmChat
+                        );
+                        assert_eq!(
+                            pages.embedder.base_url,
+                            "http://127.0.0.1:8084/v1/embeddings"
+                        );
+                        assert!(
+                            pages.embedder.api_key.is_none(),
+                            "{tier}: no key to local vLLM"
+                        );
+                        assert!(pages.arm.rerank.is_none(), "{tier}: page rerank off");
+                    }
+                    assert_eq!(
+                        cfg.extract.ocr_base_url,
+                        "http://127.0.0.1:8083/v1/chat/completions"
+                    );
+                    assert_eq!(cfg.extract.ocr_model, "PaddlePaddle/PaddleOCR-VL-1.6");
                 }
                 // Paid per document and read by no search arm: off everywhere.
                 assert!(!cfg.worker.entity_extraction_enabled, "{tier}");

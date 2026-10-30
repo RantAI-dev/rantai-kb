@@ -652,7 +652,7 @@ pub const LICENCES: &[LicenceEntry] = &[
         "BAAI/bge-reranker-v2-m3",
         "Apache-2.0",
         LicenceClass::Green,
-        "text reranker, desk/studio/station",
+        "text reranker, desk",
     ),
     entry(
         "voyageai/voyage-multimodal-3.5",
@@ -676,13 +676,13 @@ pub const LICENCES: &[LicenceEntry] = &[
         "PaddlePaddle/PaddleOCR-VL-1.6",
         "Apache-2.0",
         LicenceClass::Green,
-        "OCR, desk/studio (compose sidecar)",
+        "OCR, desk/studio/station",
     ),
     entry(
         "opendatalab/MinerU2.5-Pro",
         "Apache-2.0 weights (pipeline code 🟡)",
         LicenceClass::Green,
-        "OCR, station",
+        "OCR, station alternative (not in the preset)",
     ),
     entry(
         "Qwen/Qwen3-VL-Embedding-2B",
@@ -748,17 +748,18 @@ pub fn tier_models(tier: Tier) -> Vec<&'static str> {
         ],
         Tier::Studio => vec![
             "Qwen/Qwen3-Embedding-0.6B",
-            "BAAI/bge-reranker-v2-m3",
+            "Qwen/Qwen3-VL-Reranker-2B",
             "PaddlePaddle/PaddleOCR-VL-1.6",
             "Qwen/Qwen3-VL-Embedding-2B",
-            "Qwen/Qwen3-VL-Reranker-2B",
         ],
+        // MinerU2.5-Pro stays in the licence table as Station's alternative
+        // parser (`KB_LAYOUT_EXTRACTOR_ORDER=sidecar`); the preset and the
+        // compose profile run PaddleOCR-VL, the same parser as Desk/Studio.
         Tier::Station => vec![
             "Qwen/Qwen3-Embedding-0.6B",
-            "BAAI/bge-reranker-v2-m3",
-            "opendatalab/MinerU2.5-Pro",
-            "Qwen/Qwen3-VL-Embedding-8B",
             "Qwen/Qwen3-VL-Reranker-8B",
+            "PaddlePaddle/PaddleOCR-VL-1.6",
+            "Qwen/Qwen3-VL-Embedding-8B",
         ],
         Tier::Cloud => vec!["voyageai/voyage-multimodal-3.5", "voyageai/rerank-2.5"],
     }
@@ -1956,9 +1957,8 @@ pub fn probes_from_config(lookup: &dyn Fn(&str) -> Option<String>) -> Vec<Probe>
         });
     }
 
-    // OCR: WP1 adds `KB_OCR_*` to Config; until it lands, the environment is
-    // the only source, so read it directly.
-    // TODO(WP1): read KB_OCR_BASE_URL/KB_OCR_MODEL/KB_OCR_API_KEY through Config.
+    // Local OCR (`KB_OCR_*`). `lookup` already carries the tier preset, so this
+    // sees the same URL `kb_extract::ExtractConfig` resolves.
     if let Some(base) = non_empty(lookup("KB_OCR_BASE_URL")) {
         probes.push(Probe {
             role: "ocr (local)".to_string(),

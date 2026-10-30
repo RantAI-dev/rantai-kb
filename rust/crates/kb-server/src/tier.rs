@@ -8,10 +8,12 @@
 //! apply. With `KB_TIER` unset, resolution is unchanged from before this
 //! module existed.
 //!
-//! Only **text roles** are filled. The local tiers leave the page-image arm off
-//! because the multimodal embedder (`Qwen3-VL-Embedding`) is not wired yet; an
-//! operator who runs it sets `KB_PAGE_EMBEDDING_MODEL` (and
-//! `KB_PAGE_EMBEDDING_FORMAT=vllm`) by hand, and that wins over the tier.
+//! Every role in the `docs/kb-tiers.md` table that has an adapter is filled:
+//! text embedding, reranker, scanned-page OCR (`KB_OCR_*`) and, on Studio and
+//! Station, the page-image arm (Qwen3-VL-Embedding on vLLM). Lite and Desk keep
+//! the page arm off, as the table says. Each local service has a fixed
+//! loopback port (below) so a bare-metal install and `rust/deploy/compose.yaml`
+//! agree; compose overrides the host part with the service name.
 
 use anyhow::Result;
 
@@ -35,12 +37,26 @@ const MINILM_EMBEDDING: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const BGE_RERANKER: &str = "BAAI/bge-reranker-v2-m3";
 const VOYAGE_EMBEDDING: &str = "voyageai/voyage-multimodal-3.5";
 const VOYAGE_RERANKER: &str = "voyageai/rerank-2.5";
+const PADDLE_OCR_VL: &str = "PaddlePaddle/PaddleOCR-VL-1.6";
+/// PP-OCRv6, by the id the licence table uses. The sidecar
+/// (`rust/deploy/ocr-ppocr`) ignores the model name; it only keys the
+/// extraction cache.
+const PP_OCR: &str = "PaddlePaddle/PP-OCRv6";
+const QWEN3_VL_EMBEDDING_2B: &str = "Qwen/Qwen3-VL-Embedding-2B";
+const QWEN3_VL_EMBEDDING_8B: &str = "Qwen/Qwen3-VL-Embedding-8B";
+const QWEN3_VL_RERANKER_2B: &str = "Qwen/Qwen3-VL-Reranker-2B";
+const QWEN3_VL_RERANKER_8B: &str = "Qwen/Qwen3-VL-Reranker-8B";
 
 /// The local OpenAI-compatible embedding endpoint (`llama server --embedding`
 /// or TEI), as `docs/local-models.md` starts it.
 const LOCAL_EMBEDDINGS: &str = "http://127.0.0.1:8081/v1/embeddings";
 /// The local `/rerank` base; the TEI adapter appends `/rerank`.
 const LOCAL_RERANK_URL: &str = "http://127.0.0.1:8082";
+/// The local OCR server's chat endpoint: the PP-OCRv6 sidecar on Lite,
+/// PaddleOCR-VL-1.6 (llama.cpp or vLLM) from Desk up.
+const LOCAL_OCR_URL: &str = "http://127.0.0.1:8083/v1/chat/completions";
+/// The local vLLM page embedder (Chat Embeddings API).
+const LOCAL_PAGE_EMBEDDINGS: &str = "http://127.0.0.1:8084/v1/embeddings";
 /// OpenRouter's rerank router, which takes the Cohere request shape.
 const OPENROUTER_RERANK: &str = "https://openrouter.ai/api/v1/rerank";
 
@@ -124,6 +140,59 @@ const LOCAL_RERANK: &[(&str, &str)] = &[
     ("KB_RERANK_MODEL", BGE_RERANKER),
 ];
 
+/// Studio's chunk reranker: Qwen3-VL-Reranker-2B on vLLM, which serves the
+/// Cohere-shaped `/rerank` the `vllm` provider posts to. It takes the port bge
+/// has on Desk, so one local reranker runs per tier.
+const VL_RERANK_2B: &[(&str, &str)] = &[
+    ("KB_RERANK_ENABLED", "true"),
+    ("KB_RERANK_PROVIDER", "vllm"),
+    ("KB_RERANK_BASE_URL", LOCAL_RERANK_URL),
+    ("KB_RERANK_MODEL", QWEN3_VL_RERANKER_2B),
+];
+
+const VL_RERANK_8B: &[(&str, &str)] = &[
+    ("KB_RERANK_ENABLED", "true"),
+    ("KB_RERANK_PROVIDER", "vllm"),
+    ("KB_RERANK_BASE_URL", LOCAL_RERANK_URL),
+    ("KB_RERANK_MODEL", QWEN3_VL_RERANKER_8B),
+];
+
+/// Lite's scanned-page OCR: PP-OCRv6 on the CPU through the sidecar, one page
+/// at a time so it never competes with the embedder for both cores.
+/// Digital pages still come from the pdfium text layer; only pages without
+/// one reach this. Without the sidecar running, a scanned page fails its
+/// extraction with the page number (it never silently goes missing).
+const PP_OCR_PAGES: &[(&str, &str)] = &[
+    ("KB_OCR_BASE_URL", LOCAL_OCR_URL),
+    ("KB_OCR_MODEL", PP_OCR),
+    ("KB_OCR_CONCURRENCY", "1"),
+];
+
+/// Desk and up: PaddleOCR-VL-1.6 for scanned and complex pages, on the GPU
+/// (vLLM) or llama.cpp. `OCR:` is the adapter's default task prefix.
+const PADDLE_OCR_PAGES: &[(&str, &str)] = &[
+    ("KB_OCR_BASE_URL", LOCAL_OCR_URL),
+    ("KB_OCR_MODEL", PADDLE_OCR_VL),
+];
+
+/// Studio's page-image arm: Qwen3-VL-Embedding-2B on vLLM, 2048 wide (the
+/// model card's output width). Page rerank stays off (from [`LOCAL`]) until a
+/// local page reranker is measured.
+const VL_PAGES_2B: &[(&str, &str)] = &[
+    ("KB_PAGE_EMBEDDING_MODEL", QWEN3_VL_EMBEDDING_2B),
+    ("KB_PAGE_EMBEDDING_FORMAT", "vllm"),
+    ("KB_PAGE_EMBEDDING_BASE_URL", LOCAL_PAGE_EMBEDDINGS),
+    ("KB_PAGE_EMBEDDING_DIM", "2048"),
+];
+
+/// Station's page-image arm: Qwen3-VL-Embedding-8B, 4096 wide.
+const VL_PAGES_8B: &[(&str, &str)] = &[
+    ("KB_PAGE_EMBEDDING_MODEL", QWEN3_VL_EMBEDDING_8B),
+    ("KB_PAGE_EMBEDDING_FORMAT", "vllm"),
+    ("KB_PAGE_EMBEDDING_BASE_URL", LOCAL_PAGE_EMBEDDINGS),
+    ("KB_PAGE_EMBEDDING_DIM", "4096"),
+];
+
 /// Lite: no reranker, one embedding at a time.
 ///
 /// Embedding concurrency is filled as `KB_EMBED_CONCURRENCY`, the name Bun
@@ -145,15 +214,19 @@ const DESK: &[(&str, &str)] = &[
 const STUDIO: &[(&str, &str)] = &[
     ("KB_EMBED_CONCURRENCY", "4"),
     ("KB_RERANK_CANDIDATE_LIMIT", "20"),
+    ("KB_OCR_CONCURRENCY", "4"),
 ];
 
 const STATION: &[(&str, &str)] = &[
     ("KB_EMBED_CONCURRENCY", "8"),
     ("KB_RERANK_CANDIDATE_LIMIT", "30"),
+    ("KB_OCR_CONCURRENCY", "8"),
 ];
 
 /// Cloud: one hosted embedder for text and pages, voyage's reranker over the
-/// same OpenRouter key. Qdrant is the only chunk store, so the page arm has
+/// same OpenRouter key. Scanned pages go to Mistral OCR when the operator sets
+/// `KB_MISTRAL_OCR_KEY` (`kb-server setup --tier cloud` asks for it), otherwise
+/// to OpenRouter vision; the tier fills no OCR setting because both are keyed. Qdrant is the only chunk store, so the page arm has
 /// nothing to select; set `KB_PAGE_EMBEDDING_MODEL=` (empty) to drop the arm.
 const CLOUD: &[(&str, &str)] = &[
     ("KB_EMBEDDING_MODEL", VOYAGE_EMBEDDING),
@@ -240,11 +313,25 @@ impl Tier {
     /// The preset tables that apply to this tier, most general first.
     fn tables(self) -> &'static [&'static [(&'static str, &'static str)]] {
         match self {
-            Self::Lite => &[LOCAL, E5_SMALL_TEXT, LITE],
-            Self::LiteEn => &[LOCAL, MINILM_TEXT, LITE],
-            Self::Desk => &[LOCAL, QWEN3_TEXT, LOCAL_RERANK, DESK],
-            Self::Studio => &[LOCAL, QWEN3_TEXT, LOCAL_RERANK, STUDIO],
-            Self::Station => &[LOCAL, QWEN3_TEXT, LOCAL_RERANK, STATION],
+            Self::Lite => &[LOCAL, E5_SMALL_TEXT, PP_OCR_PAGES, LITE],
+            Self::LiteEn => &[LOCAL, MINILM_TEXT, PP_OCR_PAGES, LITE],
+            Self::Desk => &[LOCAL, QWEN3_TEXT, LOCAL_RERANK, PADDLE_OCR_PAGES, DESK],
+            Self::Studio => &[
+                LOCAL,
+                QWEN3_TEXT,
+                VL_RERANK_2B,
+                PADDLE_OCR_PAGES,
+                VL_PAGES_2B,
+                STUDIO,
+            ],
+            Self::Station => &[
+                LOCAL,
+                QWEN3_TEXT,
+                VL_RERANK_8B,
+                PADDLE_OCR_PAGES,
+                VL_PAGES_8B,
+                STATION,
+            ],
             Self::Cloud => &[CLOUD],
         }
     }
@@ -514,5 +601,75 @@ mod tests {
             line.contains("\\nQuery: "),
             "the newline is escaped: {line}"
         );
+    }
+
+    #[test]
+    fn every_local_tier_ocrs_scans_locally_and_cloud_fills_no_ocr() {
+        let none = |_: &str| None;
+        for (name, model) in [
+            ("lite", "PaddlePaddle/PP-OCRv6"),
+            ("lite-en", "PaddlePaddle/PP-OCRv6"),
+            ("desk", "PaddlePaddle/PaddleOCR-VL-1.6"),
+            ("studio", "PaddlePaddle/PaddleOCR-VL-1.6"),
+            ("station", "PaddlePaddle/PaddleOCR-VL-1.6"),
+        ] {
+            let tier = with_preset(Tier::parse(name), &none);
+            assert_eq!(
+                tier("KB_OCR_BASE_URL").as_deref(),
+                Some("http://127.0.0.1:8083/v1/chat/completions"),
+                "{name}"
+            );
+            assert_eq!(tier("KB_OCR_MODEL").as_deref(), Some(model), "{name}");
+            assert_eq!(
+                tier("KB_OCR_API_KEY"),
+                None,
+                "{name}: no key to a local OCR"
+            );
+        }
+        let cloud = with_preset(Some(Tier::Cloud), &none);
+        assert_eq!(
+            cloud("KB_OCR_BASE_URL"),
+            None,
+            "cloud OCR is keyed, not preset"
+        );
+    }
+
+    #[test]
+    fn studio_and_station_run_the_vl_page_arm_and_vl_reranker() {
+        let none = |_: &str| None;
+        for (name, embed, dim, rerank) in [
+            (
+                "studio",
+                "Qwen/Qwen3-VL-Embedding-2B",
+                "2048",
+                "Qwen/Qwen3-VL-Reranker-2B",
+            ),
+            (
+                "station",
+                "Qwen/Qwen3-VL-Embedding-8B",
+                "4096",
+                "Qwen/Qwen3-VL-Reranker-8B",
+            ),
+        ] {
+            let tier = with_preset(Tier::parse(name), &none);
+            assert_eq!(tier("KB_PAGE_EMBEDDING_MODEL").as_deref(), Some(embed));
+            assert_eq!(tier("KB_PAGE_EMBEDDING_FORMAT").as_deref(), Some("vllm"));
+            assert_eq!(tier("KB_PAGE_EMBEDDING_DIM").as_deref(), Some(dim));
+            assert_eq!(
+                tier("KB_PAGE_EMBEDDING_BASE_URL").as_deref(),
+                Some("http://127.0.0.1:8084/v1/embeddings")
+            );
+            assert_eq!(tier("KB_RERANK_PROVIDER").as_deref(), Some("vllm"));
+            assert_eq!(tier("KB_RERANK_MODEL").as_deref(), Some(rerank));
+            assert_eq!(tier("KB_PAGE_RERANK").as_deref(), Some("false"));
+        }
+        for name in ["lite", "lite-en", "desk"] {
+            let tier = with_preset(Tier::parse(name), &none);
+            assert_eq!(
+                tier("KB_PAGE_EMBEDDING_MODEL"),
+                None,
+                "{name}: page arm off"
+            );
+        }
     }
 }
