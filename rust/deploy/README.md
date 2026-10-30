@@ -155,16 +155,25 @@ Postgres holds documents, jobs, KBs, keys and the entity graph.
 
 | Tier | Model containers | Hardware | Measured (see below) |
 |---|---|---|---|
-| `lite` | TEI CPU, `intfloat/multilingual-e5-small` (384-d) | CPU, 1–2 cores, no GPU | MIRACL-id-50 nDCG@10 **0.802**, recall@10 0.938, MRR@10 0.823; 1,485 passages ingest ~126 s; search p50 42 ms / p95 49 ms. ViDoRe HR: 1.55 pages/s at page nDCG@10 0.545 |
-| `lite-en` | TEI CPU, `sentence-transformers/all-MiniLM-L6-v2` (384-d, English only) | CPU, 1–2 cores, no GPU | ViDoRe HR: **6.43 pages/s** at page nDCG@10 0.517. English only: 0.679 vs 0.802 for `lite` on Indonesian MIRACL-id |
-| `desk` | TEI CUDA, `Qwen/Qwen3-Embedding-0.6B` (1024-d) + `BAAI/bge-reranker-v2-m3` | NVIDIA 8 GB | **not measured on this hardware** — see `docs/kb-tiers.md` for estimates |
-| `studio` | same models, higher concurrency preset | NVIDIA 24 GB | not measured |
-| `station` | same models, higher concurrency preset | NVIDIA 48 GB | not measured |
+| `lite` | TEI CPU, `intfloat/multilingual-e5-small` (384-d); `ocr-ppocr` (PP-OCRv6, CPU) for scanned pages | CPU, 1–2 cores, no GPU | MIRACL-id-50 nDCG@10 **0.802**, recall@10 0.938, MRR@10 0.823; 1,485 passages ingest ~126 s; search p50 42 ms / p95 49 ms. ViDoRe HR: 1.55 pages/s at page nDCG@10 0.545 |
+| `lite-en` | TEI CPU, `sentence-transformers/all-MiniLM-L6-v2` (384-d, English only); `ocr-ppocr` | CPU, 1–2 cores, no GPU | ViDoRe HR: **6.43 pages/s** at page nDCG@10 0.517. English only: 0.679 vs 0.802 for `lite` on Indonesian MIRACL-id |
+| `desk` | TEI CUDA, `Qwen/Qwen3-Embedding-0.6B` (1024-d) + `BAAI/bge-reranker-v2-m3`; `ocr-paddlevl-desk` (PaddleOCR-VL-1.6 GGUF on llama.cpp CUDA) | NVIDIA 8 GB | **not measured on this hardware** — see `docs/kb-tiers.md` for estimates |
+| `studio` | TEI CUDA Qwen3-Embedding-0.6B; vLLM: `vllm-page-embed-studio` (Qwen3-VL-Embedding-2B, 2048-d page images), `vllm-rerank-studio` (Qwen3-VL-Reranker-2B), `vllm-ocr-studio` (PaddleOCR-VL-1.6) | NVIDIA 24 GB | not measured; `docker compose config` only |
+| `station` | as studio with the 8B Qwen3-VL models in FP8 (4096-d page images) | NVIDIA 48 GB | not measured; `docker compose config` only |
 | `cloud` | none (OpenRouter: `voyage-multimodal-3.5` embeddings, `voyageai/rerank-2.5`); page-image arm on | any machine + `OPENROUTER_API_KEY` | ViDoRe HR page nDCG@10 **0.711** ([vidore3-hr-en-image](../../docs/eval-ab/vidore3-hr-en-image/)), ViDoRe CS **0.828** ([vidore3-cs-en-night](../../docs/eval-ab/vidore3-cs-en-night/)); **paid** per page and query |
 
 The measured rows come from
 [`docs/eval-ab/lite-2core`](../../docs/eval-ab/lite-2core/) (2 pinned cores; the
 MIRACL run capped the embedder at one thread, the HR runs did not).
+Every vLLM container claims `--gpu-memory-utilization` of the whole card; the
+defaults (studio: OCR 0.12, page embed 0.2, rerank 0.2; station: 0.06 / 0.2 / 0.2
+with FP8 weights) are estimates and can be changed in `.env` with
+`KB_STUDIO_*_GPU_FRACTION` / `KB_STATION_*_GPU_FRACTION` (`OCR`, `PAGE_EMBED`,
+`RERANK`). The image is `vllm/vllm-openai:v0.32.0` (`VLLM_IMAGE` overrides it);
+set `HF_TOKEN` if your Hugging Face access needs one. The PP-OCRv6 sidecar on
+lite uses one core (`KB_LITE_OCR_CPUS`, `KB_OCR_THREADS`) and only sees pages
+without a text layer.
+
 Tier definitions and the role each model plays are in
 [`docs/kb-tiers.md`](../../docs/kb-tiers.md). GPU numbers are deliberately left
 blank: none were run here.

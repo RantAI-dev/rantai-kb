@@ -8,12 +8,12 @@ in code (preset + compose + adapter) or explicitly marked "not built" with the r
 
 | Role | Doc says | Code today | Work package |
 |---|---|---|---|
-| OCR, Lite | PP-OCRv6 ONNX on CPU | none | WP1 (adapter) + WP2 (sidecar) |
-| OCR, Desk/Studio | PaddleOCR-VL-1.6 | none (vision extractor sends whole PDFs as an OpenRouter `file` part, which vLLM/llama.cpp do not accept) | WP1 + WP2 |
-| OCR, Station | MinerU2.5-Pro / PaddleOCR-VL | MinerU sidecar adapter exists | WP2 (preset + compose) |
+| OCR, Lite | PP-OCRv6 ONNX on CPU | ✅ preset → `rust/deploy/ocr-ppocr` sidecar (RapidOCR 3.10); image not built here yet | WP1 + WP2 |
+| OCR, Desk/Studio | PaddleOCR-VL-1.6 | ✅ preset; compose: llama.cpp GGUF on Desk, vLLM on Studio (config-validated only) | WP1 + WP2 |
+| OCR, Station | MinerU2.5-Pro / PaddleOCR-VL | ✅ preset + compose run PaddleOCR-VL on vLLM; MinerU stays an option | WP2 |
 | OCR, Cloud | Mistral OCR | adapter exists; only on when `KB_MISTRAL_OCR_KEY` is set | WP3 (setup asks for the key) |
-| Page embedder, Studio/Station | Qwen3-VL-Embedding-2B / 8B | vLLM adapter exists (mock-tested), not in any preset or compose profile | WP2 |
-| Reranker, Studio/Station | Qwen3-VL-Reranker-2B / 8B | `vllm` rerank provider exists; presets still bge on TEI | WP2 |
+| Page embedder, Studio/Station | Qwen3-VL-Embedding-2B / 8B | ✅ preset + compose (`vllm-page-embed-*`); mock-tested, no GPU run | WP2 |
+| Reranker, Studio/Station | Qwen3-VL-Reranker-2B / 8B | ✅ preset (`vllm` provider) + compose (`vllm-rerank-*`, model-card recipe + vLLM score template); no GPU run | WP2 |
 | Charts/figures (captions) | chat LLM's vision (local), Gemini Flash (cloud) | `KB_PAGE_CAPTION_*` exists, opt-in, unmeasured | WP3 (setup asks for the chat LLM URL / enables Gemini Flash on cloud) |
 | Parser / caption residency | `KB_PARSE_RESIDENCY`, `KB_CAPTION_RESIDENCY`, priority queue | not built | out of scope; stays documented as not built |
 | `kb-server setup --tier` | detect, download, start, health-check, write config | ✅ detect, suggest, budget/licence gate, write `.env`/`.tier`, `--check` probes, `--start`; model download and start stay with the containers | WP3 |
@@ -28,7 +28,9 @@ in code (preset + compose + adapter) or explicitly marked "not built" with the r
   `KB_OCR_CONCURRENCY` (default 2), `KB_OCR_TIMEOUT_MS` (default 120000),
   `KB_OCR_MAX_TOKENS` (default 4096).
 - Compose services (WP2): `ocr-ppocr` (lite, CPU sidecar speaking the same chat shape),
-  `vllm-ocr` (PaddleOCR-VL-1.6), `vllm-page-embed-<tier>`, `vllm-rerank-<tier>`.
+  `ocr-paddlevl-desk` (llama.cpp), `vllm-ocr-<tier>`, `vllm-page-embed-<tier>`,
+  `vllm-rerank-<tier>`. Loopback ports in the presets: 8081 text embed, 8082 rerank,
+  8083 OCR, 8084 page embed.
 
 ## Validation
 

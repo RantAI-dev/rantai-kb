@@ -150,8 +150,11 @@ endpoint.
 **Status: mock-tested.** The request shape, ordering, retries, `Authorization` rule and the
 `ocr`/OpenRouter precedence are covered by tests in
 `rust/crates/kb-extract/src/page_ocr.rs` and `builder.rs`; end-to-end OCR quality and
-throughput with PaddleOCR-VL-1.6 on real hardware are not measured yet. PP-OCRv6 on Lite is not
-built (sidecar pending).
+throughput with PaddleOCR-VL-1.6 on real hardware are not measured yet. PaddleOCR-VL-1.6's GGUF
+did run end to end under llama.cpp on this CPU (102.5 s per page, text identical to the PDF text
+layer: `docs/tier-readiness-plan.md`). PP-OCRv6 on Lite runs in `rust/deploy/ocr-ppocr`
+(RapidOCR 3.10, ONNX Runtime, CPU), a sidecar that answers the same chat shape; it is
+**built but not yet run** (the image has not been built on this machine).
 
 ## The one-model-per-role rule
 
@@ -200,7 +203,7 @@ A tier is a **preset**: it fills in role defaults; any explicit `KB_*` setting w
 `kb-server setup` checks the VRAM budget and refuses a combination that cannot fit next to
 the chat LLM (unless `--force`); server start does not check it yet.
 
-### `KB_TIER` (text roles, implemented 2026-10-24)
+### `KB_TIER` (implemented 2026-10-24; OCR and Qwen3-VL roles 2026-10-30)
 
 `KB_TIER` fills a role default for every variable the operator did not set. It is not a mode
 switch: the resolved config is exactly what the operator would have written by hand.
@@ -217,10 +220,13 @@ switch: the resolved config is exactly what the operator would have written by h
 - `kb-server apply-schema` resolves the tier too, so the Qdrant collections are created at the
   width the server will store.
 
-Only **text roles** are filled today: no local multimodal (Qwen3-VL) embedder or reranker is
-wired yet, so the local tiers leave the page-image arm off. An operator who runs the vLLM page
-embedder sets `KB_PAGE_EMBEDDING_MODEL` / `KB_PAGE_EMBEDDING_FORMAT=vllm` by hand, and that wins
-over the tier. Lite's concurrency and batch numbers are **placeholders** until the 2-core
+Every role in "What each tier runs" that has an adapter is filled: text embedding, reranker,
+scanned-page OCR (`KB_OCR_*`) and, on Studio and Station, the page-image arm (Qwen3-VL-Embedding
+on vLLM) with the Qwen3-VL reranker. Lite and Desk keep the page arm off, as the table says.
+Each local service has a fixed loopback port (8081 text embed, 8082 rerank, 8083 OCR, 8084 page
+embed) so a bare-metal install and `rust/deploy/compose.yaml` agree; compose overrides the host
+with the service name. **The Studio/Station page and rerank roles are mock-tested only** (no
+NVIDIA machine here): see "Local page embedder (vLLM)" for what is and is not verified. Lite's concurrency and batch numbers are **placeholders** until the 2-core
 measurement (build order 5); the Desk / Studio / Station rerank widths are estimates.
 
 | Variable | lite | desk | studio | station | cloud |
@@ -237,12 +243,17 @@ measurement (build order 5); the Desk / Studio / Station rerank widths are estim
 | `KB_INGEST_CONCURRENCY` | 1 | — | — | — | — |
 | `KB_ENTITY_EXTRACTION_ENABLED` | `false` | `false` | `false` | `false` | `false` (a paid LLM call per document; only written to the Postgres graph when `KB_GRAPH_STORE=pg`) |
 | `KB_RERANK_ENABLED` | `false` | `true` | `true` | `true` | `true` |
-| `KB_RERANK_PROVIDER` | — | `tei` | `tei` | `tei` | `cohere` |
+| `KB_RERANK_PROVIDER` | — | `tei` | `vllm` | `vllm` | `cohere` |
 | `KB_RERANK_BASE_URL` | — | `http://127.0.0.1:8082` | same | same | `https://openrouter.ai/api/v1/rerank` |
-| `KB_RERANK_MODEL` | — | `BAAI/bge-reranker-v2-m3` | same | same | `voyageai/rerank-2.5` |
+| `KB_RERANK_MODEL` | — | `BAAI/bge-reranker-v2-m3` | `Qwen/Qwen3-VL-Reranker-2B` | `Qwen/Qwen3-VL-Reranker-8B` | `voyageai/rerank-2.5` |
 | `KB_RERANK_CANDIDATE_LIMIT` | — | 10 | 20 | 30 | 20 |
-| `KB_PAGE_EMBEDDING_MODEL` | — | — | — | — | `voyageai/voyage-multimodal-3.5` |
-| `KB_PAGE_EMBEDDING_DIM` | — | — | — | — | 1024 |
+| `KB_OCR_BASE_URL` | `http://127.0.0.1:8083/v1/chat/completions` | same | same | same | — (Mistral OCR when `KB_MISTRAL_OCR_KEY` is set) |
+| `KB_OCR_MODEL` | `PaddlePaddle/PP-OCRv6` | `PaddlePaddle/PaddleOCR-VL-1.6` | same as desk | same as desk | — |
+| `KB_OCR_CONCURRENCY` | 1 | — (2) | 4 | 8 | — |
+| `KB_PAGE_EMBEDDING_MODEL` | — | — | `Qwen/Qwen3-VL-Embedding-2B` | `Qwen/Qwen3-VL-Embedding-8B` | `voyageai/voyage-multimodal-3.5` |
+| `KB_PAGE_EMBEDDING_FORMAT` | — | — | `vllm` | `vllm` | — (OpenRouter) |
+| `KB_PAGE_EMBEDDING_BASE_URL` | — | — | `http://127.0.0.1:8084/v1/embeddings` | same | — (OpenRouter) |
+| `KB_PAGE_EMBEDDING_DIM` | — | — | 2048 | 4096 | 1024 |
 | `KB_PAGE_RERANK` | `false` | `false` | `false` | `false` | `true` |
 
 ¹ `Instruct: Given a question, retrieve passages that answer it\nQuery: ` — the same string
@@ -273,6 +284,14 @@ On 2 cores it ingests ViDoRe HR at 6.43 pages/s (page nDCG@10 0.517) against Lit
 - The preset fills embedding concurrency as `KB_EMBED_CONCURRENCY`, the name Bun reads, which
   Rust honours when `KB_EMBEDDING_CONCURRENCY` is unset. That way it can never shadow an
   operator's `KB_EMBEDDING_CONCURRENCY`.
+- The local vLLM page embedder never receives `OPENROUTER_API_KEY`: with
+  `KB_PAGE_EMBEDDING_FORMAT=vllm` only `KB_PAGE_EMBEDDING_API_KEY` is sent.
+- Studio and Station embed **text** with Qwen3-Embedding-0.6B (the measured local text stack)
+  and **pages** with Qwen3-VL-Embedding in a separate Qdrant vector, fused at search time. One
+  shared text+page space, as the role table puts it, would need the VL model to embed text too;
+  that is unmeasured, so it is not the preset.
+- Station runs PaddleOCR-VL-1.6 like Studio. MinerU2.5-Pro stays a documented alternative
+  (`KB_LAYOUT_EXTRACTOR_ORDER=sidecar` with a MinerU sidecar); no preset selects it.
 - bge is a poor page reranker (`docs/eval-ab/vidore3-hr-en-night`, "bge should not rerank
   pages"), so every local tier sets `KB_PAGE_RERANK=false`; it only matters when the page arm
   is on.
