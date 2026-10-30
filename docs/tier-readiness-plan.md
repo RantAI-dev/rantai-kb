@@ -37,3 +37,12 @@ mock servers only, and marked so. Live checks possible on this machine:
 PaddleOCR-VL-1.6 GGUF under llama.cpp on CPU (the WP1 adapter, end to end, on a scanned PDF),
 the PP-OCRv6 sidecar, `kb-server setup` on this CPU box (must suggest `lite`), and the lite and
 cloud profiles.
+
+## Measured: PaddleOCR-VL-1.6 on CPU (2026-10-30)
+
+Official GGUF (`PaddlePaddle/PaddleOCR-VL-1.6-GGUF`, model 936 MB + mmproj 882 MB) under
+`ghcr.io/ggml-org/llama.cpp:server`, 3 CPU threads (`--cpus 3`, shared machine), one ViDoRe HR
+page (annual_report_on_intra-eu_labour_mobility, p. 12) rendered at 150 dpi, prompt `OCR:`:
+**102.5 s for the page** (1,273 prompt tokens, 150 completion tokens). The output matched the
+PDF's text layer word for word. So the request shape works end to end, and PaddleOCR-VL is a
+GPU-tier parser: on CPU it is ~100× too slow for bulk ingest, which is why Lite keeps PP-OCRv6.
