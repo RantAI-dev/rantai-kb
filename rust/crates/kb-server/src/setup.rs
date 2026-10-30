@@ -1544,17 +1544,23 @@ fn write_budget(
     }
     writeln!(out).map_err(io_failed)?;
 
-    match check_tier_fit(hardware, tier, force || detect_only) {
+    match check_tier_fit(hardware, tier, force) {
         Ok(warnings) => {
             for warning in warnings {
                 writeln!(out, "  warning   {warning}").map_err(io_failed)?;
             }
             if let Some(budget) = tier_budget(tier) {
+                let fits = check_budget(hardware, tier).fits;
                 writeln!(
                     out,
-                    "  {tier}: estimated {:.1} GB needed, {:.1} GB available — fits",
+                    "  {tier}: estimated {:.1} GB needed, {} — {}",
                     budget.total_gb(),
-                    available.unwrap_or(0.0),
+                    available.map_or_else(|| "no GPU".to_string(), |gb| format!("{gb:.1} GB")),
+                    if fits {
+                        "fits"
+                    } else {
+                        "does not fit (forced)"
+                    },
                     tier = tier.as_str()
                 )
                 .map_err(io_failed)?;
@@ -2822,6 +2828,53 @@ mod tests {
         .expect("plan");
         let tier = std::fs::read_to_string(dir.path.join(".tier")).expect("tier file");
         assert_eq!(tier.trim(), "lite");
+    }
+
+    #[test]
+    fn detect_only_reports_a_refusal_instead_of_failing() {
+        let dir = TempDir::new("detect-desk");
+        let env_path = dir.path.join(".env");
+        let args = SetupArgs {
+            tier: Some(Tier::Desk),
+            detect_only: true,
+            ..SetupArgs::default()
+        };
+        let mut output = Vec::new();
+        plan_and_write(
+            &args,
+            &FakeRunner::linux(8, 11.7).hardware(),
+            Tier::Desk,
+            &|_: &str| None,
+            &env_path,
+            &mut output,
+        )
+        .expect("detect-only never refuses");
+        let printed = String::from_utf8(output).expect("utf8");
+        assert!(printed.contains("would refuse"), "{printed}");
+        assert!(!env_path.exists());
+    }
+
+    #[test]
+    fn a_forced_tier_says_it_does_not_fit() {
+        let dir = TempDir::new("forced-desk");
+        let env_path = dir.path.join(".env");
+        let args = SetupArgs {
+            tier: Some(Tier::Desk),
+            force: true,
+            ..SetupArgs::default()
+        };
+        let mut output = Vec::new();
+        plan_and_write(
+            &args,
+            &FakeRunner::linux(8, 11.7).hardware(),
+            Tier::Desk,
+            &|_: &str| None,
+            &env_path,
+            &mut output,
+        )
+        .expect("forced");
+        let printed = String::from_utf8(output).expect("utf8");
+        assert!(printed.contains("does not fit (forced)"), "{printed}");
     }
 
     #[test]
