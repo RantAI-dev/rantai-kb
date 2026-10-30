@@ -35,6 +35,7 @@ import statistics
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import httpx
 
@@ -119,7 +120,7 @@ async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", required=True, type=Path)
     ap.add_argument("--qdrant", default="http://127.0.0.1:16333")
-    ap.add_argument("--variant", choices=["asis", "prefix", "idf", "fixed"], required=True)
+    ap.add_argument("--variant", choices=["asis", "prefix", "idf", "fixed", "main"], required=True)
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--limit", type=int, default=50)
     ap.add_argument("--batch", type=int, default=64)
@@ -133,15 +134,25 @@ async def main() -> int:
     args = ap.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
 
-    prefix = args.variant in ("prefix", "fixed")
+    prefix = args.variant in ("prefix", "fixed", "main")
     idf = args.variant in ("idf", "fixed")
-    key = os.environ.get("OPENROUTER_API_KEY", "")
-    if not key:
-        print("OPENROUTER_API_KEY is not set", file=sys.stderr)
-        return 1
-    embedder = OpenRouterKfEmbedder(
-        model=args.dense_model, api_key=key, prefix=prefix, query_prefix=args.query_prefix
-    )
+    embedder: Any
+    if args.variant == "main":
+        # KF exactly as its main branch runs it: its own in-process fastembed
+        # LocalEmbedder (which adds the e5 prefixes itself) and its collection
+        # spec unmodified (main already sets the IDF modifier). Nothing here is
+        # ours but the loop.
+        from moco_kf.shared.embedding import LocalEmbedder
+
+        embedder = LocalEmbedder()
+    else:
+        key = os.environ.get("OPENROUTER_API_KEY", "")
+        if not key:
+            print("OPENROUTER_API_KEY is not set", file=sys.stderr)
+            return 1
+        embedder = OpenRouterKfEmbedder(
+            model=args.dense_model, api_key=key, prefix=prefix, query_prefix=args.query_prefix
+        )
     t0 = time.perf_counter()
     await embedder.warm()
     warm_s = time.perf_counter() - t0
