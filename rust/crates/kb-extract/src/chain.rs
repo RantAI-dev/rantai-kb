@@ -1,23 +1,50 @@
 //! Layout extractor chain for scanned PDFs.
 //!
 //! Mirrors the layout extraction chain in `src/lib/ingest/extract.ts:51-118`.
-//! Tries configured layout extractors (sidecar, mineru-api, mistral) in order
-//! until one yields non-blank text. Falls through to OpenRouter vision OCR
-//! if the whole chain fails.
+//! Tries configured layout extractors (sidecar, mineru-api, mistral, ocr) in
+//! order until one yields non-blank text. Falls through to a page-OCR provider
+//! if the whole chain fails: the local adapter (`KB_OCR_BASE_URL`) when it is
+//! configured, otherwise OpenRouter vision OCR.
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use kb_ports::{ExtractionOptions, ExtractionResult, Extractor, PortError};
 
 use crate::ExtractError;
 use crate::clip_reason;
-use crate::openrouter_vision::OpenRouterVisionProvider;
 
-/// An ordered chain of layout extractors with a final vision OCR fallback.
+/// A provider that can turn scanned pages or an image upload into text.
+///
+/// Two adapters implement it: the local page OCR
+/// ([`crate::page_ocr::PageOcrExtractor`], the local tiers) and the OpenRouter
+/// vision provider ([`crate::openrouter_vision::OpenRouterVisionProvider`],
+/// the cloud path). The chain and the dispatcher hold whichever one the
+/// composition root chose, so the local adapter wins when it is configured
+/// without either caller knowing which it got.
+#[async_trait]
+pub trait ScannedPageOcr: Send + Sync {
+    /// OCR every page of a scanned PDF.
+    async fn ocr_scanned_pdf(
+        &self,
+        pdf_bytes: &[u8],
+        filename: &str,
+    ) -> Result<ExtractionResult, ExtractError>;
+
+    /// OCR one image upload (`png`, `jpg`, `tif`).
+    async fn ocr_image(
+        &self,
+        image_bytes: &[u8],
+        mime_type: &str,
+        filename: &str,
+    ) -> Result<ExtractionResult, ExtractError>;
+}
+
+/// An ordered chain of layout extractors with a final page-OCR fallback.
 #[derive(Clone)]
 pub struct LayoutExtractorChain {
     extractors: Vec<(String, Arc<dyn Extractor>)>,
-    fallback_ocr: Option<Arc<OpenRouterVisionProvider>>,
+    fallback_ocr: Option<Arc<dyn ScannedPageOcr>>,
 }
 
 impl LayoutExtractorChain {
@@ -25,12 +52,29 @@ impl LayoutExtractorChain {
     #[must_use]
     pub fn new(
         extractors: Vec<(String, Arc<dyn Extractor>)>,
-        fallback_ocr: Option<Arc<OpenRouterVisionProvider>>,
+        fallback_ocr: Option<Arc<dyn ScannedPageOcr>>,
     ) -> Self {
         Self {
             extractors,
             fallback_ocr,
         }
+    }
+
+    /// The names of the configured parsers, in attempt order. Empty when no
+    /// parser is configured; `"ocr"` appears when the local adapter is both
+    /// configured and listed in `KB_LAYOUT_EXTRACTOR_ORDER`.
+    #[must_use]
+    pub fn extractor_names(&self) -> Vec<&str> {
+        self.extractors
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect()
+    }
+
+    /// Whether a final page-OCR fallback is configured.
+    #[must_use]
+    pub fn has_fallback_ocr(&self) -> bool {
+        self.fallback_ocr.is_some()
     }
 
     /// Extract scanned PDF text through the chain.
@@ -64,7 +108,7 @@ impl LayoutExtractorChain {
 
         // Final OCR fallback
         if let Some(ocr) = &self.fallback_ocr {
-            match ocr.process_scanned_pdf(pdf_bytes, filename).await {
+            match ocr.ocr_scanned_pdf(pdf_bytes, filename).await {
                 Ok(res) => Ok(res),
                 Err(err) => {
                     let msg = clip_reason(&err.to_string());

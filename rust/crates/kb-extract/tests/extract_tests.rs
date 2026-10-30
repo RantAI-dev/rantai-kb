@@ -357,3 +357,90 @@ async fn test_scanned_pdf_chain_failure_single_error_prefix() {
         "OCR failed for \"scanned.pdf\": all layout extractors failed and no fallback OCR configured"
     );
 }
+
+/// End to end through the production extractor: with `KB_OCR_BASE_URL` set but
+/// `ocr` absent from the (unchanged) default order, a scanned PDF reaches the
+/// local OCR adapter as the chain's fallback, one page at a time, and its page
+/// numbers survive into the page map.
+#[tokio::test]
+async fn test_local_ocr_fallback_keeps_page_numbers_end_to_end() {
+    let Ok(_pdfium) = get_pdfium() else {
+        eprintln!("Skipping pdfium test: libpdfium not loaded");
+        return;
+    };
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../kb-eval/fixtures/tiny/corpus/mission.pdf");
+    let Ok(pdf) = std::fs::read(&fixture) else {
+        eprintln!("Skipping local OCR test: {} missing", fixture.display());
+        return;
+    };
+
+    // A stub /v1/chat/completions that counts pages, in order.
+    async fn stub() -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+        type Seen = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
+        async fn handle(
+            axum::extract::State(seen): axum::extract::State<Seen>,
+            Json(body): Json<serde_json::Value>,
+        ) -> Json<serde_json::Value> {
+            let mut seen = seen.lock().unwrap();
+            seen.push(body);
+            let page = seen.len();
+            Json(json!({
+                "choices": [{"message": {"role": "assistant", "content": format!("OCR page {page}")}}]
+            }))
+        }
+        let seen: Seen = Arc::default();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(handle))
+            .with_state(Arc::clone(&seen));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}/v1/chat/completions"), seen)
+    }
+
+    let (url, seen) = stub().await;
+    let cfg = ExtractConfig::from_lookup(|name| match name {
+        "KB_OCR_BASE_URL" => Some(url.clone()),
+        "KB_OCR_DPI" => Some("72".to_string()),
+        _ => None,
+    });
+    assert_eq!(
+        cfg.layout_extractor_order,
+        vec!["sidecar", "mineru-api", "mistral"],
+        "the default order must not grow an `ocr` entry"
+    );
+
+    let extractor = build_production_extractor(&cfg).unwrap();
+    let out = extractor
+        .extract_with_options(
+            "mission.pdf",
+            "application/pdf",
+            &pdf,
+            ExtractionOptions {
+                force_layout: true,
+                figures: false,
+                document_type: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    assert!(out.used_ocr, "the fallback OCR produced the text");
+    assert!(out.content.contains("OCR page 1"), "{}", out.content);
+    let map = out.page_map.as_ref().expect("a page map");
+    assert_eq!(map.len(), 2, "one entry per page");
+    assert_eq!((map[0].page, map[1].page), (0, 1));
+    assert_eq!(seen.lock().unwrap().len(), 2, "one request per page");
+    for body in seen.lock().unwrap().iter() {
+        assert_eq!(body["temperature"], 0);
+        assert_eq!(
+            body.pointer("/messages/0/content/1/text")
+                .and_then(|t| t.as_str()),
+            Some("OCR:"),
+            "the task prefix is the text part"
+        );
+    }
+}

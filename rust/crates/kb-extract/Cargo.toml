@@ -26,6 +26,7 @@ pdfium-render = { workspace = true }
 image = { workspace = true }
 base64 = { workspace = true }
 fancy-regex = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 kb-ports = { path = "../kb-ports" }

@@ -14,7 +14,7 @@
 use kb_ports::{ExtractionOptions, ExtractionResult};
 
 use crate::ExtractError;
-use crate::chain::LayoutExtractorChain;
+use crate::chain::{LayoutExtractorChain, ScannedPageOcr};
 use crate::clip_reason;
 use crate::code;
 use crate::detect::{SupportedFileType, detect_file_type, extension_of};
@@ -25,7 +25,6 @@ use crate::html;
 use crate::mime::ext_to_mime;
 use crate::ods;
 use crate::odt;
-use crate::openrouter_vision::OpenRouterVisionProvider;
 use crate::pdfium::{extract_pdf_text_layer, get_pdfium};
 use crate::pptx;
 use crate::rtf;
@@ -102,7 +101,7 @@ pub async fn extract_document(
     bytes: &[u8],
     options: ExtractionOptions,
     chain: &LayoutExtractorChain,
-    vision_ocr: Option<&OpenRouterVisionProvider>,
+    vision_ocr: Option<&dyn ScannedPageOcr>,
 ) -> Result<ExtractionResult, ExtractError> {
     match detect_file_type(filename) {
         Some(SupportedFileType::Pdf) => {
@@ -165,7 +164,7 @@ pub async fn extract_document(
                         }
                     }
                 };
-                match ocr.process_image(bytes, img_mime, filename).await {
+                match ocr.ocr_image(bytes, img_mime, filename).await {
                     Ok(res) => Ok(res),
                     Err(err) => Ok(ExtractionResult::failed(
                         "image",

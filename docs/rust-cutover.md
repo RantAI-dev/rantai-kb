@@ -164,6 +164,15 @@ is the only copy of Bun's chunk index.
 ### 1. Dropped Legacy Ollama OCR Pipeline
 The legacy Ollama local OCR provider (`src/lib/ocr/ollama-provider.ts`) was dropped in favor of the OpenRouter / OpenAI vision API provider (`google/gemini-2.5-flash` or `OCR_FALLBACK_MODEL`).
 
+**Rust adds a local OCR adapter Bun does not have** (2026-10-30, WP1 of
+`docs/tier-readiness-plan.md`): `kb_extract::PageOcrExtractor` reads scanned PDF pages and image
+uploads through any OpenAI-compatible `/v1/chat/completions` (PaddleOCR-VL-1.6 under vLLM or
+llama.cpp, the PP-OCRv6 sidecar on Lite), one page per request. It is off unless
+`KB_OCR_BASE_URL` is set, and when set it takes precedence over the OpenRouter vision provider
+for scanned pages and images, so a local tier never sends a page to a paid API. The settings
+and the served commands are in `docs/kb-tiers.md` ("Local OCR"). Unset, behaviour is identical
+to Bun's vision path.
+
 ### 2. Legacy Binary Office Formats Unsupported
 In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`) and throws `EXTENSION_UNSUPPORTED` on legacy binary `.doc`, `.xls`, and `.ppt` files. The Rust port matches this exact behavior by returning `ExtractError::Unsupported`.
 

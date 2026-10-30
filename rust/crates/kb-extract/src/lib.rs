@@ -32,6 +32,7 @@ pub mod mistral;
 pub mod ods;
 pub mod odt;
 pub mod openrouter_vision;
+pub mod page_ocr;
 pub mod page_render;
 pub mod pdfium;
 mod pptx;
@@ -51,6 +52,7 @@ pub use builder::{
     build_production_extractor,
 };
 pub use chain::LayoutExtractorChain;
+pub use chain::ScannedPageOcr;
 pub use code::CODE_EXT_LANGUAGE;
 pub use config::ExtractConfig;
 pub use detect::{SupportedFileType, detect_file_type, extension_of};
@@ -65,6 +67,7 @@ pub use ods::parse_ods;
 pub use odt::parse_odt;
 pub use openrouter_vision::OPENROUTER_VISION_URL;
 pub use openrouter_vision::OpenRouterVisionProvider;
+pub use page_ocr::{PageOcrExtractor, PageOcrSettings};
 pub use page_render::PdfiumPageRenderer;
 pub use pdfium::{
     MINIMAL_BLANK_PDF, MINIMAL_PDF_HELLO_WORLD, extract_pdf_text_layer, get_pdf_page_count,

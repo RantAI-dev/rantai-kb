@@ -13,13 +13,14 @@ use std::sync::Arc;
 use kb_ports::{ExtractionOptions, ExtractionResult, Extractor, PortError};
 
 use crate::ExtractError;
-use crate::chain::LayoutExtractorChain;
+use crate::chain::{LayoutExtractorChain, ScannedPageOcr};
 use crate::config::ExtractConfig;
 use crate::hybrid::HybridExtractor;
 use crate::mineru::MineruExtractor;
 use crate::mineru_api::MineruApiExtractor;
 use crate::mistral::MistralOcrExtractor;
 use crate::openrouter_vision::OpenRouterVisionProvider;
+use crate::page_ocr::{PageOcrExtractor, PageOcrSettings};
 use crate::pdfium::{extract_pdf_text_layer, get_pdfium};
 use crate::smart_router::SmartRouterExtractor;
 use crate::vision_llm::VisionLlmExtractor;
@@ -46,13 +47,13 @@ impl Extractor for PdfiumTextExtractor {
 #[derive(Clone)]
 pub struct ProductionExtractor {
     chain: LayoutExtractorChain,
-    vision_ocr: Option<OpenRouterVisionProvider>,
+    vision_ocr: Option<Arc<dyn ScannedPageOcr>>,
 }
 
 impl ProductionExtractor {
-    /// Create a new production extractor with the given chain and vision provider.
+    /// Create a new production extractor with the given chain and OCR provider.
     #[must_use]
-    pub fn new(chain: LayoutExtractorChain, vision_ocr: Option<OpenRouterVisionProvider>) -> Self {
+    pub fn new(chain: LayoutExtractorChain, vision_ocr: Option<Arc<dyn ScannedPageOcr>>) -> Self {
         Self { chain, vision_ocr }
     }
 
@@ -92,7 +93,7 @@ impl Extractor for ProductionExtractor {
         let bytes = file_bytes.to_vec();
         let chain = self.chain.clone();
         let vision = self.vision_ocr.clone();
-        crate::dispatch::extract_document(&name, &mime, &bytes, options, &chain, vision.as_ref())
+        crate::dispatch::extract_document(&name, &mime, &bytes, options, &chain, vision.as_deref())
             .await
             .map_err(PortError::from)
     }
@@ -103,17 +104,52 @@ pub fn build_production_extractor(
     cfg: &ExtractConfig,
 ) -> Result<ProductionExtractor, ExtractError> {
     let chain = build_layout_chain(cfg)?;
-    let vision_ocr = if !cfg.openrouter_api_key.is_empty() {
-        OpenRouterVisionProvider::new(
-            &cfg.openrouter_api_key,
-            Some(cfg.ocr_fallback_model.clone()),
-            None,
-        )
-        .ok()
-    } else {
-        None
-    };
+    let vision_ocr = build_page_ocr(cfg);
+    if !cfg.ocr_base_url.trim().is_empty() && vision_ocr.is_some() {
+        tracing::info!(
+            url = cfg.ocr_base_url.trim(),
+            model = %cfg.ocr_model,
+            concurrency = cfg.ocr_concurrency,
+            dpi = cfg.ocr_dpi,
+            "local page OCR on"
+        );
+    }
     Ok(ProductionExtractor::new(chain, vision_ocr))
+}
+
+/// The local page-OCR adapter, when `KB_OCR_BASE_URL` is set.
+fn local_page_ocr(cfg: &ExtractConfig) -> Option<Arc<dyn ScannedPageOcr>> {
+    if cfg.ocr_base_url.trim().is_empty() {
+        return None;
+    }
+    match PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg)) {
+        Ok(ocr) => Some(Arc::new(ocr)),
+        Err(e) => {
+            tracing::warn!(error = %e, "local page OCR not built");
+            None
+        }
+    }
+}
+
+/// The OpenRouter vision provider, when its key is present — unchanged.
+fn openrouter_page_ocr(cfg: &ExtractConfig) -> Option<Arc<dyn ScannedPageOcr>> {
+    if cfg.openrouter_api_key.is_empty() {
+        return None;
+    }
+    OpenRouterVisionProvider::new(
+        &cfg.openrouter_api_key,
+        Some(cfg.ocr_fallback_model.clone()),
+        None,
+    )
+    .ok()
+    .map(|ocr| Arc::new(ocr) as Arc<dyn ScannedPageOcr>)
+}
+
+/// The OCR provider for scanned pages and image uploads: the **local** adapter
+/// when `KB_OCR_BASE_URL` is set, so the local tiers never send a page to a paid
+/// provider; otherwise OpenRouter vision, exactly as before.
+fn build_page_ocr(cfg: &ExtractConfig) -> Option<Arc<dyn ScannedPageOcr>> {
+    local_page_ocr(cfg).or_else(|| openrouter_page_ocr(cfg))
 }
 
 /// Build an extractor from a model-id sentinel or OpenRouter model ID.
@@ -198,21 +234,23 @@ pub fn build_layout_chain(cfg: &ExtractConfig) -> Result<LayoutExtractorChain, E
                     extractors.push(("mistral".to_string(), Arc::new(mistral)));
                 }
             }
+            // Local page OCR (`KB_OCR_BASE_URL`), the local tiers' scanner:
+            // listed in the order it runs like any other parser, and skipped
+            // when no endpoint is configured — the same rule `mistral` follows
+            // for its key. When it is not listed it still serves as the chain's
+            // final fallback (see `build_page_ocr`).
+            "ocr" if !cfg.ocr_base_url.trim().is_empty() => {
+                if let Ok(ocr) = PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg)) {
+                    extractors.push(("ocr".to_string(), Arc::new(ocr)));
+                }
+            }
             _ => {}
         }
     }
 
-    let fallback_ocr = if !cfg.openrouter_api_key.is_empty() {
-        OpenRouterVisionProvider::new(
-            &cfg.openrouter_api_key,
-            Some(cfg.ocr_fallback_model.clone()),
-            None,
-        )
-        .ok()
-        .map(Arc::new)
-    } else {
-        None
-    };
+    // The final fallback is the local adapter when it is configured, so a
+    // scanned page never reaches a paid provider on a local tier.
+    let fallback_ocr = build_page_ocr(cfg);
 
     Ok(LayoutExtractorChain::new(extractors, fallback_ocr))
 }
@@ -240,5 +278,57 @@ mod tests {
     fn build_extractor_unpdf_succeeds() {
         let cfg = ExtractConfig::default();
         assert!(build_extractor("unpdf", &cfg).is_ok());
+    }
+
+    #[test]
+    fn the_default_order_is_byte_identical_and_builds_no_local_ocr() {
+        let cfg = ExtractConfig::default();
+        assert_eq!(
+            cfg.layout_extractor_order,
+            vec!["sidecar", "mineru-api", "mistral"],
+            "adding the `ocr` adapter must not change the default order"
+        );
+        let chain = build_layout_chain(&cfg).unwrap();
+        assert!(chain.extractor_names().is_empty(), "nothing is configured");
+        assert!(
+            !chain.has_fallback_ocr(),
+            "no HTTP key and no OCR URL means no provider"
+        );
+    }
+
+    #[test]
+    fn ocr_joins_the_chain_only_when_its_endpoint_is_set() {
+        let mut cfg = ExtractConfig {
+            layout_extractor_order: vec!["ocr".to_string()],
+            ..Default::default()
+        };
+        // Listed but unconfigured: exactly like `mistral` without its key.
+        let chain = build_layout_chain(&cfg).unwrap();
+        assert!(chain.extractor_names().is_empty());
+        assert!(!chain.has_fallback_ocr());
+
+        cfg.ocr_base_url = "http://127.0.0.1:8000/v1/chat/completions".to_string();
+        let chain = build_layout_chain(&cfg).unwrap();
+        assert_eq!(chain.extractor_names(), vec!["ocr"]);
+        assert!(
+            chain.has_fallback_ocr(),
+            "the local adapter is also the scanned-page fallback"
+        );
+    }
+
+    #[test]
+    fn a_configured_local_ocr_wins_over_the_openrouter_vision_provider() {
+        // With both configured, the local adapter is the one that serves
+        // scanned PDFs, because that is the tier's "no paid call" rule.
+        let cfg = ExtractConfig {
+            layout_extractor_order: vec!["ocr".to_string()],
+            ocr_base_url: "http://127.0.0.1:8000/v1/chat/completions".to_string(),
+            openrouter_api_key: "test-key".to_string(),
+            ..Default::default()
+        };
+        let chain = build_layout_chain(&cfg).unwrap();
+        assert_eq!(chain.extractor_names(), vec!["ocr"]);
+        assert!(chain.has_fallback_ocr());
+        assert!(build_production_extractor(&cfg).is_ok());
     }
 }
