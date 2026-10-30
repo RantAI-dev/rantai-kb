@@ -1305,6 +1305,7 @@ dependencies = [
  "base64 0.22.1",
  "calamine",
  "fancy-regex",
+ "futures",
  "image",
  "kb-core",
  "kb-ports",

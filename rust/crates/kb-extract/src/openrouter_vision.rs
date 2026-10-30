@@ -258,6 +258,26 @@ struct VisionMessageResponse {
     content: Option<String>,
 }
 
+#[async_trait::async_trait]
+impl crate::chain::ScannedPageOcr for OpenRouterVisionProvider {
+    async fn ocr_scanned_pdf(
+        &self,
+        pdf_bytes: &[u8],
+        filename: &str,
+    ) -> Result<ExtractionResult, ExtractError> {
+        self.process_scanned_pdf(pdf_bytes, filename).await
+    }
+
+    async fn ocr_image(
+        &self,
+        image_bytes: &[u8],
+        mime_type: &str,
+        filename: &str,
+    ) -> Result<ExtractionResult, ExtractError> {
+        self.process_image(image_bytes, mime_type, filename).await
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
