@@ -35,6 +35,8 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
+# `kb-server setup --check` probes model endpoints and stores directly.
+reqwest = { workspace = true }
 
 [dev-dependencies]
 kb-ports = { path = "../kb-ports" }

@@ -13,6 +13,8 @@ async fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match dispatch(&args).await {
         Ok(()) => std::process::ExitCode::SUCCESS,
+        // A child process (`setup --start`) keeps its own exit code.
+        Err(kb_server::CliError::Exit(code)) => std::process::ExitCode::from(code),
         Err(err) => {
             // Usage mistakes and operation failures share the exit code, as
             // they do in the TypeScript scripts: an operator reads stderr.

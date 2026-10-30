@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One command for a complete rantai-kb (Rust) stack, per deployment tier.
 #
+#   rust/scripts/kb-dev.sh setup               # detect the hardware, write .env + .tier
 #   rust/scripts/kb-dev.sh up lite-en          # or lite | desk | studio | station | cloud
 #   rust/scripts/kb-dev.sh key my-tenant       # prints an API key
 #   rust/scripts/kb-dev.sh status              # GET /health
@@ -20,6 +21,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEPLOY_DIR="$(cd "$SCRIPT_DIR/../deploy" && pwd)"
 COMPOSE_FILE="$DEPLOY_DIR/compose.yaml"
 ENV_FILE="$DEPLOY_DIR/.env"
@@ -33,6 +35,8 @@ usage() {
   cat <<'EOF'
 usage: kb-dev.sh <command> [args]
 
+  setup [args]          detect the hardware, check budget/licences, write .env + .tier
+                        (passes everything to `kb-server setup`; try `setup --help`)
   up <tier> [--build]   start the tier (lite | lite-en | desk | studio | station | cloud)
   down [-v|--volumes]   stop the last-started tier; -v also removes its volumes
   logs [--no-follow] [service...]
@@ -42,6 +46,7 @@ usage: kb-dev.sh <command> [args]
   status                GET /health on the running tier
 
 Environment:
+  KB_SERVER_BIN         kb-server binary for `setup` (default: cargo run -p kb-server)
   KB_PORT               host port for kb-server (default 8080, also .env)
   KB_DEV_OVERRIDE       extra compose file layered on top, e.g. local tweaks
   KB_WAIT_SECONDS       how long `up` waits for /health (default 900)
@@ -189,6 +194,22 @@ wait_healthy() {
   die "health check timed out (see the logs above)"
 }
 
+# `setup` is the only command that does not need Docker: it only detects the
+# machine and writes rust/deploy/.env. It runs the built binary when
+# KB_SERVER_BIN names one, else `cargo run -p kb-server`. `setup --start` then
+# calls this script's own `up`, so the Docker logic stays here.
+cmd_setup() {
+  if [ -n "${KB_SERVER_BIN:-}" ] && [ -x "${KB_SERVER_BIN}" ]; then
+    (cd "$REPO_ROOT" && "$KB_SERVER_BIN" setup "$@")
+    return
+  fi
+  command -v cargo >/dev/null 2>&1 ||
+    die "setup needs cargo (or KB_SERVER_BIN pointing at a kb-server binary)"
+  (cd "$REPO_ROOT" &&
+    nice -n 10 cargo run --quiet --manifest-path rust/Cargo.toml -p kb-server \
+      -j "${CARGO_BUILD_JOBS:-2}" -- setup "$@")
+}
+
 cmd_up() {
   local tier="" build=0 arg
   for arg in "$@"; do
@@ -318,6 +339,7 @@ main() {
     shift
   fi
   case "$CMD" in
+    setup) cmd_setup "$@" ;;
     up) require_docker; cmd_up "$@" ;;
     down) require_docker; cmd_down "$@" ;;
     logs) require_docker; cmd_logs "$@" ;;

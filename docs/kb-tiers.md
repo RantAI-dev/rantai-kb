@@ -149,9 +149,9 @@ numbers and how to override a setting.
 | `KB_CAPTION_*` | endpoint of the chat LLM used as the captioner | — |
 | `KB_CACHE_DIR` | directory for content-addressed caches | unset: no cache |
 
-A tier is a **preset**: it fills in role defaults; any explicit `KB_*` setting wins. Server
-start and `kb-server setup` check the VRAM budget and warn, or refuse, when a combination
-can't fit next to the chat LLM.
+A tier is a **preset**: it fills in role defaults; any explicit `KB_*` setting wins.
+`kb-server setup` checks the VRAM budget and refuses a combination that cannot fit next to
+the chat LLM (unless `--force`); server start does not check it yet.
 
 ### `KB_TIER` (text roles, implemented 2026-10-24)
 
@@ -233,13 +233,57 @@ On 2 cores it ingests ViDoRe HR at 6.43 pages/s (page nDCG@10 0.517) against Lit
 The caption role points at the app's chat LLM with a **priority queue**: it writes
 descriptions when the LLM is idle and backs off while users are chatting.
 
-## `kb-server setup --tier …`
+## `kb-server setup`
 
-1. Detect the hardware (CUDA, Metal, or none) and suggest a tier.
-2. Download only 🟢/🟡 models from `docs/model-licences.md`.
-3. Start them (vLLM on CUDA, llama.cpp / MLX on Apple, the parser sidecar included).
-4. Health checks and a small smoke eval.
-5. Write the config kb-server needs.
+Implemented 2026-10-30 (`rust/crates/kb-server/src/setup.rs`, run as
+`rust/scripts/kb-dev.sh setup [flags]`). It plans and writes the config; it does not download
+or start anything, so it works on a machine with no Postgres, Qdrant, Docker or models.
+
+1. **Detect** each NVIDIA GPU (`nvidia-smi --query-gpu=name,memory.total`), Apple silicon
+   (`uname -s` + `sysctl hw.memsize` + the CPU brand; unified memory), CPU cores and RAM
+   (`/proc/meminfo`, `available_parallelism`). AMD/other GPUs and virtual displays are
+   reported as "unsupported accelerator, treated as CPU". There is no Windows tier.
+2. **Suggest a tier** from the table above: NVIDIA ≥48 / ≥24 / ≥8 GB → station / studio /
+   desk; Apple unified ≥128 / ≥32 / ≥16 GB → the same; otherwise `lite` (`lite-en` with
+   `--english`). With several NVIDIA cards the largest is used: compose reserves one GPU per
+   model container, so cards do not pool. `cloud` is never suggested, because it spends
+   money on every page and query.
+3. **Check the budget** against the estimates above and refuse a tier that does not fit, or a
+   desk/studio/station choice on a box with no NVIDIA GPU, unless `--force`. The output labels
+   every number an estimate.
+4. **Gate the licences**: every model a tier's preset or compose profile loads has a verdict
+   from `docs/model-licences.md`; a 🔴 model is refused, a 🟡 one needs
+   `--accept-licence <model>`, and a model with no entry is refused. A unit test fails when a
+   model named in `tier.rs` has no licence entry.
+5. **Write the config**: `rust/deploy/.env` (starting from `.env.example`) and
+   `rust/deploy/.tier`, never overwriting an existing `.env` without `--overwrite`. Only
+   operator-level keys are written — `KB_TIER` selects the preset, so preset values are not
+   duplicated. Cloud takes `--openrouter-key-env NAME` (the value is written only with
+   `--write-secrets`, otherwise an empty placeholder with a comment) and optionally
+   `--mistral-key-env NAME` (which adds `mistral` to `KB_LAYOUT_EXTRACTOR_ORDER`). Studio,
+   Station and Cloud — the tiers with the page arm — take `--chat-llm-url` /
+   `--chat-llm-model` for `KB_PAGE_CAPTION_*`; on Lite and Desk the flags are reported as
+   ignored. Then it prints `rust/scripts/kb-dev.sh up <tier>`, or runs it with `--start`.
+6. **`--check`** loads the env file plus the process environment (process wins, like compose)
+   with the tier preset applied, and makes one real request per configured role: an embedding
+   of `ping`, a rerank of two documents, the page embedder, the caption endpoint, and
+   `GET /v1/models` for OCR (`KB_OCR_BASE_URL`, or Mistral when `KB_MISTRAL_OCR_KEY` is set).
+   It also probes Postgres (TCP), Qdrant and S3 (HTTP) when they are configured. The table
+   prints role, host (credentials redacted), status and latency; a required failure exits
+   non-zero. Paid hosts (openrouter.ai, api.mistral.ai, voyage, Cohere) are **skipped** unless
+   `--check-paid`: a check must not spend.
+
+Not built, and not pretended by `setup`:
+
+- **Model download and start.** The containers pull the weights into the shared `hf-models`
+  volume on their first start (`kb-dev.sh up` waits up to 15 minutes for the TEI healthcheck);
+  `setup` only writes the file `up` reads. There is no vLLM/llama.cpp launcher in Rust.
+- **A smoke eval.** `--check` proves each endpoint answers; it does not measure quality.
+- **Residency and captions.** `KB_PARSE_RESIDENCY`, `KB_CAPTION_RESIDENCY` and the caption
+  priority queue do not exist, so setup does not ask about them.
+- **Apple silicon end to end.** The suggestion table covers it, but
+  `rust/deploy/compose.yaml` only reserves NVIDIA GPUs; setup warns and expects the models to
+  run outside compose.
 
 ## Build order
 
@@ -252,7 +296,7 @@ Status as of 2026-10-24:
    point at the local Qwen3-Embedding-0.6B + bge stack, Cloud at voyage through OpenRouter.
    Explicit env wins, unset `KB_TIER` is byte-identical to today, and startup logs what the
    preset filled. Still deferred: the multimodal roles (Qwen3-VL embedder/reranker), so local
-   tiers keep the page arm off, and `kb-server setup` does not exist yet.
+   tiers keep the page arm off.
 3. ✅ measured, ❌ no gain: header/footer removal (`KB_STRIP_PAGE_FURNITURE`), −0.003
    [−0.013, +0.006] on ViDoRe HR. Off by default.
    ❌ dropped for retrieval: rebuilding tables in text. ViDoRe's own markdown, with real
@@ -299,7 +343,10 @@ Status as of 2026-10-24:
      reasoning flag and image hash; a page with no visuals (`NONE`) is cached too. Effect on
      retrieval is not measured yet.
 5. Lite on exactly 2 cores (`taskset`): ✅ small-embedder bake-off (2026-10-24, `docs/eval-ab/lite-2core`): multilingual-e5-small, 0.802 nDCG@10 on MIRACL-id-50, ~2 min ingest, 42 ms search; Qwen3-0.6B ties on quality but is 41× slower to ingest. The embedder must be capped to 1 thread or it starves the server. PP-OCRv6 not done.
-6. Desk / Studio / Station on real hardware; `kb-server setup`.
+6. ✅ `kb-server setup` (2026-10-30): hardware detection, tier suggestion, VRAM budget and
+   licence gates, `.env`/`.tier` writing, `--check` probes. ❌ Desk / Studio / Station on
+   real hardware: still no NVIDIA box, so those tiers are unit-tested and
+   `docker compose config`-checked only.
 
 ## Open risks
 

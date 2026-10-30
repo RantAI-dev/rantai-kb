@@ -16,8 +16,8 @@ in code (preset + compose + adapter) or explicitly marked "not built" with the r
 | Reranker, Studio/Station | Qwen3-VL-Reranker-2B / 8B | `vllm` rerank provider exists; presets still bge on TEI | WP2 |
 | Charts/figures (captions) | chat LLM's vision (local), Gemini Flash (cloud) | `KB_PAGE_CAPTION_*` exists, opt-in, unmeasured | WP3 (setup asks for the chat LLM URL / enables Gemini Flash on cloud) |
 | Parser / caption residency | `KB_PARSE_RESIDENCY`, `KB_CAPTION_RESIDENCY`, priority queue | not built | out of scope; stays documented as not built |
-| `kb-server setup --tier` | detect, download, start, health-check, write config | not built | WP3 |
-| VRAM budget check | setup and server start warn/refuse | not built | WP3 (setup only) |
+| `kb-server setup --tier` | detect, download, start, health-check, write config | ✅ detect, suggest, budget/licence gate, write `.env`/`.tier`, `--check` probes, `--start`; model download and start stay with the containers | WP3 |
+| VRAM budget check | setup and server start warn/refuse | ✅ setup refuses unless `--force`; server start does not check yet | WP3 (setup only) |
 
 ## Fixed names (all packages use these)
 
