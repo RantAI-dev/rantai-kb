@@ -1,0 +1,2 @@
+rk-cloud: 208 s wall (ingest + queries)
+rk-cloud-text: 15 s for 215 queries
