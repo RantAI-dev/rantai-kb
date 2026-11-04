@@ -549,6 +549,7 @@ fn search_stats(
         skipped_arms: None,
         arm_plan_fallback: None,
         tree_arm: None,
+        global_arm: None,
     }
 }
 

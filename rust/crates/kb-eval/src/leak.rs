@@ -70,11 +70,21 @@ pub enum Arm {
     /// places a scope hole could hide — the outline read and the page fetch —
     /// and the row reads the chunks the server tagged `tree`.
     Tree,
+    /// The global (graph community) arm: a community summary matched the query
+    /// and its member chunks were fetched by id.
+    ///
+    /// Like the graph arm it is a two-place scope surface: the community read
+    /// names documents and chunk ids, and the chunk fetch then resolves them.
+    /// A community summary is written from every document in the community, so
+    /// a store that ignored the scope could steer an answer towards a document
+    /// the caller cannot see — which is exactly what this row watches for. The
+    /// summary text itself must never appear in an answer.
+    Global,
 }
 
 impl Arm {
     /// Every arm, in the order the report lists them.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Vector,
         Self::Bm25,
         Self::Neighbour,
@@ -82,6 +92,7 @@ impl Arm {
         Self::Graph,
         Self::Page,
         Self::Tree,
+        Self::Global,
         Self::Entity,
     ];
 
@@ -95,6 +106,7 @@ impl Arm {
             Self::Graph => "graph",
             Self::Page => "page",
             Self::Tree => "tree",
+            Self::Global => "global",
             Self::Entity => "entity",
         }
     }
@@ -112,6 +124,7 @@ impl Arm {
             Self::Graph => Some("graph"),
             Self::Page => Some("page"),
             Self::Tree => Some("tree"),
+            Self::Global => Some("global"),
             Self::Entity => None,
         }
     }
@@ -131,6 +144,7 @@ impl Arm {
             "graph" => Some(Self::Graph),
             "page" => Some(Self::Page),
             "tree" => Some(Self::Tree),
+            "global" => Some(Self::Global),
             _ => None,
         }
     }
@@ -141,9 +155,13 @@ impl Arm {
         match self {
             Self::Entity => ProbeKind::DocumentIntelligence,
             Self::Figure => ProbeKind::SearchOrAsset,
-            Self::Vector | Self::Bm25 | Self::Neighbour | Self::Graph | Self::Page | Self::Tree => {
-                ProbeKind::Search
-            }
+            Self::Vector
+            | Self::Bm25
+            | Self::Neighbour
+            | Self::Graph
+            | Self::Page
+            | Self::Tree
+            | Self::Global => ProbeKind::Search,
         }
     }
 }
@@ -260,6 +278,13 @@ pub struct Canaries {
     /// A sentence that is *not* the head of the document: the neighbouring
     /// chunk's text, for the weave.
     pub neighbour: String,
+    /// A pure-letter token for the global (community) arm.
+    ///
+    /// The other canaries contain digits (a token, a year), and the query
+    /// classifier treats a letters-and-digits token as an identifier, which wins
+    /// over the aggregative class the global arm needs. This one is letters only,
+    /// so `list all <token>` is aggregative *and* names exactly one document.
+    pub community: String,
 }
 
 /// A document the instrument seeded, with everything needed to probe it.
@@ -529,6 +554,12 @@ pub fn canary_query(document: &SeedDocument, arm: Arm) -> String {
                 .collect();
             format!("what does section 1.1 say about {}", words.join(" "))
         }
+        // The global arm runs only when the query classifies as aggregative.
+        // `list all` is one of the classifier's aggregative cues; the canary
+        // sentence after it is what the community summary has to share a term
+        // with. Written as a literal because this crate is a black-box client
+        // and may not link `kb-core`.
+        Arm::Global => format!("list all {}", document.canaries.community),
         Arm::Entity => document.id.clone(),
     }
 }
@@ -1039,6 +1070,12 @@ pub fn unreachable_arm_reason(arm: Arm, cell: &Cell) -> Option<String> {
              it measures the route, not the arm",
             cell.scope.as_str()
         )),
+        Arm::Global if !cell.scope.reaches_pipeline_arms() => Some(format!(
+            "a `{}`-scoped search is answered by one dense search and never reaches the \
+             global (community) arm, so this cell's positive control is unreachable by \
+             construction: it measures the route, not the arm",
+            cell.scope.as_str()
+        )),
         _ => None,
     }
 }
@@ -1071,6 +1108,11 @@ pub fn coverage_note(arm: Arm) -> &'static str {
             "chunks whose retrieval.arms include `tree`, from POST /v1/search: chunks on the \
              section pages the outline scored inside the caller's scope, fetched by \
              (document, page)"
+        }
+        Arm::Global => {
+            "chunks whose retrieval.arms include `global`, from POST /v1/search: the member \
+             chunks of the communities the summary matched inside the caller's scope, fetched \
+             by id. The summary text itself is never returned, so it cannot be a canary"
         }
         Arm::Entity => "GET /v1/documents/:id/intelligence for a document id",
     }
@@ -1314,7 +1356,13 @@ mod tests {
             entity: format!("Qzx{n} Vorlath"),
             figure: format!("Figure {n}: the Qzx{n} apparatus"),
             neighbour: format!("A neighbouring passage about Qzx{n}."),
+            community: format!("topicmarker{}", letter(n)),
         }
+    }
+
+    /// `0 -> a`, `1 -> b`, … so a canary is letters only.
+    fn letter(n: usize) -> char {
+        char::from(b'a' + u8::try_from(n % 26).unwrap_or(0))
     }
 
     fn doc(id: &str, tenant: &str, kb: &str, category: &str, n: usize) -> SeedDocument {

@@ -229,6 +229,13 @@ pub struct SearchStatsDto {
     /// a default search keeps exactly the earlier shape.
     #[serde(rename = "treeArm", skip_serializing_if = "Option::is_none", default)]
     pub tree_arm: Option<TreeArmStatsDto>,
+    /// Additive (`DEC-5`): what the global community arm did. Present only when
+    /// the arm ran (`KB_GLOBAL_ARM` on and an aggregative query), so a server
+    /// with the flag off answers exactly the earlier shape. `communities: 0`
+    /// means the tenant has no community set — the arm had nothing to say, and
+    /// that is not a degrade.
+    #[serde(rename = "globalArm", skip_serializing_if = "Option::is_none", default)]
+    pub global_arm: Option<GlobalArmStatsDto>,
 }
 
 /// `stats.treeArm`: outline nodes the query scored and the distinct pages the
@@ -238,6 +245,13 @@ pub struct SearchStatsDto {
 pub struct TreeArmStatsDto {
     pub nodes: usize,
     pub pages: usize,
+}
+
+/// `stats.globalArm`: the communities selected and the chunks contributed.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GlobalArmStatsDto {
+    pub communities: usize,
+    pub chunks: usize,
 }
 
 /// `stats.boost`: how many returned hits carried a usable field for each
@@ -309,6 +323,10 @@ pub struct StageDetailDto {
     /// The graph arm, end to end: seed lookup, scoped-graph load or cache hit,
     /// the walk, and the chunk fetch it needs to fuse.
     pub graph_arm: f64,
+    /// The global (graph community) arm (`DEC-5`): the scoped community read,
+    /// the BM25 selection and the scoped chunk fetch. Zero when the flag is off
+    /// or the query is not aggregative.
+    pub global_arm: f64,
     /// The page-image arm's query embed and page search, concurrent with the
     /// text arms.
     pub page_arm: f64,
@@ -395,6 +413,7 @@ impl StageDetailDto {
             keyword_arm: round_ms(self.keyword_arm),
             entity_arm: round_ms(self.entity_arm),
             graph_arm: round_ms(self.graph_arm),
+            global_arm: round_ms(self.global_arm),
             page_arm: round_ms(self.page_arm),
             vision_rerank: round_ms(self.vision_rerank),
             scope_check: round_ms(self.scope_check),
@@ -412,6 +431,7 @@ impl From<&StageTimings> for StageDetailDto {
             keyword_arm: t.keyword_arm_ms,
             entity_arm: t.entity_arm_ms,
             graph_arm: t.graph_arm_ms,
+            global_arm: t.global_arm_ms,
             page_arm: t.page_arm_ms,
             vision_rerank: t.vision_rerank_ms,
             scope_check: t.scope_check_ms,
@@ -534,6 +554,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             boost: outcome_boost,
             adaptive: outcome_adaptive,
             tree: outcome_tree,
+            global_arm: outcome_global_arm,
             timings: outcome_timings,
         } = outcome;
         let vector_results = outcome_chunks.iter().filter(|h| !h.is_bm25).count();
@@ -602,6 +623,10 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             tree_arm: outcome_tree.map(|tree| TreeArmStatsDto {
                 nodes: tree.nodes,
                 pages: tree.pages,
+            }),
+            global_arm: outcome_global_arm.map(|stats| GlobalArmStatsDto {
+                communities: stats.communities,
+                chunks: stats.chunks,
             }),
         };
         SearchResponseDto {
@@ -1070,6 +1095,7 @@ mod tests {
             skipped_arms: None,
             arm_plan_fallback: None,
             tree_arm: None,
+            global_arm: None,
         };
         let value = serde_json::to_value(&stats).unwrap();
         for key in [
@@ -1115,6 +1141,7 @@ mod tests {
             arm_plan_fallback: None,
             boost: None,
             tree_arm: None,
+            global_arm: None,
         };
         let off = serde_json::to_value(&stats).unwrap();
         assert!(off.get("queryClass").is_none());
@@ -1132,6 +1159,44 @@ mod tests {
         assert_eq!(on["skippedArms"][0]["arm"], "pageImage");
         assert_eq!(on["skippedArms"][0]["reason"], "exact query");
         assert_eq!(on["armPlanFallback"], false);
+    }
+
+    #[test]
+    fn global_arm_stats_are_additive_and_absent_when_the_arm_did_not_run() {
+        let mut stats = SearchStatsDto {
+            total_time_ms: 5.0,
+            embedding_time_ms: 1.0,
+            vector_search_time_ms: 2.0,
+            entity_search_time_ms: 0.0,
+            graph_search_time_ms: 0.0,
+            fusion_time_ms: 0.5,
+            vector_results: 2,
+            entity_results: 0,
+            graph_results: 0,
+            total_results: 3,
+            stage_timings_ms: StageTimingsDto::empty(),
+            floor_score_kind: None,
+            floor_dropped: None,
+            boost: None,
+            query_class: None,
+            skipped_arms: None,
+            arm_plan_fallback: None,
+            global_arm: None,
+            tree_arm: None,
+        };
+        let off = serde_json::to_value(&stats).unwrap();
+        assert!(
+            off.get("globalArm").is_none(),
+            "the flag is off: an old client sees exactly the earlier shape"
+        );
+
+        stats.global_arm = Some(GlobalArmStatsDto {
+            communities: 2,
+            chunks: 5,
+        });
+        let on = serde_json::to_value(&stats).unwrap();
+        assert_eq!(on["globalArm"]["communities"], 2);
+        assert_eq!(on["globalArm"]["chunks"], 5);
     }
 
     #[test]

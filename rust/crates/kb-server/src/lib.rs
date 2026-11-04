@@ -5,6 +5,7 @@
 pub mod auth;
 pub mod boundary;
 pub mod cli;
+pub mod communities;
 pub mod config;
 pub mod dto;
 pub mod egress;

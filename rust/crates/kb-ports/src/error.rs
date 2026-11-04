@@ -73,6 +73,10 @@ pub enum RetrievalDegrade {
     /// The other arms' results are returned unchanged; the search is degraded,
     /// not empty.
     TreeArmFailed,
+    /// The global (community summary) arm failed: the community store or the
+    /// scoped chunk fetch did not answer. The other arms' results are returned
+    /// unchanged — a search that lost one arm is degraded, not empty.
+    GlobalArmFailed,
 }
 
 impl RetrievalDegrade {
@@ -91,6 +95,7 @@ impl RetrievalDegrade {
             Self::VisionRerankUnavailable => "vision_rerank_unavailable",
             Self::FloorSkipped => "floor_skipped",
             Self::TreeArmFailed => "tree_arm_failed",
+            Self::GlobalArmFailed => "global_arm_failed",
         }
     }
 }

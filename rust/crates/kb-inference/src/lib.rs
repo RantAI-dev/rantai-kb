@@ -5,6 +5,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod community_summary;
 pub mod embedder;
 pub mod heuristic_extractor;
 pub mod llm_extractor;
@@ -17,6 +18,9 @@ pub mod rerankers;
 pub mod vision_scorer;
 pub mod vlm_gate;
 
+pub use community_summary::{
+    CommunitySummariser, CommunitySummarySettings, LlmCommunitySummariser,
+};
 pub use embedder::{EmbedderImpl, EmbedderSettings};
 pub use heuristic_extractor::{HeuristicExtractor, HeuristicExtractorSettings};
 pub use llm_extractor::{ExtractorSettings, LlmCombinedExtractor};

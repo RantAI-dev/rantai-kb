@@ -111,6 +111,23 @@ impl AppState {
             }
             (false, _) => None,
         };
+        // The global (graph community) arm, `DEC-5`. Off unless the operator
+        // turned `KB_GLOBAL_ARM` on; the store reads the `KbCommunity` table the
+        // operator command `communities build` writes.
+        let global_arm = if config.global_arm.enabled {
+            let store: Arc<dyn kb_ports::CommunityStore> =
+                Arc::new(kb_store_pg::PgCommunityStore::from_pool(pool.clone()));
+            Some(Arc::new(kb_engine::GlobalArm::new(
+                store,
+                kb_engine::GlobalArmConfig {
+                    communities: config.global_arm.communities,
+                    weight: config.global_arm.weight,
+                    chunks: config.global_arm.chunks,
+                },
+            )))
+        } else {
+            None
+        };
         let blob: Arc<dyn BlobStore> = Arc::new(
             kb_store_blob::S3BlobStore::new(config.s3).map_err(|e| anyhow::anyhow!("s3: {e}"))?,
         );
@@ -200,6 +217,7 @@ impl AppState {
             query_expander: expander,
             figure_gate: None,
             graph_arm: graph_arm.clone(),
+            global_arm: global_arm.clone(),
             page_arm,
             tree_arm,
         };
@@ -237,6 +255,9 @@ impl AppState {
             query_expander: Arc::new(NoopExpander),
             figure_gate: None,
             graph_arm: parts.graph_arm.clone(),
+            // A hand-built state carries no `KbCommunity` store; a test that
+            // wants the arm installs it on `state.engine.inputs` directly.
+            global_arm: None,
             page_arm: None,
             tree_arm: None,
         };

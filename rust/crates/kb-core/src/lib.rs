@@ -6,6 +6,7 @@
 
 pub mod boost;
 pub mod chunk;
+pub mod community;
 mod context;
 pub mod figure_assets;
 pub mod figure_gate;
@@ -34,6 +35,10 @@ pub use chunk::{
     Chunk, ChunkMetadata, ChunkOptions, ChunkingStrategy, SmartChunk, SmartChunkMetadata,
     SmartChunkingOptions, chunk_document, prepare_chunk_for_embedding, smart_chunk,
     smart_chunk_document,
+};
+pub use community::{
+    Community, DetectOptions, assign_chunks, bm25_scores, cooccurrence, detect, hub_entities,
+    louvain, rank_summaries, summary_prompt,
 };
 pub use context::{
     ContextItem, NumberedSource, SourceDedupKey, SourceEntry, build_context_and_sources,

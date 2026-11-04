@@ -140,7 +140,22 @@ pub fn canaries_for(seed: u64, index: usize) -> Canaries {
             "In the annex to the same minute, the {root_b}ward comptroller noted that the \
              {root_a}qjx{digits:04} adjustment had been applied twice."
         ),
+        // Letters only: the global arm's query must classify as aggregative,
+        // and a letters-and-digits token would make it an exact query instead.
+        community: format!("{root_a}marker{}", index_letters(index)),
     }
+}
+
+/// `0 -> a`, `1 -> b`, … so the community canary carries no digits.
+fn index_letters(index: usize) -> String {
+    index
+        .to_string()
+        .chars()
+        .map(|digit| {
+            let value = digit.to_digit(10).unwrap_or(0);
+            char::from(b'a' + u8::try_from(value).unwrap_or(0))
+        })
+        .collect()
 }
 
 /// The markdown body planted in one seeded document.

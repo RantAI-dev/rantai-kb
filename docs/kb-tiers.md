@@ -203,6 +203,8 @@ numbers and how to override a setting.
 | `KB_TREE_ARM` | navigate a document's section outline for `structural` questions (DEC-4); chunks carry the `tree` arm and `stats.treeArm` | `false` |
 | `KB_TREE_ARM_WEIGHT` | RRF weight of the tree arm's list | `0.5` |
 | `KB_TREE_ARM_NODES` | outline nodes kept per query | `5` |
+| `KB_GLOBAL_ARM` | global community-summary arm (`DEC-5`) for aggregative queries; **a measured loss in `EVAL-3`**, needs `KB_GRAPH_STORE=pg` and a build from `kb-server communities build`. `KB_GLOBAL_ARM_COMMUNITIES` (3), `KB_GLOBAL_ARM_WEIGHT` (0.5) and `KB_GLOBAL_ARM_CHUNKS` (200) tune it | `false` |
+| `ENTITY_EXTRACTION_LLM_*` | chat model for `communities build` (the entity extractor's settings; `OPENROUTER_API_KEY` is the key fallback). The build is an operator command, prints a `chars/4` estimate, requires `--max-usd`, caches every summary under `KB_CACHE_DIR`, and never caches an empty answer. `KB_COMMUNITY_PRICE_INPUT`/`KB_COMMUNITY_PRICE_OUTPUT` price it | model `openai/gpt-4.1-nano`; prices from a table |
 
 A tier is a **preset**: it fills in role defaults; any explicit `KB_*` setting wins.
 `kb-server setup` checks the VRAM budget and refuses a combination that cannot fit next to

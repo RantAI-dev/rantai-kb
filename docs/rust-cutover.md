@@ -617,6 +617,62 @@ the class distribution of a `queries.tsv` or `queries.jsonl` with the same class
 pipeline uses. Measurement against the p50 −20% / nDCG@10 −0.005 target is pending; the
 commands are in `docs/core/specs/ret-5.md`.
 
+### 21. Additive: global community arm (`DEC-5`, 2026-11-04)
+
+`KB_GLOBAL_ARM=1` turns on a "global mode" retrieval arm built on graph community
+summaries. **It is off by default and it is a measured loss**: `EVAL-3` found that
+fusing summary-selected communities into search lowered aggregative recall@10 by
+0.067 on ViDoRe HR and 0.103 on CS with an oracle gate
+(`docs/eval-ab/retrieval-gaps/README.md` § `EVAL-3`). The product owner asked for
+it to be built and switchable anyway (`DEC-5`), so an operator can measure it on
+their own corpus. With the flag unset, the pipeline is byte-identical to the one
+before this release: the query is not classified for this arm, no community is
+read, and no new `stats` field appears.
+
+**Data.** Communities are detected from the entity graph ingest already stores in
+Postgres (`KbEntity`, `KbMention`), which exists only when entity extraction is on
+(`KB_ENTITY_EXTRACTION_ENABLED`, `KB_ENTITY_EXTRACTOR=heuristic|llm`) and
+`KB_GRAPH_STORE=pg`. Detection is deterministic weighted Louvain over entity
+co-occurrence (`kb_core::community`), with the prototype's hub cap: an entity
+seen on more than 5% of the documents is dropped from the graph
+(`KB_GLOBAL_ARM` build's `--max-df-fraction`).
+
+**Build.** `kb-server communities build --tenant <id> [--min-pages 2]
+[--max-usd X] [--dry-run]` is the only writer. It is an operator command, never
+automatic: a summary pass is a paid LLM batch. It prints a `chars/4` token
+estimate and the uncached cost before any call, refuses to start when the
+estimate exceeds `--max-usd` (default 0, so a paid run needs an explicit
+ceiling), turns provider reasoning off (`"reasoning": {"enabled": false}` — with
+it on, the prototype lost 95 of 159 summaries to thinking tokens), caches every
+answer under `KB_CACHE_DIR` keyed by model + `sha256(prompt)`, counts an empty
+answer as a failure and never caches it, and replaces the tenant's previous
+community set in one transaction. `--dry-run` makes no call and writes nothing.
+Prices come from `--price-input`/`--price-output` (USD per 1M tokens),
+`KB_COMMUNITY_PRICE_INPUT`/`KB_COMMUNITY_PRICE_OUTPUT`, or a table read from the
+providers on 2026-11-04; a `:free` model id is zero.
+
+**Search.** The arm runs only when the flag is on **and** the query classifies
+`aggregative`. It ranks the tenant's community summaries with BM25, takes the top
+`KB_GLOBAL_ARM_COMMUNITIES` (default 3), and fuses their member chunks with the
+current fused ranking at `KB_GLOBAL_ARM_WEIGHT` (default 0.5) before the rerank.
+A contributed chunk carries the `global` provenance arm. `stats.globalArm`
+(`{communities, chunks}`) is present only when the arm ran; `communities: 0` is
+"this tenant has no community set", not a degrade. A store or fetch failure is
+the `global_arm_failed` degrade and the other arms' results go out unchanged.
+
+**Scope.** The summary text is never returned to a caller: it is written from
+every document in the community, including ones the caller cannot see, so it is
+used only to *select* a community. The community read is filtered to the caller's
+`DocumentScope` (`"documentIds" && scope`), the member document and chunk ids are
+narrowed again in the arm, and each member chunk is fetched through the scoped
+`RetrievalIndex`. A community with one out-of-scope member contributes only its
+in-scope chunks; a community entirely out of scope contributes nothing. The leak
+matrix (`kb-server --test leak_tests`) has a `global` row, including a run whose
+community store ignores the scope and is contained by the arm.
+
+The new table is additive: `prisma/migrations/20261104120000_community_tables`
+creates `KbCommunity` and two indexes, touching nothing that exists.
+
 ---
 
 ## 6. Shared Known Issues
