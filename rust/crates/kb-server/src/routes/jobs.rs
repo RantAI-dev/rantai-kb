@@ -27,6 +27,12 @@ pub async fn get_job(
         .await
         .map_err(ApiError::from)?
         .ok_or(ApiError::NotFound)?;
+    // A job names the document it ingests; a key limited to some knowledge
+    // bases must not learn about (or watch) one outside them. Unlimited keys
+    // are not looked up at all, so their behaviour is unchanged.
+    if let Some(document_id) = job.document_id.as_deref() {
+        crate::routes::ensure_document_visible(&state, &auth, document_id).await?;
+    }
     Ok(Json(job))
 }
 
@@ -46,6 +52,20 @@ pub async fn retry_job(
 ) -> Result<Response, ApiError> {
     if !crate::auth::has_scope(&auth, "kb:write") {
         return Err(ApiError::missing_scope("kb:write"));
+    }
+    // A limited key must answer 404, and requeue nothing, for a job whose
+    // document is outside its knowledge bases. Only limited keys pay this
+    // lookup: an unlimited key goes straight to the retry as before.
+    if !auth.knowledge_base_ids.is_empty() {
+        let job = state
+            .jobs
+            .get_job(&auth.tenant_id, &id)
+            .await
+            .map_err(ApiError::from)?
+            .ok_or(ApiError::NotFound)?;
+        if let Some(document_id) = job.document_id.as_deref() {
+            crate::routes::find_document(&state, &auth, document_id, false).await?;
+        }
     }
     match state
         .jobs

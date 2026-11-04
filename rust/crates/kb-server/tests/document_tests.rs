@@ -490,3 +490,144 @@ fn chunk_to_store(content: &str, index: u32) -> kb_ports::ChunkToStore {
         contextual_prefix: None,
     }
 }
+
+// ─── SEC-1: a key limited to some knowledge bases ───────────────────────────
+
+const KB_A: &str = "kb-a";
+const KB_B: &str = "kb-b";
+const LIMITED: &str = "limited-key";
+
+/// A read/write key whose knowledge-base limit is exactly `KB_A`.
+fn limited_key(h: &Harness) {
+    h.documents.insert_api_key_with_scopes(
+        LIMITED,
+        TenantId(TENANT.to_string()),
+        vec!["kb:read".into(), "kb:write".into()],
+        vec![kb_ports::KnowledgeBaseId(KB_A.to_string())],
+    );
+}
+
+fn doc_in_kb(h: &Harness, id: &str, kb: &str) {
+    let mut doc = doc_meta(id, id);
+    doc.knowledge_base_ids = vec![kb.to_string()];
+    h.documents.insert_doc(TenantId(TENANT.to_string()), doc);
+}
+
+#[tokio::test]
+async fn detail_of_a_document_outside_the_keys_knowledge_bases_is_a_404() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    limited_key(&h);
+    doc_in_kb(&h, "doc-b", KB_B);
+
+    let response = h.send("GET", "/v1/documents/doc-b", LIMITED).await;
+    assert_error(response, StatusCode::NOT_FOUND, "Not found").await;
+}
+
+#[tokio::test]
+async fn detail_of_a_document_in_the_keys_knowledge_bases_is_returned() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    limited_key(&h);
+    doc_in_kb(&h, "doc-a", KB_A);
+
+    let response = h.send("GET", "/v1/documents/doc-a", LIMITED).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json_body(response).await["document"]["id"], "doc-a");
+}
+
+#[tokio::test]
+async fn detail_of_a_document_in_no_knowledge_base_is_a_404_for_a_limited_key() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    limited_key(&h);
+    h.documents
+        .insert_doc(TenantId(TENANT.to_string()), doc_meta("doc-none", "No KB"));
+
+    let response = h.send("GET", "/v1/documents/doc-none", LIMITED).await;
+    assert_error(response, StatusCode::NOT_FOUND, "Not found").await;
+}
+
+#[tokio::test]
+async fn an_unlimited_key_still_reads_any_document_in_its_tenant() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    doc_in_kb(&h, "doc-b", KB_B);
+
+    let response = h
+        .send("GET", "/v1/documents/doc-b", &tenant_key(TENANT))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn patch_and_delete_of_a_document_outside_the_keys_knowledge_bases_are_404_and_change_nothing()
+ {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    limited_key(&h);
+    doc_in_kb(&h, "doc-b", KB_B);
+
+    let patch = h
+        .send_json(
+            "PATCH",
+            "/v1/documents/doc-b",
+            LIMITED,
+            serde_json::json!({"title": "Hijacked"}),
+        )
+        .await;
+    assert_error(patch, StatusCode::NOT_FOUND, "Not found").await;
+
+    let delete = h.send("DELETE", "/v1/documents/doc-b", LIMITED).await;
+    assert_error(delete, StatusCode::NOT_FOUND, "Not found").await;
+
+    let docs = h.documents.docs.read().unwrap();
+    let tenant = TenantId(TENANT.to_string());
+    assert_eq!(docs[&tenant][0].title, "doc-b");
+    assert!(h.documents.deleted.read().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_limited_key_can_still_patch_and_delete_a_document_in_its_knowledge_base() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    limited_key(&h);
+    doc_in_kb(&h, "doc-a", KB_A);
+
+    let patch = h
+        .send_json(
+            "PATCH",
+            "/v1/documents/doc-a",
+            LIMITED,
+            serde_json::json!({"title": "Mine"}),
+        )
+        .await;
+    assert_eq!(patch.status(), StatusCode::OK);
+    assert_eq!(json_body(patch).await["document"]["title"], "Mine");
+
+    let delete = h.send("DELETE", "/v1/documents/doc-a", LIMITED).await;
+    assert_eq!(delete.status(), StatusCode::OK);
+    assert_eq!(h.documents.deleted.read().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn hard_delete_cannot_reach_a_soft_deleted_document_outside_the_keys_knowledge_bases() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    limited_key(&h);
+    doc_in_kb(&h, "doc-b", KB_B);
+
+    // The unlimited key removes it from every read path, keeping the row for
+    // `?hard=true` — which the limited key must still not reach.
+    assert_eq!(
+        h.send("DELETE", "/v1/documents/doc-b", &tenant_key(TENANT))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    let hard = h
+        .send("DELETE", "/v1/documents/doc-b?hard=true", LIMITED)
+        .await;
+    assert_error(hard, StatusCode::NOT_FOUND, "Not found").await;
+    assert_eq!(h.documents.deleted.read().unwrap().len(), 1);
+}

@@ -1044,13 +1044,19 @@ pub(crate) async fn find_visible_document(
 
 /// The delete path is the one lookup that also sees soft-deleted documents, so
 /// `?hard=true` can follow a soft delete.
+///
+/// The tenant check is not enough on its own: a key can be limited to some
+/// knowledge bases, and a document outside them must answer exactly the same
+/// 404 as a document in another tenant, so the limit never leaks an id's
+/// existence. A document in no knowledge base is outside every limited key,
+/// matching how search and the document list already treat it.
 pub(crate) async fn find_document(
     state: &AppState,
     auth: &AuthContext,
     id: &str,
     include_deleted: bool,
 ) -> Result<kb_ports::DocumentMeta, ApiError> {
-    state
+    let doc = state
         .documents
         .find_meta_by_id(
             &auth.tenant_id,
@@ -1059,7 +1065,41 @@ pub(crate) async fn find_document(
         )
         .await
         .map_err(ApiError::from)?
-        .ok_or(ApiError::NotFound)
+        .ok_or(ApiError::NotFound)?;
+    if !key_can_see_document(auth, &doc) {
+        return Err(ApiError::NotFound);
+    }
+    Ok(doc)
+}
+
+/// Whether a key's knowledge-base limit admits a document.
+///
+/// An empty limit means the whole tenant. A non-empty limit admits a document
+/// only when at least one of its knowledge bases is in the limit; a document in
+/// no knowledge base is therefore not visible to a limited key.
+#[must_use]
+pub(crate) fn key_can_see_document(auth: &AuthContext, doc: &kb_ports::DocumentMeta) -> bool {
+    auth.knowledge_base_ids.is_empty()
+        || doc
+            .knowledge_base_ids
+            .iter()
+            .any(|kb| auth.knowledge_base_ids.iter().any(|k| k.0 == *kb))
+}
+
+/// 404 when a limited key asks about a document outside its knowledge bases.
+///
+/// Unlike [`find_document`], an unlimited key is not looked up at all, so a job
+/// that references a document row which no longer exists keeps answering
+/// exactly as it did before the limit existed.
+pub(crate) async fn ensure_document_visible(
+    state: &AppState,
+    auth: &AuthContext,
+    id: &str,
+) -> Result<(), ApiError> {
+    if auth.knowledge_base_ids.is_empty() {
+        return Ok(());
+    }
+    find_document(state, auth, id, false).await.map(|_| ())
 }
 
 // ─── Knowledge bases ─────────────────────────────────────────────────────────

@@ -16,10 +16,12 @@ use async_trait::async_trait;
 use axum::extract::State;
 use axum::response::Response;
 use futures::StreamExt;
-use kb_ports::{PortError, ProgressSink, TenantId};
+use kb_ports::{AuthContext, PortError, ProgressSink, TenantId};
 use tokio::sync::broadcast;
 
 use crate::auth::Authed;
+use crate::error::ApiError;
+use crate::state::AppState;
 
 /// Frames a subscriber may miss before the channel starts dropping for it.
 const CHANNEL_CAPACITY: usize = 1024;
@@ -29,6 +31,10 @@ const CHANNEL_CAPACITY: usize = 1024;
 pub struct EventFrame {
     /// Tenant the frame belongs to; subscribers of other tenants never see it.
     pub tenant_id: TenantId,
+    /// `documentId` from the payload, when the frame names one. The subscriber
+    /// uses it to hide progress for a document outside a limited key's
+    /// knowledge bases.
+    pub document_id: Option<String>,
     /// The complete frame: `event: <name>\ndata: <json>\n\n`.
     pub text: String,
 }
@@ -65,8 +71,13 @@ impl EventBus {
     /// lagged by the channel rather than holding the worker.
     fn publish(&self, tenant_id: &TenantId, event: &str, payload: &serde_json::Value) {
         let text = format!("event: {event}\ndata: {payload}\n\n");
+        let document_id = payload
+            .get("documentId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
         let _ = self.tx.send(EventFrame {
             tenant_id: tenant_id.clone(),
+            document_id,
             text,
         });
     }
@@ -91,7 +102,9 @@ impl ProgressSink for EventBus {
 /// `": connected\n\n"`, a `": ping\n\n"` keep-alive every 25 s, and one
 /// `event: <name>\ndata: <json>\n\n` frame per progress update. Only this
 /// tenant's frames are written; another tenant's are dropped without waking
-/// the connection's writer.
+/// the connection's writer. A key limited to some knowledge bases also drops a
+/// frame that names a document outside them, so the stream does not reveal
+/// progress for a document its other routes answer 404 for.
 pub async fn events_stream(
     State(state): State<Arc<crate::state::AppState>>,
     Authed(auth): Authed,
@@ -109,16 +122,27 @@ pub async fn events_stream(
     let connected = futures::stream::iter(vec![Ok::<axum::body::Bytes, std::convert::Infallible>(
         axum::body::Bytes::from_static(CONNECTED_FRAME),
     )]);
+    let state = Arc::clone(&state);
+    let auth = auth.clone();
     let stream = connected.chain(futures::stream::unfold(
-        (receiver, ping, tenant),
-        move |(mut receiver, mut ping, tenant)| async move {
+        (receiver, ping, tenant, state, auth),
+        move |(mut receiver, mut ping, tenant, state, auth)| async move {
             loop {
                 tokio::select! {
                     frame = receiver.recv() => match frame {
                         Ok(frame) if frame.tenant_id == tenant => {
+                            if !frame_visible_to_key(
+                                &state,
+                                &auth,
+                                frame.document_id.as_deref(),
+                            )
+                            .await
+                            {
+                                continue;
+                            }
                             return Some((Ok::<_, std::convert::Infallible>(
                                 axum::body::Bytes::from(frame.text),
-                            ), (receiver, ping, tenant)));
+                            ), (receiver, ping, tenant, state, auth)));
                         }
                         // Another tenant's frame, or a lagged subscriber that
                         // missed frames. Neither ends the stream.
@@ -132,7 +156,7 @@ pub async fn events_stream(
                     _ = ping.tick() => {
                         return Some((
                             Ok(axum::body::Bytes::from_static(PING_FRAME)),
-                            (receiver, ping, tenant),
+                            (receiver, ping, tenant, state, auth),
                         ));
                     }
                 }
@@ -156,6 +180,37 @@ pub async fn events_stream(
         axum::http::HeaderValue::from_static("keep-alive"),
     );
     response
+}
+
+/// Whether a frame that names `document_id` may reach this subscriber.
+///
+/// An unlimited key sees every frame. A limited key's frame is checked against
+/// the same helper the by-ID routes use, so the two can never disagree about a
+/// document's visibility. A lookup error fails closed and is logged: a frame
+/// whose document cannot be proven to be in scope is not shown.
+async fn frame_visible_to_key(
+    state: &AppState,
+    auth: &AuthContext,
+    document_id: Option<&str>,
+) -> bool {
+    if auth.knowledge_base_ids.is_empty() {
+        return true;
+    }
+    let Some(document_id) = document_id else {
+        return true;
+    };
+    match crate::routes::find_document(state, auth, document_id, false).await {
+        Ok(_) => true,
+        Err(ApiError::NotFound) => false,
+        Err(err) => {
+            tracing::warn!(
+                ?err,
+                document_id,
+                "event visibility check failed; dropping frame"
+            );
+            false
+        }
+    }
 }
 
 /// The first frame every subscriber receives.
