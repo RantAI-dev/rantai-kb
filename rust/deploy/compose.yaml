@@ -3,9 +3,9 @@
 #   cp rust/deploy/.env.example rust/deploy/.env   # optional; only cloud needs a key
 #   rust/scripts/kb-dev.sh up lite-en              # or lite | desk | studio | station | cloud
 #
-# This file replaces the frozen Bun stack (root docker-compose.yml) for everything
-# deployed from Rust. `rust/scripts/stack-up.sh` stays as the smoke/eval harness;
-# the facts below (images, credentials, TEI flags, env names) come from it.
+# This is the only deployment stack in the repo: the Bun compose file was removed
+# with the Bun service in v0.2.0. `rust/scripts/stack-up.sh` stays as the smoke/eval
+# harness; the facts below (images, credentials, TEI flags, env names) come from it.
 #
 # Design notes:
 #   * One kb-server service per tier (`kb-lite`, `kb-cloud`, …), each with its own

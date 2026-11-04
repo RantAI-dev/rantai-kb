@@ -11,128 +11,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: Typecheck, boundary, unit tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Generate Prisma client
-        run: bunx prisma generate
-
-      # The engine must never import service infrastructure. This is the
-      # invariant that keeps the KB embeddable as well as standalone — if it
-      # breaks, the next extraction becomes a rewrite.
-      - name: KB boundary
-        run: bun run check:kb-boundary
-
-      - name: Typecheck
-        run: bun run typecheck
-
-      - name: Unit tests
-        run: bun run test
-
-      - name: Scope token isolation check
-        run: |
-          if git grep -n "new_for_adapter" rust/crates/ \
-            ':!rust/crates/kb-ports' \
-            ':!rust/crates/kb-store-pg' \
-            ':!rust/crates/kb-engine/src/fakes.rs'; then
-            echo "ERROR: new_for_adapter called outside adapter/fakes!"
-            exit 1
-          fi
-
-  docker:
-    name: Docker image builds
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - name: Build (no push)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  smoke:
-    name: End-to-end smoke test
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: kb
-          POSTGRES_PASSWORD: kb
-          POSTGRES_DB: rantai_kb
-        ports: ["5432:5432"]
-        options: >-
-          --health-cmd "pg_isready -U kb"
-          --health-interval 5s --health-timeout 5s --health-retries 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - run: bun install
-      - run: bunx prisma generate
-
-      # SurrealDB and MinIO both need a start command with arguments, which the
-      # `services:` block cannot express — so run them directly.
-      - name: Start SurrealDB and MinIO
-        run: |
-          docker run -d --name surreal --network host surrealdb/surrealdb:v2 \
-            start --user root --pass root
-          docker run -d --name minio --network host \
-            -e MINIO_ROOT_USER=kbadmin -e MINIO_ROOT_PASSWORD=kbsecret123 \
-            quay.io/minio/minio server /data
-
-          for i in $(seq 1 40); do
-            curl -sf http://127.0.0.1:8000/health >/dev/null && break || sleep 2
-          done
-          for i in $(seq 1 40); do
-            curl -sf http://127.0.0.1:9000/minio/health/live >/dev/null && break || sleep 2
-          done
-          docker logs surreal | tail -5
-
-      - name: Create bucket
-        run: |
-          docker run --rm --network host --entrypoint sh quay.io/minio/minio -c \
-            "mc alias set local http://127.0.0.1:9000 kbadmin kbsecret123 && mc mb --ignore-existing local/rantai-kb"
-
-      - name: Migrate + vector schema
-        env:
-          DATABASE_URL: postgresql://kb:kb@127.0.0.1:5432/rantai_kb?schema=public
-          SURREAL_DB_URL: ws://127.0.0.1:8000/rpc
-          KB_EMBEDDING_DIM: "8"
-        run: |
-          bunx prisma migrate deploy
-          bun scripts/apply-vector-schema.ts
-
-      - name: Ingest + search round trip
-        env:
-          DATABASE_URL: postgresql://kb:kb@127.0.0.1:5432/rantai_kb?schema=public
-          SURREAL_DB_URL: ws://127.0.0.1:8000/rpc
-          S3_ENDPOINT: http://127.0.0.1:9000
-          S3_ACCESS_KEY_ID: kbadmin
-          S3_SECRET_ACCESS_KEY: kbsecret123
-          S3_BUCKET: rantai-kb
-          S3_ENABLE_PATH_STYLE: "1"
-          KB_EMBEDDING_DIM: "8"
-          KB_ENTITY_EXTRACTION_ENABLED: "false"
-        run: bun tests/smoke/round-trip.ts
-
-  # ─── Rust Jobs ──────────────────────────────────────────────────────────────
-
   rust-check:
     name: Rust formatting, clippy, and boundary check
     runs-on: ubuntu-latest
@@ -147,6 +25,18 @@ jobs:
         run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
       - name: KB boundary check
         run: cargo run --manifest-path rust/Cargo.toml -p kb-server -- check-boundary
+      # The engine must never construct an adapter directly. This is the
+      # invariant that keeps the KB embeddable as well as standalone — if it
+      # breaks, the next extraction becomes a rewrite.
+      - name: Scope token isolation check
+        run: |
+          if git grep -n "new_for_adapter" rust/crates/ \
+            ':!rust/crates/kb-ports' \
+            ':!rust/crates/kb-store-pg' \
+            ':!rust/crates/kb-engine/src/fakes.rs'; then
+            echo "ERROR: new_for_adapter called outside adapter/fakes!"
+            exit 1
+          fi
 
   rust-test:
     name: Rust test suite

@@ -281,8 +281,8 @@ On 2 cores it ingests ViDoRe HR at 6.43 pages/s (page nDCG@10 0.517) against Lit
   `openrouter.ai` URL.
 - Qdrant is the only chunk store (SurrealDB was removed on 2026-10-25), so no tier selects a
   store. `KB_PAGE_EMBEDDING_MODEL=` (empty) is how an operator drops the cloud page arm.
-- The preset fills embedding concurrency as `KB_EMBED_CONCURRENCY`, the name Bun reads, which
-  Rust honours when `KB_EMBEDDING_CONCURRENCY` is unset. That way it can never shadow an
+- The preset fills embedding concurrency as `KB_EMBED_CONCURRENCY`, the legacy v0.1.0 name,
+  which Rust honours when `KB_EMBEDDING_CONCURRENCY` is unset. That way it can never shadow an
   operator's `KB_EMBEDDING_CONCURRENCY`.
 - The local vLLM page embedder never receives `OPENROUTER_API_KEY`: with
   `KB_PAGE_EMBEDDING_FORMAT=vllm` only `KB_PAGE_EMBEDDING_API_KEY` is sent.

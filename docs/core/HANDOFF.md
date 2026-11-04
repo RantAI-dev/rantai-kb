@@ -39,7 +39,8 @@ Read `AGENTS.md` first. This file tells you where things stand; that one tells y
 
 ## 4. What has been merged
 
-- **`main`:** the frozen Bun service, plus PRs #1 and #2 (2026-09-23). It holds no Rust.
+- **`main`:** the v0.1.0 Bun service, plus PRs #1 and #2 (2026-09-23). It holds no Rust; the
+  Rust service replaces it from v0.2.0 (`DEC-3`).
 - **`feat/kb-sota`:** the whole Rust port. It is PR #3, still a **draft**, 281 commits ahead
   of `main`. The last 16 commits are local and not pushed (`REL-3`).
 
@@ -75,7 +76,8 @@ Past examples:
 
 - **Not ours:** `rust/crates/kb-eval/scripts/kf_vplane_ablate.py`, `rerank_bakeoff.py` and
   `ranx_check.py` are another agent's uncommitted work. Do not commit or delete them.
-- **Bun is frozen:** no Bun changes unless the owner asks for a specific fix.
+- **Bun was removed in v0.2.0:** the last Bun release is tag `v0.1.0`. Rust is the only
+  runtime in the repo.
 - **Spend:**
   - Paid APIs need a cost estimate and the owner's go-ahead before any corpus-sized job.
   - Embeddings and results are cached on disk under `~/.cache/kb-cache`.

@@ -23,9 +23,10 @@ The routes that take a document ID check only the tenant (`find_document`, `rout
 - `/intelligence`
 
 So a key limited to KB A can read, download, edit or delete a document that sits only in KB B,
-if it knows or guesses the ID. Bun has the same behaviour (`src/service/api.ts`), so this is
-not a regression from the port. The repo is now public, which makes it a real hole: the
-knowledge-base limit is the only permission model the product offers.
+if it knows or guesses the ID. The Bun v0.1.0 service had the same behaviour
+(`src/service/api.ts` at tag `v0.1.0`), so this is not a regression from the port. The repo
+is now public, which makes it a real hole: the knowledge-base limit is the only permission
+model the product offers.
 
 Found by reading the code on 2026-11-04. Not yet reproduced against a running server.
 
@@ -66,7 +67,6 @@ Run on a running server by the product owner. A step not performed is never a pa
 ## Not included
 
 - Per-user or per-document permissions (`ACC-2`, `ACC-3`).
-- Changing Bun. Bun is frozen; the difference is written in `docs/rust-cutover.md`.
 
 ## Before anyone builds it
 
