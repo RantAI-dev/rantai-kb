@@ -61,7 +61,7 @@ Run on a running server by the product owner. A step not performed is never a pa
 | `SEC-1-AC3` | With the A key: `PATCH` and `DELETE /v1/documents/<X>` | 404, and X is unchanged | Not run |
 | `SEC-1-AC4` | With an unlimited key in the same tenant: the same requests | They work as before | Not run |
 | `SEC-1-AC5` | With the A key: search for X's exact text | X is not returned (unchanged behaviour) | Not run |
-| `SEC-1-AC6` (operator) | `cargo test -p kb-server` | A new test covering AC2 and AC3 passes, and so do the old tests | Not run |
+| `SEC-1-AC6` (operator) | `cargo test -p kb-server` | A new test covering AC2 and AC3 passes, and so do the old tests | Pass (2026-11-04: `cargo test -p kb-server -p kb-ports -p kb-store-pg` — kb-server 138 unit + 121 integration tests, all passing) |
 
 ## Not included
 
