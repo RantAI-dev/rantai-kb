@@ -81,6 +81,9 @@ RUN FLAGS
     --poll-ms MS        job poll interval (default 500)
     --ingest-concurrency N
                         corpus files uploaded at once (default 16)
+    --boost JSON        send this boost object with every search (RET-4), e.g.
+                        '{{\"recency\":{{\"field\":\"metadata.effectiveDate\",\"halfLifeDays\":365,\"weight\":1}}}}';
+                        omitted by default, which is the off run
     --allow-failures    exit 0 even when queries or corpus files failed
                         (the outputs are written either way)
 
@@ -143,6 +146,12 @@ async fn eval(args: &[String]) -> Result<(), EvalError> {
     config.job_timeout = Duration::from_secs(parse_uint_u64(args, "--timeout", 900)?);
     config.poll_interval = Duration::from_millis(parse_uint_u64(args, "--poll-ms", 500)?);
     config.ingest_concurrency = parse_uint(args, "--ingest-concurrency", 16)?.max(1);
+    config.boost = match flag(args, "--boost") {
+        None => None,
+        Some(raw) => Some(serde_json::from_str(&raw).map_err(|e| {
+            EvalError::Usage(format!("--boost must be a JSON object accepted by /v1/search: {e}"))
+        })?),
+    };
 
     let allow_failures = has_flag(args, "--allow-failures");
     let report = run_harness(config).await?;
