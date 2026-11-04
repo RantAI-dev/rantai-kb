@@ -139,12 +139,16 @@ pub fn extract_pdf_text_layer(
 
     let mut pages = Vec::new();
     let mut page_map = Vec::new();
+    // Every page's text, including the empty ones, so heading numbers line up
+    // with the zero-based page index the outline stores.
+    let mut page_texts: Vec<String> = Vec::new();
 
     for (i, page) in document.pages().iter().enumerate() {
         let text_obj = page
             .text()
             .map_err(|e| ExtractError::Container(format!("failed to read page text: {e}")))?;
         let page_text = text_obj.all();
+        page_texts.push(page_text.clone());
         let trimmed = page_text.trim();
         if !trimmed.is_empty() {
             page_map.push(PageText {
@@ -161,6 +165,10 @@ pub fn extract_pdf_text_layer(
     } else {
         Some(page_map)
     };
+    // The section hierarchy the tree arm navigates (DEC-4). Free of model calls:
+    // bookmarks are read from the PDF catalog, and the heading fallback reuses
+    // the page text already in hand.
+    let outline = crate::outline::extract_outline(pdfium, pdf_bytes, &page_texts);
 
     Ok(ExtractionResult {
         content,
@@ -169,6 +177,7 @@ pub fn extract_pdf_text_layer(
         figures: Vec::new(),
         pages_blocks: None,
         page_map: map_opt,
+        outline: Some(outline),
         error: None,
     })
 }

@@ -84,6 +84,7 @@ impl OpenRouterVisionProvider {
             figures: Vec::new(),
             pages_blocks: None,
             page_map: None,
+            outline: None,
             error: None,
         })
     }
@@ -132,6 +133,7 @@ impl OpenRouterVisionProvider {
             figures: Vec::new(),
             pages_blocks: None,
             page_map: None,
+            outline: None,
             error: None,
         })
     }

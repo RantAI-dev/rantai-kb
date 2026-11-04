@@ -425,6 +425,7 @@ fn paged_result(texts: Vec<String>, file_type: &str) -> ExtractionResult {
         } else {
             Some(page_map)
         },
+        outline: None,
         error: None,
     }
 }

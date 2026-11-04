@@ -32,6 +32,7 @@ pub mod mistral;
 pub mod ods;
 pub mod odt;
 pub mod openrouter_vision;
+pub mod outline;
 pub mod page_ocr;
 pub mod page_render;
 pub mod pdfium;
@@ -67,6 +68,7 @@ pub use ods::parse_ods;
 pub use odt::parse_odt;
 pub use openrouter_vision::OPENROUTER_VISION_URL;
 pub use openrouter_vision::OpenRouterVisionProvider;
+pub use outline::{bookmark_nodes, extract_outline, finish_nodes, heading_nodes};
 pub use page_ocr::{PageOcrExtractor, PageOcrSettings};
 pub use page_render::PdfiumPageRenderer;
 pub use pdfium::{

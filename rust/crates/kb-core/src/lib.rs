@@ -21,6 +21,7 @@ pub mod query_class;
 pub mod signals;
 pub mod sparse;
 pub mod title;
+pub mod tree;
 mod weave;
 
 pub use boost::{
@@ -62,5 +63,10 @@ pub use signals::{RouterOpts, has_columnar_lines, has_dense_currency, is_unpdf_s
 pub use sparse::{
     BM25_AVGDL, BM25_B, BM25_K1, SparseVector, encode_document, encode_document_avgdl,
     encode_query, saturate_tf, term_id, tokenize,
+};
+pub use tree::{
+    DEFAULT_MAX_PAGES, DEFAULT_NODES, DEFAULT_PAGES_PER_NODE, DEFAULT_RRF_K, DEFAULT_WEIGHT,
+    Outline, OutlineMethod, OutlineNode, TreeDocument, TreeMatch, is_chapter_node, node_number,
+    node_pages, numbering_level, query_numbers, score_tree, tokens as tree_tokens,
 };
 pub use weave::{WeaveItem, weave_neighbours, weave_neighbours_with};

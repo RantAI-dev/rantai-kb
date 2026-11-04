@@ -130,6 +130,18 @@ pub trait DocumentStore: Send + Sync {
         document_ids: &[DocumentId],
     ) -> Result<Vec<DocumentMeta>, PortError>;
 
+    /// Every visible document's section outline (`Document.metadata.outline`).
+    ///
+    /// Scope is a parameter, not an option: the adapter resolves it as
+    /// `tenant = scope.tenant AND id = ANY(scope ids) AND deletedAt IS NULL`,
+    /// never as a post-filter of a wider read. A document with no outline is
+    /// absent from the result rather than present with an empty one, so the
+    /// tree arm can tell "no structure" from "never extracted".
+    async fn outlines(
+        &self,
+        scope: &DocumentScope,
+    ) -> Result<Vec<(DocumentId, kb_core::tree::Outline)>, PortError>;
+
     /// List documents visible to the tenant (optionally filtered). Used by
     /// `GET /v1/documents`.
     ///
