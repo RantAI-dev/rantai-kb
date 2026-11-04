@@ -2,8 +2,8 @@
 
 The one product document: what the product is, what it has, what it lacks, and what comes next.
 
-Last updated 2026-11-04, against `feat/kb-sota` at `41b5d44`. The product owner confirmed
-the purpose and the release decisions on 2026-11-04.
+Last updated 2026-11-04. The product owner confirmed the purpose and the release decisions
+on 2026-11-04.
 
 Statuses come from reading the repository and from runs whose results are committed under
 `docs/eval-ab/`. Anything not run says *Not verified*. **Have** means we match or beat the
@@ -65,9 +65,9 @@ Open source under Apache-2.0. There is no paid edition and no hosted version.
 
 - **Releases:** `v0.1.0` is the last Bun release. `v0.2.0` is the Rust service: merge PR #3,
   then tag (`DEC-1`, decided 2026-11-04).
-- **The Rust port:** it replaces Bun and sits on `feat/kb-sota` (PR #3, a draft, 282 commits
-  ahead of `main`). Bun was removed from the branch in `DEC-3`, so Rust is the only runtime
-  in the repo from `v0.2.0`.
+- **The Rust port:** it replaces Bun and sits on `feat/kb-sota` (PR #3, a draft, more than 280 commits
+  ahead of `main`). Bun was removed from the branch in `DEC-3`, so Rust
+  is the only runtime in the repo from `v0.2.0`.
 - **Team:** one product owner working with AI agents (`AGENTS.md`).
 
 ---

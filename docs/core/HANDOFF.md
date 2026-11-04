@@ -41,8 +41,8 @@ Read `AGENTS.md` first. This file tells you where things stand; that one tells y
 
 - **`main`:** the v0.1.0 Bun service, plus PRs #1 and #2 (2026-09-23). It holds no Rust; the
   Rust service replaces it from v0.2.0 (`DEC-3`).
-- **`feat/kb-sota`:** the whole Rust port. It is PR #3, still a **draft**, 281 commits ahead
-  of `main`. The last 16 commits are local and not pushed (`REL-3`).
+- **`feat/kb-sota`:** the whole Rust port. It is PR #3, still a **draft**, more than 280 commits
+  ahead of `main`. A set of commits is local and not pushed (`REL-3`).
 
 ## 5. What is in flight
 
