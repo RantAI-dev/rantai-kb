@@ -124,7 +124,10 @@ def chat_cached(
     path = cache_path(cache_dir, model, prompt)
     if path.is_file():
         record = json.loads(path.read_text(encoding="utf-8"))
-        return record["content"], record.get("usage", {}), True
+        # An empty answer is not a summary: a reasoning model that spent its
+        # whole budget thinking returns `content: null`. Never serve one.
+        if record.get("content"):
+            return record["content"], record.get("usage", {}), True
 
     payload = json.dumps(
         {
@@ -132,6 +135,10 @@ def chat_cached(
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
             "temperature": 0.0,
+            # Reasoning tokens count against max_tokens; with them on, deepseek
+            # v4 flash spent the whole budget thinking on 95 of 159 communities
+            # and returned no text. A summary needs no chain of thought.
+            "reasoning": {"enabled": False},
         }
     ).encode("utf-8")
     headers = {
@@ -148,6 +155,8 @@ def chat_cached(
                 body = json.loads(response.read().decode("utf-8"))
             content = body["choices"][0]["message"]["content"]
             usage = body.get("usage", {})
+            if not content:
+                raise KeyError(f"empty content (usage {usage})")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
                 json.dumps(
@@ -282,12 +291,12 @@ def main() -> int:
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     if not api_key:
         raise SystemExit("OPENROUTER_API_KEY is not set; refusing to call a provider")
-    if not args.model.endswith(":free") and not args.i-have-approval:
+    if not args.model.endswith(":free") and not args.i_have_approval:
         raise SystemExit(
             f"{args.model} is a paid model; a paid ingest batch needs the planner's "
             "explicit approval (pass --i-have-approval once you have it)"
         )
-    if len(communities) > 20 and not args.i-have-approval:
+    if len(communities) > 20 and not args.i_have_approval:
         raise SystemExit(
             f"{len(communities)} communities is a batch, not a smoke test; "
             "pass --i-have-approval to run it"

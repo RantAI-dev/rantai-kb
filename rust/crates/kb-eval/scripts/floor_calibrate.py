@@ -219,7 +219,9 @@ def ranked_units(chunks: Iterable[dict], level: str) -> List[str]:
             page = chunk.get("page")
             if not isinstance(page, int):
                 continue
-            unit = f"{doc}#p{page}"
+            # The API's `page` is 0-based; qrels `#p<N>` pages are 1-based
+            # (the eval runner converts the same way, runner.rs `page0 + 1`).
+            unit = f"{doc}#p{page + 1}"
         else:
             unit = doc
         if unit in seen:
