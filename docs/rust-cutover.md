@@ -471,6 +471,26 @@ The same rule covers `GET /v1/jobs/:id` and `POST /v1/jobs/:id/retry` when the j
 knowledge bases is dropped, and a lookup failure fails closed (drop plus a warning). Bun
 enforces none of this.
 
+### 17. Additive: search-time metadata filters (`RET-3`, 2026-11-04)
+
+`POST /v1/search` accepts three optional body fields, beside `knowledgeBaseIds`,
+`documentIds` and `category`:
+
+- `externalRefs: string[]` — only documents whose `Document.externalRef` is in the list;
+  an explicit `[]` selects nothing.
+- `language: string` — only documents whose JSONB `metadata.language` equals the value.
+  No dedicated language column exists, so the metadata key is the stored language.
+- `metadata: { "<key>": <scalar> | [<scalar>] }` — top-level JSONB equality, with an
+  array meaning "any of". Keys must match `[A-Za-z0-9_.-]{1,64}`; values must be
+  strings, numbers, booleans or arrays of those; anything else is a **400**.
+
+All of them are resolved into the `DocumentScope` by the same Postgres query that applies
+the tenant, soft-delete, knowledge-base and category predicates
+(`kb-store-pg/src/store.rs::resolve_filter`), so every arm — dense, BM25, page image,
+figure, neighbour, graph, entity — inherits the narrowed scope before ranking. Bun has no
+equivalent; a client that filters after the fact spends top-k on documents it then drops.
+The fields are additive and Bun ignores them.
+
 ---
 
 ## 6. Shared Known Issues

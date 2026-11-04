@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Search-time metadata filters (`RET-3`).** `POST /v1/search` accepts three
+  additive, optional fields:
+  - `externalRefs: string[]` — only documents whose `Document.externalRef` is in
+    the list (`[]` selects nothing).
+  - `language: string` — only documents whose JSONB `metadata` key `language`
+    equals the value. There is no dedicated `Document.language` column; the
+    metadata key is the stored language.
+  - `metadata: { "<key>": <scalar or [scalar]> }` — top-level JSONB metadata
+    equality; an array value matches any of its entries, and a document whose
+    JSONB value is an array matches when it contains one of them. Keys must
+    match `[A-Za-z0-9_.-]{1,64}` and values must be strings, numbers, booleans
+    or arrays of those; anything else is a 400.
+
+  All three are applied by `DocumentStore::build_scope`, so the narrowed
+  `DocumentScope` reaches dense, BM25, page-image, figure, neighbour, graph and
+  entity retrieval before ranking — never as a post-filter. They compose with
+  `knowledgeBaseIds`, `documentIds` and the key's knowledge-base limit by
+  intersection, so a filter can only narrow what the key may see. `documentIds`
+  now also respects the key's knowledge-base limit (before, that branch built a
+  tenant-wide scope).
+
 ## 0.2.0 — 2026-11-04
 
 The first Rust release. `v0.1.0` remains the last Bun release.

@@ -34,7 +34,8 @@ pub use scope::DocumentScope;
 pub use scope::adapter;
 pub use traits::{
     ChunkStore, DocumentFilter, DocumentStore, Embedder, EntityExtractor, EntityStore, Extractor,
-    FigureGate, JobStore, NeighbourAnchor, ProgressSink, QueryEmbedding, Reranker, ScopeRequest,
+    FigureGate, JobStore, MetadataFilter, NeighbourAnchor, ProgressSink, QueryEmbedding, Reranker,
+    ScopeRequest,
 };
 pub use types::{
     AuthContext, CategoryRecord, Chunk, ChunkMetadata, ChunkToStore, ChunkType, CreateCategory,

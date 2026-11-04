@@ -109,6 +109,43 @@ pub fn make_fake_scope(tenant: TenantId, doc_ids: Vec<DocumentId>) -> DocumentSc
     DocumentScope::new(&token, tenant, doc_ids)
 }
 
+/// A JSON scalar as Postgres `->>` renders it: strings unquoted, numbers and
+/// booleans as their text, everything else unmatchable.
+fn json_scalar_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Whether `metadata[key]` equals one of `values`, or (when the document value
+/// is an array) contains one of them. Mirrors `scope_sql` in `kb-store-pg`.
+fn metadata_values_match(
+    metadata: Option<&serde_json::Value>,
+    key: &str,
+    values: &[String],
+) -> bool {
+    let Some(value) = metadata
+        .and_then(serde_json::Value::as_object)
+        .and_then(|object| object.get(key))
+    else {
+        return false;
+    };
+    match value {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(json_scalar_text)
+            .any(|item| values.contains(&item)),
+        scalar => json_scalar_text(scalar).is_some_and(|item| values.contains(&item)),
+    }
+}
+
+fn metadata_key_matches(metadata: Option<&serde_json::Value>, key: &str, value: &str) -> bool {
+    metadata_values_match(metadata, key, &[value.to_string()])
+}
+
 /// Fake in-memory document store.
 #[derive(Clone, Default)]
 pub struct FakeDocumentStore {
@@ -179,6 +216,24 @@ impl DocumentStore for FakeDocumentStore {
                     if !d.categories.contains(cat) {
                         return false;
                     }
+                }
+                if let Some(refs) = &req.filter.external_refs
+                    && !d
+                        .external_ref
+                        .as_ref()
+                        .is_some_and(|r| refs.iter().any(|allowed| allowed == r))
+                {
+                    return false;
+                }
+                if let Some(language) = &req.filter.language
+                    && !metadata_key_matches(d.metadata.as_ref(), "language", language)
+                {
+                    return false;
+                }
+                if !req.filter.metadata.iter().all(|predicate| {
+                    metadata_values_match(d.metadata.as_ref(), &predicate.key, &predicate.values)
+                }) {
+                    return false;
                 }
                 true
             })

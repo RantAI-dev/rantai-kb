@@ -72,7 +72,7 @@ fn doc(id: &str, title: &str, kb: &str, category: &str) -> DocumentMeta {
         categories: vec![category.to_string()],
         subcategory: None,
         status: "ready".to_string(),
-        external_ref: None,
+        external_ref: Some(format!("ref-{id}")),
         chunk_count: 2,
         file_type: Some("text/markdown".to_string()),
         file_size: Some(1024),
@@ -128,6 +128,7 @@ fn seed_documents() -> Vec<SeedDocument> {
                     tenant: tenant.to_string(),
                     knowledge_base_id: format!("{tenant}-kb{kb}"),
                     category_id: format!("{tenant}-cat{category}"),
+                    external_ref: format!("ref-{id}"),
                     canaries: canaries_for(0xC0FFEE, index),
                     n_chunks: 2,
                     has_figures: true,
@@ -473,6 +474,7 @@ async fn the_matrix_passes_against_a_server_that_scopes_every_arm() {
         ScopeKind::Tenant,
         ScopeKind::KnowledgeBase,
         ScopeKind::Category,
+        ScopeKind::ExternalRef,
     ] {
         let cell = page.cells.iter().find(|c| c.scope == kind).unwrap();
         assert_eq!(cell.status, Status::Pass, "page × {kind:?}: {cell:?}");

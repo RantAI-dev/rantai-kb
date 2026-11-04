@@ -128,40 +128,14 @@ impl PgDocumentStore {
         tenant: &TenantId,
         filter: &DocumentFilter,
     ) -> Result<Vec<DocumentId>, PortError> {
-        let mut query = String::from(
-            r#"
-            SELECT DISTINCT d.id
-              FROM "Document" d
-         LEFT JOIN "DocumentGroup" dg ON dg."documentId" = d.id
-             WHERE d."tenantId" = $1
-               AND d."deletedAt" IS NULL
-        "#,
-        );
-
-        if !filter.knowledge_base_ids.is_empty() {
-            query.push_str(" AND dg.\"knowledgeBaseId\" = ANY($2::text[])");
-        }
-        if filter.category.is_some() {
-            let cat_param = if filter.knowledge_base_ids.is_empty() {
-                "$2"
-            } else {
-                "$3"
+        let (sql, binds) = scope_sql(filter);
+        let mut q = sqlx::query(&sql).bind(tenant.0.as_str());
+        for bind in binds {
+            q = match bind {
+                ScopeBind::TextArray(values) => q.bind(values),
+                ScopeBind::Text(value) => q.bind(value),
+                ScopeBind::Metadata { key, values } => q.bind(key).bind(values),
             };
-            query.push_str(&format!(" AND {cat_param} = ANY(d.categories)"));
-        }
-
-        let mut q = sqlx::query(&query).bind(tenant.0.as_str());
-        let kb_str_ids: Vec<&str> = filter
-            .knowledge_base_ids
-            .iter()
-            .map(|k| k.0.as_str())
-            .collect();
-
-        if !filter.knowledge_base_ids.is_empty() {
-            q = q.bind(&kb_str_ids);
-        }
-        if let Some(cat) = &filter.category {
-            q = q.bind(cat.as_str());
         }
 
         let rows = q
@@ -178,6 +152,85 @@ impl PgDocumentStore {
         }
         Ok(ids)
     }
+}
+
+/// A value bound into the scope query, in the order it appears.
+///
+/// Kept typed and owned so [`scope_sql`] can be unit-tested without a database:
+/// the test asserts the statement and the binds agree, which is the thing a
+/// hand-written `$n` counter gets wrong.
+#[derive(Debug, PartialEq, Eq)]
+enum ScopeBind {
+    TextArray(Vec<String>),
+    Text(String),
+    Metadata { key: String, values: Vec<String> },
+}
+
+/// Build the tenant-scope statement and its binds from a filter.
+///
+/// Every value, including the metadata *keys*, is bound: the only text in the
+/// statement is SQL structure, never caller input. Each metadata key contributes
+/// two parameters (key, values) and appears in the statement only as `$n`.
+fn scope_sql(filter: &DocumentFilter) -> (String, Vec<ScopeBind>) {
+    let mut query = String::from(
+        r#"
+            SELECT DISTINCT d.id
+              FROM "Document" d
+         LEFT JOIN "DocumentGroup" dg ON dg."documentId" = d.id
+             WHERE d."tenantId" = $1
+               AND d."deletedAt" IS NULL
+        "#,
+    );
+    let mut binds: Vec<ScopeBind> = Vec::new();
+    let mut next = 2usize;
+
+    if !filter.knowledge_base_ids.is_empty() {
+        query.push_str(&format!(
+            " AND dg.\"knowledgeBaseId\" = ANY(${next}::text[])"
+        ));
+        binds.push(ScopeBind::TextArray(
+            filter
+                .knowledge_base_ids
+                .iter()
+                .map(|k| k.0.clone())
+                .collect(),
+        ));
+        next += 1;
+    }
+    if let Some(category) = &filter.category {
+        query.push_str(&format!(" AND ${next} = ANY(d.categories)"));
+        binds.push(ScopeBind::Text(category.clone()));
+        next += 1;
+    }
+    if let Some(external_refs) = &filter.external_refs {
+        query.push_str(&format!(" AND d.\"externalRef\" = ANY(${next}::text[])"));
+        binds.push(ScopeBind::TextArray(external_refs.clone()));
+        next += 1;
+    }
+    if let Some(language) = &filter.language {
+        query.push_str(&format!(" AND d.metadata ->> 'language' = ${next}"));
+        binds.push(ScopeBind::Text(language.clone()));
+        next += 1;
+    }
+    for predicate in &filter.metadata {
+        let key_param = next;
+        let values_param = next + 1;
+        query.push_str(&format!(
+            " AND (d.metadata ->> ${key_param}::text = ANY(${values_param}::text[]) \
+               OR CASE WHEN jsonb_typeof(d.metadata -> ${key_param}::text) = 'array' \
+                       THEN EXISTS (SELECT 1 \
+                                      FROM jsonb_array_elements_text(d.metadata -> ${key_param}::text) AS elem \
+                                     WHERE elem = ANY(${values_param}::text[])) \
+                       ELSE FALSE END)"
+        ));
+        binds.push(ScopeBind::Metadata {
+            key: predicate.key.clone(),
+            values: predicate.values.clone(),
+        });
+        next += 2;
+    }
+
+    (query, binds)
 }
 
 #[async_trait]
@@ -770,4 +823,73 @@ impl DocumentStore for PgDocumentStore {
 /// and by the fakes.
 fn new_group_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use kb_ports::{KnowledgeBaseId, MetadataFilter};
+
+    use super::{DocumentFilter, ScopeBind, scope_sql};
+
+    #[test]
+    fn an_empty_filter_binds_only_the_tenant() {
+        let (sql, binds) = scope_sql(&DocumentFilter::default());
+        assert!(binds.is_empty());
+        assert!(sql.contains("d.\"tenantId\" = $1"));
+        assert!(!sql.contains("$2"));
+    }
+
+    #[test]
+    fn every_filter_is_one_bound_parameter_and_never_interpolated() {
+        let filter = DocumentFilter {
+            knowledge_base_ids: vec![
+                KnowledgeBaseId("kb-1".into()),
+                KnowledgeBaseId("kb-2".into()),
+            ],
+            category: Some("cat-1".into()),
+            external_refs: Some(vec!["ku-1".into()]),
+            language: Some("id".into()),
+            metadata: vec![
+                MetadataFilter {
+                    key: "year".into(),
+                    values: vec!["2024".into(), "2025".into()],
+                },
+                MetadataFilter {
+                    key: "draft".into(),
+                    values: vec!["true".into()],
+                },
+            ],
+        };
+        let (sql, binds) = scope_sql(&filter);
+
+        assert_eq!(
+            binds,
+            vec![
+                ScopeBind::TextArray(vec!["kb-1".into(), "kb-2".into()]),
+                ScopeBind::Text("cat-1".into()),
+                ScopeBind::TextArray(vec!["ku-1".into()]),
+                ScopeBind::Text("id".into()),
+                ScopeBind::Metadata {
+                    key: "year".into(),
+                    values: vec!["2024".into(), "2025".into()],
+                },
+                ScopeBind::Metadata {
+                    key: "draft".into(),
+                    values: vec!["true".into()],
+                },
+            ]
+        );
+
+        // Two parameters per metadata predicate, one for everything else, and
+        // the tenant is $1. The highest placeholder must equal the bind count.
+        assert!(sql.contains("$9::text[]"), "{sql}");
+        assert!(!sql.contains("$10"), "{sql}");
+
+        // Caller-supplied text is never part of the statement.
+        for value in ["kb-1", "cat-1", "ku-1", "\"year\"", "2024", "draft"] {
+            assert!(!sql.contains(value), "{value} was interpolated into: {sql}");
+        }
+        // The metadata key is a placeholder, not an identifier.
+        assert!(sql.contains("d.metadata ->> $"));
+    }
 }

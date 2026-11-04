@@ -178,14 +178,17 @@ pub enum ScopeKind {
     Category,
     /// `documentIds: [...]`.
     DocumentIds,
+    /// `externalRefs: [<ref>]`: a caller-side metadata filter (`RET-3`).
+    ExternalRef,
 }
 
 impl ScopeKind {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Tenant,
         Self::KnowledgeBase,
         Self::Category,
         Self::DocumentIds,
+        Self::ExternalRef,
     ];
 
     #[must_use]
@@ -195,6 +198,7 @@ impl ScopeKind {
             Self::KnowledgeBase => "knowledge_base",
             Self::Category => "category",
             Self::DocumentIds => "document_ids",
+            Self::ExternalRef => "external_ref",
         }
     }
 
@@ -255,6 +259,9 @@ pub struct SeedDocument {
     pub tenant: String,
     pub knowledge_base_id: String,
     pub category_id: String,
+    /// Unique caller reference, so an `externalRefs` scope can select exactly
+    /// this document.
+    pub external_ref: String,
     pub canaries: Canaries,
     /// Chunks the ingest produced; the neighbour arm needs more than one.
     pub n_chunks: usize,
@@ -278,6 +285,7 @@ pub struct Scope {
     pub knowledge_base_ids: Vec<String>,
     pub category: Option<String>,
     pub document_ids: Option<Vec<String>>,
+    pub external_refs: Option<Vec<String>>,
 }
 
 /// What one probe does and what it expects.
@@ -348,6 +356,7 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
             knowledge_base_ids: Vec::new(),
             category: None,
             document_ids: None,
+            external_refs: None,
         });
 
         // 2. One knowledge base each.
@@ -370,6 +379,7 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
                 knowledge_base_ids: vec![kb.to_string()],
                 category: None,
                 document_ids: None,
+                external_refs: None,
             });
         }
 
@@ -390,6 +400,7 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
                 knowledge_base_ids: Vec::new(),
                 category: Some(cat.to_string()),
                 document_ids: None,
+                external_refs: None,
             });
         }
 
@@ -405,6 +416,24 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
                 knowledge_base_ids: Vec::new(),
                 category: None,
                 document_ids: Some(vec![first.id.clone()]),
+                external_refs: None,
+            });
+        }
+
+        // 5. One externalRef: the search filter that runs inside every arm
+        //    (`RET-3`). The seeded document carries its own ref, so selecting
+        //    it here is the positive control and every sibling's canary is the
+        //    leak probe.
+        if let Some(first) = of_tenant.first() {
+            scopes.push(Scope {
+                kind: ScopeKind::ExternalRef,
+                label: format!("tenant={tenant} externalRefs=[{}]", first.external_ref),
+                tenant: tenant.clone(),
+                allowed: vec![first.id.clone()],
+                knowledge_base_ids: Vec::new(),
+                category: None,
+                document_ids: None,
+                external_refs: Some(vec![first.external_ref.clone()]),
             });
         }
     }
@@ -1260,6 +1289,7 @@ mod tests {
             tenant: tenant.to_string(),
             knowledge_base_id: kb.to_string(),
             category_id: category.to_string(),
+            external_ref: format!("ref-{id}"),
             canaries: canaries(n),
             n_chunks: 2,
             has_figures: false,

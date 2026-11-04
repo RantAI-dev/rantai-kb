@@ -21,6 +21,11 @@ use crate::types::{
 
 /// What the chunk store is allowed to look at. Currently the empty case is
 /// allowed (it short-circuits to zero results).
+///
+/// Every field narrows the tenant's visible documents and is applied by
+/// `DocumentStore::build_scope` in one Postgres query, so every retrieval arm
+/// inherits the narrowed [`DocumentScope`] instead of post-filtering a ranked
+/// list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DocumentFilter {
     /// Restrict to documents in any of these knowledge bases. Empty = no
@@ -29,6 +34,35 @@ pub struct DocumentFilter {
     /// Restrict to documents whose `categories` array contains this value.
     /// `None` = no category filter.
     pub category: Option<String>,
+    /// Restrict to documents whose `Document.externalRef` is one of these.
+    ///
+    /// `Some(vec![])` selects no document; `None` means the filter is absent.
+    /// The distinction matters because a caller that sends an empty list is
+    /// asking for nothing, not for everything.
+    #[serde(default)]
+    pub external_refs: Option<Vec<String>>,
+    /// Restrict to documents whose JSONB metadata `language` key equals this
+    /// value. There is no dedicated `Document.language` column; the metadata
+    /// key is the stored language (see `CHANGELOG.md`).
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Restrict to documents whose top-level JSONB metadata matches every
+    /// predicate. An empty list means no metadata filter.
+    #[serde(default)]
+    pub metadata: Vec<MetadataFilter>,
+}
+
+/// One top-level JSONB metadata predicate: `metadata[key]` equals one of
+/// `values`.
+///
+/// A document value that is an array matches when any element is in `values`;
+/// a scalar document value matches when it is one of `values`. The scalar
+/// comparison uses the JSON text rendering (`2024`, `true`, `"draft"`), which
+/// is what the HTTP layer validates and normalises.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataFilter {
+    pub key: String,
+    pub values: Vec<String>,
 }
 
 /// What the document store can build a [`DocumentScope`] from.
