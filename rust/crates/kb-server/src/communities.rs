@@ -334,6 +334,10 @@ pub async fn estimate(
 ///
 /// An empty answer is a failure and is never cached, so the next run retries it
 /// instead of serving a hole.
+///
+/// This is the composed helper the tests drive. The CLI calls [`estimate`],
+/// prints it, and then [`summarise_after_estimate`], so the operator sees the
+/// number *before* the first request rather than after the batch.
 pub async fn summarise(
     plans: &[PlannedCommunity],
     summariser: &dyn CommunitySummariser,
@@ -347,10 +351,26 @@ pub async fn summarise(
     if dry_run {
         return Ok((estimate, SummaryRun::default()));
     }
-    if estimate.usd > max_usd + 1e-9 {
+    let run = summarise_after_estimate(plans, summariser, cache, max_usd, estimate.usd).await?;
+    Ok((estimate, run))
+}
+
+/// [`summarise`] after the estimate has been printed.
+///
+/// Re-checks the ceiling rather than trusting the caller: this is the last
+/// function before the first HTTP request, and the refusal has to be here for
+/// "aborting before any call" to be true no matter who calls it.
+pub async fn summarise_after_estimate(
+    plans: &[PlannedCommunity],
+    summariser: &dyn CommunitySummariser,
+    cache: &DiskCache,
+    max_usd: f64,
+    estimated_usd: f64,
+) -> Result<SummaryRun, CliError> {
+    if estimated_usd > max_usd + 1e-9 {
         return Err(CliError::Failed(format!(
-            "estimated ${:.4} exceeds --max-usd ${max_usd:.4}; aborting before any call",
-            estimate.usd
+            "estimated ${estimated_usd:.4} exceeds --max-usd ${max_usd:.4}; aborting before any \
+             call"
         )));
     }
 
@@ -383,7 +403,7 @@ pub async fn summarise(
             }
         }
     }
-    Ok((estimate, run))
+    Ok(run)
 }
 
 /// The price pair for a model: flags, then env, then the built-in table.
@@ -607,17 +627,17 @@ async fn run_build(args: &[String]) -> Result<(), CliError> {
         ));
     }
     let summariser = LlmCommunitySummariser::new(summary_settings)?;
-    let (estimate, run) = summarise(
+    // The estimate is computed and printed *before* the first request: the
+    // operator reads the number, then the ceiling check runs, then the calls
+    // start. Printing it after the batch would make the estimate useless.
+    let estimate = estimate(
         &plans,
-        &summariser,
+        summariser.model(),
         &cache,
         prices,
         parsed.max_tokens,
-        parsed.max_usd,
-        parsed.dry_run,
     )
-    .await?;
-
+    .await;
     println!(
         "communities: {} prompts, {} cached, ~{} prompt tokens (chars/4), {} completion tokens, \
          estimated ${:.4} uncached",
@@ -638,6 +658,8 @@ async fn run_build(args: &[String]) -> Result<(), CliError> {
         println!("dry run: nothing written, no request made");
         return Ok(());
     }
+    let run =
+        summarise_after_estimate(&plans, &summariser, &cache, parsed.max_usd, estimate.usd).await?;
 
     if run.summaries.is_empty() {
         return Err(CliError::Failed(format!(
