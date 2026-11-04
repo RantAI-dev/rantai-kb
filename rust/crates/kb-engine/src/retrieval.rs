@@ -1229,9 +1229,25 @@ async fn execute_pipeline_with_plan(
                 })
                 .collect();
 
+            // With a relevance floor (RET-2) every candidate needs a score, or the
+            // floor would drop every hit below `final_k` for having none and cut
+            // the answer to `final_k` hits. So the reranker scores them all (a
+            // rerank API bills per document sent, not per result returned), while
+            // the order below stays exactly the floorless one: the first
+            // `final_k` by rerank score, the rest in fused order.
+            let request_k = if opts.min_score.is_some() {
+                u32::try_from(candidates.len())
+                    .unwrap_or(u32::MAX)
+                    .max(final_k)
+            } else {
+                final_k
+            };
             let rerank_timeout = std::time::Duration::from_millis(opts.rerank_timeout_ms.max(100));
-            match tokio::time::timeout(rerank_timeout, reranker.rerank(query, candidates, final_k))
-                .await
+            match tokio::time::timeout(
+                rerank_timeout,
+                reranker.rerank(query, candidates, request_k),
+            )
+            .await
             {
                 Ok(Ok(ordered)) => {
                     // Remember the fused order so hits the reranker did not return are
@@ -1243,7 +1259,13 @@ async fn execute_pipeline_with_plan(
                         hit_map.entry(h.chunk.id.0.clone()).or_default().push(h);
                     }
                     let mut reordered: Vec<SearchHit> = Vec::new();
+                    // Scores of candidates past `final_k`, attached in fused order.
+                    let mut tail_scores: HashMap<String, f32> = HashMap::new();
                     for (rank, item) in ordered.into_iter().enumerate() {
+                        if rank >= final_k as usize {
+                            tail_scores.entry(item.id.0.clone()).or_insert(item.score);
+                            continue;
+                        }
                         if let Some(hits_for_id) = hit_map.get_mut(&item.id.0) {
                             if !hits_for_id.is_empty() {
                                 let mut hit = hits_for_id.remove(0);
@@ -1259,6 +1281,9 @@ async fn execute_pipeline_with_plan(
                         if let Some(remaining_hits) = hit_map.get_mut(&id) {
                             for mut hit in remaining_hits.drain(..) {
                                 hit.rank = reordered.len() as u32;
+                                if let Some(score) = tail_scores.get(&id) {
+                                    hit.rerank_score = Some(*score);
+                                }
                                 reordered.push(hit);
                             }
                         }

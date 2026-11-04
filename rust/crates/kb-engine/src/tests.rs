@@ -1460,6 +1460,63 @@ mod pipeline_tests {
     }
 
     #[tokio::test]
+    async fn a_floor_scores_hits_past_rerank_final_k_instead_of_dropping_them() {
+        // Before: the reranker returned only `rerank_final_k` results, the rest
+        // had no rerank score, and any floor cut the answer to `final_k` hits.
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        five_hits(&chunk_store);
+        let base = RetrievalOptions {
+            max_chunks: 5,
+            rerank_enabled: true,
+            rerank_final_k: 2,
+            ..RetrievalOptions::default()
+        };
+        let run = |opts: RetrievalOptions| {
+            let (d, c, e, r) = (
+                doc_store.clone(),
+                chunk_store.clone(),
+                embedder.clone(),
+                reranker.clone(),
+            );
+            let scope = scope.clone();
+            async move {
+                execute_pipeline(
+                    &(d as Arc<_>),
+                    &(c as Arc<_>),
+                    &(e as Arc<_>),
+                    &(r as Arc<_>),
+                    &noop_expander(),
+                    &scope,
+                    "query",
+                    &opts,
+                    &SystemClock,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        let floorless = run(base.clone()).await;
+        // The fake scores 1.0, 0.95, 0.90, 0.85, 0.80: a 0.5 floor keeps all five.
+        let floored = run(RetrievalOptions {
+            min_score: Some(0.5),
+            ..base
+        })
+        .await;
+        let ids = |o: &crate::retrieval::RetrievalOutcome| -> Vec<String> {
+            o.chunks.iter().map(|c| c.chunk.id.0.clone()).collect()
+        };
+        assert_eq!(floored.chunks.len(), 5, "no hit lost for lack of a score");
+        assert_eq!(
+            ids(&floored),
+            ids(&floorless),
+            "the floor only removes, never reorders"
+        );
+        assert!(floored.chunks.iter().all(|c| c.rerank_score.is_some()));
+        assert_eq!(floored.floor.expect("a floor ran").dropped, 0);
+    }
+
+    #[tokio::test]
     async fn a_reranked_search_floors_on_the_rerank_score() {
         let (doc_store, chunk_store, embedder, reranker) = setup();
         let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
