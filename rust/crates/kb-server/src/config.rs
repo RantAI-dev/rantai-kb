@@ -90,6 +90,9 @@ pub struct Config {
     pub graph_store: GraphStoreChoice,
     /// Whether the graph retrieval arm runs (`KB_GRAPH_ARM`).
     pub graph_arm: GraphArmSettings,
+    /// The tree arm's tunables (`KB_TREE_ARM`, DEC-4). `None` turns it off,
+    /// which is the default and leaves the pipeline unchanged.
+    pub tree_arm: Option<kb_engine::TreeArmConfig>,
     /// In-process ingest worker: whether it runs, and how it is tuned.
     pub worker: WorkerConfig,
     /// Reported by `GET /health` (`KB_VERSION`).
@@ -489,6 +492,22 @@ impl Config {
         // byte-identical to the previous release unless an operator opts in
         // (or a request sends `adaptiveArms`).
         let adaptive_arms = bool_flag(&lookup, "KB_ADAPTIVE_ARMS", false);
+        // The tree arm (DEC-4). Off by default: the classifier gate and the
+        // outline ingest cost are both opt-in, and a pipeline identical to the
+        // previous release is the default the tests pin.
+        let tree_arm = if bool_flag(&lookup, "KB_TREE_ARM", false) {
+            let weight = float_var(&lookup, "KB_TREE_ARM_WEIGHT", 0.5)?;
+            if !weight.is_finite() || weight < 0.0 {
+                bail!("KB_TREE_ARM_WEIGHT must be a finite number >= 0, got {weight}");
+            }
+            Some(kb_engine::TreeArmConfig {
+                weight,
+                nodes: int_var(&lookup, "KB_TREE_ARM_NODES", 5u32)?.max(1) as usize,
+                ..kb_engine::TreeArmConfig::default()
+            })
+        } else {
+            None
+        };
         // Defaults keep the pre-L.4 behaviour (every candidate, full text, the
         // reranker client's own 20 s ceiling). A CPU-only box opts into a budget,
         // e.g. 5 candidates of 200 chars (`docs/eval-baseline.md` §8).
@@ -878,6 +897,7 @@ impl Config {
             entity_extractor,
             graph_store,
             graph_arm,
+            tree_arm,
             worker,
             version,
             request_timeout: Duration::from_secs(30),
@@ -1158,6 +1178,41 @@ mod tests {
         map.insert("KB_MIN_SCORE", "not-a-number");
         let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
         assert!(err.to_string().contains("KB_MIN_SCORE"), "{err}");
+    }
+
+    #[test]
+    fn test_tree_arm_is_off_by_default_and_settable() {
+        let load = |vars: &[(&'static str, &'static str)]| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            for (k, v) in vars {
+                map.insert(*k, *v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .tree_arm
+        };
+        assert_eq!(load(&[]), None, "the tree arm must be opt-in");
+        assert_eq!(load(&[("KB_TREE_ARM", "false")]), None);
+        let arm = load(&[
+            ("KB_TREE_ARM", "true"),
+            ("KB_TREE_ARM_WEIGHT", "0.25"),
+            ("KB_TREE_ARM_NODES", "3"),
+        ])
+        .expect("the arm is on");
+        assert!((arm.weight - 0.25).abs() < f32::EPSILON);
+        assert_eq!(arm.nodes, 3);
+        assert_eq!(arm.pages_per_node, 5, "the prototype's five gold pages");
+        assert_eq!(arm.rrf_k, 60, "the pipeline's RRF constant");
+
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_TREE_ARM", "true");
+        map.insert("KB_TREE_ARM_WEIGHT", "-1");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        assert!(err.to_string().contains("KB_TREE_ARM_WEIGHT"), "{err}");
     }
 
     #[test]

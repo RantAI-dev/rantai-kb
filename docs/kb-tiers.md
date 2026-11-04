@@ -200,6 +200,9 @@ numbers and how to override a setting.
 | `KB_CACHE_DIR` | directory for content-addressed caches | unset: no cache |
 | `KB_MIN_SCORE` | relevance floor: reranker score, else dense cosine (a request's `minScore` overrides it) | unset: no floor |
 | `KB_ADAPTIVE_ARMS` | skip the arms a query's class cannot use (RET-5; a request's `adaptiveArms` overrides it); skipped arms are named in `stats.skippedArms` | `false` (every arm runs) |
+| `KB_TREE_ARM` | navigate a document's section outline for `structural` questions (DEC-4); chunks carry the `tree` arm and `stats.treeArm` | `false` |
+| `KB_TREE_ARM_WEIGHT` | RRF weight of the tree arm's list | `0.5` |
+| `KB_TREE_ARM_NODES` | outline nodes kept per query | `5` |
 
 A tier is a **preset**: it fills in role defaults; any explicit `KB_*` setting wins.
 `kb-server setup` checks the VRAM budget and refuses a combination that cannot fit next to

@@ -64,17 +64,24 @@ pub enum Arm {
     /// (the page index search and the chunk fetch), and the row reads the chunks
     /// the server tagged `page` in `retrieval.arms`. It only ever sees PDFs.
     Page,
+    /// The tree arm (`DEC-4`): a structural question scores the outline nodes
+    /// of the caller's visible documents, and the chunks on the winning nodes'
+    /// pages are fetched by (document, page). Like the page arm it has two
+    /// places a scope hole could hide — the outline read and the page fetch —
+    /// and the row reads the chunks the server tagged `tree`.
+    Tree,
 }
 
 impl Arm {
     /// Every arm, in the order the report lists them.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Vector,
         Self::Bm25,
         Self::Neighbour,
         Self::Figure,
         Self::Graph,
         Self::Page,
+        Self::Tree,
         Self::Entity,
     ];
 
@@ -87,6 +94,7 @@ impl Arm {
             Self::Figure => "figure",
             Self::Graph => "graph",
             Self::Page => "page",
+            Self::Tree => "tree",
             Self::Entity => "entity",
         }
     }
@@ -103,6 +111,7 @@ impl Arm {
             Self::Figure => Some("figure"),
             Self::Graph => Some("graph"),
             Self::Page => Some("page"),
+            Self::Tree => Some("tree"),
             Self::Entity => None,
         }
     }
@@ -121,6 +130,7 @@ impl Arm {
             "figure" => Some(Self::Figure),
             "graph" => Some(Self::Graph),
             "page" => Some(Self::Page),
+            "tree" => Some(Self::Tree),
             _ => None,
         }
     }
@@ -131,7 +141,7 @@ impl Arm {
         match self {
             Self::Entity => ProbeKind::DocumentIntelligence,
             Self::Figure => ProbeKind::SearchOrAsset,
-            Self::Vector | Self::Bm25 | Self::Neighbour | Self::Graph | Self::Page => {
+            Self::Vector | Self::Bm25 | Self::Neighbour | Self::Graph | Self::Page | Self::Tree => {
                 ProbeKind::Search
             }
         }
@@ -506,6 +516,19 @@ pub fn canary_query(document: &SeedDocument, arm: Arm) -> String {
         // `stub_embeddings`' `/page-embeddings`, which puts every page at the
         // top of every query.
         Arm::Page => document.canaries.vector.clone(),
+        // The tree arm only runs for a structural question. The query keeps
+        // only the canary sentence's digit-free words: a token mixing letters
+        // and digits is an *exact* query to the production classifier, which
+        // would take precedence over `structural` and skip the arm.
+        Arm::Tree => {
+            let words: Vec<&str> = document
+                .canaries
+                .vector
+                .split_whitespace()
+                .filter(|word| !word.chars().any(|c| c.is_ascii_digit()))
+                .collect();
+            format!("what does section 1.1 say about {}", words.join(" "))
+        }
         Arm::Entity => document.id.clone(),
     }
 }
@@ -1010,6 +1033,12 @@ pub fn unreachable_arm_reason(arm: Arm, cell: &Cell) -> Option<String> {
              it measures the route, not the arm",
             cell.scope.as_str()
         )),
+        Arm::Tree if !cell.scope.reaches_pipeline_arms() => Some(format!(
+            "a `{}`-scoped search is answered by one dense search and never reaches the \
+             tree arm, so this cell's positive control is unreachable by construction: \
+             it measures the route, not the arm",
+            cell.scope.as_str()
+        )),
         _ => None,
     }
 }
@@ -1037,6 +1066,11 @@ pub fn coverage_note(arm: Arm) -> &'static str {
             "chunks whose retrieval.arms include `page`, from POST /v1/search: chunks on the \
              PDF pages the page-image arm ranked inside the caller's scope, fetched by id. \
              Only PDFs have pages, so the row needs a PDF corpus (`eval leak --pdf`)"
+        }
+        Arm::Tree => {
+            "chunks whose retrieval.arms include `tree`, from POST /v1/search: chunks on the \
+             section pages the outline scored inside the caller's scope, fetched by \
+             (document, page)"
         }
         Arm::Entity => "GET /v1/documents/:id/intelligence for a document id",
     }
@@ -1807,6 +1841,32 @@ mod tests {
         assert_eq!(Arm::from_wire("page"), Some(Arm::Page));
         assert!(Arm::ALL.contains(&Arm::Page));
         assert_eq!(Arm::Page.probe_kind(), ProbeKind::Search);
+    }
+
+    #[test]
+    fn the_tree_arm_is_named_on_the_wire_and_read_back() {
+        assert_eq!(Arm::Tree.as_str(), "tree");
+        assert_eq!(Arm::Tree.wire_label(), Some("tree"));
+        assert_eq!(Arm::from_wire("tree"), Some(Arm::Tree));
+        assert!(Arm::ALL.contains(&Arm::Tree));
+        assert_eq!(Arm::Tree.probe_kind(), ProbeKind::Search);
+    }
+
+    #[test]
+    fn the_tree_arm_query_is_structural_so_the_production_gate_runs_it() {
+        let document = doc("doc-a", "A", "kb0", "cat0", 1);
+        let query = canary_query(&document, Arm::Tree);
+        let words: Vec<&str> = document
+            .canaries
+            .vector
+            .split_whitespace()
+            .filter(|word| !word.chars().any(|c| c.is_ascii_digit()))
+            .collect();
+        assert!(query.ends_with(&words.join(" ")), "{query}");
+        // The production classifier labels "section N" structural; the exact
+        // wording is pinned here so a change to this query cannot silently turn
+        // the tree probe into an ordinary question the gate skips.
+        assert!(query.contains("section 1.1"), "{query}");
     }
 
     /// `documentIds` never reaches the page arm, and the report has to say that

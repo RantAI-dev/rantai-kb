@@ -25,6 +25,7 @@ use crate::QueryExpander;
 use crate::graph_arm::{GraphArm, GraphRanking};
 use crate::page_arm::PageArm;
 use crate::timing::{Clock, StageTimings, Stopwatch, stage_span};
+use crate::tree_arm::{TreeArm, TreeStats, fuse_tree, tree_chunk_ids};
 
 /// Parameters for one retrieval execution.
 #[derive(Clone)]
@@ -61,6 +62,10 @@ pub struct RetrievalOptions {
     pub graph_arm: Option<std::sync::Arc<GraphArm>>,
     /// The page-image arm, when configured. `None` leaves the pipeline as it was.
     pub page_arm: Option<std::sync::Arc<PageArm>>,
+    /// The tree arm (`DEC-4`), when `KB_TREE_ARM` is on. `None` leaves the
+    /// pipeline byte-identical to the previous release; `Some` only runs it for
+    /// queries the classifier labels `structural`.
+    pub tree_arm: Option<std::sync::Arc<TreeArm>>,
     /// Optional recency/authority boost (`RET-4`). `None` — or a config with
     /// neither boost — leaves the ranking exactly as it was.
     pub boost: Option<BoostConfig>,
@@ -93,6 +98,7 @@ impl fmt::Debug for RetrievalOptions {
             .field("hybrid_bm25_enabled", &self.hybrid_bm25_enabled)
             .field("graph_arm", &self.graph_arm.as_ref().map(|_| "<GraphArm>"))
             .field("page_arm", &self.page_arm.as_ref().map(|a| a.config))
+            .field("tree_arm", &self.tree_arm.as_ref().map(|a| a.config))
             .field("boost", &self.boost)
             .field("adaptive_arms", &self.adaptive_arms)
             .field(
@@ -124,6 +130,7 @@ impl Default for RetrievalOptions {
             rerank_enabled: false,
             graph_arm: None,
             page_arm: None,
+            tree_arm: None,
             boost: None,
             boost_now: None,
             adaptive_arms: false,
@@ -210,6 +217,10 @@ pub struct RetrievalOutcome {
     /// `stats.skippedArms`). `None` on a default search, so an old client sees
     /// exactly the earlier shape.
     pub adaptive: Option<AdaptiveStats>,
+    /// `Some` only when the tree arm ran and had nodes to offer (`stats.treeArm`).
+    /// `None` on every ordinary search, so an old client sees exactly the
+    /// earlier shape.
+    pub tree: Option<TreeStats>,
     /// What each stage cost. Always present: a request nobody times is a
     /// request nobody can make faster, and the numbers are the only evidence
     /// a retrieval change can be judged by.
@@ -1155,7 +1166,45 @@ async fn execute_pipeline_with_plan(
     };
     timings.graph_arm_ms = graph_sw.elapsed_ms();
 
+    // 4c. The tree arm (`DEC-4`): structural questions only, never the full
+    // corpus. The classifier runs regardless of adaptive mode, because the
+    // gate is a property of the question, not of whether other arms were
+    // skipped. A failed outline read or page fetch is one more degraded arm;
+    // the candidates already scored go out unchanged (AGENTS rule 6).
+    let mut tree_stats: Option<TreeStats> = None;
+    let mut tree_ids: HashSet<ChunkId> = HashSet::new();
+    let tree_class = opts.tree_arm.as_ref().map(|_| classify_query(query).class);
+    if let (Some(arm), Some(QueryClass::Structural)) = (opts.tree_arm.as_ref(), tree_class) {
+        match arm.rank(doc_store, index, scope, query).await {
+            Ok(ranking) => {
+                if !ranking.chunks.is_empty() {
+                    tree_ids = tree_chunk_ids(&ranking.chunks);
+                    candidates = fuse_tree(candidates, ranking.chunks, &arm.config);
+                }
+                if ranking.stats.nodes > 0 {
+                    tree_stats = Some(ranking.stats);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "tree arm failed (non-fatal)");
+                degrades.push(RetrievalDegrade::TreeArmFailed);
+            }
+        }
+    }
+
     let mut hits: Vec<SearchHit> = candidates.into_iter().map(candidate_to_hit).collect();
+
+    // A tree hit is one the outline brought in; the text arms never scored it.
+    for hit in &mut hits {
+        if tree_ids.contains(&hit.chunk.id) {
+            hit.retrieval = Some(
+                hit.retrieval
+                    .clone()
+                    .unwrap_or_else(|| RetrievalProvenance::unscored(ProvenanceArm::Tree))
+                    .with_arm(ProvenanceArm::Tree),
+            );
+        }
+    }
 
     // The graph arm's rank is provenance, not a score: the fused score a graph
     // chunk carries is an RRF sum like everyone else's, and comparing it to
@@ -1384,6 +1433,7 @@ async fn execute_pipeline_with_plan(
                     floor: floor_stats,
                     boost: opts.boost.as_ref().map(|_| BoostStats::default()),
                     adaptive: None,
+                    tree: tree_stats,
                     timings,
                 });
             }
@@ -1680,6 +1730,7 @@ async fn execute_pipeline_with_plan(
         floor: floor_stats,
         boost: boost_stats,
         adaptive: None,
+        tree: tree_stats,
         timings,
     })
 }

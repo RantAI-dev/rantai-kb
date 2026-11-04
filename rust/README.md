@@ -3,6 +3,9 @@
 | `KB_FIGURE_VLM_TIMEOUT_MS` | Figure gate evaluation timeout in ms | `15000` |
 | `KB_MIN_SCORE` | Relevance floor for `/v1/search`: reranker score when a reranker ran, else dense cosine; a request's `minScore` overrides it | `None` (no floor) |
 | `KB_ADAPTIVE_ARMS` | Classify each query and skip the retrieval arms its class cannot use (RET-5); a request's `adaptiveArms` overrides it. Skipped arms are named in `stats.skippedArms` | `false` |
+| `KB_TREE_ARM` | Navigate a document's section outline for questions the classifier labels `structural` (DEC-4). Contributed chunks carry `retrieval.arms: ["tree"]` and `stats.treeArm` reports `{nodes, pages}`. Ingest always stores `Document.metadata.outline`; this switch gates only the search arm | `false` |
+| `KB_TREE_ARM_WEIGHT` | RRF weight of the tree arm's page list when it is fused with the text candidates | `0.5` |
+| `KB_TREE_ARM_NODES` | Outline nodes the tree arm keeps per query (the best-scoring sections) | `5` |
 | **Qdrant Store (the only chunk store)** | | |
 | `QDRANT_GRPC_URL` | Qdrant gRPC endpoint (e.g. `http://127.0.0.1:16334`) | `http://127.0.0.1:16334` |
 | `QDRANT_URL` | Alternative Qdrant URL if gRPC URL is unset | `http://127.0.0.1:16334` |
