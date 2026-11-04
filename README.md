@@ -42,6 +42,10 @@ rust/scripts/kb-dev.sh up lite-en             # CPU only; lite-en is the English
 rust/scripts/kb-dev.sh key my-tenant          # copy the key it prints
 ```
 
+`up` needs Docker. `setup` also needs a Rust toolchain (or `KB_SERVER_BIN` pointing at a
+`kb-server` binary); without one, copy `rust/deploy/.env.example` to
+`rust/deploy/.env` and start at `up`. Only the cloud tier needs an API key.
+
 Then upload a file and search it:
 
 ```bash
