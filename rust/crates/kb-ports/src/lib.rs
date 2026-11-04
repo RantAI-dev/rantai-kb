@@ -19,6 +19,9 @@ mod traits;
 mod types;
 
 pub use blob::{BlobStore, asset_path, document_path, page_image_path, sanitize_filename};
+/// The section outline a document's extraction carries (`DEC-4`), re-exported so
+/// adapters that implement [`Extractor::outline`] need not depend on kb-core.
+pub use kb_core::tree::Outline;
 #[cfg(feature = "contract")]
 pub mod contract;
 pub use error::{EngineError, PortError, RetrievalDegrade};

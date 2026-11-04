@@ -473,7 +473,32 @@ impl IngestWorker {
         // and the page text already parsed. A failure here is logged and
         // non-fatal; the document indexes normally and the tree arm simply has
         // nothing for it until a re-ingest.
-        if let Some(outline) = extraction.outline.as_ref() {
+        // An extraction with no outline (a cache entry from before DEC-4, or an
+        // OCR/layout parser) gets one from the extractor's free outline read,
+        // so a paid extraction is never repeated for it.
+        let fallback_outline = if extraction.outline.is_none() {
+            let pages: Vec<String> = extraction
+                .page_map
+                .as_ref()
+                .map(|map| {
+                    let len = map.iter().map(|p| p.page as usize + 1).max().unwrap_or(0);
+                    let mut pages = vec![String::new(); len];
+                    for p in map {
+                        pages[p.page as usize].clone_from(&p.text);
+                    }
+                    pages
+                })
+                .unwrap_or_default();
+            let outline_mime = if extraction.file_type.eq_ignore_ascii_case("pdf") {
+                "application/pdf"
+            } else {
+                mime
+            };
+            self.extractor.outline(outline_mime, &bytes, &pages).await
+        } else {
+            None
+        };
+        if let Some(outline) = extraction.outline.as_ref().or(fallback_outline.as_ref()) {
             let mut outline = outline.clone();
             outline.document_title = Some(title.clone());
             let patch = json!({ "outline": outline });

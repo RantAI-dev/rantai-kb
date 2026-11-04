@@ -487,6 +487,21 @@ pub trait ProgressSink: Send + Sync {
 /// or one of the local parsers; the port only cares about the result shape.
 #[async_trait]
 pub trait Extractor: Send + Sync {
+    /// The section outline of `file_bytes` (DEC-4), read without re-extracting
+    /// the document: PDF bookmarks, else numbered headings in `pages` (the
+    /// extraction's own page text, zero-based). Ingest calls it when an
+    /// extraction carries no outline — a cache entry from before DEC-4, or a
+    /// parser (OCR, layout API) that does not produce one — so no paid
+    /// extraction is ever repeated to get one. `None` when the format has none.
+    async fn outline(
+        &self,
+        _mime_type: &str,
+        _file_bytes: &[u8],
+        _pages: &[String],
+    ) -> Option<kb_core::tree::Outline> {
+        None
+    }
+
     /// Extract text (and, when the format has them, figures) from `file_bytes`.
     async fn extract(
         &self,

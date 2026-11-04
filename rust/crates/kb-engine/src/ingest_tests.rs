@@ -639,6 +639,89 @@ async fn a_pdf_outline_is_stored_in_document_metadata() {
     assert_eq!(stored["document_title"], "Quarterly report");
 }
 
+/// An extractor whose extraction carries no outline (a pre-DEC-4 cache entry,
+/// or an OCR parser) but whose free outline read finds one.
+struct OutlineOnlyOnRequest {
+    inner: FakeExtractor,
+    outline_calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl kb_ports::Extractor for OutlineOnlyOnRequest {
+    async fn extract(
+        &self,
+        filename: &str,
+        mime_type: &str,
+        file_bytes: &[u8],
+    ) -> Result<ExtractionResult, PortError> {
+        self.inner.extract(filename, mime_type, file_bytes).await
+    }
+
+    async fn outline(
+        &self,
+        mime_type: &str,
+        _file_bytes: &[u8],
+        _pages: &[String],
+    ) -> Option<kb_core::tree::Outline> {
+        self.outline_calls.fetch_add(1, Ordering::SeqCst);
+        (mime_type == "application/pdf").then(|| kb_core::tree::Outline {
+            document_title: None,
+            method: kb_core::tree::OutlineMethod::Headings,
+            nodes: vec![kb_core::tree::OutlineNode {
+                title: "3.1 Scope".into(),
+                level: 2,
+                start_page: 0,
+                end_page: 0,
+            }],
+        })
+    }
+}
+
+/// No paid extraction is repeated to get an outline: when the extraction has
+/// none, ingest asks the extractor's free outline read and stores that.
+#[tokio::test]
+async fn an_extraction_without_an_outline_gets_one_from_the_outline_read() {
+    let extractor = Arc::new(OutlineOnlyOnRequest {
+        inner: FakeExtractor::returning_result(ExtractionResult {
+            content: long_text(),
+            file_type: "pdf".to_string(),
+            outline: None,
+            ..ExtractionResult::default()
+        }),
+        outline_calls: AtomicUsize::new(0),
+    });
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let worker = worker_with(
+        jobs.clone(),
+        documents.clone(),
+        chunks,
+        blobs,
+        extractor.clone(),
+        Arc::new(FakeEmbedder::default()),
+    );
+    jobs.push(job());
+    assert!(worker.run_once().await.unwrap());
+
+    assert_eq!(extractor.outline_calls.load(Ordering::SeqCst), 1);
+    let docs = documents.docs.read().unwrap();
+    let meta = docs[&tenant()]
+        .iter()
+        .find(|d| d.id.as_str() == DOC)
+        .expect("the document");
+    let stored = meta
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("outline"))
+        .expect("metadata.outline from the fallback read");
+    assert_eq!(stored["method"], "headings");
+    assert_eq!(stored["nodes"][0]["title"], "3.1 Scope");
+}
+
 /// A PDF whose content is its pages is chunked page by page: every stored
 /// chunk names its page, and none holds text from two pages.
 #[tokio::test]

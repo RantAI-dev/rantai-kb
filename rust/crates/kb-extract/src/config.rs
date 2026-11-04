@@ -71,9 +71,10 @@ pub struct ExtractConfig {
 /// Bump when a change to this crate alters extraction output for the same
 /// file and configuration, so `KB_CACHE_DIR` entries from before are not reused.
 ///
-/// 3: PDF results now carry the section outline (`DEC-4`), so an extraction
-/// cached by epoch 2 would return a document with no `metadata.outline`.
-pub const EXTRACT_CACHE_EPOCH: u32 = 3;
+/// Not bumped for the DEC-4 outline: a bump would discard cached OCR, some of
+/// it paid. An entry without an outline gets one at ingest through
+/// `Extractor::outline`, a free bookmark/heading read.
+pub const EXTRACT_CACHE_EPOCH: u32 = 2;
 
 impl ExtractConfig {
     /// What a cached extraction depends on: which parsers run, in which order,

@@ -17,7 +17,11 @@
     carries `title`, `level`, `start_page` (zero-based) and `end_page`.
     Bookmarks and page text are already parsed, so there is no model call and
     no second parse. Existing documents get an outline on their next ingest or
-    `kb-server reindex`.
+    `kb-server reindex`. A cached extraction from before this release, or one
+    from an OCR or layout parser, carries no outline; ingest then calls the new
+    `Extractor::outline` port method (a free bookmark/heading read) rather than
+    invalidating the extraction cache, so no paid OCR is repeated. Also stored in
+    `metadata`, so `GET /v1/documents` responses grow by the outline.
   - **Search** runs the arm only when `KB_TREE_ARM` is on **and**
     `kb_core::classify_query` labels the question `structural`. It reads
     outlines only for documents in the caller's `DocumentScope`, scores nodes

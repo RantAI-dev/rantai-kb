@@ -97,6 +97,27 @@ impl Extractor for ProductionExtractor {
             .await
             .map_err(PortError::from)
     }
+
+    async fn outline(
+        &self,
+        mime_type: &str,
+        file_bytes: &[u8],
+        pages: &[String],
+    ) -> Option<kb_core::tree::Outline> {
+        if !mime_type.eq_ignore_ascii_case("application/pdf") {
+            return None;
+        }
+        let bytes = file_bytes.to_vec();
+        let pages = pages.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let pdfium = crate::pdfium::get_pdfium().ok()?;
+            let outline = crate::outline::extract_outline(pdfium, &bytes, &pages);
+            (!outline.nodes.is_empty()).then_some(outline)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
 }
 
 /// Build the full production extractor wired to the configured layout chain and vision OCR.
