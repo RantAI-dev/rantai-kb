@@ -59,6 +59,7 @@ impl Harness {
             expansion_paraphrases: 3,
             hybrid_bm25_enabled: true,
             rerank_enabled: false,
+            adaptive_arms: false,
         };
 
         let state = AppState::from_parts(

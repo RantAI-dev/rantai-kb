@@ -83,6 +83,10 @@ RUN FLAGS
                         corpus files uploaded at once (default 16)
     --allow-failures    exit 0 even when queries or corpus files failed
                         (the outputs are written either way)
+    --adaptive-arms     force per-request adaptive arm choice on (RET-5)
+    --no-adaptive-arms  force it off, whatever the server default is
+                        (default: omit `adaptiveArms`; env KB_EVAL_ADAPTIVE_ARMS
+                        does the same)
 
 LEAK FLAGS
     --base-url URL      kb-server to probe (required)
@@ -103,6 +107,8 @@ LEAK FLAGS
 
 OUTPUTS (in --out)
     metrics.json  every metric with a 95% bootstrap CI, plus latency
+    latency.json  one record per query: id, client latency, status, and the
+                  server's queryClass/skippedArms when adaptive mode ran
     report.md     the same, as a table
     run.trec      document-level TREC run
     run.page.trec page-level TREC run
@@ -143,6 +149,7 @@ async fn eval(args: &[String]) -> Result<(), EvalError> {
     config.job_timeout = Duration::from_secs(parse_uint_u64(args, "--timeout", 900)?);
     config.poll_interval = Duration::from_millis(parse_uint_u64(args, "--poll-ms", 500)?);
     config.ingest_concurrency = parse_uint(args, "--ingest-concurrency", 16)?.max(1);
+    config.adaptive_arms = adaptive_override(args);
 
     let allow_failures = has_flag(args, "--allow-failures");
     let report = run_harness(config).await?;
@@ -490,6 +497,28 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 
 fn has_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
+}
+
+/// `--adaptive-arms` / `--no-adaptive-arms`, with `KB_EVAL_ADAPTIVE_ARMS` as
+/// the environment fallback. `None` omits the request field, so the server's
+/// `KB_ADAPTIVE_ARMS` decides — the A/B must be able to test the *default* too.
+fn adaptive_override(args: &[String]) -> Option<bool> {
+    if has_flag(args, "--adaptive-arms") {
+        return Some(true);
+    }
+    if has_flag(args, "--no-adaptive-arms") {
+        return Some(false);
+    }
+    match std::env::var("KB_EVAL_ADAPTIVE_ARMS")
+        .ok()?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn parse_uint(args: &[String], name: &str, default: usize) -> Result<usize, EvalError> {

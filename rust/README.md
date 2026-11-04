@@ -2,6 +2,7 @@
 | `KB_FIGURE_VLM_MAX` | Maximum number of candidate figures accepted | `2` |
 | `KB_FIGURE_VLM_TIMEOUT_MS` | Figure gate evaluation timeout in ms | `15000` |
 | `KB_MIN_SCORE` | Relevance floor for `/v1/search`: reranker score when a reranker ran, else dense cosine; a request's `minScore` overrides it | `None` (no floor) |
+| `KB_ADAPTIVE_ARMS` | Classify each query and skip the retrieval arms its class cannot use (RET-5); a request's `adaptiveArms` overrides it. Skipped arms are named in `stats.skippedArms` | `false` |
 | **Qdrant Store (the only chunk store)** | | |
 | `QDRANT_GRPC_URL` | Qdrant gRPC endpoint (e.g. `http://127.0.0.1:16334`) | `http://127.0.0.1:16334` |
 | `QDRANT_URL` | Alternative Qdrant URL if gRPC URL is unset | `http://127.0.0.1:16334` |

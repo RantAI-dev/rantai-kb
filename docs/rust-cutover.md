@@ -504,6 +504,45 @@ and 2,000 page units and sets `truncated: true` when a cap is reached. It uses t
 by-ID visibility helper as §16, so a key limited to other knowledge bases gets the same
 404 as an unknown document.
 
+### 19. Additive: adaptive arm choice (`RET-5`, 2026-11-04)
+
+`POST /v1/search` accepts an optional `adaptiveArms: boolean`, and the server accepts a
+default from `KB_ADAPTIVE_ARMS`. Both are off unless set, so an unconfigured server runs
+exactly the arms it ran before this release.
+
+When adaptive mode is on, the query is classified once, locally and without a model, into
+one of six labels: `exact` (an identifier, code or quoted phrase), `factual`, `structural`
+("chapter 2", "section 3.1", "table 4", "page 12"), `relational` ("relationship between X
+and Y", "who … with"), `aggregative` ("main themes", "list every", "how many documents") or
+`topical`. Both English and Indonesian cues are recognised because MIRACL-id is
+Indonesian. The class selects an arm plan; only arms that are clearly useless for the
+class are skipped:
+
+| class | runs | skipped |
+|---|---|---|
+| `exact` | dense, sparse, figure, neighbour, rerank | page image, graph |
+| `factual` | every configured arm | — |
+| `structural` | dense, sparse, page image, figure, neighbour, rerank | graph |
+| `relational` | every configured arm | — |
+| `aggregative` | dense, sparse, neighbour, graph, rerank | page image, figure |
+| `topical` | every configured arm | — |
+
+A skipped arm is not started: the page-image arm does not embed the query or search the
+page index, and the graph arm does not seed or walk the graph. The response reports the
+decision through three additive `stats` fields, present only when adaptive mode ran:
+`queryClass`, `skippedArms` (`[{"arm":"pageImage","reason":"exact query"}]`) and
+`armPlanFallback`. Because the plan can be wrong, an empty result from a plan that skipped
+a candidate-producing arm re-runs the full plan once and sets `armPlanFallback: true`
+instead of returning silence. A failed arm still degrades as before; adaptive mode adds no
+new failure path and changes no existing one.
+
+The evaluation harness takes `--adaptive-arms` / `--no-adaptive-arms` (or
+`KB_EVAL_ADAPTIVE_ARMS=true|false`) per run, and writes `latency.json` beside
+`metrics.json` with one record per query. `kb-server eval classify --queries FILE` prints
+the class distribution of a `queries.tsv` or `queries.jsonl` with the same classifier the
+pipeline uses. Measurement against the p50 −20% / nDCG@10 −0.005 target is pending; the
+commands are in `docs/core/specs/ret-5.md`.
+
 ---
 
 ## 6. Shared Known Issues

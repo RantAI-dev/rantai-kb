@@ -474,7 +474,13 @@ async fn search(
 
     let outcome = state
         .engine
-        .retrieve_with_floor(&query, &scope, Some(max_chunks), body.min_score)
+        .retrieve_with_request(
+            &query,
+            &scope,
+            Some(max_chunks),
+            body.min_score,
+            body.adaptive_arms,
+        )
         .await
         .map_err(ApiError::from)?;
     let mut response = SearchResponseDto::from(outcome);
@@ -520,6 +526,9 @@ fn search_stats(
         stage_timings_ms: stages,
         floor_score_kind,
         floor_dropped,
+        query_class: None,
+        skipped_arms: None,
+        arm_plan_fallback: None,
     }
 }
 

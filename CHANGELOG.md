@@ -62,6 +62,28 @@
   nDCG@10. The thresholds themselves are **not** shipped as a default until the
   calibration has been run.
 
+- **Adaptive arm choice (`RET-5`, off by default).** `POST /v1/search` accepts an
+  optional `adaptiveArms` (boolean) and the server accepts a default from
+  `KB_ADAPTIVE_ARMS`. When on, the query is classified as `exact`, `factual`,
+  `structural`, `relational`, `aggregative` or `topical` (English and Indonesian
+  cues), and the arms that class cannot use are not launched: an exact ID or
+  quoted phrase skips the page-image and entity-graph arms; a structural
+  question ("chapter 2", "page 12") skips the graph; an aggregative one ("main
+  themes", "list every", "how many documents") skips the page-image and figure
+  arms. Factual, relational and topical queries run every arm, exactly as
+  before. Skipping means the arm is not called at all — no query embed, no
+  store round trip — which is where the latency win comes from. The response
+  names the decision, additively and only in adaptive mode:
+  `stats.queryClass`, `stats.skippedArms` (`[{ "arm": "pageImage", "reason":
+  "exact query" }]`) and `stats.armPlanFallback`. If the plan returns nothing
+  and a skipped arm could have contributed candidates, the full plan runs once
+  and `armPlanFallback: true` says so; a failed search is never reported as an
+  empty one. Off, the pipeline is the one every earlier release ran. The eval
+  runner accepts `--adaptive-arms` / `--no-adaptive-arms` (or
+  `KB_EVAL_ADAPTIVE_ARMS`), writes `latency.json` per query, and
+  `kb-server eval classify --queries FILE` prints the class distribution using
+  the same rules.
+
 ### Notes
 
 - **Structure caps.** The route reads at most 20,000 text units and 2,000 page units

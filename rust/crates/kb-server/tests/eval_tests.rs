@@ -45,6 +45,7 @@ fn engine_settings() -> EngineSettings {
         expansion_paraphrases: 3,
         hybrid_bm25_enabled: false,
         rerank_enabled: false,
+        adaptive_arms: false,
     }
 }
 

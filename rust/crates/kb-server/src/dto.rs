@@ -109,6 +109,11 @@ pub struct SearchRequestDto {
     /// is unset unless an operator configured one).
     #[serde(rename = "minScore", default)]
     pub min_score: Option<f32>,
+    /// Per-request adaptive arm choice (RET-5). `Some(true)`/`Some(false)`
+    /// overrides the server's `KB_ADAPTIVE_ARMS`; absent means "use the server
+    /// default", which is off.
+    #[serde(rename = "adaptiveArms", default)]
+    pub adaptive_arms: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -184,6 +189,40 @@ pub struct SearchStatsDto {
         default
     )]
     pub floor_dropped: Option<usize>,
+    /// The question's class (`"exact"`, `"factual"`, `"structural"`,
+    /// `"relational"`, `"aggregative"`, `"topical"`). ADDITIVE RET-5; present
+    /// only when adaptive arm choice ran. Absent on a default search so an old
+    /// client sees exactly the earlier shape.
+    #[serde(
+        rename = "queryClass",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub query_class: Option<String>,
+    /// The arms adaptive mode did not run, each with the class's reason
+    /// (`[{"arm":"pageImage","reason":"exact query"}]`). Empty only when the
+    /// plan skipped nothing or a fallback ran the full plan.
+    #[serde(
+        rename = "skippedArms",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub skipped_arms: Option<Vec<SkippedArmDto>>,
+    /// True when the adaptive plan returned nothing and the full plan was run
+    /// once more. Present only when adaptive mode ran.
+    #[serde(
+        rename = "armPlanFallback",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub arm_plan_fallback: Option<bool>,
+}
+
+/// One arm adaptive mode skipped, as serialised in `stats.skippedArms`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkippedArmDto {
+    pub arm: String,
+    pub reason: String,
 }
 
 /// The per-stage breakdown, in milliseconds.
@@ -461,6 +500,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             degrades: outcome_degrades,
             note: outcome_note,
             floor: outcome_floor,
+            adaptive: outcome_adaptive,
             timings: outcome_timings,
         } = outcome;
         let vector_results = outcome_chunks.iter().filter(|h| !h.is_bm25).count();
@@ -477,6 +517,23 @@ impl From<RetrievalOutcome> for SearchResponseDto {
                 Some(floor.dropped),
             )
         });
+        let (query_class, skipped_arms, arm_plan_fallback) =
+            outcome_adaptive.map_or((None, None, None), |adaptive| {
+                (
+                    Some(adaptive.class.as_str().to_string()),
+                    Some(
+                        adaptive
+                            .skipped_arms
+                            .into_iter()
+                            .map(|skipped| SkippedArmDto {
+                                arm: skipped.arm.as_str().to_string(),
+                                reason: skipped.reason.to_string(),
+                            })
+                            .collect(),
+                    ),
+                    Some(adaptive.arm_plan_fallback),
+                )
+            });
         // The route adds its own stages (scope build, serialisation) and the
         // total afterwards; what the engine knows goes in here.
         let stats = SearchStatsDto {
@@ -505,6 +562,9 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             },
             floor_score_kind,
             floor_dropped,
+            query_class,
+            skipped_arms,
+            arm_plan_fallback,
         };
         SearchResponseDto {
             chunks: Some(chunks),
@@ -958,6 +1018,9 @@ mod tests {
             stage_timings_ms: StageTimingsDto::empty(),
             floor_score_kind: None,
             floor_dropped: None,
+            query_class: None,
+            skipped_arms: None,
+            arm_plan_fallback: None,
         };
         let value = serde_json::to_value(&stats).unwrap();
         for key in [
@@ -980,6 +1043,44 @@ mod tests {
             Some(11),
             "exactly the Bun fields plus stageTimingsMs, nothing renamed away"
         );
+    }
+
+    #[test]
+    fn adaptive_stats_are_additive_and_absent_when_adaptive_mode_did_not_run() {
+        let mut stats = SearchStatsDto {
+            total_time_ms: 5.0,
+            embedding_time_ms: 1.0,
+            vector_search_time_ms: 2.0,
+            entity_search_time_ms: 0.0,
+            graph_search_time_ms: 0.0,
+            fusion_time_ms: 0.5,
+            vector_results: 2,
+            entity_results: 0,
+            graph_results: 0,
+            total_results: 3,
+            stage_timings_ms: StageTimingsDto::empty(),
+            floor_score_kind: None,
+            floor_dropped: None,
+            query_class: None,
+            skipped_arms: None,
+            arm_plan_fallback: None,
+        };
+        let off = serde_json::to_value(&stats).unwrap();
+        assert!(off.get("queryClass").is_none());
+        assert!(off.get("skippedArms").is_none());
+        assert!(off.get("armPlanFallback").is_none());
+
+        stats.query_class = Some("exact".to_string());
+        stats.skipped_arms = Some(vec![SkippedArmDto {
+            arm: "pageImage".to_string(),
+            reason: "exact query".to_string(),
+        }]);
+        stats.arm_plan_fallback = Some(false);
+        let on = serde_json::to_value(&stats).unwrap();
+        assert_eq!(on["queryClass"], "exact");
+        assert_eq!(on["skippedArms"][0]["arm"], "pageImage");
+        assert_eq!(on["skippedArms"][0]["reason"], "exact query");
+        assert_eq!(on["armPlanFallback"], false);
     }
 
     #[test]

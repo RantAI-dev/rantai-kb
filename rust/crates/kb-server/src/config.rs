@@ -485,6 +485,10 @@ impl Config {
         let query_expansion_paraphrases = int_var(&lookup, "KB_QUERY_EXPANSION_PARAPHRASES", 3)?;
 
         let rerank_enabled = bool_flag(&lookup, "KB_RERANK_ENABLED", false);
+        // Adaptive arm choice (RET-5). Off by default: the pipeline must be
+        // byte-identical to the previous release unless an operator opts in
+        // (or a request sends `adaptiveArms`).
+        let adaptive_arms = bool_flag(&lookup, "KB_ADAPTIVE_ARMS", false);
         // Defaults keep the pre-L.4 behaviour (every candidate, full text, the
         // reranker client's own 20 s ceiling). A CPU-only box opts into a budget,
         // e.g. 5 candidates of 200 chars (`docs/eval-baseline.md` §8).
@@ -528,6 +532,7 @@ impl Config {
             expansion_paraphrases: query_expansion_paraphrases,
             hybrid_bm25_enabled,
             rerank_enabled,
+            adaptive_arms,
         };
 
         let pg = PgSettings {
@@ -1153,6 +1158,27 @@ mod tests {
         map.insert("KB_MIN_SCORE", "not-a-number");
         let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
         assert!(err.to_string().contains("KB_MIN_SCORE"), "{err}");
+    }
+
+    #[test]
+    fn test_adaptive_arms_is_off_by_default_and_settable() {
+        let load = |value: Option<&'static str>| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            if let Some(v) = value {
+                map.insert("KB_ADAPTIVE_ARMS", v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .engine
+                .adaptive_arms
+        };
+        assert!(!load(None), "adaptive arms must be opt-in");
+        assert!(!load(Some("")), "empty is the same as unset");
+        assert!(!load(Some("false")));
+        assert!(load(Some("true")));
+        assert!(load(Some("1")));
     }
 
     #[test]
