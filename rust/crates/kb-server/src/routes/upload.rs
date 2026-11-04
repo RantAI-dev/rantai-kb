@@ -46,6 +46,29 @@ impl Upload {
     }
 }
 
+/// Parse the optional `metadata` multipart field: a JSON object, or nothing.
+///
+/// The whole object is stored as `Document.metadata`; the keys are not
+/// interpreted here (a filter or a boost names the key it wants later). A
+/// malformed value is the route's own 400, so a caller learns what to fix
+/// instead of getting a parser message.
+fn parse_upload_metadata(value: Option<&str>) -> Result<Option<serde_json::Value>, ApiError> {
+    let Some(raw) = value.filter(|v| !v.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
+        ApiError::BadRequest(format!(
+            "Invalid 'metadata': expected a JSON object (e.g. {{\"effectiveDate\": \"2025-03-01\"}}): {e}"
+        ))
+    })?;
+    if !parsed.is_object() {
+        return Err(ApiError::BadRequest(
+            "Invalid 'metadata': expected a JSON object of key/value pairs".to_string(),
+        ));
+    }
+    Ok(Some(parsed))
+}
+
 /// Accepted extension check, including the extensionless case: `slice(lastIndexOf("."))`
 /// returns the whole name when there is no dot, so "README" is tested as "readme".
 fn is_accepted_extension(file_name: &str) -> bool {
@@ -108,6 +131,10 @@ pub async fn ingest_document(
         .field("externalRef")
         .filter(|v| !v.is_empty())
         .map(str::to_string);
+    // Additive: an optional JSON object for the document's JSONB metadata, the
+    // same store `RET-3` filters and `RET-4` boosts read. Absent keeps exactly
+    // the metadata an upload had before this field existed.
+    let metadata = parse_upload_metadata(upload.field("metadata"))?;
     let document_type = upload
         .field("documentType")
         .filter(|v| !v.is_empty())
@@ -173,6 +200,7 @@ pub async fn ingest_document(
                 mime_type: upload.content_type.clone().filter(|v| !v.is_empty()),
                 status: "processing".to_string(),
                 external_ref: external_ref.clone(),
+                metadata: metadata.clone(),
             },
             &knowledge_base_ids,
         )

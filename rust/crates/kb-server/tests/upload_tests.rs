@@ -316,3 +316,63 @@ async fn upload_into_another_tenants_or_an_unknown_knowledge_base_is_a_400_and_s
         serde_json::json!(["kb-mine"])
     );
 }
+
+#[tokio::test]
+async fn upload_stores_an_optional_metadata_object() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+
+    let response = h
+        .send_multipart(
+            "/v1/documents",
+            &tenant_key(TENANT),
+            vec![
+                (
+                    "metadata",
+                    r#"{"effectiveDate":"2025-03-01","authority":0.9}"#.to_string(),
+                ),
+                ("file", "policy.txt\u{1}Remote work allowance".to_string()),
+            ],
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let document_id = json_body(response).await["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+
+    let docs = h.documents.docs.read().unwrap();
+    let stored = docs[&TenantId(TENANT.to_string())]
+        .iter()
+        .find(|d| d.id.0 == document_id)
+        .expect("stored document");
+    assert_eq!(
+        stored.metadata,
+        Some(serde_json::json!({"effectiveDate": "2025-03-01", "authority": 0.9}))
+    );
+}
+
+#[tokio::test]
+async fn upload_rejects_metadata_that_is_not_a_json_object() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+
+    for value in ["not json", "[1,2]", "\"text\""] {
+        let response = h
+            .send_multipart(
+                "/v1/documents",
+                &tenant_key(TENANT),
+                vec![
+                    ("metadata", value.to_string()),
+                    ("file", "notes.txt\u{1}hello".to_string()),
+                ],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{value}");
+        assert!(
+            error_text(response).await.contains("metadata"),
+            "{value} should name the field"
+        );
+    }
+    assert!(h.documents.docs.read().unwrap().values().all(Vec::is_empty));
+}

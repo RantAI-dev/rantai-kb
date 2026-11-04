@@ -76,7 +76,7 @@ pub use page_arm::{
 };
 pub use retrieval::{
     BoostStats, FloorScoreKind, FloorStats, RetrievalOptions, RetrievalOutcome, apply_boosts,
-    enrich_titles, execute_pipeline,
+    apply_boosts_now, enrich_titles, execute_pipeline,
 };
 pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
 

@@ -549,6 +549,12 @@ pub struct NewDocument {
     pub mime_type: Option<String>,
     pub status: String,
     pub external_ref: Option<String>,
+    /// Initial JSONB `Document.metadata`. Additive (`RET-4`): the upload route
+    /// accepts an optional JSON object so a caller can set the fields that
+    /// metadata filters (`RET-3`) and boosts (`RET-4`) read, e.g.
+    /// `{"effectiveDate": "2025-03-01", "authority": 0.9}`.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Metadata update patch for a document.

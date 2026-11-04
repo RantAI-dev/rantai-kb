@@ -720,6 +720,18 @@ pub fn apply_boosts(
     stats
 }
 
+/// [`apply_boosts`] at the current wall clock.
+///
+/// Used by the by-id search branch, which does not go through the pipeline but
+/// still has the document rows it read for titles.
+pub fn apply_boosts_now(
+    hits: &mut Vec<SearchHit>,
+    meta: &HashMap<DocumentId, DocumentMeta>,
+    config: &BoostConfig,
+) -> BoostStats {
+    apply_boosts(hits, meta, config, Utc::now())
+}
+
 /// Execute the full retrieval pipeline.
 ///
 /// Every collaborator is passed explicitly rather than behind a context

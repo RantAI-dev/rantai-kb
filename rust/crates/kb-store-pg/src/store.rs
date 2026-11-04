@@ -512,6 +512,7 @@ impl DocumentStore for PgDocumentStore {
             .bind(doc.mime_type.as_deref())
             .bind(&doc.status)
             .bind(doc.external_ref.as_deref())
+            .bind(doc.metadata.as_ref())
             .execute(&mut *tx)
             .await
             .map_err(|e| PortError::Unavailable(format!("pg insert document: {e}")))?;
