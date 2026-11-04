@@ -524,8 +524,12 @@ fn document_scores<'a>(
         .collect()
 }
 
+/// One node as the scorer sees it: its bag of words, its own heading number
+/// (`None` when the title has none), and whether the title says Chapter/Part.
+type NodeText = (Vec<String>, Option<(String, bool)>);
+
 /// BM25 over one document's node titles, k1 1.2 / b 0.75.
-fn bm25(query: &[String], nodes: &[(Vec<String>, Option<(String, bool)>)]) -> Vec<f32> {
+fn bm25(query: &[String], nodes: &[NodeText]) -> Vec<f32> {
     if nodes.is_empty() || query.is_empty() {
         return vec![0.0; nodes.len()];
     }
@@ -622,7 +626,7 @@ pub fn score_tree(query: &str, documents: &[TreeDocument<'_>]) -> Vec<TreeMatch>
     let mut scored: Vec<TreeMatch> = Vec::new();
     for document_index in chosen {
         let document = documents[document_index];
-        let node_texts: Vec<(Vec<String>, Option<(String, bool)>)> = document
+        let node_texts: Vec<NodeText> = document
             .nodes
             .iter()
             .map(|node| {
