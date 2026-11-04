@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v0.1.0)"
+        description: "Tag to release (e.g. v0.2.0)"
         required: true
 
 permissions:
@@ -45,6 +45,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: rust/Dockerfile
           push: true
           # arm64 matters here: the on-prem GPU boxes this runs on are aarch64.
           platforms: linux/amd64,linux/arm64
