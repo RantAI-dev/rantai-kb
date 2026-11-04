@@ -57,9 +57,9 @@ The Qdrant retrieval-quality and cross-scope leak gate (the same one CI runs):
 ./rust/scripts/ci-eval-gate.sh
 ```
 
-Bun and Rust no longer share a chunk store, so there is no live search-parity harness. Bun
-reads and writes SurrealDB; Rust reads and writes Qdrant. Production migration is
-`kb-server reindex` (see below).
+Qdrant is the only chunk store, so there is no live search-parity harness. The Bun
+service was removed in v0.2.0 (last Bun release: tag `v0.1.0`); a v0.1.0 deployment
+moves its index with `kb-server reindex` (see below).
 
 ### 4. Adapter Contract Tests
 

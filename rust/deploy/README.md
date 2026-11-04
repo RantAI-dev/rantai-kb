@@ -4,9 +4,10 @@
 S3 (rustfs), the models a tier needs, and the Rust `kb-server` — behind
 one profile per deployment tier. `rust/scripts/kb-dev.sh` is the interface.
 
-This is the Rust service. The root `docker-compose.yml` still describes the
-frozen Bun service and is not used here; `rust/scripts/stack-up.sh` remains the
-smoke/eval harness (it starts containers by hand, without compose).
+This is the only deployment stack in the repo. The Bun compose file was removed
+with the Bun service in v0.2.0 (the last Bun release is tag `v0.1.0`);
+`rust/scripts/stack-up.sh` remains the smoke/eval harness (it starts containers
+by hand, without compose).
 
 **Status (2026-10-25):** the `lite-en` profile was run end to end on a 2-core-class Linux host:
 `kb-dev.sh up lite-en --build` healthy in 3 min (image built from `rust/Dockerfile`), key created,
@@ -311,10 +312,10 @@ and re-ingest: `kb-dev.sh down -v`, then `up <new-tier>`.
 **`down` says no tier is recorded.** `rust/deploy/.tier` was removed or never
 written because `up` failed validation; run `kb-dev.sh down <tier>` once.
 
-**An old Bun stack is still running.** `kb-dev.sh` never touches containers
-outside the `rantai-kb-dev` compose project. Stop the Bun stack with
-`docker compose down` in the repo root before starting a Rust tier on the same
-port.
+**An old v0.1.0 (Bun) stack is still running.** `kb-dev.sh` never touches
+containers outside the `rantai-kb-dev` compose project. Stop the old stack with
+`docker compose down` in a v0.1.0 checkout before starting a Rust tier on the
+same port.
 
 **Everything, including volumes.** `kb-dev.sh down -v` removes only this
 project's network and the five named volumes (`pg-data`, `rustfs-data`,

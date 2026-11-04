@@ -1,5 +1,10 @@
 # Runbook: Rust Cutover & Migration (`rantai-kb`)
 
+> **2026-11-04: Bun was removed from this repository in v0.2.0 (`DEC-3`).** The last
+> Bun release is tag `v0.1.0`; check that tag out to run the Bun service, its compose
+> file or its container image. Rust is the only runtime in the repo from v0.2.0. This
+> runbook stays as the migration guide for operators moving a v0.1.0 deployment to Rust.
+
 This runbook guides operators through rolling out the Rust implementation of `rantai-kb` into production, operating in a mixed fleet alongside the Bun service, and rolling back if necessary.
 
 > **2026-10-25: SurrealDB was removed from the Rust service.** Rust is
