@@ -108,6 +108,10 @@ def main() -> int:
     parser.add_argument("--baseline-weight", type=float, default=1.0)
     parser.add_argument("--gate", action="store_true",
                         help="fuse only queries that look structural")
+    parser.add_argument("--classes", type=Path,
+                        help="output of `kb-server eval classify --queries F --per-query`; "
+                             "with --gate, fuse only queries the production classifier "
+                             "labels `structural` instead of using this script's cue list")
     parser.add_argument("--tag", default="tree-fused")
     args = parser.parse_args()
 
@@ -119,14 +123,25 @@ def main() -> int:
             if line.strip():
                 query = json.loads(line)
                 text_of[query["_id"]] = query.get("text", "")
-    if args.gate and not text_of:
+    class_of: dict[str, str] = {}
+    if args.classes:
+        for line in args.classes.read_text(encoding="utf-8").splitlines():
+            qid, _, label = line.partition("\t")
+            if label:
+                class_of[qid] = label.strip()
+    if args.gate and not text_of and not class_of:
         raise SystemExit("--gate needs --queries so a query can be classified")
 
     fused_count = gated_count = 0
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", encoding="utf-8") as handle:
         for qid in sorted(set(base_run) | set(tree_run), key=natural_key):
-            fuse = not args.gate or is_structural(text_of.get(qid, ""))
+            if not args.gate:
+                fuse = True
+            elif class_of:
+                fuse = class_of.get(qid) == "structural"
+            else:
+                fuse = is_structural(text_of.get(qid, ""))
             if fuse:
                 rows = rrf(base_run.get(qid, []), tree_run.get(qid, []),
                            args.k, args.baseline_weight, args.tree_weight)

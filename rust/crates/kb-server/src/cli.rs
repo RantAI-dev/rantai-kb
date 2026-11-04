@@ -98,7 +98,7 @@ USAGE
     kb-server eval --base-url URL --dataset DIR  Measure retrieval quality
     kb-server eval score --qrels F --run F       Score an existing run offline
     kb-server eval compare --baseline F --current F  Compare two runs against a baseline
-    kb-server eval classify --queries FILE       Print the query-class distribution of a
+    kb-server eval classify --queries FILE [--per-query]  Print the query-class distribution of a
                                                  queries.tsv / queries.jsonl file (RET-5)
     kb-server bench search --base-url URL --queries F  Closed-loop load test for /v1/search
     kb-server check-boundary                   Fail if an inner crate depends on an adapter
@@ -342,6 +342,15 @@ fn classify_queries(args: &[String]) -> Result<(), CliError> {
         return Err(CliError::Failed(format!("{path}: no queries found")));
     }
 
+    // `--per-query` prints `<id>\t<class>` per query instead of the counts, so
+    // offline experiments (EVAL-2's gated tree fusion) can gate on exactly the
+    // classifier the pipeline runs.
+    if args.iter().any(|arg| arg == "--per-query") {
+        for (id, query) in &queries {
+            println!("{id}\t{}", kb_core::classify_query(query).class.as_str());
+        }
+        return Ok(());
+    }
     let mut counts: HashMap<kb_core::QueryClass, usize> = HashMap::new();
     for (_id, query) in &queries {
         let class = kb_core::classify_query(query).class;
