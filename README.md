@@ -206,10 +206,10 @@ published in [IKAT](https://github.com/RantAI-dev/ikat).
 - **Tenants.** Every API key belongs to exactly one tenant. Every search arm, document
   route and asset route is filtered to that tenant. A CI gate probes the retrieval arms
   for cross-tenant leaks.
-- **Key scopes.** A key carries `kb:read` and/or `kb:write`. A key with neither is
-  rejected. `kb-dev.sh key <tenant>` mints an unrestricted key; the CLI accepts
-  `--scopes kb:read,kb:write` and `--kb id,id` for a read-only or knowledge-base-limited
-  key (`kb-server create-api-key --help`).
+- **Key scopes.** A key can be limited to `kb:read` and/or `kb:write`; an empty scope
+  list means full access (the CLI prints `(all)`). `kb-dev.sh key <tenant>` mints an
+  unrestricted key; `kb-server create-api-key` accepts `--scopes kb:read,kb:write` and
+  `--kb id,id` for a read-only or knowledge-base-limited key.
 - **Knowledge-base limit.** A key can be limited to a set of knowledge bases. The limit
   applies to search, the document list, upload and metadata edits.
 - **Known gap.** The by-ID document routes check only the tenant, so a knowledge-base-

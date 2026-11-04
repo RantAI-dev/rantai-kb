@@ -27,8 +27,8 @@ stays current. The format follows RantAI Lakehouse's `docs/core/`.
 Merged is not accepted. A feature counts as done at step 4.
 
 **People.** The repository is public and open source. Owner, Acceptor and
-Assignee names are not written here; they are held outside the repo (where
-is decision `DEC-2`).
+Assignee names are not written here; the board and assignments live in GitHub
+Projects (`DEC-2`, decided 2026-11-04).
 
 ## Rules
 

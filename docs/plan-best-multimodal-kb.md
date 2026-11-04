@@ -1,5 +1,9 @@
 # Plan: the best multimodal knowledge base, on local or cloud models
 
+> **Historical plan from the Bun/SurrealDB era (2026-10-16).** Its Rust work landed; Bun was
+> removed and Qdrant became the only chunk store in v0.2.0. The Bun comparisons below are
+> the cutover context, not current code.
+
 Written 2026-10-16 with `.claude/skills/ambitious-planning`. Inputs: the ParaGPT kb-bridge
 reference (`~/kb-ref/kb`, spec + code), a map of our current pipeline, and the public state of
 the art as of October 2026 (sources at the end).

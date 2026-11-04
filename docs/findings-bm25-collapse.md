@@ -1,5 +1,8 @@
 # Root Cause Analysis: BM25 Retrieval Collapse on Natural Language Queries
 
+> **Historical investigation from the Bun/SurrealDB era.** The service is Qdrant-only from
+> v0.2.0; the Bun comparison below explains the old behaviour that the port had to match.
+
 ## Executive Summary
 
 On the MIRACL Indonesian benchmark, rantai-kb scored **nDCG@10 0.003** with the stub embedder, while a 30-line independent BM25 (`rank_bm25`, `\w+` lowercase tokens) on the same corpus and queries scored **nDCG@10 0.708**.

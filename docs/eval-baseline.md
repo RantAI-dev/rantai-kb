@@ -1,5 +1,8 @@
 # Eval baseline — step 0 of `docs/plan-best-multimodal-kb.md`
 
+> **Historical measurement record.** The SurrealDB rows are the pre-Qdrant baseline. Bun was
+> removed in v0.2.0; the current service is Qdrant-only (`docs/rust-cutover.md`).
+
 The first numbers this repo has ever measured, and the exact commands that
 produce them. Everything here was run live against a real Postgres 16,
 SurrealDB v2, rustfs S3 and `kb-server`, by `kb-eval`. Reproduce with the

@@ -57,7 +57,7 @@ Record the current baseline first. A target without a baseline can't be claimed.
 ## 4. Challenge the assumptions adversarially
 
 List the 1–3 beliefs the plan depends on ("BM25 hurts more than it helps", "the reranker is the
-bottleneck", "Rust matches Bun"). For each, plan a cheap test that could *disprove* it from raw
+bottleneck", "the new code matches the old implementation"). For each, plan a cheap test that could *disprove* it from raw
 data before building on it. Once deep in the data, ask: what signal is here that we didn't know
 to look for? Write down blind spots found.
 
@@ -120,6 +120,6 @@ Then verify the runner's claims yourself by re-running its checks.
 
 ## Guardrails
 
-Ambition doesn't override the rules in `AGENTS.md`: tenant isolation, Rust↔Bun compatibility,
+Ambition doesn't override the rules in `AGENTS.md`: tenant isolation, API compatibility,
 evidence-only reporting, and asking before outward-facing actions (push, PR, deploy). Bigger
 goals need stronger verification, not weaker.

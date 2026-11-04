@@ -1,5 +1,9 @@
 # Target architecture: matching industry and state-of-the-art structure
 
+> **Historical design record (2026-10-16).** It describes the mixed Bun/Rust port and the
+> SurrealDB era. Bun was removed and Qdrant became the only chunk store in v0.2.0; the
+> references below are kept as the reasoning that shaped the Rust ports.
+
 Written 2026-10-16. This compares the Rust port's structure today (audited from code) with
 the structures that leading RAG systems and standards use, then lists the changes. It goes
 with `docs/plan-best-multimodal-kb.md`; step S there carries out this document.

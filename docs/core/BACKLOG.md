@@ -38,7 +38,7 @@ Started 2026-11-04 from:
 
 | ID | Kind | Item | Module | Priority | Status | PR | Source |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `SEC-1` | Task | A key limited to some knowledge bases can still read, download, edit and delete a document outside them by ID. The by-ID routes check only the tenant. Bun does the same. [Spec](specs/sec-1.md) | Access & Security | P0 | Todo | | Code read 2026-11-04, `routes.rs:1047` |
+| `SEC-1` | Task | A key limited to some knowledge bases can still read, download, edit and delete a document outside them by ID. The by-ID routes check only the tenant. The v0.1.0 Bun service did the same. [Spec](specs/sec-1.md) | Access & Security | P0 | Todo | | Code read 2026-11-04, `routes.rs:1047` |
 | `REL-1` | Task | PR #3's "Rust retrieval eval & scope isolation gate" is red. On the 12-query CI set, document hit@1 fell 0.500 → 0.417 (one query; max allowed drop 0.020), while page nDCG@10 rose 0.500 → 0.815. Either fix the query or refresh the gate's baseline with the reason written down | Delivery | P0 | Todo | | CI run 40703570765 (2026-10-28) |
 | `REL-2` | Task | PR #3's Bun "End-to-end smoke test" is red: `docker pull` of its MinIO image is refused (unauthorized). Repoint the image, or retire the Bun job if `DEC-3` retires Bun. **Cancelled: Bun CI jobs removed with `DEC-3`** | Delivery | P1 | Cancelled | | CI run 40703570765 |
 | `REL-3` | Task | Push the 16 local commits on `feat/kb-sota` (tier presets, compose for every tier, the cloud eval, the lite OCR build fix) so PR #3 and CI see them | Delivery | P1 | Todo | | `git rev-list origin/feat/kb-sota..HEAD` = 16, 2026-11-04 |
@@ -60,7 +60,7 @@ Started 2026-11-04 from:
 | `ACC-3` | Feature | Per-document permissions filtered at search time, for documents inside a knowledge base that only some users may see. **Blocked by `ACC-2`** | Access & Security | P2 | Idea | | Owner question 2026-11-04 |
 | `EVAL-1` | Task | Run KF main on ViDoRe v3 HR and CS (Docling + RapidOCR, pages mapped by text overlap), to complete the comparison. Needs an idle machine: about 2,470 pages of OCR on CPU | Retrieval | P2 | Todo | | `docs/eval-ab/rk-cloud-vs-kf/README.md` caveats |
 | `RET-1` | Task | Measure a local tier's retrieval on the same sets as the cloud one (studio's Qwen3-VL page arm on a GPU), so each tier has its own number. Only cloud and local bge (0.661 HR) are measured. **Blocked by `DEP-2`** | Retrieval | P2 | Todo | | `docs/kb-tiers.md` |
-| `ING-1` | Feature | Legacy binary Office files (`.doc`, `.xls`, `.ppt`) are accepted by the upload list but cannot be extracted (`Unsupported`, as in Bun). Extract them, or stop accepting them with a clear error | Ingest | P2 | Idea | | `docs/rust-cutover.md` §5.2; `kb-extract/src/mime.rs` |
+| `ING-1` | Feature | Legacy binary Office files (`.doc`, `.xls`, `.ppt`) are accepted by the upload list but cannot be extracted (`Unsupported`, as in v0.1.0). Extract them, or stop accepting them with a clear error | Ingest | P2 | Idea | | `docs/rust-cutover.md` §5.2; `kb-extract/src/mime.rs` |
 | `DEP-4` | Task | Server start does not check the tier's GPU memory budget; only `setup` does | Deployment | P3 | Todo | | `docs/tier-readiness-plan.md` |
 
 ## Later (P3)
