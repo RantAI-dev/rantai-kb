@@ -366,3 +366,29 @@ async fn invalid_boost_shapes_are_400s() {
         );
     }
 }
+
+/// Every additive `stats` member the engine reports reaches the wire. The route
+/// rebuilds `stats` when it stamps the serialisation time, and once dropped
+/// `queryClass` / `skippedArms` (RET-5), `treeArm` (DEC-4) and `globalArm`
+/// (DEC-5) from every live response while the engine tests still passed.
+#[tokio::test]
+async fn the_route_keeps_the_engines_additive_stats_members() {
+    let harness = fixture(vec![meta("only", None, None)], &["only"]);
+    let response = harness
+        .send_json(
+            "POST",
+            "/v1/search",
+            &tenant_key(TENANT),
+            serde_json::json!({"query": "current allowance", "adaptiveArms": true}),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(
+        body["stats"]["queryClass"], "topical",
+        "stats.queryClass must survive the route: {}",
+        body["stats"]
+    );
+    assert!(body["stats"]["skippedArms"].is_array(), "{}", body["stats"]);
+    assert_eq!(body["stats"]["armPlanFallback"], false);
+}

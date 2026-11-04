@@ -592,14 +592,38 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
     let mut stages = stats.stage_timings_ms;
     stages.serialise = serialise_ms;
     stages.total = route_sw.elapsed_ms();
-    let stats = search_stats(
-        stages,
-        stats.vector_results,
-        stats.total_results,
-        stats.floor_score_kind,
-        stats.floor_dropped,
-        stats.boost,
-    );
+    // The legacy time fields are recomputed from the final stages; every
+    // additive member the engine reported is carried over as it is. Rebuilding
+    // without them dropped `queryClass`, `skippedArms`, `armPlanFallback`,
+    // `treeArm` and `globalArm` from every live response.
+    let SearchStatsDto {
+        vector_results,
+        total_results,
+        floor_score_kind,
+        floor_dropped,
+        boost,
+        query_class,
+        skipped_arms,
+        arm_plan_fallback,
+        tree_arm,
+        global_arm,
+        ..
+    } = stats;
+    let stats = SearchStatsDto {
+        query_class,
+        skipped_arms,
+        arm_plan_fallback,
+        tree_arm,
+        global_arm,
+        ..search_stats(
+            stages,
+            vector_results,
+            total_results,
+            floor_score_kind,
+            floor_dropped,
+            boost,
+        )
+    };
     let stats_json = match serde_json::to_vec(&stats) {
         Ok(json) => json,
         Err(err) => {
