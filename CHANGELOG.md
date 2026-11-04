@@ -20,8 +20,9 @@
     `kb-server reindex`. A cached extraction from before this release, or one
     from an OCR or layout parser, carries no outline; ingest then calls the new
     `Extractor::outline` port method (a free bookmark/heading read) rather than
-    invalidating the extraction cache, so no paid OCR is repeated. Also stored in
-    `metadata`, so `GET /v1/documents` responses grow by the outline.
+    invalidating the extraction cache, so no paid OCR is repeated. The outline lives in
+    the document row's `metadata`, which `GET /v1/documents/:id` does not
+    return, so no response grows.
   - **Search** runs the arm only when `KB_TREE_ARM` is on **and**
     `kb_core::classify_query` labels the question `structural`. It reads
     outlines only for documents in the caller's `DocumentScope`, scores nodes
