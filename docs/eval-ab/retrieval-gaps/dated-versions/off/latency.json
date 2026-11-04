@@ -1,0 +1,281 @@
+{
+  "adaptiveArms": null,
+  "label": "off",
+  "queries": [
+    {
+      "latencyMs": 1406.265414,
+      "queryId": "q001",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1565.274564,
+      "queryId": "q002",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 3273.563167,
+      "queryId": "q003",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1289.134698,
+      "queryId": "q004",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1357.845548,
+      "queryId": "q005",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1297.12751,
+      "queryId": "q006",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1433.2696620000002,
+      "queryId": "q007",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1368.771794,
+      "queryId": "q008",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1300.340753,
+      "queryId": "q009",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1310.128722,
+      "queryId": "q010",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1293.659044,
+      "queryId": "q011",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1309.639766,
+      "queryId": "q012",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1995.2971100000002,
+      "queryId": "q013",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1340.9777680000002,
+      "queryId": "q014",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1323.1574930000002,
+      "queryId": "q015",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1313.14126,
+      "queryId": "q016",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1308.646373,
+      "queryId": "q017",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1369.117252,
+      "queryId": "q018",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1287.909789,
+      "queryId": "q019",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1501.382436,
+      "queryId": "q020",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1311.6829079999998,
+      "queryId": "q021",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1348.5812400000002,
+      "queryId": "q022",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1449.677697,
+      "queryId": "q023",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1367.749221,
+      "queryId": "q024",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1309.943745,
+      "queryId": "q025",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1303.1250079999998,
+      "queryId": "q026",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1347.305693,
+      "queryId": "q027",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 2610.855439,
+      "queryId": "q028",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1299.129587,
+      "queryId": "q029",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1358.773115,
+      "queryId": "q030",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1327.10925,
+      "queryId": "q031",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1350.237884,
+      "queryId": "q032",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1368.2289380000002,
+      "queryId": "q033",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1333.844878,
+      "queryId": "q034",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1338.993866,
+      "queryId": "q035",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1306.3290080000002,
+      "queryId": "q036",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1319.054723,
+      "queryId": "q037",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1345.2335799999998,
+      "queryId": "q038",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1348.6049520000001,
+      "queryId": "q039",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1321.06536,
+      "queryId": "q040",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1294.4320679999998,
+      "queryId": "q041",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1306.277689,
+      "queryId": "q042",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1337.068866,
+      "queryId": "q043",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1395.119271,
+      "queryId": "q044",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1280.8667810000002,
+      "queryId": "q045",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1364.987905,
+      "queryId": "q046",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1575.77097,
+      "queryId": "q047",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 2445.934872,
+      "queryId": "q048",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1411.352286,
+      "queryId": "q049",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1378.5135610000002,
+      "queryId": "q050",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1377.905336,
+      "queryId": "q051",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1505.905209,
+      "queryId": "q052",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1322.252813,
+      "queryId": "q053",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1342.028669,
+      "queryId": "q054",
+      "status": "answered"
+    },
+    {
+      "latencyMs": 1330.050268,
+      "queryId": "q055",
+      "status": "answered"
+    }
+  ]
+}

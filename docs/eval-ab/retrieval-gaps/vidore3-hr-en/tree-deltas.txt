@@ -1,0 +1,8 @@
+### vidore3-hr-en regular tree-fused-ungated
+Evaluated 318 queries.
+| recall@10 | 0.7341 | 0.6595 | -0.0747 | [-0.0975, -0.0539] | 318 |
+| ndcg@10 | 0.7109 | 0.5176 | -0.1933 | [-0.2195, -0.1669] | 318 |
+### vidore3-hr-en regular tree-fused-gated-rust
+Evaluated 318 queries.
+| recall@10 | 0.7341 | 0.7341 | +0.0000 | [+0.0000, +0.0000] | 318 |
+| ndcg@10 | 0.7109 | 0.7109 | +0.0000 | [+0.0000, +0.0000] | 318 |
