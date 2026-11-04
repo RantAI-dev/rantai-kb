@@ -44,6 +44,9 @@ pub struct RunnerConfig {
     /// costs a poll interval per file on both sides (client and worker), so a
     /// 3,000-file corpus spends most of its ingest asleep.
     pub ingest_concurrency: usize,
+    /// Optional `boost` object sent with every search (`RET-4`). `None` is the
+    /// off run and sends no member at all.
+    pub boost: Option<serde_json::Value>,
 }
 
 impl RunnerConfig {
@@ -67,6 +70,7 @@ impl RunnerConfig {
             job_timeout: Duration::from_secs(900),
             poll_interval: Duration::from_millis(500),
             ingest_concurrency: 16,
+            boost: None,
         }
     }
 }
@@ -472,6 +476,12 @@ async fn ingest_one(
     if let Some(title) = &file.title {
         form = form.text("title", title.clone());
     }
+    // The dataset's optional metadata sidecar, as the JSON object the upload
+    // route stores in `Document.metadata`. Absent keeps the pre-RET-4 upload
+    // exactly as it was.
+    if let Some(metadata) = &file.metadata {
+        form = form.text("metadata", metadata.to_string());
+    }
     let response = client
         .post(endpoint(&config.base_url, "/v1/documents"))
         .header(reqwest::header::AUTHORIZATION, bearer(&config.api_key))
@@ -586,10 +596,16 @@ async fn search_one(
     config: &RunnerConfig,
     text: &str,
 ) -> Result<SearchAnswer, RunError> {
+    // `boost` is omitted entirely on the off run, so the off run is the same
+    // request it always was.
+    let mut body = json!({ "query": text, "maxChunks": config.max_chunks });
+    if let Some(boost) = &config.boost {
+        body["boost"] = boost.clone();
+    }
     let response = client
         .post(endpoint(&config.base_url, "/v1/search"))
         .header(reqwest::header::AUTHORIZATION, bearer(&config.api_key))
-        .json(&json!({ "query": text, "maxChunks": config.max_chunks }))
+        .json(&body)
         .send()
         .await?;
     if !response.status().is_success() {

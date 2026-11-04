@@ -1262,6 +1262,7 @@ dependencies = [
 name = "kb-core"
 version = "0.2.0"
 dependencies = [
+ "chrono",
  "fancy-regex",
  "serde",
  "serde_json",
@@ -1272,6 +1273,7 @@ name = "kb-engine"
 version = "0.2.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures",
  "kb-core",
  "kb-ports",

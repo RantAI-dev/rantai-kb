@@ -109,6 +109,10 @@ pub struct SearchRequestDto {
     /// is unset unless an operator configured one).
     #[serde(rename = "minScore", default)]
     pub min_score: Option<f32>,
+    /// Additive (`RET-4`): optional recency/authority boosts. Kept untyped so
+    /// a malformed value is this route's 400, not a deserialiser 422.
+    #[serde(default)]
+    pub boost: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -184,6 +188,19 @@ pub struct SearchStatsDto {
         default
     )]
     pub floor_dropped: Option<usize>,
+    /// Additive (`RET-4`): what a recency/authority boost applied. Absent when
+    /// the request did not ask for one, so an old client's shape is unchanged.
+    #[serde(rename = "boost", skip_serializing_if = "Option::is_none", default)]
+    pub boost: Option<BoostStatsDto>,
+}
+
+/// `stats.boost`: how many returned hits carried a usable field for each
+/// requested boost. A hit without the field kept its base relevance and is
+/// not counted; this is not an error count.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BoostStatsDto {
+    pub recency: usize,
+    pub authority: usize,
 }
 
 /// The per-stage breakdown, in milliseconds.
@@ -461,6 +478,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             degrades: outcome_degrades,
             note: outcome_note,
             floor: outcome_floor,
+            boost: outcome_boost,
             timings: outcome_timings,
         } = outcome;
         let vector_results = outcome_chunks.iter().filter(|h| !h.is_bm25).count();
@@ -505,6 +523,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             },
             floor_score_kind,
             floor_dropped,
+            boost: outcome_boost.map(BoostStatsDto::from),
         };
         SearchResponseDto {
             chunks: Some(chunks),
@@ -514,6 +533,15 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             stats: Some(stats),
             note: outcome_note,
             degrades,
+        }
+    }
+}
+
+impl From<kb_engine::BoostStats> for BoostStatsDto {
+    fn from(stats: kb_engine::BoostStats) -> Self {
+        Self {
+            recency: stats.recency,
+            authority: stats.authority,
         }
     }
 }
@@ -958,6 +986,7 @@ mod tests {
             stage_timings_ms: StageTimingsDto::empty(),
             floor_score_kind: None,
             floor_dropped: None,
+            boost: None,
         };
         let value = serde_json::to_value(&stats).unwrap();
         for key in [

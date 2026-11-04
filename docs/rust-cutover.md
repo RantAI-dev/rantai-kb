@@ -504,6 +504,80 @@ and 2,000 page units and sets `truncated: true` when a cap is reached. It uses t
 by-ID visibility helper as §16, so a key limited to other knowledge bases gets the same
 404 as an unknown document.
 
+### 19. Additive: recency and authority boosts (`RET-4`, 2026-11-04)
+
+`POST /v1/search` accepts one more optional body member, `boost`:
+
+```json
+{
+  "query": "what is the current remote work allowance?",
+  "boost": {
+    "recency":   {"field": "metadata.effectiveDate", "halfLifeDays": 365, "weight": 1.0},
+    "authority": {"field": "metadata.authority", "weight": 0.5}
+  }
+}
+```
+
+- `recency.field` — `createdAt`, `updatedAt`, or `metadata.<key>`. A metadata date
+  must be ISO-8601: a date (`2025-03-01`) or a date-time with an offset
+  (`2025-03-01T09:30:00Z`); a local date-time without an offset is read as UTC.
+- `recency.halfLifeDays` — a finite number `> 0`.
+- `authority.field` — `metadata.<key>`, whose JSONB value must be a JSON number.
+- `weight` (both) — a finite number in `(0, 1]`.
+- Metadata keys follow the `RET-3` rule, `[A-Za-z0-9_.-]{1,64}`. Unknown members, a
+  bad field, a non-positive half-life or an out-of-range weight are a **400**, in the
+  same shape as the other request-shape errors on this route.
+
+**Off is off.** An absent `boost`, `null`, `{}`, or an object with no `recency` and no
+`authority` computes no factor and does no re-sort, so the answer is rank-identical to
+a server before this release. The request is per call; there is no tenant-wide or
+env-configured default.
+
+**Formula.** Each hit gets a base relevance in `[0, 1]`: `sigmoid(rerankScore)` when a
+reranker scored it, otherwise `1/(1+rank)` on its post-fusion/post-rerank rank (`rank`
+is 0-based). Then
+
+```text
+final = base * recency_factor * authority_factor
+recency_factor   = 1 - w_r + w_r * 0.5 ^ (age_days / halfLifeDays)
+authority_factor = 1 - w_a + w_a * minmax(authority over this request's hits)
+```
+
+`age_days` is clamped at zero, so a future date is as new as now, not fresher.
+Authority is min-max normalised over the candidate documents that carry the value; if
+every present value is equal (or only one is), they all normalise to `1`, and that
+boost changes no order. A missing, non-numeric or unparseable field gives that factor
+`1.0` and is never an error.
+
+**Where it runs.** After fusion, the rerank and the relevance floor (so the floor
+still compares the raw rerank/dense score and keeps the meaning `RET-2` defined), and
+before the final cut to `maxChunks`. Only the order and `rank` change; `similarity`,
+`denseScore` and `rerankScore` are untouched. Ties break on content, page and chunk
+index — the same keys `kb_ports::sort_candidates` uses — never on a document or chunk
+UUID, so the order is reproducible across ingests. The document dates and metadata are
+read from the rows `find_alive_meta_by_ids` already fetched for title enrichment (one
+round trip, not two).
+
+**Response.** Additive `stats.boost: {"recency": n, "authority": n}` counts returned
+hits that carried a usable field for each boost. The member is absent when the request
+did not boost, so an old client's body is unchanged. The by-id search branch
+(`documentIds`) applies the same boost; the `hybrid: true` stub searches nothing and
+therefore boosts nothing.
+
+**Upload metadata.** `POST /v1/documents` accepts an optional multipart field
+`metadata`: a JSON object stored as `Document.metadata`. It is additive (an absent
+field stores nothing) and is the way a caller supplies `effectiveDate`, `authority`, or
+any field the `RET-3` filters read. Any value that is not a JSON object is a **400**.
+
+**Evaluation.** `rust/crates/kb-eval/sets/dated-versions/` is a synthetic set of 55
+families × 3 dated editions with 55 "current/latest" questions, judged only on the
+newest edition; `generate.py` (Python stdlib, deterministic) rebuilds it.
+`kb-server eval --boost '<json>'` sends the object with every query, and dataset
+sidecars in `metadata/<doc-key>.json` are uploaded with the corpus, so off/on share one
+ingest. MRR@10 comes from `rust/crates/kb-eval/scripts/score_deltas.py`, which already
+reported it. The set is synthetic and measures ranking, not answer correctness; the
+live MRR measurement for `RET-4` has **not** been run yet.
+
 ---
 
 ## 6. Shared Known Issues

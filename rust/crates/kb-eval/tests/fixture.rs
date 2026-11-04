@@ -105,3 +105,29 @@ fn miracl_id_200_loads_if_present() {
         }
     }
 }
+
+#[test]
+fn the_dated_versions_set_loads_and_judges_only_the_newest_edition() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("sets/dated-versions");
+    let dataset = Dataset::load(dir).expect("load dated-versions");
+    assert_eq!(dataset.corpus.len(), 165, "55 families x 3 editions");
+    assert_eq!(dataset.queries.len(), 55);
+    assert_eq!(dataset.qrels.len(), 55);
+    assert!(
+        dataset.corpus.iter().all(|f| f.metadata.is_some()),
+        "every document must carry its effectiveDate sidecar"
+    );
+    for qrel in &dataset.qrels {
+        assert_eq!(qrel.score, 1);
+        assert!(qrel.corpus_id.ends_with("-v2025"), "{qrel:?}");
+    }
+    let dated = dataset
+        .corpus
+        .iter()
+        .find(|f| f.key == "remote-work-allowance-v2025")
+        .expect("a dated document");
+    assert_eq!(
+        dated.metadata.as_ref().unwrap()["effectiveDate"],
+        "2025-01-01"
+    );
+}

@@ -271,10 +271,10 @@ pub const UPDATE_METADATA: &str = r#"
 pub const INSERT_DOCUMENT: &str = r#"
     INSERT INTO "Document" (
         id, "tenantId", title, content, categories, "subcategory",
-        "s3Key", "fileSize", "mimeType", status, "externalRef",
+        "s3Key", "fileSize", "mimeType", status, "externalRef", metadata,
         "createdAt", "updatedAt"
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), now()
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now()
     )
 "#;
 

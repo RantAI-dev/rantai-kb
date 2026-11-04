@@ -40,8 +40,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::Authed;
 use crate::dto::{
-    ChunkDto, SearchRequestDto, SearchResponseDto, SearchStatsDto, StageDetailDto, StageTimingsDto,
-    splice_json_member,
+    BoostStatsDto, ChunkDto, SearchRequestDto, SearchResponseDto, SearchStatsDto, StageDetailDto,
+    StageTimingsDto, splice_json_member,
 };
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -266,6 +266,7 @@ async fn search(
     let requested_kbs = restrict_kbs(&auth, body.knowledge_base_ids.as_deref());
     let max_chunks = body.max_chunks.unwrap_or(8).clamp(1, 50);
     let metadata_filter = parse_metadata_filter(body.metadata.as_ref())?;
+    let boost = parse_boost(body.boost.as_ref())?;
 
     // A key bound to specific knowledge bases that asks for none of them gets
     // an explicit note rather than an empty result: "no results" and "you may
@@ -370,6 +371,13 @@ async fn search(
             } else {
                 (None, None)
             };
+        // RET-4: the by-id branch has the same document rows it is about to use
+        // for titles, so the boost is applied here too rather than silently
+        // ignored. It runs before the cut so a promoted hit is not lost.
+        let boost_stats = boost
+            .as_ref()
+            .filter(|config| !config.is_off())
+            .map(|config| kb_engine::apply_boosts_now(&mut hits, &alive_map, config));
         hits.truncate(max_chunks as usize);
         for h in hits.iter_mut() {
             if let Some(meta) = alive_map.get(&h.chunk.document_id) {
@@ -427,6 +435,7 @@ async fn search(
                 total_results,
                 floor_score_kind,
                 floor_dropped,
+                boost_stats.map(BoostStatsDto::from),
             )),
             note: floor_note,
             degrades: Vec::new(),
@@ -448,7 +457,14 @@ async fn search(
                 // Same shape as every other branch, every number zero: nothing
                 // ran here. `total` and `serialise` are stamped by
                 // `finish_search`, which is the only place that can measure them.
-                stats: Some(search_stats(StageTimingsDto::default(), 0, 0, None, None)),
+                stats: Some(search_stats(
+                    StageTimingsDto::default(),
+                    0,
+                    0,
+                    None,
+                    None,
+                    None,
+                )),
                 note: None,
                 // Nothing was searched, and an empty list here looks exactly
                 // like "no matches". A client that sent `hybrid: true` expecting
@@ -474,7 +490,7 @@ async fn search(
 
     let outcome = state
         .engine
-        .retrieve_with_floor(&query, &scope, Some(max_chunks), body.min_score)
+        .retrieve_with_boost(&query, &scope, Some(max_chunks), body.min_score, boost)
         .await
         .map_err(ApiError::from)?;
     let mut response = SearchResponseDto::from(outcome);
@@ -505,6 +521,7 @@ fn search_stats(
     total_results: usize,
     floor_score_kind: Option<String>,
     floor_dropped: Option<usize>,
+    boost: Option<BoostStatsDto>,
 ) -> SearchStatsDto {
     SearchStatsDto {
         total_time_ms: stages.total,
@@ -520,6 +537,7 @@ fn search_stats(
         stage_timings_ms: stages,
         floor_score_kind,
         floor_dropped,
+        boost,
     }
 }
 
@@ -556,6 +574,7 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
             0,
             None,
             None,
+            None,
         )
     });
     let mut stages = stats.stage_timings_ms;
@@ -567,6 +586,7 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
         stats.total_results,
         stats.floor_score_kind,
         stats.floor_dropped,
+        stats.boost,
     );
     let stats_json = match serde_json::to_vec(&stats) {
         Ok(json) => json,
@@ -617,7 +637,7 @@ fn parse_metadata_filter(
     };
     let mut out = Vec::with_capacity(object.len());
     for (key, value) in object {
-        if key.is_empty() || key.len() > 64 || !key.bytes().all(metadata_key_byte) {
+        if !kb_core::valid_metadata_key(key) {
             return Err(ApiError::BadRequest(format!(
                 "Invalid metadata key '{key}': keys must match [A-Za-z0-9_.-]{{1,64}}"
             )));
@@ -635,8 +655,153 @@ fn parse_metadata_filter(
     Ok(out)
 }
 
-fn metadata_key_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
+/// Validate and normalise the optional `boost` object (`RET-4`).
+///
+/// The request shape is:
+///
+/// ```json
+/// {"recency":   {"field": "createdAt|updatedAt|metadata.<key>",
+///                "halfLifeDays": 365, "weight": 0.5},
+///  "authority": {"field": "metadata.<key>", "weight": 0.5}}
+/// ```
+///
+/// Every field is required within its object, unknown members are a 400 (a
+/// typo must not silently mean "no boost"), `halfLifeDays` must be finite and
+/// `> 0`, `weight` must be in `(0, 1]`, and a metadata key must match
+/// `[A-Za-z0-9_.-]{1,64}` — the same rule as the `metadata` filter. An absent,
+/// `null` or empty object means no boost, which is the off state.
+fn parse_boost(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<kb_core::BoostConfig>, ApiError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(object) = value.as_object() else {
+        return Err(ApiError::BadRequest(
+            "'boost' must be an object with optional 'recency' and 'authority' members".to_string(),
+        ));
+    };
+    for key in object.keys() {
+        if key != "recency" && key != "authority" {
+            return Err(ApiError::BadRequest(format!(
+                "Unknown boost member '{key}': expected 'recency' or 'authority'"
+            )));
+        }
+    }
+    let recency = match object.get("recency") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(parse_recency_boost(value)?),
+    };
+    let authority = match object.get("authority") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(value) => Some(parse_authority_boost(value)?),
+    };
+    if recency.is_none() && authority.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(kb_core::BoostConfig { recency, authority }))
+}
+
+fn parse_recency_boost(value: &serde_json::Value) -> Result<kb_core::RecencyBoost, ApiError> {
+    let object = boost_object(value, "recency", &["field", "halfLifeDays", "weight"])?;
+    let field = match object
+        .get("field")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+    {
+        "createdAt" => kb_core::RecencyField::CreatedAt,
+        "updatedAt" => kb_core::RecencyField::UpdatedAt,
+        other => match other.strip_prefix("metadata.") {
+            Some(key) if kb_core::valid_metadata_key(key) => {
+                kb_core::RecencyField::Metadata(key.to_string())
+            }
+            _ => {
+                return Err(ApiError::BadRequest(
+                    "Invalid boost.recency.field: expected 'createdAt', 'updatedAt' or \
+                     'metadata.<key>' with a key matching [A-Za-z0-9_.-]{1,64}"
+                        .to_string(),
+                ));
+            }
+        },
+    };
+    let half_life_days = positive_number(object.get("halfLifeDays"), "boost.recency.halfLifeDays")?;
+    let weight = boost_weight(object.get("weight"), "boost.recency.weight")?;
+    Ok(kb_core::RecencyBoost {
+        field,
+        half_life_days,
+        weight,
+    })
+}
+
+fn parse_authority_boost(value: &serde_json::Value) -> Result<kb_core::AuthorityBoost, ApiError> {
+    let object = boost_object(value, "authority", &["field", "weight"])?;
+    let field = match object
+        .get("field")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|field| field.strip_prefix("metadata."))
+    {
+        Some(key) if kb_core::valid_metadata_key(key) => key.to_string(),
+        _ => {
+            return Err(ApiError::BadRequest(
+                "Invalid boost.authority.field: expected 'metadata.<key>' with a key matching \
+                 [A-Za-z0-9_.-]{1,64}"
+                    .to_string(),
+            ));
+        }
+    };
+    let weight = boost_weight(object.get("weight"), "boost.authority.weight")?;
+    Ok(kb_core::AuthorityBoost { field, weight })
+}
+
+fn boost_object<'a>(
+    value: &'a serde_json::Value,
+    name: &str,
+    allowed: &[&str],
+) -> Result<&'a serde_json::Map<String, serde_json::Value>, ApiError> {
+    let Some(object) = value.as_object() else {
+        return Err(ApiError::BadRequest(format!(
+            "boost.{name} must be an object with {}",
+            allowed
+                .iter()
+                .map(|key| format!("'{key}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    };
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(ApiError::BadRequest(format!(
+                "Unknown boost.{name} member '{key}': expected one of {}",
+                allowed
+                    .iter()
+                    .map(|key| format!("'{key}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+    Ok(object)
+}
+
+fn positive_number(value: Option<&serde_json::Value>, name: &str) -> Result<f64, ApiError> {
+    match value.and_then(serde_json::Value::as_f64) {
+        Some(number) if number.is_finite() && number > 0.0 => Ok(number),
+        _ => Err(ApiError::BadRequest(format!(
+            "Invalid {name}: expected a number greater than 0"
+        ))),
+    }
+}
+
+fn boost_weight(value: Option<&serde_json::Value>, name: &str) -> Result<f64, ApiError> {
+    match value.and_then(serde_json::Value::as_f64) {
+        Some(number) if number.is_finite() && number > 0.0 && number <= 1.0 => Ok(number),
+        _ => Err(ApiError::BadRequest(format!(
+            "Invalid {name}: expected a number in (0, 1]"
+        ))),
+    }
 }
 
 fn metadata_scalar_values(value: &serde_json::Value) -> Option<Vec<String>> {

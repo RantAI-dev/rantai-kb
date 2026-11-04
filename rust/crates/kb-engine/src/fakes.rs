@@ -460,7 +460,7 @@ impl DocumentStore for FakeDocumentStore {
             created_at: FAKE_TIMESTAMP.to_string(),
             updated_at: FAKE_TIMESTAMP.to_string(),
             knowledge_base_ids: group_kb_ids.iter().map(|k| k.0.clone()).collect(),
-            metadata: None,
+            metadata: doc.metadata.clone(),
         };
         self.insert_doc(doc.tenant_id.clone(), meta);
         self.download_metas.write().unwrap().insert(
