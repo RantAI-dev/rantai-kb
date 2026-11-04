@@ -22,6 +22,7 @@ use kb_ports::{
 use tracing::Instrument;
 
 use crate::QueryExpander;
+use crate::global_arm::{GlobalArm, fuse_global};
 use crate::graph_arm::{GraphArm, GraphRanking};
 use crate::page_arm::PageArm;
 use crate::timing::{Clock, StageTimings, Stopwatch, stage_span};
@@ -59,6 +60,10 @@ pub struct RetrievalOptions {
     /// The entity-graph arm, when `KB_GRAPH_ARM` is on. `None` leaves the
     /// pipeline byte-identical to the two-arm version it has always been.
     pub graph_arm: Option<std::sync::Arc<GraphArm>>,
+    /// The global (graph community) arm, when `KB_GLOBAL_ARM` is on. `None`
+    /// leaves the pipeline byte-identical to the one before `DEC-5`: the query
+    /// is not classified for this arm and no community store is read.
+    pub global_arm: Option<std::sync::Arc<GlobalArm>>,
     /// The page-image arm, when configured. `None` leaves the pipeline as it was.
     pub page_arm: Option<std::sync::Arc<PageArm>>,
     /// Optional recency/authority boost (`RET-4`). `None` — or a config with
@@ -92,6 +97,7 @@ impl fmt::Debug for RetrievalOptions {
             .field("expansion_paraphrases", &self.expansion_paraphrases)
             .field("hybrid_bm25_enabled", &self.hybrid_bm25_enabled)
             .field("graph_arm", &self.graph_arm.as_ref().map(|_| "<GraphArm>"))
+            .field("global_arm", &self.global_arm.as_ref().map(|a| a.config()))
             .field("page_arm", &self.page_arm.as_ref().map(|a| a.config))
             .field("boost", &self.boost)
             .field("adaptive_arms", &self.adaptive_arms)
@@ -123,12 +129,26 @@ impl Default for RetrievalOptions {
             figure_gate: None,
             rerank_enabled: false,
             graph_arm: None,
+            global_arm: None,
             page_arm: None,
             boost: None,
             boost_now: None,
             adaptive_arms: false,
         }
     }
+}
+
+/// What the global arm did, for `stats.globalArm`.
+///
+/// Present only when the arm ran: `KB_GLOBAL_ARM` on *and* the query classified
+/// aggregative. `communities: 0` is a legitimate answer — the tenant has no
+/// community set, so the arm had nothing to say. It is not a degrade.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GlobalArmStats {
+    /// Communities selected by BM25 over the summary text.
+    pub communities: usize,
+    /// Member chunks the arm contributed to the fused list.
+    pub chunks: usize,
 }
 
 /// Which comparable score the relevance floor compared against.
@@ -210,6 +230,10 @@ pub struct RetrievalOutcome {
     /// `stats.skippedArms`). `None` on a default search, so an old client sees
     /// exactly the earlier shape.
     pub adaptive: Option<AdaptiveStats>,
+    /// `Some` only when the global community arm ran (`KB_GLOBAL_ARM` on and an
+    /// aggregative query). `None` on every other search, so a server with the
+    /// flag off answers exactly as it did before `DEC-5`.
+    pub global_arm: Option<GlobalArmStats>,
     /// What each stage cost. Always present: a request nobody times is a
     /// request nobody can make faster, and the numbers are the only evidence
     /// a retrieval change can be judged by.
@@ -1155,6 +1179,71 @@ async fn execute_pipeline_with_plan(
     };
     timings.graph_arm_ms = graph_sw.elapsed_ms();
 
+    // 4c. The global (graph community) arm, `DEC-5`. It runs only when the flag
+    // is on *and* the query is aggregative: a summary of a whole community
+    // cannot answer "what does chapter 2 say", and running it for every query
+    // would spend latency on the questions it was measured to hurt. With the
+    // flag off (`opts.global_arm == None`) nothing here executes, so the
+    // pipeline is byte-identical to the one before this arm existed.
+    // No clock read when the flag is off: a request that never looked at this
+    // arm must not pay even two `Instant::now` calls for it.
+    let global_sw = opts.global_arm.as_ref().map(|_| Stopwatch::start(clock));
+    let mut global_stats: Option<GlobalArmStats> = None;
+    let mut global_ranks: HashMap<ChunkId, u32> = HashMap::new();
+    if let Some(arm) = opts.global_arm.as_ref() {
+        let aggregative = classify_query(query).class == QueryClass::Aggregative;
+        if aggregative {
+            match arm.rank(scope, query).await {
+                Ok(ranking) => {
+                    // No communities is the arm having nothing to say, not a
+                    // failure: stats says so and the other arms go out unchanged.
+                    global_stats = Some(GlobalArmStats {
+                        communities: ranking.communities,
+                        chunks: ranking.chunks.len(),
+                    });
+                    if !ranking.chunks.is_empty() {
+                        match fuse_global(
+                            index,
+                            scope,
+                            &ranking.chunks,
+                            &candidates,
+                            arm.config().weight,
+                            opts.rrf_k,
+                            pool_size,
+                        )
+                        .await
+                        {
+                            Ok((fused, ranks)) => {
+                                candidates = fused;
+                                global_ranks = ranks;
+                            }
+                            Err(e) => {
+                                // A failed arm is a degraded search, not a failed
+                                // one: the candidates already fused go out as they
+                                // are, and the response names the failure.
+                                tracing::warn!(error = %e, "global arm fetch failed (non-fatal)");
+                                degrades.push(RetrievalDegrade::GlobalArmFailed);
+                                // Nothing was fused, so the count is 0 even
+                                // though the communities were selected.
+                                global_stats = Some(GlobalArmStats {
+                                    communities: ranking.communities,
+                                    chunks: 0,
+                                });
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "global arm failed (non-fatal)");
+                    degrades.push(RetrievalDegrade::GlobalArmFailed);
+                }
+            }
+        }
+    }
+    if let Some(stopwatch) = global_sw {
+        timings.global_arm_ms = stopwatch.elapsed_ms();
+    }
+
     let mut hits: Vec<SearchHit> = candidates.into_iter().map(candidate_to_hit).collect();
 
     // The graph arm's rank is provenance, not a score: the fused score a graph
@@ -1168,6 +1257,17 @@ async fn execute_pipeline_with_plan(
                     .unwrap_or_else(|| RetrievalProvenance::unscored(ProvenanceArm::Graph))
                     .with_arm(ProvenanceArm::Graph)
                     .with_graph_rank(*rank),
+            );
+        }
+        // The global arm's position is provenance too, and it is the only record
+        // that a chunk reached the answer through a community summary rather
+        // than through its own text.
+        if global_ranks.contains_key(&hit.chunk.id) {
+            hit.retrieval = Some(
+                hit.retrieval
+                    .clone()
+                    .unwrap_or_else(|| RetrievalProvenance::unscored(ProvenanceArm::Global))
+                    .with_arm(ProvenanceArm::Global),
             );
         }
     }
@@ -1384,6 +1484,9 @@ async fn execute_pipeline_with_plan(
                     floor: floor_stats,
                     boost: opts.boost.as_ref().map(|_| BoostStats::default()),
                     adaptive: None,
+                    // The global arm runs after the floor, so a floored-to-empty
+                    // answer has not reached it: absent is the honest value.
+                    global_arm: None,
                     timings,
                 });
             }
@@ -1680,6 +1783,7 @@ async fn execute_pipeline_with_plan(
         floor: floor_stats,
         boost: boost_stats,
         adaptive: None,
+        global_arm: global_stats,
         timings,
     })
 }

@@ -25,6 +25,7 @@ use kb_ports::{
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod fakes;
+pub mod global_arm;
 pub mod graph_arm;
 pub mod ingest;
 pub mod page_arm;
@@ -53,6 +54,8 @@ pub use in_memory_graph_store::InMemoryGraphStore;
 #[cfg(test)]
 mod boost_tests;
 #[cfg(test)]
+mod global_arm_tests;
+#[cfg(test)]
 mod graph_arm_tests;
 #[cfg(all(test, feature = "test-utils"))]
 mod in_memory_graph_store_tests;
@@ -65,6 +68,7 @@ mod page_arm_tests;
 #[cfg(test)]
 mod tests;
 
+pub use global_arm::{GlobalArm, GlobalArmConfig, GlobalRanking, fuse_global};
 pub use graph_arm::{GraphArm, GraphArmConfig, GraphCache, GraphRanking};
 pub use ingest::{
     CancelToken, INGEST_CHUNKING, IngestSettings, IngestWorker, JobOutcome, reap_failed_job_uploads,
@@ -176,6 +180,9 @@ pub struct EngineInputs {
     /// scoped-graph cache, so the cache is per-process state rather than engine
     /// settings.
     pub graph_arm: Option<Arc<GraphArm>>,
+    /// The global (graph community) arm, or `None` when `KB_GLOBAL_ARM` is off.
+    /// `None` leaves the pipeline byte-identical to the one before `DEC-5`.
+    pub global_arm: Option<Arc<GlobalArm>>,
     /// The page-image arm, or `None` when it is off.
     pub page_arm: Option<Arc<PageArm>>,
 }
@@ -235,6 +242,7 @@ impl Engine {
             query_expander: Arc::new(NoopExpander),
             figure_gate: None,
             graph_arm: None,
+            global_arm: None,
             page_arm: None,
         };
         Self::new(settings, inputs)
@@ -347,6 +355,7 @@ impl Engine {
                 floor: None,
                 boost: None,
                 adaptive: None,
+                global_arm: None,
                 timings: StageTimings::default(),
             });
         }
@@ -373,6 +382,7 @@ impl Engine {
             figure_gate: self.inputs.figure_gate.clone(),
             rerank_enabled: self.settings.rerank_enabled,
             graph_arm: self.inputs.graph_arm.clone(),
+            global_arm: self.inputs.global_arm.clone(),
             page_arm: self.inputs.page_arm.clone(),
             boost: request_boost,
             boost_now: None,

@@ -26,7 +26,7 @@ use crate::config::Config;
 pub enum CliError {
     #[error(
         "{0}\n\nusage: kb-server \
-         <serve|create-api-key|apply-schema|migrate|reindex|setup|eval|bench|check-boundary>"
+         <serve|create-api-key|apply-schema|migrate|reindex|communities|setup|eval|bench|check-boundary>"
     )]
     Usage(String),
     #[error("{0}")]
@@ -62,6 +62,7 @@ pub async fn dispatch(args: &[String]) -> Result<(), CliError> {
         Some("apply-schema") => apply_schema().await,
         Some("migrate") => migrate().await,
         Some("reindex") => reindex(&args[1..]).await,
+        Some("communities") => crate::communities::run(&args[1..]).await,
         Some("setup") => crate::setup::run(&args[1..]).await,
         Some("check-boundary") => check_boundary(),
         Some("eval") => eval(&args[1..]).await,
@@ -91,6 +92,12 @@ USAGE
     kb-server reindex [--tenant <id>] [--dry-run]
                                                Re-queue ingest for every live document so Qdrant
                                                is rebuilt from the originals in S3 (see below)
+    kb-server communities build --tenant <id> [--min-pages 2] [--max-usd X] [--dry-run]
+                                               Detect graph communities and write one LLM summary
+                                               per community for the global arm (DEC-5, off by
+                                               default). Prints a chars/4 cost estimate first;
+                                               --max-usd 0 refuses any paid run. Every summary is
+                                               cached under KB_CACHE_DIR
     kb-server setup [--tier T] [--detect-only] [--check]
                                                Detect the hardware, check the VRAM budget and
                                                model licences, write rust/deploy/.env (see

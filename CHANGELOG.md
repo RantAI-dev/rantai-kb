@@ -4,6 +4,30 @@
 
 ### Added
 
+- **Global community arm (`DEC-5`), off by default.** `KB_GLOBAL_ARM=1` adds a
+  retrieval arm that ranks the tenant's graph community summaries by BM25 and
+  fuses their member chunks before the rerank (RRF weight
+  `KB_GLOBAL_ARM_WEIGHT`, default 0.5), only for queries
+  `kb_core::classify_query` labels `aggregative`. A hit the arm contributed
+  carries `retrieval.arms: ["global"]`, and `stats.globalArm`
+  (`{communities, chunks}`) is present only when the arm ran. **`EVAL-3`
+  measured a loss for this design even on the broad questions it targets**
+  (aggregative recall@10 −0.067 on HR and −0.103 on CS with an oracle gate), so
+  the flag is off and an unconfigured server is byte-identical to before: no
+  classification, no community read, no new `stats` field. Communities are
+  built by the operator command
+  `kb-server communities build --tenant <id> [--min-pages 2] [--max-usd X] [--dry-run]`,
+  which prints a `chars/4` cost estimate before any call, refuses to start above
+  `--max-usd` (0 by default), turns provider reasoning off, caches every summary
+  under `KB_CACHE_DIR` keyed by model + `sha256(prompt)`, and never caches an
+  empty answer. It needs the entity graph (`KB_ENTITY_EXTRACTION_ENABLED`,
+  `KB_ENTITY_EXTRACTOR=heuristic|llm`, `KB_GRAPH_STORE=pg`); without it the
+  command says so and writes nothing. A new additive table `KbCommunity` stores
+  the summaries; the summary text is **never** returned to a caller, because it
+  may describe documents the caller cannot see. A community read is scoped to
+  the caller's `DocumentScope`, a store failure degrades as
+  `global_arm_failed` rather than emptying the answer, and a tenant with no
+  communities reports `stats.globalArm.communities: 0` without a degrade.
 - **Search-time metadata filters (`RET-3`).** `POST /v1/search` accepts three
   additive, optional fields:
   - `externalRefs: string[]` — only documents whose `Document.externalRef` is in

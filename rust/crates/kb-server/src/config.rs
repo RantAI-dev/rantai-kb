@@ -70,6 +70,33 @@ impl Default for GraphArmSettings {
     }
 }
 
+/// Global (graph community) arm tunables (`KB_GLOBAL_ARM`, `KB_GLOBAL_ARM_*`).
+///
+/// `DEC-5` built this arm although `EVAL-3` measured a loss, so it is off by
+/// default and every setting here is inert until an operator turns it on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlobalArmSettings {
+    /// Master switch. Off by default.
+    pub enabled: bool,
+    /// Communities selected per aggregative query.
+    pub communities: usize,
+    /// RRF weight of the arm's chunk list.
+    pub weight: f32,
+    /// Chunks the arm may contribute per query.
+    pub chunks: usize,
+}
+
+impl Default for GlobalArmSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            communities: 3,
+            weight: 0.5,
+            chunks: 200,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind_addr: String,
@@ -90,6 +117,8 @@ pub struct Config {
     pub graph_store: GraphStoreChoice,
     /// Whether the graph retrieval arm runs (`KB_GRAPH_ARM`).
     pub graph_arm: GraphArmSettings,
+    /// The global (graph community) arm (`KB_GLOBAL_ARM`, `DEC-5`).
+    pub global_arm: GlobalArmSettings,
     /// In-process ingest worker: whether it runs, and how it is tuned.
     pub worker: WorkerConfig,
     /// Reported by `GET /health` (`KB_VERSION`).
@@ -629,6 +658,23 @@ impl Config {
         if graph_arm.enabled && graph_store == GraphStoreChoice::None {
             bail!("KB_GRAPH_ARM=1 needs a graph store: set KB_GRAPH_STORE=pg");
         }
+        let global_arm = GlobalArmSettings {
+            enabled: bool_flag(&lookup, "KB_GLOBAL_ARM", false),
+            communities: int_var(&lookup, "KB_GLOBAL_ARM_COMMUNITIES", 3)?.max(1) as usize,
+            weight: float_var(&lookup, "KB_GLOBAL_ARM_WEIGHT", 0.5)?.clamp(0.0, 1.0),
+            chunks: int_var(&lookup, "KB_GLOBAL_ARM_CHUNKS", 200)?.max(1) as usize,
+        };
+        // Communities are built from the Postgres entity graph and stored in
+        // Postgres. Without `KB_GRAPH_STORE=pg` there is neither a graph to build
+        // from nor a table to read, so an enabled arm would silently return
+        // nothing on every query — say so at boot instead.
+        if global_arm.enabled && graph_store == GraphStoreChoice::None {
+            bail!(
+                "KB_GLOBAL_ARM=1 needs the Postgres entity graph: set KB_GRAPH_STORE=pg \
+                 (communities are built from KbEntity/KbMention, which only exist when \
+                 entity extraction writes them)"
+            );
+        }
         let worker = read_worker(&lookup);
         let version = lookup("KB_VERSION")
             .filter(|v| !v.trim().is_empty())
@@ -878,6 +924,7 @@ impl Config {
             entity_extractor,
             graph_store,
             graph_arm,
+            global_arm,
             worker,
             version,
             request_timeout: Duration::from_secs(30),
