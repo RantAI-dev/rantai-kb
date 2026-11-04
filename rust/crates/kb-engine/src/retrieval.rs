@@ -13,7 +13,7 @@ use kb_ports::{
     Candidate, Chunk, ChunkId, ChunkMetadata, DocumentId, DocumentMeta, DocumentScope,
     DocumentStore, Embedder, EngineError, FigureGate, FigureGateCandidate, Fusion, HybridQuery,
     KeywordQuery, PortError, ProvenanceArm, RerankCandidate, Reranker, RetrievalDegrade,
-    RetrievalIndex, RetrievalProvenance, SearchHit, TenantId,
+    RetrievalIndex, RetrievalProvenance, SearchHit, TenantId, sort_candidates,
 };
 use tracing::Instrument;
 
@@ -706,13 +706,10 @@ pub async fn execute_pipeline(
             }
         }
         candidates = cand_map.into_values().collect();
-        candidates.sort_by(|a, b| {
-            b.scores
-                .fused
-                .partial_cmp(&a.scores.fused)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| a.unit_id.0.cmp(&b.unit_id.0))
-        });
+        // One ordering for every path: `unit_id` embeds the per-ingest document
+        // UUID, so sorting on it would make an expanded query's ties depend on
+        // the ingest. `sort_candidates` breaks them on the corpus instead.
+        sort_candidates(&mut candidates);
         candidates.truncate(pool_size as usize);
     }
 

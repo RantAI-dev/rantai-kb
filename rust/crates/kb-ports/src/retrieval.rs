@@ -330,23 +330,34 @@ pub trait RetrievalIndex: Send + Sync {
     fn capabilities(&self) -> IndexCapabilities;
 }
 
-/// Order candidates by fused score descending, breaking ties on document id
-/// then chunk index, then unit id.
+/// Order candidates by fused score descending, breaking ties on properties of
+/// the *corpus* rather than properties of the ingest.
 ///
 /// Deliberately **not** "the dense arm wins ties". That was the old behaviour:
 /// vector and BM25 rank-1 hits both scored 1/61, the vector hit owned position
 /// 1, and with a noisy dense arm that pinned Hit@1 at 0 (`docs/eval-baseline.md`
 /// §4). A deterministic total order is enough; which arm *wins* is a tuning
 /// question the eval should answer, not a property of the port.
+///
+/// The tie-break is the chunk's text, then its page and index. It used to be
+/// `document_id` and `unit_id`, but both contain the document id, which is a
+/// fresh UUID on every ingest. Two chunks with the same fused score were
+/// therefore ordered by whichever document happened to be inserted first:
+/// identical corpora could answer differently after a re-ingest, and the tiny
+/// stub gate — whose 8-dimensional embeddings make exact score ties common —
+/// flipped one document in and out of rank 1 between runs. Text, page and index
+/// are fixed by the corpus, so the same chunks always come out in the same
+/// order. Chunks with no text at all fall through to their index, which is the
+/// only remaining corpus-stable property.
 pub fn sort_candidates(candidates: &mut [Candidate]) {
     candidates.sort_by(|a, b| {
         b.scores
             .fused
             .partial_cmp(&a.scores.fused)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.document_id.as_str().cmp(b.document_id.as_str()))
+            .then_with(|| a.content.cmp(&b.content))
+            .then_with(|| a.page.cmp(&b.page))
             .then_with(|| a.chunk_index.cmp(&b.chunk_index))
-            .then_with(|| a.unit_id.as_str().cmp(b.unit_id.as_str()))
     });
     for (i, candidate) in candidates.iter_mut().enumerate() {
         candidate.ranks.fused = i as u32;
@@ -359,6 +370,10 @@ mod tests {
     use super::*;
 
     fn candidate(doc: &str, index: u32, fused: f32) -> Candidate {
+        candidate_with(doc, index, fused, "")
+    }
+
+    fn candidate_with(doc: &str, index: u32, fused: f32, content: &str) -> Candidate {
         Candidate {
             unit_id: ChunkId::new_unchecked(format!("{doc}_{index}")),
             document_id: DocumentId::new_unchecked(doc),
@@ -366,7 +381,7 @@ mod tests {
             chunk_index: index,
             page: None,
             chunk_type: ChunkType::Text,
-            content: String::new(),
+            content: content.to_string(),
             contextual_prefix: None,
             metadata: serde_json::Value::Null,
             scores: ArmScores {
@@ -378,19 +393,43 @@ mod tests {
         }
     }
 
+    /// Equal fused scores are ordered by the chunk's text, never by the
+    /// document id: that id is a new UUID on every ingest, so a tie-break on it
+    /// makes a fresh ingest of the same corpus answer differently.
     #[test]
-    fn ties_break_on_document_id_then_chunk_index_not_on_insertion() {
+    fn ties_break_on_content_not_on_the_per_ingest_document_id() {
+        // Same three chunks, two different random document ids (and a different
+        // input order, because the two arms can hand them back either way).
+        let mut first = vec![
+            candidate_with("9f2c-uuid", 0, 1.0, "zebra"),
+            candidate_with("1a7b-uuid", 7, 1.0, "alpha"),
+            candidate_with("4c8d-uuid", 3, 1.0, "mango"),
+        ];
+        sort_candidates(&mut first);
+        let contents: Vec<&str> = first.iter().map(|c| c.content.as_str()).collect();
+        assert_eq!(contents, vec!["alpha", "mango", "zebra"]);
+
+        // A re-ingest assigns new ids; the order must not move.
+        let mut second = vec![
+            candidate_with("0000-uuid", 3, 1.0, "mango"),
+            candidate_with("ffff-uuid", 0, 1.0, "zebra"),
+            candidate_with("5555-uuid", 7, 1.0, "alpha"),
+        ];
+        sort_candidates(&mut second);
+        let contents: Vec<&str> = second.iter().map(|c| c.content.as_str()).collect();
+        assert_eq!(contents, vec!["alpha", "mango", "zebra"]);
+    }
+
+    #[test]
+    fn identical_text_falls_back_to_chunk_index() {
         let mut v = vec![
-            candidate("doc_b", 0, 1.0),
-            candidate("doc_a", 7, 1.0),
-            candidate("doc_a", 3, 1.0),
+            candidate_with("doc_b", 2, 1.0, "same"),
+            candidate_with("doc_a", 0, 1.0, "same"),
+            candidate_with("doc_c", 1, 1.0, "same"),
         ];
         sort_candidates(&mut v);
-        let ids: Vec<String> = v
-            .iter()
-            .map(|c| format!("{}_{}", c.document_id, c.chunk_index))
-            .collect();
-        assert_eq!(ids, vec!["doc_a_3", "doc_a_7", "doc_b_0"]);
+        let indices: Vec<u32> = v.iter().map(|c| c.chunk_index).collect();
+        assert_eq!(indices, vec![0, 1, 2]);
     }
 
     #[test]

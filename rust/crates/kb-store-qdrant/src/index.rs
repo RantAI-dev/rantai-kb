@@ -155,14 +155,19 @@ impl QdrantIndex {
 #[derive(Clone)]
 struct ScoredPoint {
     id: PointId,
-    /// `unit_id` from the payload: the tie-break key. `None` only when the query
-    /// did not ask for payloads, which none of the adapter's own queries do.
-    unit_id: Option<String>,
+    /// The chunk's text, from the payload: the primary tie-break key. `None`
+    /// only when the query did not ask for payloads, which none of the
+    /// adapter's own queries do.
+    content: Option<String>,
+    /// The chunk's page and index, from the payload: the tie-break when two
+    /// chunks hold the same text.
+    page: Option<u32>,
+    chunk_index: Option<u32>,
     score: f32,
     payload: std::collections::HashMap<String, qdrant_client::qdrant::Value>,
 }
 
-/// One arm's results, ordered by score and then by a stable key.
+/// One arm's results, ordered by score and then by a key fixed by the corpus.
 ///
 /// This is the fix for the tiny corpus being non-deterministic across stacks:
 /// with an 8-dimensional stub embedding, cosine similarity collapses into a
@@ -173,9 +178,12 @@ struct ScoredPoint {
 /// that position, RRF is a function of ranks, so a tie reshuffling moved
 /// nDCG@10 by up to 0.036 on identical data.
 ///
-/// Breaking ties on `unit_id` (a deterministic function of tenant, document and
-/// chunk index) makes the arm's ranking a function of the *scores* and the
-/// *ids*, neither of which changes between two ingests of the same corpus.
+/// Breaking ties on `unit_id`, as this adapter did first, does **not** fix it:
+/// the unit id is `{document_id}_{chunk_index}` and `document_id` is a fresh
+/// UUID on every ingest, so the "stable" key was random too. The chunk's text,
+/// page and index are properties of the corpus; ordering on them makes the arm's
+/// ranking a function of the scores and the content, both of which are the same
+/// after a re-ingest.
 fn ranked_arm(points: &[ScoredPoint]) -> Vec<&ScoredPoint> {
     let mut ordered: Vec<(usize, &ScoredPoint)> = points.iter().enumerate().collect();
     ordered.sort_by(|(left_index, left), (right_index, right)| {
@@ -183,12 +191,12 @@ fn ranked_arm(points: &[ScoredPoint]) -> Vec<&ScoredPoint> {
             .score
             .partial_cmp(&left.score)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| match (&left.unit_id, &right.unit_id) {
-                (Some(l), Some(r)) => l.cmp(r),
-                // No payload means no id to break ties on, so fall back to the
-                // order the store gave, which is what the old code did.
-                _ => left_index.cmp(right_index),
-            })
+            .then_with(|| left.content.cmp(&right.content))
+            .then_with(|| left.page.cmp(&right.page))
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+            // No payload means no corpus-stable key, so fall back to the order
+            // the store gave, which is what the old code did.
+            .then_with(|| left_index.cmp(right_index))
     });
     ordered.into_iter().map(|(_, point)| point).collect()
 }
@@ -210,7 +218,14 @@ fn scored_points(results: &[qdrant_client::qdrant::ScoredPoint]) -> Vec<ScoredPo
         .filter_map(|point| {
             Some(ScoredPoint {
                 id: point.id.clone()?,
-                unit_id: crate::payload::string(&point.payload, crate::payload::KEY_UNIT_ID),
+                content: crate::payload::string(&point.payload, crate::payload::KEY_CONTENT),
+                page: crate::payload::integer(&point.payload, crate::payload::KEY_PAGE)
+                    .map(|v| v as u32),
+                chunk_index: crate::payload::integer(
+                    &point.payload,
+                    crate::payload::KEY_CHUNK_INDEX,
+                )
+                .map(|v| v as u32),
                 score: point.score,
                 payload: point.payload.clone(),
             })
@@ -743,10 +758,12 @@ impl RetrievalIndex for QdrantIndex {
 mod tests {
     use super::*;
 
-    fn point(id: u64, unit_id: &str, score: f32) -> ScoredPoint {
+    fn point(id: u64, content: &str, score: f32) -> ScoredPoint {
         ScoredPoint {
             id: PointId::from(id),
-            unit_id: Some(unit_id.to_string()),
+            content: Some(content.to_string()),
+            page: None,
+            chunk_index: Some(0),
             score,
             payload: std::collections::HashMap::new(),
         }
@@ -755,48 +772,58 @@ mod tests {
     fn order(points: &[ScoredPoint]) -> Vec<String> {
         ranked_arm(points)
             .into_iter()
-            .map(|p| p.unit_id.clone().unwrap_or_default())
+            .map(|p| p.content.clone().unwrap_or_default())
             .collect()
     }
 
     #[test]
-    fn tied_scores_are_broken_by_unit_id_not_by_the_order_the_store_answered_in() {
+    fn tied_scores_are_broken_by_content_not_by_the_order_the_store_answered_in() {
         // The bug this fixes: with an 8-dim stub embedding a 19-chunk corpus has
         // 4- and 5-way score ties, and Qdrant hands tied points back in segment
         // order — which follows ingest order, which is not stable across runs.
-        let a = point(1, "doc_0", 0.627);
-        let b = point(2, "doc_1", 0.627);
-        let c = point(3, "doc_2", 0.627);
+        let a = point(1, "zebra", 0.627);
+        let b = point(2, "alpha", 0.627);
+        let c = point(3, "mango", 0.627);
         assert_eq!(
             order(&[a.clone(), b.clone(), c.clone()]),
-            ["doc_0", "doc_1", "doc_2"]
+            ["alpha", "mango", "zebra"]
         );
         assert_eq!(
             order(&[c.clone(), a.clone(), b.clone()]),
-            ["doc_0", "doc_1", "doc_2"]
+            ["alpha", "mango", "zebra"]
         );
         assert_eq!(
             order(&[b.clone(), c.clone(), a.clone()]),
-            ["doc_0", "doc_1", "doc_2"]
+            ["alpha", "mango", "zebra"]
         );
+    }
+
+    /// A re-ingest gives every document a new UUID, so the same chunk has a new
+    /// point id and unit id. Content, page and index do not move; the order
+    /// must not either.
+    #[test]
+    fn a_reingest_with_new_point_ids_keeps_the_same_arm_order() {
+        let before = [point(1, "beta", 0.5), point(2, "alpha", 0.5)];
+        let after = [point(99, "alpha", 0.5), point(7, "beta", 0.5)];
+        assert_eq!(order(&before), order(&after));
     }
 
     #[test]
     fn a_higher_score_always_beats_a_lower_one_however_the_ties_fall() {
         let points = [
-            point(1, "doc_z", 0.1),
-            point(2, "doc_a", 0.9),
-            point(3, "doc_m", 0.1),
+            point(1, "zebra", 0.1),
+            point(2, "alpha", 0.9),
+            point(3, "mango", 0.1),
         ];
-        assert_eq!(order(&points), ["doc_a", "doc_m", "doc_z"]);
+        assert_eq!(order(&points), ["alpha", "mango", "zebra"]);
     }
 
     #[test]
     fn ranks_are_the_sorted_positions_not_the_input_positions() {
         let map = rank_map(&[
-            point(3, "doc_2", 0.5),
-            point(1, "doc_0", 0.5),
-            point(2, "doc_1", 0.9),
+            point(3, "mango", 0.5),
+            point(1, "alpha", 0.5),
+            point(2, "zebra", 0.9),
         ]);
         assert_eq!(map[&PointId::from(2)], (0.9, 0));
         assert_eq!(map[&PointId::from(1)], (0.5, 1));
@@ -807,10 +834,11 @@ mod tests {
     fn a_point_without_a_payload_keeps_the_stores_order() {
         // Nothing to break ties on, so the store's order is what it gets: worse
         // than a tie-break, never worse than the old behaviour.
-        let points: Vec<ScoredPoint> = [point(7, "doc_1", 0.5), point(8, "doc_0", 0.5)]
+        let points: Vec<ScoredPoint> = [point(7, "ignored", 0.5), point(8, "ignored", 0.5)]
             .into_iter()
             .map(|mut p| {
-                p.unit_id = None;
+                p.content = None;
+                p.chunk_index = None;
                 p
             })
             .collect();
