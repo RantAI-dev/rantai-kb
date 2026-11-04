@@ -321,6 +321,31 @@ pub trait RetrievalIndex: Send + Sync {
         document_id: &DocumentId,
     ) -> Result<Vec<Candidate>, PortError>;
 
+    /// Read at most `max_units` stored units of one document, ordered by
+    /// `chunk_index` ascending, for the document-structure read.
+    ///
+    /// The default is the honest smallest implementation — [`Self::ordered_chunks`]
+    /// followed by a truncation — which is what a fake or a small adapter needs.
+    /// A real adapter overrides it and scrolls in windows, so a 2,000-page
+    /// document is never one unbounded store round trip. `max_units` is the
+    /// caller's memory cap as well as the read cap: the adapter must not read
+    /// past it, and a caller that gets exactly `max_units` units cannot tell
+    /// whether more exist (the route reports `truncated` when the cap is hit).
+    ///
+    /// Document visibility is the caller's job, exactly as for
+    /// [`Self::ordered_chunks`]: pass a document id only after the tenant and
+    /// knowledge-base check.
+    async fn document_units(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+        max_units: usize,
+    ) -> Result<Vec<Candidate>, PortError> {
+        let mut units = self.ordered_chunks(tenant, document_id).await?;
+        units.truncate(max_units);
+        Ok(units)
+    }
+
     /// Probe whether the index backend is healthy and responding.
     async fn health_check(&self) -> Result<(), PortError> {
         Ok(())

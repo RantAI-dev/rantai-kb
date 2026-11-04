@@ -69,8 +69,8 @@ pub use ingest::{
 };
 pub use page_arm::{
     MergeOutcome, PageArm, PageArmConfig, PageCaption, PageCaptionConfig, PageIngest, PageOutcome,
-    PageRerankConfig, PageRerankContext, PageVision, PageVisionContext, PageVisionRerankConfig,
-    RankedPage,
+    PageRerankConfig, PageRerankContext, PageTextSemantics, PageVision, PageVisionContext,
+    PageVisionRerankConfig, RankedPage,
 };
 pub use retrieval::{RetrievalOptions, RetrievalOutcome, enrich_titles, execute_pipeline};
 pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};

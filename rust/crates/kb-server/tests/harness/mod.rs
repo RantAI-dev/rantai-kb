@@ -13,12 +13,12 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use kb_engine::EngineSettings;
 use kb_engine::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityStore, FakeJobStore,
     FakeReranker,
 };
-use kb_ports::DocumentMeta;
+use kb_engine::{EngineSettings, PageArm, PageArmConfig};
+use kb_ports::{DocumentMeta, PageEmbedder, PageImage, PortError};
 use kb_server::events::EventBus;
 use kb_server::state::{AppState, StateParts};
 use tower::ServiceExt;
@@ -34,6 +34,8 @@ pub struct Harness {
     pub entities: FakeEntityStore,
     pub embedder: FakeEmbedder,
     pub events: Arc<EventBus>,
+    /// The page-image arm's index, when [`Harness::with_page_index`] built one.
+    pub page_index: Option<FakeChunkStore>,
 }
 
 impl Default for Harness {
@@ -78,6 +80,56 @@ impl Harness {
             entities,
             embedder,
             events,
+            page_index: None,
+        }
+    }
+
+    /// A harness whose engine has a page-image arm, for the reads that need
+    /// page units (the structure route). `page_index` is the fake collection
+    /// those units live in; seed it with `RetrievalIndex::upsert`.
+    pub fn with_page_index() -> Self {
+        let documents = FakeDocumentStore::default();
+        let chunks = FakeChunkStore::default();
+        let blobs = FakeBlobStore::default();
+        let jobs = FakeJobStore::default();
+        let entities = FakeEntityStore::default();
+        let embedder = FakeEmbedder::default();
+        let events = EventBus::new();
+        let page_index = FakeChunkStore::default();
+
+        let mut state = AppState::from_parts(
+            StateParts {
+                documents: Arc::new(documents.clone()),
+                index: Arc::new(chunks.clone()),
+                entities: Some(Arc::new(entities.clone())),
+                graph: None,
+                graph_arm: None,
+                blob: Arc::new(blobs.clone()),
+                embedder: Arc::new(embedder.clone()),
+                jobs: Arc::new(jobs.clone()),
+                events: Arc::clone(&events),
+                version: "test".to_string(),
+            },
+            Arc::new(FakeReranker::default()),
+            engine_settings(),
+        );
+        state.engine.inputs.page_arm = Some(Arc::new(PageArm {
+            embedder: Arc::new(FixedPageEmbedder),
+            index: Arc::new(page_index.clone()),
+            config: PageArmConfig::default(),
+            vision: None,
+        }));
+
+        Self {
+            app: kb_server::build_router(state),
+            documents,
+            chunks,
+            blobs,
+            jobs,
+            entities,
+            embedder,
+            events,
+            page_index: Some(page_index),
         }
     }
 
@@ -166,6 +218,25 @@ impl Harness {
             )
             .await
             .unwrap()
+    }
+}
+
+/// A four-dimensional page embedder: the structure route never embeds a page,
+/// but `PageArm` requires one to exist.
+struct FixedPageEmbedder;
+
+#[async_trait::async_trait]
+impl PageEmbedder for FixedPageEmbedder {
+    async fn embed_pages(&self, pages: &[PageImage]) -> Result<Vec<Vec<f32>>, PortError> {
+        Ok(vec![vec![0.1, 0.2, 0.3, 0.4]; pages.len()])
+    }
+
+    async fn embed_query(&self, _text: &str) -> Result<Vec<f32>, PortError> {
+        Ok(vec![0.1, 0.2, 0.3, 0.4])
+    }
+
+    fn dimension(&self) -> u32 {
+        4
     }
 }
 

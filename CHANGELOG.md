@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Document structure read (`ING-3`).** `GET /v1/documents/:id/structure` returns
+  `documentId`, `externalRef`, `title`, `pages` (`number`, `hasTextLayer`, `ocrText`,
+  `imageAssetKey`), `figures` (`key`, `page`, `bbox`, `caption`, `ocrText`, `assetKey`)
+  and `chunks` (`chunkId`, `chunkIndex`, `page`) — the chunk → page map. It is additive:
+  every value comes from a record ingest already wrote. Pages come from the page-image
+  index's page units plus every page a text or figure hit can reference; figures come
+  from the figure chunks retrieval can return, merged with the document row's
+  `metadata.figures` for `bbox` and `caption`, and include figure rows that have no
+  chunk (keyed by their asset key). The route enforces the tenant and the key's
+  knowledge-base limit exactly like the other by-ID routes (`SEC-1`): another tenant,
+  a document outside the key's knowledge bases, and a document in no knowledge base
+  all answer the same 404.
+- **Page provenance at ingest.** Page units now carry `hasTextLayer`, `ocr`, and
+  `image` (whether the page JPEG was written), derived from the extraction result, so
+  the structure read does not infer them from text. The text index is unchanged.
+
+### Notes
+
+- **Structure caps.** The route reads at most 20,000 text units and 2,000 page units
+  (the adapter scrolls in 512-point windows) and sets `truncated: true` when either cap
+  is reached, instead of silently returning a short list.
+- **Nulls, not guesses.** A document ingested before this release has no per-page
+  provenance or image-success marker, so its `hasTextLayer`, `ocrText` and
+  `imageAssetKey` are `null`; its pages and figures are still listed. Figure OCR is not
+  extracted or stored today, so `figures[].ocrText` is always `null` (the field stays
+  so a caller's shape does not change when it is). `ocrText` is the page's stored text
+  (at most 8,000 characters) with the caption stage's `[Visual] …` description
+  stripped. `pages[].number` is 0-based, matching `chunks[].page`.
+
 ## 0.2.0 — 2026-11-04
 
 The first Rust release. `v0.1.0` remains the last Bun release.
