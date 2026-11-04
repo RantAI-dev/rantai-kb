@@ -1,0 +1,252 @@
+{"_id": "1", "text": "What drives the rise in women's workforce involvement in EU nations such as Germany?", "query_types": ["open-ended"]}
+{"_id": "2", "text": "reasons behind decrease in posted workers in Germany 2022", "query_types": ["open-ended"]}
+{"_id": "4", "text": "estimated skilled labor needs for EU green transition by 2030", "query_types": ["extractive", "numerical"]}
+{"_id": "6", "text": "How might the observed trends in top-end income inequality (S80/S50) relate to broader economic shifts in high-income households during the pandemic recovery?", "query_types": ["open-ended"]}
+{"_id": "7", "text": "difference in labor productivity growth between eu and us in q4 2024 percentage points", "query_types": ["compare-contrast", "numerical"]}
+{"_id": "8", "text": "According to the 2022 report, what is the average length of a posting for a worker in the European Union?", "query_types": ["extractive", "numerical"]}
+{"_id": "9", "text": "What factors contribute to the variation in per-person training costs across EU countries in the context of renewable energy expansion?", "query_types": ["open-ended"]}
+{"_id": "10", "text": "Compare how well voucher schemes and tax-related incentives have worked in decreasing informal domestic labor across European nations", "query_types": ["compare-contrast"]}
+{"_id": "11", "text": "Does the Regional Green Transition Vulnerability Index show that wealthier regions reliant on polluting sectors face greater risk than poorer regions with comparable industrial profiles?", "query_types": ["boolean"]}
+{"_id": "12", "text": "Age distribution in green versus high-digital-intensity occupations in the EU workforce", "query_types": ["compare-contrast"]}
+{"_id": "14", "text": "reasons behind gender disparities in EU jobs focused on digital and green transitions", "query_types": ["open-ended"]}
+{"_id": "15", "text": "Employment disparities between EU movers and third-country nationals in Belgium, Netherlands, and Germany", "query_types": ["compare-contrast"]}
+{"_id": "16", "text": "Examine how gender disparities in technical and digital occupations affect the long-term adaptability of the labor market, taking into account the unequal access to training outlined in the report.", "query_types": ["open-ended"]}
+{"_id": "17", "text": "Assess the impact of gender disparities across sectors on labor market trends amid the European Union's shift toward sustainable energy.", "query_types": ["open-ended"]}
+{"_id": "18", "text": "What could explain the increased likelihood of employed EU mobile workers being at risk of poverty compared to local workers in some member states?", "query_types": ["open-ended"]}
+{"_id": "19", "text": "Describe the approach to creating a digital work environment centered on human needs that enhances employee wellbeing and involves workers in the development and implementation of technological systems.", "query_types": ["open-ended"]}
+{"_id": "20", "text": "Determinants affecting workforce dynamics in EU industries undergoing green transformation", "query_types": ["open-ended"]}
+{"_id": "21", "text": "Compare adult learning participation rates between tertiary-educated adults and those with lower education in the EU.", "query_types": ["compare-contrast"]}
+{"_id": "22", "text": "How do the trends in EU citizen mobility compare to those of third-country nationals in terms of inflows and net mobility between 2021 and 2022?", "query_types": ["compare-contrast"]}
+{"_id": "23", "text": "Compare the employment conditions between digital-intensive and green economy-focused future-oriented occupations in the EU", "query_types": ["compare-contrast"]}
+{"_id": "24", "text": "Compare the roles of public employment services in supporting green transition versus attracting third-country workers based on current initiatives and challenges.", "query_types": ["compare-contrast"]}
+{"_id": "25", "text": "In what ways did the conflict in Ukraine influence the movement of third-country nationals into Central European nations relative to those in Western Europe?", "query_types": ["compare-contrast", "open-ended"]}
+{"_id": "26", "text": "What explains the disparity in part-time work prevalence between female and male EU migrants in certain European Union countries?", "query_types": ["compare-contrast", "open-ended"]}
+{"_id": "27", "text": "Identify the EU's employment rate target for 2030 as mentioned in the summary.", "query_types": ["extractive"]}
+{"_id": "28", "text": "List the number of EU countries that ratified ILO Convention C189 by 2024 as mentioned in the text.", "query_types": ["extractive", "numerical"]}
+{"_id": "32", "text": "Describe the changes in the age composition of mobile EU citizens from 2021 to 2022 in Sweden, Slovenia, and Switzerland, and analyze how these shifts may influence broader patterns of labor mobility within the EU.", "query_types": ["open-ended"]}
+{"_id": "33", "text": "Calculate the projected increase in economically active older people in the EU by 2030 based on the provided estimate.", "query_types": ["numerical"]}
+{"_id": "34", "text": "What has been the impact of declining PISA scores on long-term economic growth in the EU?", "query_types": ["open-ended"]}
+{"_id": "35", "text": "How does exposure to artificial intelligence affect gender distribution in forward-looking occupations within the European Union?", "query_types": ["open-ended"]}
+{"_id": "36", "text": "What drove the rise in A1 certificate issuances in Germany and Switzerland from 2022 to 2023?", "query_types": ["open-ended"]}
+{"_id": "38", "text": "female employment rate European Union 2023", "query_types": ["extractive", "numerical"]}
+{"_id": "39", "text": "Does the reliability of Eurostat's data assessments influence the observed labor mobility trends in Ireland?", "query_types": ["boolean"]}
+{"_id": "40", "text": "How does Luxembourg's employee compensation compare to wage growth trends in Eastern European countries according to the 2024 review?", "query_types": ["compare-contrast"]}
+{"_id": "41", "text": "How many years had the European Network of Public Employment Services been operational by the time the 2024 Annual Report was published?", "query_types": ["numerical"]}
+{"_id": "42", "text": "wage growth productivity gap southern vs central eastern europe", "query_types": ["compare-contrast"]}
+{"_id": "44", "text": "What role do age-based workforce mobility trends in EU Member States play in shaping the challenges of transitioning labor into new green industries?", "query_types": ["open-ended"]}
+{"_id": "45", "text": "age distribution digital vs green jobs", "query_types": ["compare-contrast", "open-ended"]}
+{"_id": "46", "text": "factors contributing to EU labour market resilience amid economic slowdown", "query_types": ["open-ended"]}
+{"_id": "47", "text": "Did the EU's unemployment rate drop below 6% in February 2025, reflecting a tighter labour market than in 2023?", "query_types": ["boolean"]}
+{"_id": "50", "text": "EU movers vs third-country nationals fixed-term contracts 2023 comparison", "query_types": ["compare-contrast"]}
+{"_id": "51", "text": "Do pension changes in nations such as France and Sweden support higher labour market engagement for people aged 55–68 by 2030?", "query_types": ["boolean"]}
+{"_id": "52", "text": "What is the percentage point difference in permanent contract rates between mobile EU healthcare workers and host-country nationals in 2023?", "query_types": ["numerical"]}
+{"_id": "53", "text": "Compare the job strain and earnings predictability between workers in green jobs facing labour shortages and those in digital-intensive roles.", "query_types": ["compare-contrast"]}
+{"_id": "54", "text": "Identify the percentage of workers in AI-exposed and highly digital occupations who have permanent contracts and compare it to the EU average.", "query_types": ["extractive", "numerical"]}
+{"_id": "55", "text": "comparison of employment rates among older workers across EU member states", "query_types": ["compare-contrast"]}
+{"_id": "56", "text": "How do labour market integration and the prevalence of part-time employment compare between EU citizens working abroad and third-country nationals within the EU?", "query_types": ["compare-contrast"]}
+{"_id": "57", "text": "Determine the anticipated reduction in the labour force, in millions, projected for 2070 according to the static model scenario.", "query_types": ["extractive", "numerical"]}
+{"_id": "58", "text": "What proportion of Estonia's nurses are working in other EU or EFTA member states?", "query_types": ["numerical"]}
+{"_id": "59", "text": "Compare training participation rates between AI-exposed occupations and traditional service industries in the EU labor market", "query_types": ["compare-contrast"]}
+{"_id": "60", "text": "Is there uniform interest across all EU regions in adopting Individual Learning Accounts according to the 2024 report?", "query_types": ["boolean"]}
+{"_id": "61", "text": "Examine the underlying causes of gender disparities in EU jobs related to the digital and green transitions, and propose policy actions to reduce these inequities.", "query_types": ["open-ended"]}
+{"_id": "62", "text": "Did the gap in fixed-term employment rates between EU movers and nationals decrease between 2018 and 2023?", "query_types": ["boolean"]}
+{"_id": "63", "text": "What drove the rise in immigration from non-EU nationals to the European Union during the period from 2021 to 2022?", "query_types": ["open-ended"]}
+{"_id": "64", "text": "employment rate change Greece Portugal 2019-2023", "query_types": ["compare-contrast", "numerical"]}
+{"_id": "65", "text": "How does the PES Network use digital tools to support knowledge sharing among public employment services in Europe?", "query_types": ["open-ended"]}
+{"_id": "66", "text": "Analyze how full-time employment among returning health workers evolved in the Netherlands and Italy from 2018 to 2023, and describe the differences in their employment trends.", "query_types": ["compare-contrast", "open-ended"]}
+{"_id": "67", "text": "Analyze how digitalization and AI are contributing to new forms of worker vulnerability in platform work", "query_types": ["open-ended"]}
+{"_id": "68", "text": "Is the prevalence of undeclared work in non-care domestic tasks higher than in care-related services across European countries?", "query_types": ["boolean"]}
+{"_id": "69", "text": "How do the approaches of Estonia, Slovenia, and Germany differ in designing initiatives to enhance research career paths, particularly in tackling issues related to recruitment and advancement?", "query_types": ["compare-contrast", "open-ended"]}
+{"_id": "70", "text": "Describe the approach outlined in the EU report for tackling workforce demographic challenges using integrated policy measures.", "query_types": ["open-ended"]}
+{"_id": "71", "text": "What patterns of workforce movement are evident in EU transforming sectors during the period from 2010 to 2020?", "query_types": ["open-ended"]}
+{"_id": "72", "text": "What percentage of EU employment is accounted for by future-oriented occupations?", "query_types": ["numerical"]}
+{"_id": "75", "text": "Compare the count of EU countries that have ratified ILO Convention C189 with those that provide domestic workers the same labour and social protection as other workers.", "query_types": ["compare-contrast", "numerical"]}
+{"_id": "76", "text": "Compare the job strain levels and access to training between AI-exposed occupations and labour-shortage occupations in the EU based on the provided data.", "query_types": ["compare-contrast"]}
+{"_id": "77", "text": "Compare the effectiveness of training participation and job transition rates for older workers in leading versus lagging EU countries based on recent trends.", "query_types": ["compare-contrast", "multi-hop"]}
+{"_id": "78", "text": "Explain how implementing Sweden's labor force participation approach would affect the expected reduction in the EU's workforce.", "query_types": ["open-ended"]}
+{"_id": "81", "text": "percentage of individuals with digital skills in Bulgaria", "query_types": ["extractive", "numerical"]}
+{"_id": "83", "text": "What systemic challenges prevent surplus healthcare graduates from addressing workforce shortages in the EU?", "query_types": ["open-ended"]}
+{"_id": "85", "text": "Explain how labour market transitions can support the green transition in the EU, considering sectoral changes and skill demands.", "query_types": ["open-ended"]}
+{"_id": "86", "text": "Analyze the factors contributing to the persistent gender gap in part-time employment among EU movers, particularly the 36% of women compared to 8% of men in 2023.", "query_types": ["numerical", "open-ended"]}
+{"_id": "87", "text": "Is the EU's projected job growth from the green transition contingent on resolving public sector skills shortages in clean energy? (Yes/No?)", "query_types": ["boolean"]}
+{"_id": "88", "text": "Do AI-exposed roles have a greater likelihood of permanent employment compared to the overall EU average?", "query_types": ["boolean"]}
+{"_id": "89", "text": "Summarize the key factors influencing future EU labor force trends and the policy interventions proposed to address demographic challenges.", "query_types": ["open-ended"]}
+{"_id": "90", "text": "Analyze how gender and household status influence underemployment among part-time workers in the EU, and compare the underlying factors driving these patterns.", "query_types": ["compare-contrast", "open-ended"]}
+{"_id": "91", "text": "Describe the ways in which digital transformation and automated systems influence labor market risks and inequalities in Europe", "query_types": ["open-ended"]}
+{"_id": "92", "text": "What percentage of the EU labour force increase in 2023 was due to non-EU citizens?", "query_types": ["numerical"]}
+{"_id": "93", "text": "How do the risks of poverty and social exclusion for mobile EU workers compare to those of third-country nationals, and what factors might explain these differences?", "query_types": ["compare-contrast", "open-ended"]}
+{"_id": "94", "text": "In what ways has the Benchlearning initiative supported the advancement and modernization of public employment services across Europe?", "query_types": ["open-ended"]}
+{"_id": "95", "text": "employment rate tertiary education vs low skilled workers EU 2023", "query_types": ["compare-contrast", "numerical"]}
+{"_id": "96", "text": "What underlying reasons explain the limited job mobility among employees in energy-intensive sectors across the European Union?", "query_types": ["open-ended"]}
+{"_id": "97", "text": "Examine how the emphasis on digital and green competencies in career guidance mirrors wider economic and technological transformations in European labor markets.", "query_types": ["open-ended"]}
+{"_id": "99", "text": "Compare the employment growth trends among older workers (55–64) and youth employment in the EU's 2023 labour market.", "query_types": ["compare-contrast"]}
+{"_id": "100", "text": "What is the projected financial range required for workforce training investments to support the EU's green transition by 2030?", "query_types": ["extractive", "numerical"]}
+{"_id": "101", "text": "Do countries with higher education investments have higher re-employment rates among older workers in the EU?", "query_types": ["boolean"]}
+{"_id": "103", "text": "Analyze how the green transition impacts labour market dynamics in EU transforming sectors", "query_types": ["open-ended"]}
+{"_id": "105", "text": "What differences exist between the legal safeguards for care workers in Portugal and Hungary, and where are social protection shortfalls still present?", "query_types": ["compare-contrast", "open-ended"]}
+{"_id": "106", "text": "Can increasing labor force participation among underutilized groups fully offset the projected annual loss of 2 million workers by 2040?", "query_types": ["boolean"]}
+{"_id": "107", "text": "How do the long-term effects of labour market investments compare to housing investments in reducing regional disparities in the EU?", "query_types": ["compare-contrast"]}
+{"_id": "108", "text": "Is underemployment among younger workers (20–34) higher than among older workers (55–64) in the EU labor market?", "query_types": ["boolean"]}
+{"_id": "109", "text": "How do trends in regional income convergence differ between countries like Austria and France compared to Czechia and Sweden, and what factors explain these differences?", "query_types": ["compare-contrast", "open-ended"]}
+{"_id": "110", "text": "Was there a decline in underemployment among part-time workers in the EU from 2013 to 2023?", "query_types": ["boolean"]}
+{"_id": "111", "text": "How do the working conditions of declared versus undeclared care workers in the EU differ in terms of job security and access to social protections?", "query_types": ["compare-contrast"]}
+{"_id": "113", "text": "impact of Individual Learning Accounts on workforce development in Europe", "query_types": ["open-ended"]}
+{"_id": "114", "text": "As of mid-2024, have real wages in the EU returned to their levels before the pandemic?", "query_types": ["boolean"]}
+{"_id": "116", "text": "Compare the effectiveness of voucher systems and tax incentives in reducing undeclared domestic work across EU Member States, highlighting differences in coverage and equity impacts.", "query_types": ["compare-contrast"]}
+{"_id": "118", "text": "Did the increase in long-term mobility inflows to EU countries in 2022 outweigh the decrease in outflows compared to 2021?", "query_types": ["boolean"]}
+{"_id": "119", "text": "Why do EU movers have a higher median income than nationals even though their income growth has been slower?", "query_types": ["open-ended"]}
+{"_id": "120", "text": "Determine the annual percentage increase in ICT specialist employment necessary for the EU to reach its 2030 goal of 20 million specialists.", "query_types": ["numerical"]}
+{"_id": "121", "text": "How has digital transformation been integrated into European public employment services, and what are its key benefits?", "query_types": ["open-ended"]}
+{"_id": "123", "text": "What are the key demographic and employment characteristics of workers in energy-intensive industries in the EU, and how do they impact the green transition?", "query_types": ["open-ended"]}
+{"_id": "125", "text": "how does social investment influence gender parity in labor market participation", "query_types": ["open-ended"]}
+{"_id": "127", "text": "How can research and innovation address the dual challenges of green and digital transitions while ensuring social equity in EU labour markets?", "query_types": ["open-ended"]}
+{"_id": "129", "text": "Which principle of the European Pillar of Social Rights specifically supports the inclusion of people with disabilities in the workforce?", "query_types": ["extractive"]}
+{"_id": "130", "text": "How does cohabitation with a partner influence the likelihood of underemployment for part-time workers in the EU?", "query_types": ["extractive"]}
+{"_id": "131", "text": "What percentage of EU healthcare movers are female compared to national workers?", "query_types": ["extractive", "numerical"]}
+{"_id": "132", "text": "List the countries with vocational education employment rates below 70% in 2023.", "query_types": ["enumerative", "extractive"]}
+{"_id": "133", "text": "Examine the implications of gender disparities in AI-impacted jobs for the inclusivity of the digital transformation in the European Union", "query_types": ["open-ended"]}
+{"_id": "134", "text": "Is it expected that the green transition under the European Green Deal will generate up to 2.5 million jobs in the EU by 2030?", "query_types": ["boolean"]}
+{"_id": "135", "text": "Which countries are expected to have higher re-training costs per worker despite having lower current renewable energy deployment?", "query_types": ["compare-contrast", "extractive"]}
+{"_id": "136", "text": "Determine the year-on-year percentage growth in real wages recorded for the EU during the second quarter of 2024.", "query_types": ["numerical"]}
+{"_id": "137", "text": "Explain the long-term economic implications of shifting education levels in the EU labor force", "query_types": ["open-ended"]}
+{"_id": "138", "text": "digital competencies employment training differences between older and younger workers EU", "query_types": ["compare-contrast"]}
+{"_id": "139", "text": "Does unequal access to digital technologies worsen disparities in the European labour market?", "query_types": ["boolean"]}
+{"_id": "140", "text": "Netherlands and Belgium job vacancy levels 2024-Q4 EU contrast", "query_types": ["compare-contrast", "numerical"]}
+{"_id": "141", "text": "According to the data, does Finland have a narrower gender employment gap compared to Sweden?", "query_types": ["boolean"]}
+{"_id": "142", "text": "Analyze how digital and green transitions intersect to affect vulnerable workers in Europe", "query_types": ["open-ended"]}
+{"_id": "143", "text": "Does the information from Denmark and the Netherlands cover both posted workers and self-employed persons?", "query_types": ["boolean"]}
+{"_id": "144", "text": "Did the Netherlands have a higher job vacancy rate than Poland in 2024?", "query_types": ["boolean"]}
+{"_id": "145", "text": "What was the rise in the proportion of EU movers with low education levels from 2018 to 2023?", "query_types": ["numerical"]}
+{"_id": "147", "text": "What were the changes in self-employment rates for EU citizens working in another EU country from 2017 to 2023, and how did these trends differ from those observed among third-country nationals during the same period?", "query_types": ["compare-contrast", "multi-hop"]}
+{"_id": "148", "text": "How do part-time employment trends differ between EU movers and nationals in EFTA countries?", "query_types": ["compare-contrast"]}
+{"_id": "149", "text": "In what ways do Belgium-FOREM and Denmark's strategies for digital inclusion of vulnerable jobseekers vary regarding outreach methods and the delivery of services?", "query_types": ["compare-contrast", "multi-hop"]}
+{"_id": "150", "text": "EU employment rate for individuals aged 20 to 64 in 2023", "query_types": ["extractive", "numerical"]}
+{"_id": "151", "text": "What is the self-employment rate in Slovakia for domestic workers?", "query_types": ["extractive", "numerical"]}
+{"_id": "152", "text": "Overview of the European Commission's findings from the ERA4FutureWork Initiative", "query_types": ["open-ended"]}
+{"_id": "154", "text": "How does the EU27 labor market represent an aging workforce?", "query_types": ["open-ended"]}
+{"_id": "155", "text": "Why do men in the EU work fewer part-time jobs than women?", "query_types": ["open-ended"]}
+{"_id": "156", "text": "Native students in the European Union vs. Foreign-born students", "query_types": ["compare-contrast"]}
+{"_id": "157", "text": "Define the term \"care allowances.\"", "query_types": ["extractive"]}
+{"_id": "158", "text": "What percentage of older part-time workers are underemployed in the EU?", "query_types": ["extractive", "numerical"]}
+{"_id": "159", "text": "How did overall household financial conditions improve across the EU?", "query_types": ["open-ended"]}
+{"_id": "160", "text": "Income vs consumption across the EU, 2024.", "query_types": ["compare-contrast"]}
+{"_id": "164", "text": "What is the average age of miners in Poland?", "query_types": ["extractive", "numerical"]}
+{"_id": "165", "text": "Are wage subsidies in Greece helpful for people who are unemployed for the long term?", "query_types": ["boolean"]}
+{"_id": "166", "text": "Determine the approximate percentage of youths between the ages of 15 and 29 who were employed, educated, or in training.", "query_types": ["extractive", "numerical"]}
+{"_id": "167", "text": "Did Estonia present reforms in doctoral training to the EU in 2024?", "query_types": ["boolean"]}
+{"_id": "169", "text": "Compare the discrepancies between total and breakdown figures reported by EL, IT, and LT for incoming posted workers in 2023.", "query_types": ["compare-contrast"]}
+{"_id": "170", "text": "Determine the name of countries that exhibit a homogenous working-age population.", "query_types": ["enumerative", "extractive"]}
+{"_id": "171", "text": "Which age group had lower representation in residual green occupations of interest in the EU27 before 2021?", "query_types": ["extractive"]}
+{"_id": "172", "text": "How did the number of EU movers and health workers in IT aged 35-39 change from 2018 to 2023, compared to those aged 55-59?", "query_types": ["compare-contrast", "numerical"]}
+{"_id": "173", "text": "Did the percentage of females moving to Denmark increase between 2021 and 2022?", "query_types": ["boolean"]}
+{"_id": "174", "text": "What percentage of workers were TCNs in France in 2022?", "query_types": ["extractive", "numerical"]}
+{"_id": "175", "text": "Compare the impact of unpaid care work on women’s and men’s labour market access and representation in STEM sectors.", "query_types": ["compare-contrast"]}
+{"_id": "176", "text": "Did third-country nationals have higher rates of formal education and training participation than EU movers between 2018 and 2022?", "query_types": ["boolean"]}
+{"_id": "178", "text": "Which year's Employment Outlook was published by the OECD in Paris?", "query_types": ["extractive"]}
+{"_id": "179", "text": "EU job strain proportion lowest-value higher digital skill intensity occupation", "query_types": ["extractive", "numerical"]}
+{"_id": "180", "text": "What is the primary aim for the STR partnership?", "query_types": ["extractive"]}
+{"_id": "181", "text": "Describe the variation in tertiary education attainment among EU movers aged 30–34 across different EU Member States from 2017 to 2022.", "query_types": ["open-ended"]}
+{"_id": "182", "text": "How did Spain's October 2022 law expand social protection for domestic workers?", "query_types": ["open-ended"]}
+{"_id": "183", "text": "What is the EU’s target for adult training participation by 2030?", "query_types": ["extractive", "numerical"]}
+{"_id": "185", "text": "European vs North American Universities: tenure protection and academic staff restructuring", "query_types": ["compare-contrast", "open-ended"]}
+{"_id": "187", "text": "2022 EU Corporate profits vs. labor share", "query_types": ["compare-contrast", "numerical"]}
+{"_id": "188", "text": "Which demographic has the lowest part-time rate in Europe?", "query_types": ["extractive"]}
+{"_id": "189", "text": "What was the average government spending on healthcare as a percentage of GDP in 2019 for Germany, France, Italy, Spain, and Ireland?", "query_types": ["extractive", "numerical"]}
+{"_id": "190", "text": "Is Luxembourg's PPS change greater than 0 in the list of EU movers as a share of the total working-age population in 2023?", "query_types": ["boolean", "numerical"]}
+{"_id": "191", "text": "EU young vs. old workers' employment, shortage, higher digital intensity.", "query_types": ["compare-contrast"]}
+{"_id": "192", "text": "When did unemployment in the EU reach its lowest point in 2025?", "query_types": ["extractive", "numerical"]}
+{"_id": "193", "text": "Preventive action by Finland to reduce youth basic skills decline", "query_types": ["open-ended"]}
+{"_id": "194", "text": "When was the Housing Job Schme introduced in Denmark?", "query_types": ["extractive"]}
+{"_id": "195", "text": "What issue is highlighted by the \"PHS Employment Monitor\" survey?", "query_types": ["extractive"]}
+{"_id": "196", "text": "Did ICT employment achieve the 2030 target in the EU region?", "query_types": ["boolean"]}
+{"_id": "197", "text": "What was Romania’s employment rate for people aged 15 to 24 in 2020?", "query_types": ["extractive", "numerical"]}
+{"_id": "198", "text": "What are the signs of a successful P-JAC proposal return program?", "query_types": ["open-ended"]}
+{"_id": "199", "text": "What is the sum of the Diff(%) of labor mobility people below 35 for CH and IS?", "query_types": ["numerical"]}
+{"_id": "200", "text": "Discuss the implications of leading sectors for construction, transport, and storage on the labor standards and worker protections.", "query_types": ["open-ended"]}
+{"_id": "201", "text": "2022-2023 total work hours percentage increased for part-time workers", "query_types": ["extractive", "numerical"]}
+{"_id": "202", "text": "How much did Sweden's population grow between 2019 and 2023?", "query_types": ["numerical"]}
+{"_id": "203", "text": "Find the percentage of people between the ages of 25 and 54 who reported having a higher level of education than their job requirements in 2023.", "query_types": ["extractive", "numerical"]}
+{"_id": "204", "text": "What was the EU AROP rate in 2022 and 2023?", "query_types": ["extractive", "numerical"]}
+{"_id": "206", "text": "Mobility rate year-on-year change direction, HU, 2018 to 2023.", "query_types": ["numerical", "open-ended"]}
+{"_id": "207", "text": "Quantitative and Qualitative PES benchmarking structured analysis process differences.", "query_types": ["compare-contrast", "open-ended"]}
+{"_id": "208", "text": "What is the national employment rate of France in 2020?", "query_types": ["extractive", "numerical"]}
+{"_id": "209", "text": "What is Germany's commitment to improve its ECEC programs?", "query_types": ["extractive"]}
+{"_id": "210", "text": "How much higher is the probability of employment for CIEs training participants with respect to non-participants?", "query_types": ["extractive", "numerical"]}
+{"_id": "211", "text": "2021 EU Finance & Insurance wage per hour", "query_types": ["extractive", "numerical"]}
+{"_id": "213", "text": "What is the maximum percentage of workers experiencing discrimination in future-oriented, high digital intensity occupations?", "query_types": ["extractive", "numerical"]}
+{"_id": "214", "text": "In 2018, what was the average number of EU movers in EU and EFTA countries?", "query_types": ["extractive", "numerical"]}
+{"_id": "216", "text": "Name the framework used for the first-stage analysis of EU Member States to identify social and employment risks for the Social Scoreboard assessment", "query_types": ["extractive"]}
+{"_id": "217", "text": "How many percentage points higher is the employment rate of EU mobile workers than that of nationals in 2023?", "query_types": ["numerical"]}
+{"_id": "218", "text": "State Germany’s national policy that is designed to combat gender imbalances and foster cultural change in academia throughout every career stage.", "query_types": ["extractive"]}
+{"_id": "219", "text": "How did the fiscal system help buffer the economic turmoil in the EU states in 2024?", "query_types": ["open-ended"]}
+{"_id": "220", "text": "Which year has female employment increased in EU?", "query_types": ["open-ended"]}
+{"_id": "221", "text": "Which country has the highest levels of digital skills among EU movers in 2023?", "query_types": ["extractive", "numerical"]}
+{"_id": "222", "text": "Is the part-time employment rate higher than 70% for EU movers according to the European Commission's 2024 report?", "query_types": ["boolean"]}
+{"_id": "223", "text": "Identify the countries that have VET employment greater than 90% in the EU.", "query_types": ["enumerative", "extractive"]}
+{"_id": "224", "text": "Additional funds allocated per student by the EU in 2022.", "query_types": ["extractive", "numerical"]}
+{"_id": "225", "text": "Did the share of part-time contracts for EU movers in Denmark decrease from 2022 to 2023?", "query_types": ["boolean"]}
+{"_id": "226", "text": "Describe precautions to address challenges like rising mental stress and skilled worker shortages in digitalization within value creation.", "query_types": ["open-ended"]}
+{"_id": "228", "text": "Requirements outlined in the EU policy brief for the digital transformation", "query_types": ["open-ended"]}
+{"_id": "229", "text": "Examine the share of workers registered in all EU member states through prior declaration tools for the Information and Communication sector as a proportion of total employment in 2022.", "query_types": ["numerical", "open-ended"]}
+{"_id": "230", "text": "How did the GDP per capita in PPS of the EU member states vary between 2014 and 2022?", "query_types": ["compare-contrast"]}
+{"_id": "231", "text": "Can working hours for 24-hour home care workers, including on-call time, in Austria exceed 128 hours for two consecutive weeks?", "query_types": ["boolean"]}
+{"_id": "232", "text": "Can EU Open Data Portal information be reused commercially?", "query_types": ["boolean"]}
+{"_id": "233", "text": "Is the share of early leavers from education and training aged 18–24 in Italy greater than 12%?", "query_types": ["boolean"]}
+{"_id": "234", "text": "Switzerland national part-time contract workers proportion 2022", "query_types": ["extractive", "numerical"]}
+{"_id": "235", "text": "EU union-related policy first and second sections differences.", "query_types": ["compare-contrast", "extractive"]}
+{"_id": "237", "text": "EU's Vulnerable groups' housing allowance exclusion risks.", "query_types": ["open-ended"]}
+{"_id": "239", "text": "What are the services that fall under the EURES?", "query_types": ["enumerative", "extractive"]}
+{"_id": "240", "text": "By how many percentage points did the share of households experiencing financial distress change between August 2023 and March 2025?", "query_types": ["numerical"]}
+{"_id": "241", "text": "Gross disposable household income dropped in Italy in 2023 vs 2008.", "query_types": ["numerical"]}
+{"_id": "242", "text": "Do green occupations in the EU that require intermediate or lower digital skills show higher levels of worker engagement?", "query_types": ["boolean"]}
+{"_id": "243", "text": "Is Germany's net inflow of third-country nationals greater than 700,000?", "query_types": ["boolean", "numerical"]}
+{"_id": "244", "text": "What is the percentage difference between the 2023 employment rates of nationals and third-country nationals in IT?", "query_types": ["numerical"]}
+{"_id": "245", "text": "What percentage of digital shortage jobs (LST-D) are held by women?", "query_types": ["extractive", "numerical"]}
+{"_id": "246", "text": "What was the decline percentage in the number of posted workers in Austria for 2022?", "query_types": ["extractive", "numerical"]}
+{"_id": "247", "text": "2016 EU movers breakdown as personal care workers across countries", "query_types": ["enumerative", "open-ended"]}
+{"_id": "248", "text": "What actions is the PES network taking in response to the rising labor shortages, as stated in its Memorandum to the EU leadership?", "query_types": ["open-ended"]}
+{"_id": "249", "text": "How does age play a role in the training and upskilling of the labor market across EU?", "query_types": ["open-ended"]}
+{"_id": "250", "text": "What was the percentage increase in the prices of food and beverages in Europe for 2023?", "query_types": ["extractive", "numerical"]}
+{"_id": "251", "text": "What percentage of EU movers had low education in 2023?", "query_types": ["extractive", "numerical"]}
+{"_id": "252", "text": "What are the impact areas that the STR Partnership will focus on?", "query_types": ["enumerative", "extractive"]}
+{"_id": "253", "text": "How many domestic workers make up the workforce per EU-27?", "query_types": ["extractive", "numerical"]}
+{"_id": "254", "text": "In what demographic group was the increase in participation of highly educated people the highest in the EU?", "query_types": ["extractive"]}
+{"_id": "255", "text": "Male citizens of third countries in the EU in 2020 in %", "query_types": ["extractive", "numerical"]}
+{"_id": "257", "text": "What percentage of workers in Cyprus put in less than 40 hours a week?", "query_types": ["extractive", "numerical"]}
+{"_id": "258", "text": "Does investment in ALMPs yield long-term fiscal benefits such as increased tax revenue and social security contributions?", "query_types": ["boolean"]}
+{"_id": "259", "text": "Name the live-in care setup in Italy that highlights the mix of legal and illegal work for domestic workers.", "query_types": ["extractive"]}
+{"_id": "260", "text": "Why does the employment stability differ in the future-oriented EU occupations?", "query_types": ["open-ended"]}
+{"_id": "261", "text": "What caused the structural change in the data for workers deployed in the transport sector within the EU?", "query_types": ["open-ended"]}
+{"_id": "262", "text": "Employment rate of young people in 2019 vs 2020 in Hungary.", "query_types": ["compare-contrast", "numerical"]}
+{"_id": "263", "text": "Were most domestic workers in Bosnia and Herzegovina and Serbia in permanent contracts in 2023, per EU-27?", "query_types": ["boolean"]}
+{"_id": "265", "text": "Do EU movers in Malta, Finland, Czechia, Ireland, and the Netherlands outperform nationals in digital skills?", "query_types": ["boolean"]}
+{"_id": "267", "text": "Do green and digital jobs offer wage premiums due to scarcity and productivity in the EU?", "query_types": ["boolean"]}
+{"_id": "268", "text": "What was the share of Italian adults with at least basic digital skills in 2023?", "query_types": ["extractive", "numerical"]}
+{"_id": "269", "text": "Which country in Europe had the highest self-employment rate?", "query_types": ["extractive", "numerical"]}
+{"_id": "270", "text": "What was the topic for the Annual Stakeholder Conference held in November 2024?", "query_types": ["extractive"]}
+{"_id": "271", "text": "What are the average predicted probabilities of underemployment among part-time workers in the EU27 over the 2013-2023 period under the category of educational attainment?", "query_types": ["enumerative", "numerical"]}
+{"_id": "272", "text": "Compare the difference between the information provided on the Europa website and the EU Open Data Portal.", "query_types": ["compare-contrast"]}
+{"_id": "273", "text": "Calculate the EU ratio of increase in poverty risk between non-working households and single-earner households.", "query_types": ["numerical"]}
+{"_id": "274", "text": "Explain the details of the 2024 Annual Report of the European Network of Public Employment Services for the public employment services across Europe.", "query_types": ["open-ended"]}
+{"_id": "275", "text": "Determine the percentage of the EU population that reject the idea that women are more interested in home and children than paid work.", "query_types": ["extractive", "numerical"]}
+{"_id": "276", "text": "Does Romania have only 14% of 55–64 year-olds with at least basic digital skills?", "query_types": ["boolean"]}
+{"_id": "277", "text": "How many important value-creation dynamics did the presenters cover?", "query_types": ["extractive", "numerical"]}
+{"_id": "278", "text": "What conditions might a worker face when having a shift in their sector of employment in the EU?", "query_types": ["open-ended"]}
+{"_id": "279", "text": "Did Ireland have healthcare worker shortages despite high medical graduation rates?", "query_types": ["boolean"]}
+{"_id": "280", "text": "What does the 2024 annual report of the European Network of Public Employment Services discuss and highlight?", "query_types": ["open-ended"]}
+{"_id": "282", "text": "Did in-work poverty in the EU fall to 9% in 2023?", "query_types": ["boolean"]}
+{"_id": "283", "text": "Calculate the change in percentage of children below the age of 3 years being put under formal childcare from 2022 and 2023 in Poland.", "query_types": ["numerical"]}
+{"_id": "284", "text": "What is the difference in the number of personal care workers between Germany and Spain?", "query_types": ["compare-contrast", "numerical"]}
+{"_id": "286", "text": "Which three factors are considered in the 'triple transitions'?", "query_types": ["enumerative", "extractive"]}
+{"_id": "288", "text": "EU's Middle-aged employment versus youth unemployment rates.", "query_types": ["compare-contrast"]}
+{"_id": "289", "text": "What are some of the similarities in the different indicators of success of Estonia's doctorial studies and seal of excellence?", "query_types": ["compare-contrast", "open-ended"]}
+{"_id": "291", "text": "How do the employment rates after the pandemic in Greece and Ireland differ from each other, according to the European Commission's 2024 Annual Review?", "query_types": ["compare-contrast"]}
+{"_id": "292", "text": "Difference in percentage of children at risk and not at risk of poverty's participation in ECEC in 2019", "query_types": ["compare-contrast", "numerical"]}
+{"_id": "293", "text": "Which three sectors have the highest percentage of vacancies in 2023?", "query_types": ["enumerative", "extractive"]}
+{"_id": "294", "text": "How is an indirect contractual employment arrangement defined?", "query_types": ["extractive"]}
+{"_id": "295", "text": "What percentage of AI-exposed workers have over 10 years of seniority?", "query_types": ["extractive", "numerical"]}
+{"_id": "296", "text": "Does youth unemployment remain above 20% in Italy, Portugal, and Romania?", "query_types": ["boolean"]}
+{"_id": "297", "text": "Which country has a high estimated number of undeclared domestic workers, far exceeding the recorded EU data?", "query_types": ["extractive", "numerical"]}
+{"_id": "298", "text": "Identify the reasons behind the dip in the inflow of EU citizens in EFTA countries in 2020.", "query_types": ["open-ended"]}
+{"_id": "300", "text": "How have some EU PES worked towards supporting the job-seeking and the job-providing classes in 2024?", "query_types": ["open-ended"]}
+{"_id": "1812", "text": "Which 3 countries have the highest rate of old-aged people employed?", "query_types": ["enumerative", "multi-hop"]}
