@@ -2,8 +2,8 @@
 
 The one product document: what the product is, what it has, what it lacks, and what comes next.
 
-Last updated 2026-11-04, against `feat/kb-sota` at `0840d55`. The product owner confirmed
-the purpose on 2026-11-04.
+Last updated 2026-11-04, against `feat/kb-sota` at `41b5d44`. The product owner confirmed
+the purpose and the release decisions on 2026-11-04.
 
 Statuses come from reading the repository and from runs whose results are committed under
 `docs/eval-ab/`. Anything not run says *Not verified*. **Have** means we match or beat the
@@ -63,9 +63,11 @@ Open source under Apache-2.0. There is no paid edition and no hosted version.
 
 ### Stage
 
-- **Releases:** `v0.1.0` is the Bun service on `main`.
-- **The Rust port:** it replaces Bun, sits on `feat/kb-sota` (PR #3, a draft, 281 commits
-  ahead of `main`) and has not been released.
+- **Releases:** `v0.1.0` is the last Bun release. `v0.2.0` is the Rust service: merge PR #3,
+  then tag (`DEC-1`, decided 2026-11-04).
+- **The Rust port:** it replaces Bun and sits on `feat/kb-sota` (PR #3, a draft, 282 commits
+  ahead of `main`). Bun was removed from the branch in `DEC-3`, so Rust is the only runtime
+  in the repo from `v0.2.0`.
 - **Team:** one product owner working with AI agents (`AGENTS.md`).
 
 ---
@@ -78,7 +80,7 @@ Open source under Apache-2.0. There is no paid edition and no hosted version.
 | **Retrieval** | `POST /v1/search` returns chunks with document, page, score, figures, the arms that found each hit, and `degrades` when an arm failed | Built. Dense + BM25 fused, reranker, page-image arm, neighbour chunks and an entity graph. Measured numbers are in section 1 |
 | **Access & Security** | Tenants, API keys (scopes `kb:read` / `kb:write`, optional knowledge-base limit), knowledge bases and categories | Partial. The tenant wall is tested in CI. The knowledge-base limit is not applied to by-ID document routes (`SEC-1`). There are no users, roles, folders or per-document permissions |
 | **Deployment** | `kb-dev.sh setup` → `up <tier>` → `key`. Tiers: lite, lite-en (CPU), desk, studio, station (NVIDIA), cloud (OpenRouter key) | Partial. lite-en ran end to end on 2026-10-25. The GPU tiers are checked by `docker compose config` only. Cloud is measured through the eval harness, not through compose (`DEP-1` to `DEP-3`) |
-| **Platform** | Postgres (documents, jobs, keys, graph), Qdrant (chunks, vectors, BM25, page images) and S3 for originals. `kb-server reindex` rebuilds the index from S3 | Built in Rust. Bun is frozen and still on `main` (`DEC-3`) |
+| **Platform** | Postgres (documents, jobs, keys, graph), Qdrant (chunks, vectors, BM25, page images) and S3 for originals. `kb-server reindex` rebuilds the index from S3 | Built in Rust. Bun was removed in `v0.2.0` (`DEC-3`); `v0.1.0` is the last Bun release |
 
 ### Coverage against competitors
 
@@ -139,8 +141,7 @@ PDF and search it, without help from us.
 | 1 | By-ID document routes ignore a key's knowledge-base limit, and the repo is public | `SEC-1` |
 | 2 | PR #3's retrieval gate is red (hit@1 −0.083 on the 12-query CI set) | `REL-1`: fix, or refresh the baseline with the reason |
 | 3 | The lite tiers, the ones most outsiders will try first, are unproven on a fresh build with the new OCR sidecar | `DEP-1` |
-| 4 | The README describes the Bun service, and there is no `SECURITY.md`, `CONTRIBUTING.md` or `CHANGELOG.md` | `COM-1` |
-| 5 | The Rust port is not on `main` | `DEC-1`, then merge PR #3 |
+| 4 | The Rust port is not on `main` | `DEC-1`, then merge PR #3 |
 
 **Not blockers, but outside users will hit them:**
 
@@ -168,8 +169,8 @@ This is the proposed order. The product owner decides it.
 
 | Item | Why |
 | --- | --- |
-| `SEC-1`, `REL-1`, `DEP-1`, `COM-1`, then `DEC-1` | The release blockers in section 4 |
-| `REL-3`, `REL-4`, `REL-2` | Small, and they keep CI honest |
+| `SEC-1`, `REL-1`, `DEP-1` | The remaining release blockers in section 4 |
+| `REL-3`, `REL-4` | Small, and they keep CI honest |
 
 ### Next
 
@@ -185,13 +186,15 @@ Connectors (`ING-2`) and parse/caption residency (`DEP-5`).
 
 ---
 
-## 6. Decisions waiting on the product owner
+## 6. Decisions taken by the product owner
 
-| # | Decision | Recommendation |
+All three were decided on 2026-11-04.
+
+| # | Decision | Outcome |
 | --- | --- | --- |
-| `DEC-1` | What the release is | Merge PR #3 after the section 4 blockers, then tag `v0.2.0` |
+| `DEC-1` | What the release is | Release `v0.2.0` so RantAI products can use it; merge PR #3, then tag |
 | `DEC-2` | Where people (Owner, Acceptor) and the board live | GitHub Projects, so community contributors can see it |
-| `DEC-3` | Retire Bun from `main` at the release | Yes. Keep `v0.1.0` as the Bun tag; `docs/rust-cutover.md` covers migration |
+| `DEC-3` | Retire Bun from `main` at the release | Removed. `v0.2.0` is Rust-only; `v0.1.0` stays as the last Bun tag, and `docs/rust-cutover.md` covers migration |
 
 ---
 
