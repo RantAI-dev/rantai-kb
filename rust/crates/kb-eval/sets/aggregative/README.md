@@ -90,8 +90,8 @@ and is why the cost estimate below quotes both "every community" and "≥2
 pages". A real LLM entity extractor would produce fewer, larger communities
 (and cost more at extraction time — see §3).
 
-`communities.json` (0.77 MB HR, 0.78 MB CS) is committed because it is under
-2 MB and is the exact input to the cost estimate and the no-LLM measurement.
+`communities.json` (≈0.78 MB each) is committed because it is under 2 MB and is
+the exact input to the cost estimate and the no-LLM measurement.
 
 **Plumbing checks run, with output:**
 
