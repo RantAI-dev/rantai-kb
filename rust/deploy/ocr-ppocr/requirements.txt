@@ -1,0 +1,6 @@
+# rapidocr 3.10 defaults to PP-OCRv6 (det + rec, "small"); the ONNX Runtime
+# engine is a separate install.
+rapidocr==3.10.0
+onnxruntime==1.31.1
+numpy<3
+Pillow

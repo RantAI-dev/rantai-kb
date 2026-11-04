@@ -1,0 +1,19 @@
+[package]
+name = "kb-store-blob"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+kb-ports = { path = "../kb-ports" }
+async-trait = { workspace = true }
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+chrono = { workspace = true }

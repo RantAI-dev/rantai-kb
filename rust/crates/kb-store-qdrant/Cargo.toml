@@ -1,0 +1,41 @@
+[package]
+name = "kb-store-qdrant"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The RetrievalIndex contract suite against a live Qdrant. Off by default so
+# `cargo test --workspace` needs no containers; the test also refuses to report
+# a pass unless KB_QDRANT_CONTRACT=1, so turning the feature on without a
+# running stack cannot look like coverage.
+integration = ["kb-ports/contract"]
+
+[dependencies]
+kb-ports = { path = "../kb-ports" }
+kb-core = { path = "../kb-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+# The official Qdrant client (Apache-2.0). `serde` for payload conversion,
+# `generate-snippets` for the request builders. `download_snapshots` is off: it
+# pulls in reqwest for snapshot downloads, which this adapter never does.
+qdrant-client = { version = "1.19.0", default-features = false, features = [
+    "serde",
+    "generate-snippets",
+] }
+# `v5` for the deterministic point ids (UUIDv5 of tenant/document/chunk index).
+uuid = { workspace = true, features = ["v5"] }
+
+[dev-dependencies]
+kb-engine = { path = "../kb-engine", features = ["test-utils"] }
+kb-eval = { path = "../kb-eval" }

@@ -1,0 +1,13 @@
+query-id	corpus-id	score
+q1	mars	2
+q2	mars	1
+q3	coffee	2
+q4	coffee	1
+q5	photosynthesis	2
+q6	photosynthesis	1
+q7	rust-lang	2
+q8	rust-lang	1
+q9	guitar	2
+q10	guitar	1
+q11	mission#p2	2
+q12	mission#p1	2

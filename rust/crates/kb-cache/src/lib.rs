@@ -1,0 +1,27 @@
+//! Content-addressed disk caches for the expensive model calls: embeddings,
+//! extraction, page vectors and rerank results.
+//!
+//! AGENTS.md rule 7: every embedding, OCR and caption result is cached on disk,
+//! keyed by model and content hash, so no input is paid for twice. The wrappers
+//! here are decorators over the ports: the engine never knows a cache exists,
+//! and the composition root (`kb-server`) decides whether to wrap.
+
+mod embedder;
+mod extractor;
+mod page_describer;
+mod page_embedder;
+mod reranker;
+mod store;
+mod vectors;
+mod vision_scorer;
+
+pub use embedder::CachedEmbedder;
+pub use extractor::CachedExtractor;
+pub use page_describer::CachedPageDescriber;
+pub use page_embedder::CachedPageEmbedder;
+pub use reranker::CachedReranker;
+pub use store::{CacheKey, CacheStats, DiskCache};
+pub use vision_scorer::CachedPageVisionScorer;
+
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,23 @@
+[package]
+name = "kb-eval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
+chrono = { workspace = true }
+# Latency percentiles with a bounded number of buckets. `hdrhistogram` records
+# into fixed-width buckets instead of keeping every sample, so a 30 s run at
+# concurrency 32 costs the same memory as one request.
+hdrhistogram = { version = "7.5", default-features = false }

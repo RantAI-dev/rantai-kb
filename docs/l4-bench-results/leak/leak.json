@@ -1,0 +1,2970 @@
+{
+  "matrix": {
+    "arms": [
+      {
+        "arm": "vector",
+        "cells": [
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 2,
+            "positive_probes": 2,
+            "probes": 8,
+            "reason": null,
+            "refusals": 0,
+            "scope": "tenant",
+            "status": "PASS"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 4,
+            "positive_probes": 4,
+            "probes": 16,
+            "reason": null,
+            "refusals": 0,
+            "scope": "knowledge_base",
+            "status": "PASS"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 4,
+            "positive_probes": 4,
+            "probes": 16,
+            "reason": null,
+            "refusals": 0,
+            "scope": "category",
+            "status": "PASS"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 2,
+            "positive_probes": 2,
+            "probes": 8,
+            "reason": null,
+            "refusals": 0,
+            "scope": "document_ids",
+            "status": "PASS"
+          }
+        ],
+        "coverage": "chunks whose retrieval.arms include `dense`, from POST /v1/search",
+        "errors": 0,
+        "leak_examples": [],
+        "leaks": 0,
+        "positive_hits": 12,
+        "positive_probes": 12,
+        "probes": 48,
+        "reason": null,
+        "refusals": 0,
+        "status": "PASS"
+      },
+      {
+        "arm": "bm25",
+        "cells": [
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 2,
+            "positive_probes": 2,
+            "probes": 8,
+            "reason": null,
+            "refusals": 0,
+            "scope": "tenant",
+            "status": "PASS"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 4,
+            "positive_probes": 4,
+            "probes": 16,
+            "reason": null,
+            "refusals": 0,
+            "scope": "knowledge_base",
+            "status": "PASS"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 4,
+            "positive_probes": 4,
+            "probes": 16,
+            "reason": null,
+            "refusals": 0,
+            "scope": "category",
+            "status": "PASS"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 0,
+            "positive_probes": 2,
+            "probes": 8,
+            "reason": "a `document_ids`-scoped search runs no keyword arm in either runtime, so this cell's positive control is unreachable by construction: it measures the route, not the arm",
+            "refusals": 0,
+            "scope": "document_ids",
+            "status": "UNTESTED"
+          }
+        ],
+        "coverage": "chunks whose retrieval.arms include `sparse`, from POST /v1/search",
+        "errors": 0,
+        "leak_examples": [],
+        "leaks": 0,
+        "positive_hits": 10,
+        "positive_probes": 12,
+        "probes": 48,
+        "reason": "scopes untested: document_ids",
+        "refusals": 0,
+        "status": "PARTIAL"
+      },
+      {
+        "arm": "neighbour",
+        "cells": [
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 2,
+            "positive_probes": 2,
+            "probes": 8,
+            "reason": null,
+            "refusals": 0,
+            "scope": "tenant",
+            "status": "PASS"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 4,
+            "positive_probes": 4,
+            "probes": 16,
+            "reason": null,
+            "refusals": 0,
+            "scope": "knowledge_base",
+            "status": "PASS"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 4,
+            "positive_probes": 4,
+            "probes": 16,
+            "reason": null,
+            "refusals": 0,
+            "scope": "category",
+            "status": "PASS"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 2,
+            "positive_probes": 2,
+            "probes": 8,
+            "reason": null,
+            "refusals": 0,
+            "scope": "document_ids",
+            "status": "PASS"
+          }
+        ],
+        "coverage": "every chunk of a search answer: a woven neighbour is one thing the answer adds that no arm ranked, so this cell stays the widest containment check rather than the narrow one it could be",
+        "errors": 0,
+        "leak_examples": [],
+        "leaks": 0,
+        "positive_hits": 12,
+        "positive_probes": 12,
+        "probes": 48,
+        "reason": null,
+        "refusals": 0,
+        "status": "PASS"
+      },
+      {
+        "arm": "figure",
+        "cells": [
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 0,
+            "positive_probes": 2,
+            "probes": 8,
+            "reason": "positive control missed 2/2 times: this probe cannot find its own target, so 'no leaks' proves nothing",
+            "refusals": 0,
+            "scope": "tenant",
+            "status": "UNTESTED"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 0,
+            "positive_probes": 4,
+            "probes": 16,
+            "reason": "positive control missed 4/4 times: this probe cannot find its own target, so 'no leaks' proves nothing",
+            "refusals": 0,
+            "scope": "knowledge_base",
+            "status": "UNTESTED"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 0,
+            "positive_probes": 4,
+            "probes": 16,
+            "reason": "positive control missed 4/4 times: this probe cannot find its own target, so 'no leaks' proves nothing",
+            "refusals": 0,
+            "scope": "category",
+            "status": "UNTESTED"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 0,
+            "positive_probes": 2,
+            "probes": 8,
+            "reason": "positive control missed 2/2 times: this probe cannot find its own target, so 'no leaks' proves nothing",
+            "refusals": 0,
+            "scope": "document_ids",
+            "status": "UNTESTED"
+          }
+        ],
+        "coverage": "sources and chunks carrying an assetKey or a `figure` arm, plus the asset route when a seeded document has a figure",
+        "errors": 0,
+        "leak_examples": [],
+        "leaks": 0,
+        "positive_hits": 0,
+        "positive_probes": 12,
+        "probes": 48,
+        "reason": "positive control missed 12/12 times: this probe cannot find its own target, so 'no leaks' proves nothing",
+        "refusals": 0,
+        "status": "UNTESTED"
+      },
+      {
+        "arm": "graph",
+        "cells": [
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 0,
+            "positive_probes": 2,
+            "probes": 8,
+            "reason": "positive control missed 2/2 times: this probe cannot find its own target, so 'no leaks' proves nothing",
+            "refusals": 0,
+            "scope": "tenant",
+            "status": "UNTESTED"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 0,
+            "positive_probes": 4,
+            "probes": 16,
+            "reason": "positive control missed 4/4 times: this probe cannot find its own target, so 'no leaks' proves nothing",
+            "refusals": 0,
+            "scope": "knowledge_base",
+            "status": "UNTESTED"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 0,
+            "positive_probes": 4,
+            "probes": 16,
+            "reason": "positive control missed 4/4 times: this probe cannot find its own target, so 'no leaks' proves nothing",
+            "refusals": 0,
+            "scope": "category",
+            "status": "UNTESTED"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 0,
+            "positive_probes": 2,
+            "probes": 8,
+            "reason": "positive control missed 2/2 times: this probe cannot find its own target, so 'no leaks' proves nothing",
+            "refusals": 0,
+            "scope": "document_ids",
+            "status": "UNTESTED"
+          }
+        ],
+        "coverage": "chunks whose retrieval.arms include `graph`, from POST /v1/search: the chunks a walk over the caller's scoped entity graph ranked, fetched by id",
+        "errors": 0,
+        "leak_examples": [],
+        "leaks": 0,
+        "positive_hits": 0,
+        "positive_probes": 12,
+        "probes": 48,
+        "reason": "positive control missed 12/12 times: this probe cannot find its own target, so 'no leaks' proves nothing",
+        "refusals": 0,
+        "status": "UNTESTED"
+      },
+      {
+        "arm": "entity",
+        "cells": [
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 2,
+            "positive_probes": 2,
+            "probes": 8,
+            "reason": null,
+            "refusals": 6,
+            "scope": "tenant",
+            "status": "PASS"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 4,
+            "positive_probes": 4,
+            "probes": 16,
+            "reason": null,
+            "refusals": 8,
+            "scope": "knowledge_base",
+            "status": "PASS"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 4,
+            "positive_probes": 4,
+            "probes": 16,
+            "reason": null,
+            "refusals": 8,
+            "scope": "category",
+            "status": "PASS"
+          },
+          {
+            "errors": 0,
+            "leaks": 0,
+            "positive_hits": 2,
+            "positive_probes": 2,
+            "probes": 8,
+            "reason": null,
+            "refusals": 3,
+            "scope": "document_ids",
+            "status": "PASS"
+          }
+        ],
+        "coverage": "GET /v1/documents/:id/intelligence for a document id",
+        "errors": 0,
+        "leak_examples": [],
+        "leaks": 0,
+        "positive_hits": 12,
+        "positive_probes": 12,
+        "probes": 48,
+        "reason": null,
+        "refusals": 25,
+        "status": "PASS"
+      }
+    ],
+    "attribution": {
+      "heuristic": 0,
+      "provenance": 240
+    },
+    "base_url": "http://127.0.0.1:18080",
+    "degrades": [],
+    "harness_commit": "a6664c5-dirty",
+    "notes": [
+      "no seeded document produced a figure: figures only come from a layout extractor (kb-extract: the MinerU sidecar, mineru-api or Mistral), which this stack does not run. The figure arm therefore has nothing to retrieve and is reported UNTESTED rather than passing; the asset route is probed only once a figure exists."
+    ],
+    "server_version": "dev",
+    "timestamp": "2026-10-17T23:17:49.795586829+00:00"
+  },
+  "seed": {
+    "documents": [
+      {
+        "canaries": {
+          "bm25": "vorlaqjx1488",
+          "entity": "VORLA-1488 Ivory of the zhelvi Accord",
+          "figure": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+          "neighbour": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+          "vector": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded."
+        },
+        "category_id": "47ecd6e8-2d5c-45f6-84e9-d211d28c5a43",
+        "figure_asset_key": null,
+        "has_figures": false,
+        "id": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "knowledge_base_id": "0239b3a9-3f67-4dd7-8165-31ab3a6562d0",
+        "n_chunks": 4,
+        "tenant": "leak-a"
+      },
+      {
+        "canaries": {
+          "bm25": "keselqjx0769",
+          "entity": "KESEL-769 Ivory of the kesel Accord",
+          "figure": "Figure 769: the keselwright reconciliation curve against kesel volume",
+          "neighbour": "In the annex to the same minute, the keselward comptroller noted that the keselqjx0769 adjustment had been applied twice.",
+          "vector": "The keselwright commission reconvened at dawn to appraise the tariff of keselqjx0769, a figure no ledger had recorded."
+        },
+        "category_id": "db8b2d5f-a2df-43fd-86a8-0911923ac40e",
+        "figure_asset_key": null,
+        "has_figures": false,
+        "id": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "knowledge_base_id": "0239b3a9-3f67-4dd7-8165-31ab3a6562d0",
+        "n_chunks": 4,
+        "tenant": "leak-a"
+      },
+      {
+        "canaries": {
+          "bm25": "tumneqjx0060",
+          "entity": "TUMNE-60 Ivory of the brikal Accord",
+          "figure": "Figure 60: the tumnewright reconciliation curve against brikal volume",
+          "neighbour": "In the annex to the same minute, the brikalward comptroller noted that the tumneqjx0060 adjustment had been applied twice.",
+          "vector": "The tumnewright commission reconvened at dawn to appraise the tariff of brikalqjx0060, a figure no ledger had recorded."
+        },
+        "category_id": "47ecd6e8-2d5c-45f6-84e9-d211d28c5a43",
+        "figure_asset_key": null,
+        "has_figures": false,
+        "id": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "knowledge_base_id": "4c310b9c-d98f-4e82-a9c6-d5827faa6f09",
+        "n_chunks": 4,
+        "tenant": "leak-a"
+      },
+      {
+        "canaries": {
+          "bm25": "vorlaqjx5448",
+          "entity": "VORLA-5448 Ivory of the pirlu Accord",
+          "figure": "Figure 5448: the vorlawright reconciliation curve against pirlu volume",
+          "neighbour": "In the annex to the same minute, the pirluward comptroller noted that the vorlaqjx5448 adjustment had been applied twice.",
+          "vector": "The vorlawright commission reconvened at dawn to appraise the tariff of pirluqjx5448, a figure no ledger had recorded."
+        },
+        "category_id": "db8b2d5f-a2df-43fd-86a8-0911923ac40e",
+        "figure_asset_key": null,
+        "has_figures": false,
+        "id": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "knowledge_base_id": "4c310b9c-d98f-4e82-a9c6-d5827faa6f09",
+        "n_chunks": 4,
+        "tenant": "leak-a"
+      },
+      {
+        "canaries": {
+          "bm25": "vorlaqjx1360",
+          "entity": "VORLA-1360 Ivory of the anzhir Accord",
+          "figure": "Figure 1360: the vorlawright reconciliation curve against anzhir volume",
+          "neighbour": "In the annex to the same minute, the anzhirward comptroller noted that the vorlaqjx1360 adjustment had been applied twice.",
+          "vector": "The vorlawright commission reconvened at dawn to appraise the tariff of anzhirqjx1360, a figure no ledger had recorded."
+        },
+        "category_id": "35c48c51-99be-446f-80bf-6df086f069c2",
+        "figure_asset_key": null,
+        "has_figures": false,
+        "id": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "knowledge_base_id": "54dd5464-3b48-4f39-b41d-9f7eca3e930f",
+        "n_chunks": 4,
+        "tenant": "leak-b"
+      },
+      {
+        "canaries": {
+          "bm25": "tumneqjx4388",
+          "entity": "TUMNE-4388 Ivory of the okrast Accord",
+          "figure": "Figure 4388: the tumnewright reconciliation curve against okrast volume",
+          "neighbour": "In the annex to the same minute, the okrastward comptroller noted that the tumneqjx4388 adjustment had been applied twice.",
+          "vector": "The tumnewright commission reconvened at dawn to appraise the tariff of okrastqjx4388, a figure no ledger had recorded."
+        },
+        "category_id": "18a4ce56-a743-4876-83bf-6640da484db5",
+        "figure_asset_key": null,
+        "has_figures": false,
+        "id": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "knowledge_base_id": "54dd5464-3b48-4f39-b41d-9f7eca3e930f",
+        "n_chunks": 4,
+        "tenant": "leak-b"
+      },
+      {
+        "canaries": {
+          "bm25": "zhelviqjx1581",
+          "entity": "ZHELVI-1581 Ivory of the anzhir Accord",
+          "figure": "Figure 1581: the zhelviwright reconciliation curve against anzhir volume",
+          "neighbour": "In the annex to the same minute, the anzhirward comptroller noted that the zhelviqjx1581 adjustment had been applied twice.",
+          "vector": "The zhelviwright commission reconvened at dawn to appraise the tariff of anzhirqjx1581, a figure no ledger had recorded."
+        },
+        "category_id": "35c48c51-99be-446f-80bf-6df086f069c2",
+        "figure_asset_key": null,
+        "has_figures": false,
+        "id": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "knowledge_base_id": "12499b64-bc74-45af-b879-688b00c2bd9b",
+        "n_chunks": 4,
+        "tenant": "leak-b"
+      },
+      {
+        "canaries": {
+          "bm25": "anzhirqjx2666",
+          "entity": "ANZHIR-2666 Ivory of the pirlu Accord",
+          "figure": "Figure 2666: the anzhirwright reconciliation curve against pirlu volume",
+          "neighbour": "In the annex to the same minute, the pirluward comptroller noted that the anzhirqjx2666 adjustment had been applied twice.",
+          "vector": "The anzhirwright commission reconvened at dawn to appraise the tariff of pirluqjx2666, a figure no ledger had recorded."
+        },
+        "category_id": "18a4ce56-a743-4876-83bf-6640da484db5",
+        "figure_asset_key": null,
+        "has_figures": false,
+        "id": "3a51cf05-5b14-4afd-a5b3-cf9ca72ae904",
+        "knowledge_base_id": "12499b64-bc74-45af-b879-688b00c2bd9b",
+        "n_chunks": 4,
+        "tenant": "leak-b"
+      }
+    ],
+    "probes": [
+      {
+        "arm": "vector",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of anzhirqjx1360, a figure no ledger had recorded.",
+        "scope": 0
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1360",
+        "scope": 0
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the anzhirward comptroller noted that the vorlaqjx1360 adjustment had been applied twice.",
+        "scope": 0
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1360: the vorlawright reconciliation curve against anzhir volume",
+        "scope": 0
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1360 Ivory of the anzhir Accord",
+        "scope": 0
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "scope": 0
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "kind": "search",
+        "positive": false,
+        "query": "The tumnewright commission reconvened at dawn to appraise the tariff of okrastqjx4388, a figure no ledger had recorded.",
+        "scope": 0
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "kind": "search",
+        "positive": false,
+        "query": "tumneqjx4388",
+        "scope": 0
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the okrastward comptroller noted that the tumneqjx4388 adjustment had been applied twice.",
+        "scope": 0
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 4388: the tumnewright reconciliation curve against okrast volume",
+        "scope": 0
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "kind": "search",
+        "positive": false,
+        "query": "TUMNE-4388 Ivory of the okrast Accord",
+        "scope": 0
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "scope": 0
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "kind": "search",
+        "positive": false,
+        "query": "The zhelviwright commission reconvened at dawn to appraise the tariff of anzhirqjx1581, a figure no ledger had recorded.",
+        "scope": 0
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "kind": "search",
+        "positive": false,
+        "query": "zhelviqjx1581",
+        "scope": 0
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the anzhirward comptroller noted that the zhelviqjx1581 adjustment had been applied twice.",
+        "scope": 0
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1581: the zhelviwright reconciliation curve against anzhir volume",
+        "scope": 0
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "kind": "search",
+        "positive": false,
+        "query": "ZHELVI-1581 Ivory of the anzhir Accord",
+        "scope": 0
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "scope": 0
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded.",
+        "scope": 0
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "vorlaqjx1488",
+        "scope": 0
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+        "scope": 0
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search_or_asset",
+        "positive": true,
+        "query": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+        "scope": 0
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "VORLA-1488 Ivory of the zhelvi Accord",
+        "scope": 0
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "document_intelligence",
+        "positive": true,
+        "query": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "scope": 0
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "The tumnewright commission reconvened at dawn to appraise the tariff of brikalqjx0060, a figure no ledger had recorded.",
+        "scope": 1
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "tumneqjx0060",
+        "scope": 1
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the brikalward comptroller noted that the tumneqjx0060 adjustment had been applied twice.",
+        "scope": 1
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 60: the tumnewright reconciliation curve against brikal volume",
+        "scope": 1
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "TUMNE-60 Ivory of the brikal Accord",
+        "scope": 1
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "scope": 1
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of pirluqjx5448, a figure no ledger had recorded.",
+        "scope": 1
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx5448",
+        "scope": 1
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the pirluward comptroller noted that the vorlaqjx5448 adjustment had been applied twice.",
+        "scope": 1
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 5448: the vorlawright reconciliation curve against pirlu volume",
+        "scope": 1
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-5448 Ivory of the pirlu Accord",
+        "scope": 1
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "scope": 1
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of anzhirqjx1360, a figure no ledger had recorded.",
+        "scope": 1
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1360",
+        "scope": 1
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the anzhirward comptroller noted that the vorlaqjx1360 adjustment had been applied twice.",
+        "scope": 1
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1360: the vorlawright reconciliation curve against anzhir volume",
+        "scope": 1
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1360 Ivory of the anzhir Accord",
+        "scope": 1
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "scope": 1
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded.",
+        "scope": 1
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "vorlaqjx1488",
+        "scope": 1
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+        "scope": 1
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search_or_asset",
+        "positive": true,
+        "query": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+        "scope": 1
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "VORLA-1488 Ivory of the zhelvi Accord",
+        "scope": 1
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "document_intelligence",
+        "positive": true,
+        "query": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "scope": 1
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded.",
+        "scope": 2
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1488",
+        "scope": 2
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+        "scope": 2
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+        "scope": 2
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1488 Ivory of the zhelvi Accord",
+        "scope": 2
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "scope": 2
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "The keselwright commission reconvened at dawn to appraise the tariff of keselqjx0769, a figure no ledger had recorded.",
+        "scope": 2
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "keselqjx0769",
+        "scope": 2
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the keselward comptroller noted that the keselqjx0769 adjustment had been applied twice.",
+        "scope": 2
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 769: the keselwright reconciliation curve against kesel volume",
+        "scope": 2
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "KESEL-769 Ivory of the kesel Accord",
+        "scope": 2
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "scope": 2
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of anzhirqjx1360, a figure no ledger had recorded.",
+        "scope": 2
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1360",
+        "scope": 2
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the anzhirward comptroller noted that the vorlaqjx1360 adjustment had been applied twice.",
+        "scope": 2
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1360: the vorlawright reconciliation curve against anzhir volume",
+        "scope": 2
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1360 Ivory of the anzhir Accord",
+        "scope": 2
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "scope": 2
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": true,
+        "query": "The tumnewright commission reconvened at dawn to appraise the tariff of brikalqjx0060, a figure no ledger had recorded.",
+        "scope": 2
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": true,
+        "query": "tumneqjx0060",
+        "scope": 2
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": true,
+        "query": "In the annex to the same minute, the brikalward comptroller noted that the tumneqjx0060 adjustment had been applied twice.",
+        "scope": 2
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search_or_asset",
+        "positive": true,
+        "query": "Figure 60: the tumnewright reconciliation curve against brikal volume",
+        "scope": 2
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": true,
+        "query": "TUMNE-60 Ivory of the brikal Accord",
+        "scope": 2
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "document_intelligence",
+        "positive": true,
+        "query": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "scope": 2
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "The keselwright commission reconvened at dawn to appraise the tariff of keselqjx0769, a figure no ledger had recorded.",
+        "scope": 3
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "keselqjx0769",
+        "scope": 3
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the keselward comptroller noted that the keselqjx0769 adjustment had been applied twice.",
+        "scope": 3
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 769: the keselwright reconciliation curve against kesel volume",
+        "scope": 3
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "KESEL-769 Ivory of the kesel Accord",
+        "scope": 3
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "scope": 3
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of pirluqjx5448, a figure no ledger had recorded.",
+        "scope": 3
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx5448",
+        "scope": 3
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the pirluward comptroller noted that the vorlaqjx5448 adjustment had been applied twice.",
+        "scope": 3
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 5448: the vorlawright reconciliation curve against pirlu volume",
+        "scope": 3
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-5448 Ivory of the pirlu Accord",
+        "scope": 3
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "scope": 3
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of anzhirqjx1360, a figure no ledger had recorded.",
+        "scope": 3
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1360",
+        "scope": 3
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the anzhirward comptroller noted that the vorlaqjx1360 adjustment had been applied twice.",
+        "scope": 3
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1360: the vorlawright reconciliation curve against anzhir volume",
+        "scope": 3
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1360 Ivory of the anzhir Accord",
+        "scope": 3
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "scope": 3
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded.",
+        "scope": 3
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "vorlaqjx1488",
+        "scope": 3
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+        "scope": 3
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search_or_asset",
+        "positive": true,
+        "query": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+        "scope": 3
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "VORLA-1488 Ivory of the zhelvi Accord",
+        "scope": 3
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "document_intelligence",
+        "positive": true,
+        "query": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "scope": 3
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded.",
+        "scope": 4
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1488",
+        "scope": 4
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+        "scope": 4
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+        "scope": 4
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1488 Ivory of the zhelvi Accord",
+        "scope": 4
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "scope": 4
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "The tumnewright commission reconvened at dawn to appraise the tariff of brikalqjx0060, a figure no ledger had recorded.",
+        "scope": 4
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "tumneqjx0060",
+        "scope": 4
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the brikalward comptroller noted that the tumneqjx0060 adjustment had been applied twice.",
+        "scope": 4
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 60: the tumnewright reconciliation curve against brikal volume",
+        "scope": 4
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "TUMNE-60 Ivory of the brikal Accord",
+        "scope": 4
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "scope": 4
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of anzhirqjx1360, a figure no ledger had recorded.",
+        "scope": 4
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1360",
+        "scope": 4
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the anzhirward comptroller noted that the vorlaqjx1360 adjustment had been applied twice.",
+        "scope": 4
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1360: the vorlawright reconciliation curve against anzhir volume",
+        "scope": 4
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1360 Ivory of the anzhir Accord",
+        "scope": 4
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "scope": 4
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": true,
+        "query": "The keselwright commission reconvened at dawn to appraise the tariff of keselqjx0769, a figure no ledger had recorded.",
+        "scope": 4
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": true,
+        "query": "keselqjx0769",
+        "scope": 4
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": true,
+        "query": "In the annex to the same minute, the keselward comptroller noted that the keselqjx0769 adjustment had been applied twice.",
+        "scope": 4
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search_or_asset",
+        "positive": true,
+        "query": "Figure 769: the keselwright reconciliation curve against kesel volume",
+        "scope": 4
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": true,
+        "query": "KESEL-769 Ivory of the kesel Accord",
+        "scope": 4
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "document_intelligence",
+        "positive": true,
+        "query": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "scope": 4
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "The keselwright commission reconvened at dawn to appraise the tariff of keselqjx0769, a figure no ledger had recorded.",
+        "scope": 5
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "keselqjx0769",
+        "scope": 5
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the keselward comptroller noted that the keselqjx0769 adjustment had been applied twice.",
+        "scope": 5
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 769: the keselwright reconciliation curve against kesel volume",
+        "scope": 5
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "KESEL-769 Ivory of the kesel Accord",
+        "scope": 5
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "scope": 5
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "The tumnewright commission reconvened at dawn to appraise the tariff of brikalqjx0060, a figure no ledger had recorded.",
+        "scope": 5
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "tumneqjx0060",
+        "scope": 5
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the brikalward comptroller noted that the tumneqjx0060 adjustment had been applied twice.",
+        "scope": 5
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 60: the tumnewright reconciliation curve against brikal volume",
+        "scope": 5
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "TUMNE-60 Ivory of the brikal Accord",
+        "scope": 5
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "scope": 5
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of pirluqjx5448, a figure no ledger had recorded.",
+        "scope": 5
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx5448",
+        "scope": 5
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the pirluward comptroller noted that the vorlaqjx5448 adjustment had been applied twice.",
+        "scope": 5
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 5448: the vorlawright reconciliation curve against pirlu volume",
+        "scope": 5
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-5448 Ivory of the pirlu Accord",
+        "scope": 5
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "7737bc7c-8540-46fb-a31a-b93ba9d4c201",
+        "scope": 5
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded.",
+        "scope": 5
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "vorlaqjx1488",
+        "scope": 5
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+        "scope": 5
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search_or_asset",
+        "positive": true,
+        "query": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+        "scope": 5
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": true,
+        "query": "VORLA-1488 Ivory of the zhelvi Accord",
+        "scope": 5
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "document_intelligence",
+        "positive": true,
+        "query": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "scope": 5
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded.",
+        "scope": 6
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1488",
+        "scope": 6
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+        "scope": 6
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+        "scope": 6
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1488 Ivory of the zhelvi Accord",
+        "scope": 6
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "scope": 6
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "The keselwright commission reconvened at dawn to appraise the tariff of keselqjx0769, a figure no ledger had recorded.",
+        "scope": 6
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "keselqjx0769",
+        "scope": 6
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the keselward comptroller noted that the keselqjx0769 adjustment had been applied twice.",
+        "scope": 6
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 769: the keselwright reconciliation curve against kesel volume",
+        "scope": 6
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "KESEL-769 Ivory of the kesel Accord",
+        "scope": 6
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "scope": 6
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "The tumnewright commission reconvened at dawn to appraise the tariff of brikalqjx0060, a figure no ledger had recorded.",
+        "scope": 6
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "tumneqjx0060",
+        "scope": 6
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the brikalward comptroller noted that the tumneqjx0060 adjustment had been applied twice.",
+        "scope": 6
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 60: the tumnewright reconciliation curve against brikal volume",
+        "scope": 6
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "TUMNE-60 Ivory of the brikal Accord",
+        "scope": 6
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "scope": 6
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of anzhirqjx1360, a figure no ledger had recorded.",
+        "scope": 6
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "vorlaqjx1360",
+        "scope": 6
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "In the annex to the same minute, the anzhirward comptroller noted that the vorlaqjx1360 adjustment had been applied twice.",
+        "scope": 6
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search_or_asset",
+        "positive": true,
+        "query": "Figure 1360: the vorlawright reconciliation curve against anzhir volume",
+        "scope": 6
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "VORLA-1360 Ivory of the anzhir Accord",
+        "scope": 6
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "document_intelligence",
+        "positive": true,
+        "query": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "scope": 6
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded.",
+        "scope": 7
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1488",
+        "scope": 7
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+        "scope": 7
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+        "scope": 7
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1488 Ivory of the zhelvi Accord",
+        "scope": 7
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "scope": 7
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "The keselwright commission reconvened at dawn to appraise the tariff of keselqjx0769, a figure no ledger had recorded.",
+        "scope": 7
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "keselqjx0769",
+        "scope": 7
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the keselward comptroller noted that the keselqjx0769 adjustment had been applied twice.",
+        "scope": 7
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 769: the keselwright reconciliation curve against kesel volume",
+        "scope": 7
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "KESEL-769 Ivory of the kesel Accord",
+        "scope": 7
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "scope": 7
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "The tumnewright commission reconvened at dawn to appraise the tariff of brikalqjx0060, a figure no ledger had recorded.",
+        "scope": 7
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "tumneqjx0060",
+        "scope": 7
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the brikalward comptroller noted that the tumneqjx0060 adjustment had been applied twice.",
+        "scope": 7
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 60: the tumnewright reconciliation curve against brikal volume",
+        "scope": 7
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "TUMNE-60 Ivory of the brikal Accord",
+        "scope": 7
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "scope": 7
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "kind": "search",
+        "positive": true,
+        "query": "The zhelviwright commission reconvened at dawn to appraise the tariff of anzhirqjx1581, a figure no ledger had recorded.",
+        "scope": 7
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "kind": "search",
+        "positive": true,
+        "query": "zhelviqjx1581",
+        "scope": 7
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "kind": "search",
+        "positive": true,
+        "query": "In the annex to the same minute, the anzhirward comptroller noted that the zhelviqjx1581 adjustment had been applied twice.",
+        "scope": 7
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "kind": "search_or_asset",
+        "positive": true,
+        "query": "Figure 1581: the zhelviwright reconciliation curve against anzhir volume",
+        "scope": 7
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "kind": "search",
+        "positive": true,
+        "query": "ZHELVI-1581 Ivory of the anzhir Accord",
+        "scope": 7
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "kind": "document_intelligence",
+        "positive": true,
+        "query": "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+        "scope": 7
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded.",
+        "scope": 8
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1488",
+        "scope": 8
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+        "scope": 8
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+        "scope": 8
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1488 Ivory of the zhelvi Accord",
+        "scope": 8
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "scope": 8
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "The keselwright commission reconvened at dawn to appraise the tariff of keselqjx0769, a figure no ledger had recorded.",
+        "scope": 8
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "keselqjx0769",
+        "scope": 8
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the keselward comptroller noted that the keselqjx0769 adjustment had been applied twice.",
+        "scope": 8
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 769: the keselwright reconciliation curve against kesel volume",
+        "scope": 8
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "KESEL-769 Ivory of the kesel Accord",
+        "scope": 8
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "scope": 8
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "The tumnewright commission reconvened at dawn to appraise the tariff of brikalqjx0060, a figure no ledger had recorded.",
+        "scope": 8
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "tumneqjx0060",
+        "scope": 8
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the brikalward comptroller noted that the tumneqjx0060 adjustment had been applied twice.",
+        "scope": 8
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 60: the tumnewright reconciliation curve against brikal volume",
+        "scope": 8
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "TUMNE-60 Ivory of the brikal Accord",
+        "scope": 8
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "scope": 8
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of anzhirqjx1360, a figure no ledger had recorded.",
+        "scope": 8
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "vorlaqjx1360",
+        "scope": 8
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "In the annex to the same minute, the anzhirward comptroller noted that the vorlaqjx1360 adjustment had been applied twice.",
+        "scope": 8
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search_or_asset",
+        "positive": true,
+        "query": "Figure 1360: the vorlawright reconciliation curve against anzhir volume",
+        "scope": 8
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "VORLA-1360 Ivory of the anzhir Accord",
+        "scope": 8
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "document_intelligence",
+        "positive": true,
+        "query": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "scope": 8
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded.",
+        "scope": 9
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1488",
+        "scope": 9
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+        "scope": 9
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+        "scope": 9
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1488 Ivory of the zhelvi Accord",
+        "scope": 9
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "scope": 9
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "The keselwright commission reconvened at dawn to appraise the tariff of keselqjx0769, a figure no ledger had recorded.",
+        "scope": 9
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "keselqjx0769",
+        "scope": 9
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the keselward comptroller noted that the keselqjx0769 adjustment had been applied twice.",
+        "scope": 9
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 769: the keselwright reconciliation curve against kesel volume",
+        "scope": 9
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "KESEL-769 Ivory of the kesel Accord",
+        "scope": 9
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "scope": 9
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "The tumnewright commission reconvened at dawn to appraise the tariff of brikalqjx0060, a figure no ledger had recorded.",
+        "scope": 9
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "tumneqjx0060",
+        "scope": 9
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the brikalward comptroller noted that the tumneqjx0060 adjustment had been applied twice.",
+        "scope": 9
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 60: the tumnewright reconciliation curve against brikal volume",
+        "scope": 9
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "TUMNE-60 Ivory of the brikal Accord",
+        "scope": 9
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "scope": 9
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "kind": "search",
+        "positive": true,
+        "query": "The tumnewright commission reconvened at dawn to appraise the tariff of okrastqjx4388, a figure no ledger had recorded.",
+        "scope": 9
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "kind": "search",
+        "positive": true,
+        "query": "tumneqjx4388",
+        "scope": 9
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "kind": "search",
+        "positive": true,
+        "query": "In the annex to the same minute, the okrastward comptroller noted that the tumneqjx4388 adjustment had been applied twice.",
+        "scope": 9
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "kind": "search_or_asset",
+        "positive": true,
+        "query": "Figure 4388: the tumnewright reconciliation curve against okrast volume",
+        "scope": 9
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "kind": "search",
+        "positive": true,
+        "query": "TUMNE-4388 Ivory of the okrast Accord",
+        "scope": 9
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "kind": "document_intelligence",
+        "positive": true,
+        "query": "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+        "scope": 9
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded.",
+        "scope": 10
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1488",
+        "scope": 10
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+        "scope": 10
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+        "scope": 10
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1488 Ivory of the zhelvi Accord",
+        "scope": 10
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "scope": 10
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "The keselwright commission reconvened at dawn to appraise the tariff of keselqjx0769, a figure no ledger had recorded.",
+        "scope": 10
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "keselqjx0769",
+        "scope": 10
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the keselward comptroller noted that the keselqjx0769 adjustment had been applied twice.",
+        "scope": 10
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 769: the keselwright reconciliation curve against kesel volume",
+        "scope": 10
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "KESEL-769 Ivory of the kesel Accord",
+        "scope": 10
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "scope": 10
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "The tumnewright commission reconvened at dawn to appraise the tariff of brikalqjx0060, a figure no ledger had recorded.",
+        "scope": 10
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "tumneqjx0060",
+        "scope": 10
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the brikalward comptroller noted that the tumneqjx0060 adjustment had been applied twice.",
+        "scope": 10
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 60: the tumnewright reconciliation curve against brikal volume",
+        "scope": 10
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "TUMNE-60 Ivory of the brikal Accord",
+        "scope": 10
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "scope": 10
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of anzhirqjx1360, a figure no ledger had recorded.",
+        "scope": 10
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "vorlaqjx1360",
+        "scope": 10
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "In the annex to the same minute, the anzhirward comptroller noted that the vorlaqjx1360 adjustment had been applied twice.",
+        "scope": 10
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search_or_asset",
+        "positive": true,
+        "query": "Figure 1360: the vorlawright reconciliation curve against anzhir volume",
+        "scope": 10
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "VORLA-1360 Ivory of the anzhir Accord",
+        "scope": 10
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "document_intelligence",
+        "positive": true,
+        "query": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "scope": 10
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of zhelviqjx1488, a figure no ledger had recorded.",
+        "scope": 11
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "vorlaqjx1488",
+        "scope": 11
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the zhelviward comptroller noted that the vorlaqjx1488 adjustment had been applied twice.",
+        "scope": 11
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 1488: the vorlawright reconciliation curve against zhelvi volume",
+        "scope": 11
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "search",
+        "positive": false,
+        "query": "VORLA-1488 Ivory of the zhelvi Accord",
+        "scope": 11
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+        "scope": 11
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "The keselwright commission reconvened at dawn to appraise the tariff of keselqjx0769, a figure no ledger had recorded.",
+        "scope": 11
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "keselqjx0769",
+        "scope": 11
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the keselward comptroller noted that the keselqjx0769 adjustment had been applied twice.",
+        "scope": 11
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 769: the keselwright reconciliation curve against kesel volume",
+        "scope": 11
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "search",
+        "positive": false,
+        "query": "KESEL-769 Ivory of the kesel Accord",
+        "scope": 11
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+        "scope": 11
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "The tumnewright commission reconvened at dawn to appraise the tariff of brikalqjx0060, a figure no ledger had recorded.",
+        "scope": 11
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "tumneqjx0060",
+        "scope": 11
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "In the annex to the same minute, the brikalward comptroller noted that the tumneqjx0060 adjustment had been applied twice.",
+        "scope": 11
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search_or_asset",
+        "positive": false,
+        "query": "Figure 60: the tumnewright reconciliation curve against brikal volume",
+        "scope": 11
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "search",
+        "positive": false,
+        "query": "TUMNE-60 Ivory of the brikal Accord",
+        "scope": 11
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "kind": "document_intelligence",
+        "positive": false,
+        "query": "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+        "scope": 11
+      },
+      {
+        "arm": "vector",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "The vorlawright commission reconvened at dawn to appraise the tariff of anzhirqjx1360, a figure no ledger had recorded.",
+        "scope": 11
+      },
+      {
+        "arm": "bm25",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "vorlaqjx1360",
+        "scope": 11
+      },
+      {
+        "arm": "neighbour",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "In the annex to the same minute, the anzhirward comptroller noted that the vorlaqjx1360 adjustment had been applied twice.",
+        "scope": 11
+      },
+      {
+        "arm": "figure",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search_or_asset",
+        "positive": true,
+        "query": "Figure 1360: the vorlawright reconciliation curve against anzhir volume",
+        "scope": 11
+      },
+      {
+        "arm": "graph",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "search",
+        "positive": true,
+        "query": "VORLA-1360 Ivory of the anzhir Accord",
+        "scope": 11
+      },
+      {
+        "arm": "entity",
+        "canary_owner": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "kind": "document_intelligence",
+        "positive": true,
+        "query": "bde84edd-dad9-4482-b787-cbfc474b6276",
+        "scope": 11
+      }
+    ],
+    "scopes": [
+      {
+        "allowed": [
+          "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+          "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+          "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+          "7737bc7c-8540-46fb-a31a-b93ba9d4c201"
+        ],
+        "category": null,
+        "document_ids": null,
+        "kind": "tenant",
+        "knowledge_base_ids": [],
+        "label": "tenant=leak-a",
+        "tenant": "leak-a"
+      },
+      {
+        "allowed": [
+          "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+          "03fd86f9-e789-40f9-91f7-b9dbdddeea63"
+        ],
+        "category": null,
+        "document_ids": null,
+        "kind": "knowledge_base",
+        "knowledge_base_ids": [
+          "0239b3a9-3f67-4dd7-8165-31ab3a6562d0"
+        ],
+        "label": "tenant=leak-a kb=0239b3a9-3f67-4dd7-8165-31ab3a6562d0",
+        "tenant": "leak-a"
+      },
+      {
+        "allowed": [
+          "9f6f6cd7-7011-4c09-bac0-95b7d307d819",
+          "7737bc7c-8540-46fb-a31a-b93ba9d4c201"
+        ],
+        "category": null,
+        "document_ids": null,
+        "kind": "knowledge_base",
+        "knowledge_base_ids": [
+          "4c310b9c-d98f-4e82-a9c6-d5827faa6f09"
+        ],
+        "label": "tenant=leak-a kb=4c310b9c-d98f-4e82-a9c6-d5827faa6f09",
+        "tenant": "leak-a"
+      },
+      {
+        "allowed": [
+          "4f8dc72d-ad5d-42f2-ad14-11ab17952e65",
+          "9f6f6cd7-7011-4c09-bac0-95b7d307d819"
+        ],
+        "category": "47ecd6e8-2d5c-45f6-84e9-d211d28c5a43",
+        "document_ids": null,
+        "kind": "category",
+        "knowledge_base_ids": [],
+        "label": "tenant=leak-a category=47ecd6e8-2d5c-45f6-84e9-d211d28c5a43",
+        "tenant": "leak-a"
+      },
+      {
+        "allowed": [
+          "03fd86f9-e789-40f9-91f7-b9dbdddeea63",
+          "7737bc7c-8540-46fb-a31a-b93ba9d4c201"
+        ],
+        "category": "db8b2d5f-a2df-43fd-86a8-0911923ac40e",
+        "document_ids": null,
+        "kind": "category",
+        "knowledge_base_ids": [],
+        "label": "tenant=leak-a category=db8b2d5f-a2df-43fd-86a8-0911923ac40e",
+        "tenant": "leak-a"
+      },
+      {
+        "allowed": [
+          "4f8dc72d-ad5d-42f2-ad14-11ab17952e65"
+        ],
+        "category": null,
+        "document_ids": [
+          "4f8dc72d-ad5d-42f2-ad14-11ab17952e65"
+        ],
+        "kind": "document_ids",
+        "knowledge_base_ids": [],
+        "label": "tenant=leak-a documentIds=[4f8dc72d-ad5d-42f2-ad14-11ab17952e65]",
+        "tenant": "leak-a"
+      },
+      {
+        "allowed": [
+          "bde84edd-dad9-4482-b787-cbfc474b6276",
+          "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+          "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+          "3a51cf05-5b14-4afd-a5b3-cf9ca72ae904"
+        ],
+        "category": null,
+        "document_ids": null,
+        "kind": "tenant",
+        "knowledge_base_ids": [],
+        "label": "tenant=leak-b",
+        "tenant": "leak-b"
+      },
+      {
+        "allowed": [
+          "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c",
+          "3a51cf05-5b14-4afd-a5b3-cf9ca72ae904"
+        ],
+        "category": null,
+        "document_ids": null,
+        "kind": "knowledge_base",
+        "knowledge_base_ids": [
+          "12499b64-bc74-45af-b879-688b00c2bd9b"
+        ],
+        "label": "tenant=leak-b kb=12499b64-bc74-45af-b879-688b00c2bd9b",
+        "tenant": "leak-b"
+      },
+      {
+        "allowed": [
+          "bde84edd-dad9-4482-b787-cbfc474b6276",
+          "db2b5d28-b839-4851-9384-1a8e3faaa8fc"
+        ],
+        "category": null,
+        "document_ids": null,
+        "kind": "knowledge_base",
+        "knowledge_base_ids": [
+          "54dd5464-3b48-4f39-b41d-9f7eca3e930f"
+        ],
+        "label": "tenant=leak-b kb=54dd5464-3b48-4f39-b41d-9f7eca3e930f",
+        "tenant": "leak-b"
+      },
+      {
+        "allowed": [
+          "db2b5d28-b839-4851-9384-1a8e3faaa8fc",
+          "3a51cf05-5b14-4afd-a5b3-cf9ca72ae904"
+        ],
+        "category": "18a4ce56-a743-4876-83bf-6640da484db5",
+        "document_ids": null,
+        "kind": "category",
+        "knowledge_base_ids": [],
+        "label": "tenant=leak-b category=18a4ce56-a743-4876-83bf-6640da484db5",
+        "tenant": "leak-b"
+      },
+      {
+        "allowed": [
+          "bde84edd-dad9-4482-b787-cbfc474b6276",
+          "e92dd9bb-ed1a-4b9d-97aa-77415b5df72c"
+        ],
+        "category": "35c48c51-99be-446f-80bf-6df086f069c2",
+        "document_ids": null,
+        "kind": "category",
+        "knowledge_base_ids": [],
+        "label": "tenant=leak-b category=35c48c51-99be-446f-80bf-6df086f069c2",
+        "tenant": "leak-b"
+      },
+      {
+        "allowed": [
+          "bde84edd-dad9-4482-b787-cbfc474b6276"
+        ],
+        "category": null,
+        "document_ids": [
+          "bde84edd-dad9-4482-b787-cbfc474b6276"
+        ],
+        "kind": "document_ids",
+        "knowledge_base_ids": [],
+        "label": "tenant=leak-b documentIds=[bde84edd-dad9-4482-b787-cbfc474b6276]",
+        "tenant": "leak-b"
+      }
+    ]
+  }
+}

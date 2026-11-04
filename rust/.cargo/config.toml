@@ -1,0 +1,9 @@
+# Cap cargo at two parallel compilation jobs. The host has 6 cores but ~2 GB
+# free memory while other agents run, so the limiting factor is RSS, not cores.
+[build]
+jobs = 2
+
+# Reuse a single target directory inside the workspace so concurrent cargo
+# invocations (if any sneak in despite the "one at a time" rule) share work.
+[cache]
+dir = "target"

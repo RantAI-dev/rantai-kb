@@ -1,0 +1,2 @@
+ours: 902 s wall (ingest + queries)
+ours-bge20: 854 s for 318 queries

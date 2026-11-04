@@ -1,0 +1,9 @@
+[package]
+name = "rkdump"
+version = "0.1.0"
+edition = "2024"
+[dependencies]
+kb-core = { path = "../../../kb-core" }
+kb-engine = { path = "../../../kb-engine" }
+serde_json = "1"
+[workspace]

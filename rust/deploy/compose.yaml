@@ -1,0 +1,600 @@
+# A complete rantai-kb (Rust) stack, one profile per deployment tier.
+#
+#   cp rust/deploy/.env.example rust/deploy/.env   # optional; only cloud needs a key
+#   rust/scripts/kb-dev.sh up lite-en              # or lite | desk | studio | station | cloud
+#
+# This is the only deployment stack in the repo: the Bun compose file was removed
+# with the Bun service in v0.2.0. `rust/scripts/stack-up.sh` stays as the smoke/eval
+# harness; the facts below (images, credentials, TEI flags, env names) come from it.
+#
+# Design notes:
+#   * One kb-server service per tier (`kb-lite`, `kb-cloud`, …), each with its own
+#     KB_TIER and its own model containers, all sharing the `x-kb-server` anchor.
+#     A single service with interpolated env cannot work: the local tiers must
+#     point KB_EMBEDDING_BASE_URL at a compose hostname, cloud must not, and an
+#     explicit (even empty) variable always wins over the KB_TIER preset.
+#   * Only kb-server publishes a host port (KB_PORT, default 8080). Stores and
+#     models are reachable on the compose network only.
+#   * Every tier stores chunks in Qdrant (the only chunk store), so the Qdrant
+#     service is not profile-gated.
+#   * Switching tiers changes the embedding dimension (384 for lite/lite-en,
+#     1024 for desk/studio/station/cloud; page images 2048 on studio, 4096 on
+#     station, 1024 on cloud): wipe the data with `kb-dev.sh down -v` before
+#     moving between tiers of different widths.
+#   * Scanned pages are OCRed on the host on every local tier: PP-OCRv6 (CPU
+#     sidecar, ./ocr-ppocr) on lite, PaddleOCR-VL-1.6 from desk up. Model
+#     services listen on :8000 inside the network; the KB_TIER preset's
+#     loopback ports (8081-8084) are for bare-metal installs.
+#   * GPU profiles (desk/studio/station) are validated with `docker compose
+#     config` only: no NVIDIA machine has run them yet. Every vLLM memory
+#     fraction is an estimate (docs/kb-tiers.md), tunable from .env.
+
+name: rantai-kb-dev
+
+# ─── Shared kb-server half: image, published port, healthcheck, stores ───────
+
+x-kb-server: &kb-server
+  image: rantai-kb-rust:${KB_IMAGE_TAG:-dev}
+  build:
+    context: ../..
+    dockerfile: rust/Dockerfile
+    args:
+      # Keep a release build from saturating a shared machine. Unset = all cores.
+      CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-2}
+      KB_VERSION: ${KB_VERSION:-dev}
+  restart: unless-stopped
+  # Ingest can be mid-batch when the stack goes down; give it time to finish.
+  stop_grace_period: 30s
+  ports:
+    - "${KB_PORT:-8080}:8080"
+  volumes:
+    - kb-cache:/app/cache
+  healthcheck:
+    # /health answers 503 until Postgres and the vector store both answer, so a
+    # successful curl is a real readiness signal, not just a listening socket.
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 6
+    start_period: 30s
+  depends_on: &kb-stores
+    postgres:
+      condition: service_healthy
+    rustfs:
+      condition: service_healthy
+    createbucket:
+      condition: service_completed_successfully
+    qdrant:
+      condition: service_healthy
+  environment: &kb-env
+    DATABASE_URL: postgresql://${POSTGRES_USER:-kb}:${POSTGRES_PASSWORD:-kb}@postgres:5432/${POSTGRES_DB:-rantai_kb}?schema=public
+    S3_ENDPOINT: http://rustfs:9000
+    S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-kbadmin}
+    S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-kbsecret123}
+    S3_BUCKET: ${S3_BUCKET:-rantai-kb}
+    S3_ENABLE_PATH_STYLE: "1"
+    # Chunks, vectors, BM25 and page images all live in Qdrant.
+    QDRANT_GRPC_URL: http://qdrant:6334
+    QDRANT_URL: http://qdrant:6333
+    # Content-addressed embedding/extraction cache, on its own volume so a
+    # `down` without `-v` never re-embeds the same pages.
+    KB_CACHE_DIR: ${KB_CACHE_DIR:-/app/cache}
+    RUST_LOG: ${RUST_LOG:-info}
+
+# Extra settings every *local* tier gets. Zero-spend by default: entity
+# extraction is off, and when a developer turns it on the free heuristic
+# extractor runs instead of a paid OpenRouter call.
+x-kb-local-env: &kb-local-env
+  <<: *kb-env
+  KB_ENTITY_EXTRACTION_ENABLED: ${KB_ENTITY_EXTRACTION_ENABLED:-false}
+  KB_ENTITY_EXTRACTOR: ${KB_ENTITY_EXTRACTOR:-heuristic}
+  KB_GRAPH_STORE: ${KB_GRAPH_STORE:-none}
+  KB_GRAPH_ARM: ${KB_GRAPH_ARM:-false}
+  # Only spent if the two settings above are turned on (or the reranker is
+  # switched to the LLM provider). Empty means "no paid key in this container".
+  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+
+x-gpu: &gpu
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+
+x-tei-embed: &tei-embed
+  <<: *gpu
+  image: ${TEI_GPU_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.8.1}
+  restart: unless-stopped
+  command:
+    ["--model-id", "Qwen/Qwen3-Embedding-0.6B", "--max-batch-tokens", "8192", "--max-client-batch-size", "32"]
+  volumes:
+    - hf-models:/data
+  healthcheck: &tei-health
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 12
+    start_period: 900s
+
+# vLLM, one model per container on the shared GPU. Each container claims
+# --gpu-memory-utilization of the *whole* card, so the fractions of one tier
+# must add up to well under 1.0 with the chat model's share left over.
+x-vllm: &vllm
+  <<: *gpu
+  image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.32.0}
+  restart: unless-stopped
+  entrypoint: ["vllm", "serve"]
+  ipc: host
+  volumes:
+    - hf-models:/root/.cache/huggingface
+    - ./vllm:/templates:ro
+  environment:
+    HF_TOKEN: ${HF_TOKEN:-}
+  healthcheck: &vllm-health
+    test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+    interval: 15s
+    timeout: 5s
+    retries: 20
+    # First start downloads the weights and compiles the graphs.
+    start_period: 1800s
+
+# ─── Shared stores ──────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kb}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kb}
+      POSTGRES_DB: ${POSTGRES_DB:-rantai_kb}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  rustfs:
+    # rustfs, not MinIO: quay.io/minio/minio now answers "unauthorized" to
+    # anonymous pulls. rustfs speaks the same S3 API and the same
+    # MINIO_ROOT_USER/PASSWORD variables (rust/scripts/stack-up.sh already uses it).
+    image: rustfs/rustfs:latest
+    restart: unless-stopped
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-kbadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-kbsecret123}
+      RUSTFS_VOLUMES: /data
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  createbucket:
+    # One-shot: creates the bucket an empty S3 has no way to create itself.
+    # Idempotent on purpose — a second `up` against an existing volume must not
+    # fail (kb-server waits for this to exit 0), so it checks first.
+    image: amazon/aws-cli:latest
+    restart: "no"
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-kbadmin}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-kbsecret123}
+      AWS_DEFAULT_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-rantai-kb}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        aws --endpoint-url http://rustfs:9000 s3api head-bucket --bucket "$$S3_BUCKET" 2>/dev/null ||
+        aws --endpoint-url http://rustfs:9000 s3 mb "s3://$$S3_BUCKET"
+    depends_on:
+      rustfs:
+        condition: service_healthy
+
+  qdrant:
+    # The adapter uses the Query API with prefetch + RRF (needs >= 1.10).
+    image: qdrant/qdrant:v1.19.2
+    restart: unless-stopped
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  # ─── lite / lite-en: PP-OCRv6 on CPU for scanned pages ────────────────────
+  #
+  # Speaks the chat shape kb-server's local OCR adapter sends (KB_OCR_*), so
+  # the same adapter talks to it and to PaddleOCR-VL on the GPU tiers. Digital
+  # pages never reach it (pdfium reads their text layer).
+
+  ocr-ppocr:
+    image: rantai-kb-ocr-ppocr:${KB_IMAGE_TAG:-dev}
+    build:
+      context: ./ocr-ppocr
+    profiles: ["lite", "lite-en"]
+    restart: unless-stopped
+    environment:
+      OCR_THREADS: ${KB_OCR_THREADS:-1}
+    cpus: ${KB_LITE_OCR_CPUS:-1.0}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ─── lite: multilingual-e5-small on CPU ───────────────────────────────────
+
+  tei-lite:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+    profiles: ["lite"]
+    restart: unless-stopped
+    command:
+      ["--model-id", "intfloat/multilingual-e5-small", "--max-batch-tokens", "4096", "--max-client-batch-size", "32"]
+    volumes:
+      - hf-models:/data
+    environment:
+      # Thread count matched to the CPU limit below. Measured on 2 cores
+      # (docs/eval-ab/lite-2core): e5-small/MiniLM sharing both cores with
+      # kb-server keeps the API responsive (a 0.6B model did not).
+      OMP_NUM_THREADS: ${KB_EMBED_THREADS:-2}
+      RAYON_NUM_THREADS: ${KB_EMBED_THREADS:-2}
+      MKL_NUM_THREADS: ${KB_EMBED_THREADS:-2}
+    # e5-small/MiniLM are compute-bound: ~95% of ingest is embedding, so this
+    # limit sets ingest speed (e5-small: ~4.9 chunks/s per core on a 2016 Xeon).
+    # The 2-core numbers in docs/eval-ab/lite-2core used 2 cores shared with
+    # kb-server. On a bigger box raise KB_LITE_EMBED_CPUS and KB_EMBED_THREADS.
+    cpus: ${KB_LITE_EMBED_CPUS:-2.0}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      # First start downloads the model and warms the ONNX graph.
+      start_period: 900s
+
+  kb-lite:
+    <<: *kb-server
+    profiles: ["lite"]
+    environment:
+      <<: *kb-local-env
+      KB_TIER: lite
+      # Inside compose the tier's loopback defaults are wrong; these point the
+      # roles at the compose services. A value in .env wins.
+      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL:-http://ocr-ppocr:8000/v1/chat/completions}
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-lite:80/v1/embeddings}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
+    cpus: ${KB_LITE_SERVER_CPUS:-2.0}
+    depends_on:
+      <<: *kb-stores
+      tei-lite:
+        condition: service_healthy
+      ocr-ppocr:
+        condition: service_healthy
+
+  # ─── lite-en: all-MiniLM-L6-v2 on CPU, English only ───────────────────────
+
+  tei-lite-en:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+    profiles: ["lite-en"]
+    restart: unless-stopped
+    command:
+      ["--model-id", "sentence-transformers/all-MiniLM-L6-v2", "--max-batch-tokens", "4096", "--max-client-batch-size", "32"]
+    volumes:
+      - hf-models:/data
+    environment:
+      OMP_NUM_THREADS: ${KB_EMBED_THREADS:-2}
+      RAYON_NUM_THREADS: ${KB_EMBED_THREADS:-2}
+      MKL_NUM_THREADS: ${KB_EMBED_THREADS:-2}
+    cpus: ${KB_LITE_EMBED_CPUS:-2.0}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:80/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 900s
+
+  kb-lite-en:
+    <<: *kb-server
+    profiles: ["lite-en"]
+    environment:
+      <<: *kb-local-env
+      KB_TIER: lite-en
+      # Inside compose the tier's loopback defaults are wrong; these point the
+      # roles at the compose services. A value in .env wins.
+      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL:-http://ocr-ppocr:8000/v1/chat/completions}
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-lite-en:80/v1/embeddings}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
+    cpus: ${KB_LITE_SERVER_CPUS:-2.0}
+    depends_on:
+      <<: *kb-stores
+      tei-lite-en:
+        condition: service_healthy
+      ocr-ppocr:
+        condition: service_healthy
+
+  # ─── desk / studio / station: GPU tiers ────────────────────────────────────
+  #
+  # Text embedding is Qwen3-Embedding-0.6B on TEI everywhere (the measured
+  # local text stack). Desk adds bge on TEI and PaddleOCR-VL-1.6 on llama.cpp;
+  # Studio and Station run the Qwen3-VL embedder (page images) and reranker
+  # plus PaddleOCR-VL on vLLM. The TEI tags without a suffix are the CUDA
+  # images (`cpu-…`, `turing-…`, `rocm-…` are the alternatives).
+
+  tei-embed-desk:
+    <<: *tei-embed
+    profiles: ["desk"]
+
+  tei-rerank-desk:
+    <<: *gpu
+    image: ${TEI_GPU_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.8.1}
+    profiles: ["desk"]
+    restart: unless-stopped
+    command:
+      ["--model-id", "BAAI/bge-reranker-v2-m3", "--max-batch-tokens", "2048", "--max-client-batch-size", "64", "--auto-truncate"]
+    volumes:
+      - hf-models:/data
+    healthcheck: *tei-health
+
+  # PaddleOCR-VL-1.6, the official GGUF, on llama.cpp: ~1.8 GB with the
+  # vision projector, the smallest way to keep it on an 8 GB card next to
+  # the chat model. Measured on CPU only (102.5 s/page, text identical to the
+  # PDF text layer: docs/tier-readiness-plan.md); GPU speed is unmeasured.
+  ocr-paddlevl-desk:
+    <<: *gpu
+    image: ${LLAMA_CPP_CUDA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    profiles: ["desk"]
+    restart: unless-stopped
+    command:
+      - --hf-repo
+      - PaddlePaddle/PaddleOCR-VL-1.6-GGUF
+      - --hf-file
+      - PaddleOCR-VL-1.6-GGUF.gguf
+      - --mmproj-url
+      - https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6-GGUF/resolve/main/PaddleOCR-VL-1.6-GGUF-mmproj.gguf
+      - --alias
+      - PaddlePaddle/PaddleOCR-VL-1.6
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --n-gpu-layers
+      - "99"
+      - --ctx-size
+      - "8192"
+      - --parallel
+      - "2"
+      - --temp
+      - "0"
+    environment:
+      LLAMA_CACHE: /models
+    volumes:
+      - llama-models:/models
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 900s
+
+  kb-desk:
+    <<: *kb-server
+    profiles: ["desk"]
+    environment:
+      <<: *kb-local-env
+      KB_TIER: desk
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-embed-desk:80/v1/embeddings}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
+      KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-tei}
+      KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://tei-rerank-desk:80}
+      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL:-http://ocr-paddlevl-desk:8000/v1/chat/completions}
+    depends_on:
+      <<: *kb-stores
+      tei-embed-desk:
+        condition: service_healthy
+      tei-rerank-desk:
+        condition: service_healthy
+      ocr-paddlevl-desk:
+        condition: service_healthy
+
+  # Studio (24 GB): 2B models in bf16, ~12.5 GB for the KB at these fractions.
+  tei-embed-studio:
+    <<: *tei-embed
+    profiles: ["studio"]
+
+  vllm-ocr-studio:
+    <<: *vllm
+    profiles: ["studio"]
+    command:
+      - PaddlePaddle/PaddleOCR-VL-1.6
+      - --trust-remote-code
+      - --max-num-batched-tokens
+      - "16384"
+      - --no-enable-prefix-caching
+      - --mm-processor-cache-gb
+      - "0"
+      - --gpu-memory-utilization
+      - ${KB_STUDIO_OCR_GPU_FRACTION:-0.12}
+      - --port
+      - "8000"
+
+  vllm-page-embed-studio:
+    <<: *vllm
+    profiles: ["studio"]
+    command:
+      - Qwen/Qwen3-VL-Embedding-2B
+      - --runner
+      - pooling
+      - --max-model-len
+      - "8192"
+      - --gpu-memory-utilization
+      - ${KB_STUDIO_PAGE_EMBED_GPU_FRACTION:-0.2}
+      - --port
+      - "8000"
+
+  # The model card's serving recipe: a sequence classifier over the "yes"/"no"
+  # tokens plus vLLM's score template, which answers the Cohere-shaped
+  # /rerank the `vllm` rerank provider posts.
+  vllm-rerank-studio:
+    <<: *vllm
+    profiles: ["studio"]
+    command:
+      - Qwen/Qwen3-VL-Reranker-2B
+      - --runner
+      - pooling
+      - --max-model-len
+      - "8192"
+      - --hf-overrides
+      - '{"architectures": ["Qwen3VLForSequenceClassification"], "classifier_from_token": ["no", "yes"], "is_original_qwen3_reranker": true}'
+      - --chat-template
+      - /templates/qwen3_vl_reranker.jinja
+      - --gpu-memory-utilization
+      - ${KB_STUDIO_RERANK_GPU_FRACTION:-0.2}
+      - --port
+      - "8000"
+
+  kb-studio:
+    <<: *kb-server
+    profiles: ["studio"]
+    environment:
+      <<: *kb-local-env
+      KB_TIER: studio
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-embed-studio:80/v1/embeddings}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
+      KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-vllm}
+      KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://vllm-rerank-studio:8000}
+      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL:-http://vllm-ocr-studio:8000/v1/chat/completions}
+      KB_PAGE_EMBEDDING_BASE_URL: ${KB_PAGE_EMBEDDING_BASE_URL:-http://vllm-page-embed-studio:8000/v1/embeddings}
+    depends_on:
+      <<: *kb-stores
+      tei-embed-studio:
+        condition: service_healthy
+      vllm-ocr-studio:
+        condition: service_healthy
+      vllm-page-embed-studio:
+        condition: service_healthy
+      vllm-rerank-studio:
+        condition: service_healthy
+
+  # Station (48 GB): the 8B models, FP8 weights (~8 GB each) so the KB stays
+  # near the 20 GB budget in docs/kb-tiers.md; ~22 GB at these fractions.
+  tei-embed-station:
+    <<: *tei-embed
+    profiles: ["station"]
+
+  vllm-ocr-station:
+    <<: *vllm
+    profiles: ["station"]
+    command:
+      - PaddlePaddle/PaddleOCR-VL-1.6
+      - --trust-remote-code
+      - --max-num-batched-tokens
+      - "16384"
+      - --no-enable-prefix-caching
+      - --mm-processor-cache-gb
+      - "0"
+      - --gpu-memory-utilization
+      - ${KB_STATION_OCR_GPU_FRACTION:-0.06}
+      - --port
+      - "8000"
+
+  vllm-page-embed-station:
+    <<: *vllm
+    profiles: ["station"]
+    command:
+      - Qwen/Qwen3-VL-Embedding-8B
+      - --runner
+      - pooling
+      - --max-model-len
+      - "8192"
+      - --quantization
+      - fp8
+      - --gpu-memory-utilization
+      - ${KB_STATION_PAGE_EMBED_GPU_FRACTION:-0.2}
+      - --port
+      - "8000"
+
+  # The model card's serving recipe: a sequence classifier over the "yes"/"no"
+  # tokens plus vLLM's score template, which answers the Cohere-shaped
+  # /rerank the `vllm` rerank provider posts.
+  vllm-rerank-station:
+    <<: *vllm
+    profiles: ["station"]
+    command:
+      - Qwen/Qwen3-VL-Reranker-8B
+      - --runner
+      - pooling
+      - --max-model-len
+      - "8192"
+      - --hf-overrides
+      - '{"architectures": ["Qwen3VLForSequenceClassification"], "classifier_from_token": ["no", "yes"], "is_original_qwen3_reranker": true}'
+      - --chat-template
+      - /templates/qwen3_vl_reranker.jinja
+      - --quantization
+      - fp8
+      - --gpu-memory-utilization
+      - ${KB_STATION_RERANK_GPU_FRACTION:-0.2}
+      - --port
+      - "8000"
+
+  kb-station:
+    <<: *kb-server
+    profiles: ["station"]
+    environment:
+      <<: *kb-local-env
+      KB_TIER: station
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-embed-station:80/v1/embeddings}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
+      KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-vllm}
+      KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://vllm-rerank-station:8000}
+      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL:-http://vllm-ocr-station:8000/v1/chat/completions}
+      KB_PAGE_EMBEDDING_BASE_URL: ${KB_PAGE_EMBEDDING_BASE_URL:-http://vllm-page-embed-station:8000/v1/embeddings}
+    depends_on:
+      <<: *kb-stores
+      tei-embed-station:
+        condition: service_healthy
+      vllm-ocr-station:
+        condition: service_healthy
+      vllm-page-embed-station:
+        condition: service_healthy
+      vllm-rerank-station:
+        condition: service_healthy
+
+  # ─── cloud: no local models; OpenRouter pays for embeddings + rerank ──────
+  #
+  # Nothing here overrides KB_EMBEDDING_BASE_URL / KB_RERANK_BASE_URL: the
+  # cloud preset leaves them at OpenRouter and the reranker at the Cohere shape
+  # OpenRouter's /rerank takes. `kb-dev.sh up cloud` refuses to run without
+  # OPENROUTER_API_KEY. The page-image arm is on (the tier preset sets it), which
+  # is why Qdrant runs on every tier.
+
+  kb-cloud:
+    <<: *kb-server
+    profiles: ["cloud"]
+    environment:
+      <<: *kb-env
+      KB_TIER: cloud
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+
+volumes:
+  pg-data:
+  rustfs-data:
+  qdrant-data:
+  # One HF cache for every TEI and vLLM container: a tier switch never
+  # re-downloads.
+  hf-models:
+  # GGUF files llama.cpp fetches (desk OCR).
+  llama-models:
+  # Content-addressed embeddings/extraction (KB_CACHE_DIR), survives `down`.
+  kb-cache:
+

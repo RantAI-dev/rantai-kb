@@ -1,0 +1,52 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Font << /F1 7 0 R >> >> >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>
+endobj
+5 0 obj
+<< /Length 483 >>
+stream
+BT /F1 18 Tf 72 720 Td (Mars Mission Overview) Tj ET
+BT /F1 11 Tf 72 696 Td (The Ares program sends an uncrewed lander to the Jezero crater.) Tj ET
+BT /F1 11 Tf 72 679 Td (The primary objective is to collect twelve rock cores and cache them) Tj ET
+BT /F1 11 Tf 72 662 Td (for a later return to Earth.) Tj ET
+BT /F1 11 Tf 72 645 Td (The lander carries a small helicopter that scouts the terrain ahead.) Tj ET
+BT /F1 11 Tf 72 628 Td (The helicopter recharges from a solar panel.) Tj ET
+endstream
+endobj
+6 0 obj
+<< /Length 413 >>
+stream
+BT /F1 18 Tf 72 720 Td (Communications and Landing) Tj ET
+BT /F1 11 Tf 72 696 Td (The mission uses the Deep Space Network for commanding.) Tj ET
+BT /F1 11 Tf 72 679 Td (Each uplink window lasts about eight hours.) Tj ET
+BT /F1 11 Tf 72 662 Td (Round-trip light time to Mars is between five and twenty minutes.) Tj ET
+BT /F1 11 Tf 72 645 Td (Entry, descent and landing is called the seven minutes of terror.) Tj ET
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000373 00000 n 
+0000000907 00000 n 
+0000001371 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+1441
+%%EOF
