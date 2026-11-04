@@ -102,9 +102,18 @@ def read_json(path: Path) -> dict:
 def response_files(directory: Path) -> List[Path]:
     if not directory.is_dir():
         raise SystemExit(f"not a directory: {directory}")
-    files = sorted(directory.glob("*.json"))
+    files = sorted(p for p in directory.glob("*.json") if p.name != "ingest-map.json")
     if not files:
         raise SystemExit(f"no *.json responses in {directory}")
+    # A failed or degraded search is not an empty result: counting it as one
+    # would make a floor look better than it is. Refuse to calibrate on it.
+    bad = []
+    for path in files:
+        body = read_json(path)
+        if "error" in body or body.get("degrades"):
+            bad.append(f"{path.name}: {body.get('error') or body.get('degrades')}")
+    if bad:
+        raise SystemExit(f"{len(bad)} failed/degraded responses in {directory}, e.g. {bad[:3]}")
     return files
 
 
