@@ -7,10 +7,11 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use kb_core::{
-    BoostConfig, ContextItem, RecencyField, RrfOptions, SourceEntry, authority_factor,
-    authority_value, base_from_rank, base_from_rerank_in, build_context_and_sources, date_value,
-    normalise_authority, parse_date, recency_factor, reciprocal_rank_fusion_with,
-    rerank_scores_are_probabilities, weave_neighbours_with,
+    ArmPlan, BoostConfig, ContextItem, QueryClass, RecencyField, RrfOptions, SkippedArm,
+    SourceEntry, authority_factor, authority_value, base_from_rank, base_from_rerank_in,
+    build_context_and_sources, classify_query, date_value, normalise_authority, parse_date,
+    recency_factor, reciprocal_rank_fusion_with, rerank_scores_are_probabilities,
+    weave_neighbours_with,
 };
 use kb_ports::{
     Candidate, Chunk, ChunkId, ChunkMetadata, DocumentId, DocumentMeta, DocumentScope,
@@ -67,6 +68,10 @@ pub struct RetrievalOptions {
     /// leaves it `None` and the pipeline reads the clock once, at the boost
     /// step.
     pub boost_now: Option<DateTime<Utc>>,
+    /// Adaptive arm choice (RET-5). Off by default: the pipeline runs exactly
+    /// the arms every earlier release ran. On, the query is classified and the
+    /// arms its class cannot use are not launched.
+    pub adaptive_arms: bool,
 }
 
 impl fmt::Debug for RetrievalOptions {
@@ -89,6 +94,7 @@ impl fmt::Debug for RetrievalOptions {
             .field("graph_arm", &self.graph_arm.as_ref().map(|_| "<GraphArm>"))
             .field("page_arm", &self.page_arm.as_ref().map(|a| a.config))
             .field("boost", &self.boost)
+            .field("adaptive_arms", &self.adaptive_arms)
             .field(
                 "figure_gate",
                 &self.figure_gate.as_ref().map(|_| "<FigureGate>"),
@@ -120,6 +126,7 @@ impl Default for RetrievalOptions {
             page_arm: None,
             boost: None,
             boost_now: None,
+            adaptive_arms: false,
         }
     }
 }
@@ -168,6 +175,21 @@ pub struct BoostStats {
     pub authority: usize,
 }
 
+/// What adaptive arm choice did, for the response's `stats` object.
+///
+/// Present only when adaptive mode ran. `skipped_arms` is empty after a
+/// fallback, because a fallback ran the full plan: naming an arm as skipped
+/// while it actually ran would be a lie.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveStats {
+    /// The question's class (`stats.queryClass`).
+    pub class: QueryClass,
+    /// The arms the plan turned off, each with the class's reason.
+    pub skipped_arms: Vec<SkippedArm>,
+    /// True when the plan's skip left nothing and the full plan was run once.
+    pub arm_plan_fallback: bool,
+}
+
 /// The outcome of the retrieval pipeline.
 #[derive(Debug, Clone)]
 pub struct RetrievalOutcome {
@@ -184,6 +206,10 @@ pub struct RetrievalOutcome {
     /// it did not, so a response that never boosted is byte-identical to one
     /// from before `RET-4`.
     pub boost: Option<BoostStats>,
+    /// `Some` only when adaptive arm choice ran (`stats.queryClass` and
+    /// `stats.skippedArms`). `None` on a default search, so an old client sees
+    /// exactly the earlier shape.
+    pub adaptive: Option<AdaptiveStats>,
     /// What each stage cost. Always present: a request nobody times is a
     /// request nobody can make faster, and the numbers are the only evidence
     /// a retrieval change can be judged by.
@@ -739,6 +765,14 @@ pub fn apply_boosts_now(
 /// Every collaborator is passed explicitly rather than behind a context
 /// object: the engine receives its stores as arguments, which is the whole
 /// point of the port boundary.
+///
+/// With `RetrievalOptions::adaptive_arms` off this is exactly the pre-RET-5
+/// pipeline. With it on, the query is classified once and the arms its class
+/// cannot use are not launched; every skipped arm is named on
+/// [`RetrievalOutcome::adaptive`]. If the skip leaves nothing and a skipped arm
+/// could have contributed candidates, the full plan runs once more and the
+/// outcome says `arm_plan_fallback: true` — a plan that guessed wrong must not
+/// turn a searchable question into an empty answer.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_pipeline(
     doc_store: &Arc<dyn DocumentStore>,
@@ -751,6 +785,80 @@ pub async fn execute_pipeline(
     opts: &RetrievalOptions,
     clock: &dyn Clock,
 ) -> Result<RetrievalOutcome, EngineError> {
+    if !opts.adaptive_arms {
+        return execute_pipeline_with_plan(
+            doc_store,
+            index,
+            embedder,
+            reranker,
+            expander,
+            scope,
+            query,
+            opts,
+            clock,
+            &ArmPlan::all(),
+        )
+        .await;
+    }
+
+    let signature = classify_query(query);
+    let plan = signature.arm_plan();
+    let skipped_candidate_arm = !plan.dense
+        || !plan.sparse
+        || (!plan.page_image && opts.page_arm.is_some())
+        || (!plan.graph && opts.graph_arm.is_some());
+    let mut outcome = execute_pipeline_with_plan(
+        doc_store, index, embedder, reranker, expander, scope, query, opts, clock, &plan,
+    )
+    .await?;
+
+    if outcome.chunks.is_empty() && skipped_candidate_arm && outcome.note.is_none() {
+        tracing::info!(
+            class = signature.class.as_str(),
+            "adaptive plan returned nothing; re-running the full plan once"
+        );
+        outcome = execute_pipeline_with_plan(
+            doc_store,
+            index,
+            embedder,
+            reranker,
+            expander,
+            scope,
+            query,
+            opts,
+            clock,
+            &ArmPlan::all(),
+        )
+        .await?;
+        outcome.adaptive = Some(AdaptiveStats {
+            class: signature.class,
+            skipped_arms: Vec::new(),
+            arm_plan_fallback: true,
+        });
+        return Ok(outcome);
+    }
+
+    outcome.adaptive = Some(AdaptiveStats {
+        class: signature.class,
+        skipped_arms: signature.skipped_arms(),
+        arm_plan_fallback: false,
+    });
+    Ok(outcome)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_pipeline_with_plan(
+    doc_store: &Arc<dyn DocumentStore>,
+    index: &Arc<dyn RetrievalIndex>,
+    embedder: &Arc<dyn Embedder>,
+    reranker: &Arc<dyn Reranker>,
+    expander: &Arc<dyn QueryExpander>,
+    scope: &DocumentScope,
+    query: &str,
+    opts: &RetrievalOptions,
+    clock: &dyn Clock,
+    plan: &ArmPlan,
+) -> Result<RetrievalOutcome, EngineError> {
     let total_sw = Stopwatch::start(clock);
     let mut timings = StageTimings::default();
     let mut degrades: Vec<RetrievalDegrade> = Vec::new();
@@ -759,7 +867,15 @@ pub async fn execute_pipeline(
     // 0. The page-image arm runs alongside everything below: its query embedding
     // is a second round trip to a different model, and it must not add to the
     // text arms' latency. Joined after the rerank, where it is fused.
-    let page_task = opts.page_arm.clone().map(|arm| {
+    //
+    // Adaptive mode may skip the arm entirely: no task is spawned, so its query
+    // embed and page search (the expensive part) never happen.
+    let page_task = if plan.page_image {
+        opts.page_arm.clone()
+    } else {
+        None
+    }
+    .map(|arm| {
         let scope = scope.clone();
         let query = query.to_string();
         tokio::spawn(async move {
@@ -769,9 +885,10 @@ pub async fn execute_pipeline(
         })
     });
 
-    // 1. Query expansion.
+    // 1. Query expansion. Expansion feeds the dense arm only, so it is skipped
+    // with that arm rather than spending a paid call for nothing.
     let expand_sw = Stopwatch::start(clock);
-    let variants: Vec<String> = if opts.expansion_enabled {
+    let variants: Vec<String> = if opts.expansion_enabled && plan.dense {
         match expander.expand(query).await {
             Ok(mut v) => {
                 if !v.iter().any(|q| q == query) {
@@ -792,31 +909,32 @@ pub async fn execute_pipeline(
 
     // 2. Query embedding & sparse encoding
     let embed_sw = Stopwatch::start(clock);
-    let embeds = variants.iter().map(|q| embedder.embed_query_detailed(q));
-    let vectors = futures::future::join_all(embeds).await;
-    timings.query_embed_ms = embed_sw.elapsed_ms();
-
-    let mut query_vectors: Vec<Vec<f32>> = Vec::with_capacity(vectors.len());
     let mut cached: Option<bool> = None;
     let mut embed_failed = false;
-    for res in vectors {
-        match res {
-            Ok(qe) => {
-                cached = Some(cached.map_or(qe.cached, |seen| seen && qe.cached));
-                query_vectors.push(qe.vector);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "query embed failed");
-                embed_failed = true;
+    let mut query_vectors: Vec<Vec<f32>> = Vec::new();
+    if plan.dense {
+        let embeds = variants.iter().map(|q| embedder.embed_query_detailed(q));
+        let vectors = futures::future::join_all(embeds).await;
+        for res in vectors {
+            match res {
+                Ok(qe) => {
+                    cached = Some(cached.map_or(qe.cached, |seen| seen && qe.cached));
+                    query_vectors.push(qe.vector);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "query embed failed");
+                    embed_failed = true;
+                }
             }
         }
     }
+    timings.query_embed_ms = embed_sw.elapsed_ms();
     timings.query_embed_cached = cached.unwrap_or(false);
-    if embed_failed || query_vectors.is_empty() {
+    if plan.dense && (embed_failed || query_vectors.is_empty()) {
         degrades.push(RetrievalDegrade::VectorArmFailed);
     }
 
-    let sparse_query = if opts.hybrid_bm25_enabled {
+    let sparse_query = if opts.hybrid_bm25_enabled && plan.sparse {
         let sq = KeywordQuery::from_text(query);
         if sq.is_empty() { None } else { Some(sq) }
     } else {
@@ -988,43 +1106,48 @@ pub async fn execute_pipeline(
             .is_none_or(|sim| sim >= opts.min_similarity || c.scores.sparse.is_some())
     });
 
-    // 4b. The graph arm, fused as one more ranked list.
+    // 4b. The graph arm, fused as one more ranked list. Adaptive mode may skip
+    // it: no seed lookup and no scoped-graph walk happens at all.
     let graph_sw = Stopwatch::start(clock);
-    let graph_ranks = match &opts.graph_arm {
-        None => HashMap::new(),
-        Some(arm) => {
-            let ranking = match arm.rank(scope, query, clock).await {
-                Ok(ranking) => ranking,
-                Err(e) => {
-                    // A failed arm is a degraded search, not a failed one. The
-                    // other arms' candidates are already in `candidates` and go
-                    // out unchanged; what must not happen is silence, because a
-                    // graph arm that quietly stopped running looks exactly like a
-                    // graph arm that has stopped helping (AGENTS rule 6).
-                    tracing::warn!(error = %e, "graph arm failed (non-fatal)");
-                    degrades.push(RetrievalDegrade::GraphArmUnavailable);
-                    GraphRanking::default()
-                }
-            };
-            if ranking.chunks.is_empty() {
-                // No entity in this scope matches the query. That is the graph
-                // having nothing to say, not a failure, so no degrade.
-                tracing::debug!(
-                    seeds = ranking.seeds,
-                    unmatched_terms = ranking.unmatched_terms,
-                    "graph arm had nothing to say",
-                );
-                HashMap::new()
-            } else {
-                match fuse_graph(index, scope, &ranking.chunks, &candidates, pool_size).await {
-                    Ok((fused, ranks)) => {
-                        candidates = fused;
-                        ranks
-                    }
+    let graph_ranks = if !plan.graph {
+        HashMap::new()
+    } else {
+        match &opts.graph_arm {
+            None => HashMap::new(),
+            Some(arm) => {
+                let ranking = match arm.rank(scope, query, clock).await {
+                    Ok(ranking) => ranking,
                     Err(e) => {
-                        tracing::warn!(error = %e, "graph arm fetch failed (non-fatal)");
+                        // A failed arm is a degraded search, not a failed one. The
+                        // other arms' candidates are already in `candidates` and go
+                        // out unchanged; what must not happen is silence, because a
+                        // graph arm that quietly stopped running looks exactly like a
+                        // graph arm that has stopped helping (AGENTS rule 6).
+                        tracing::warn!(error = %e, "graph arm failed (non-fatal)");
                         degrades.push(RetrievalDegrade::GraphArmUnavailable);
-                        HashMap::new()
+                        GraphRanking::default()
+                    }
+                };
+                if ranking.chunks.is_empty() {
+                    // No entity in this scope matches the query. That is the graph
+                    // having nothing to say, not a failure, so no degrade.
+                    tracing::debug!(
+                        seeds = ranking.seeds,
+                        unmatched_terms = ranking.unmatched_terms,
+                        "graph arm had nothing to say",
+                    );
+                    HashMap::new()
+                } else {
+                    match fuse_graph(index, scope, &ranking.chunks, &candidates, pool_size).await {
+                        Ok((fused, ranks)) => {
+                            candidates = fused;
+                            ranks
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "graph arm fetch failed (non-fatal)");
+                            degrades.push(RetrievalDegrade::GraphArmUnavailable);
+                            HashMap::new()
+                        }
                     }
                 }
             }
@@ -1065,7 +1188,7 @@ pub async fn execute_pipeline(
     let max_chunks = opts.max_chunks.clamp(1, 50) as usize;
     let rerank_sw = Stopwatch::start(clock);
     let rerank_future = async {
-        if opts.rerank_enabled && hits.len() > 1 {
+        if plan.rerank && opts.rerank_enabled && hits.len() > 1 {
             let final_k = opts.rerank_final_k.clamp(1, 100);
             // 0 means no limit: every candidate goes to the reranker, as before L.4.
             let candidate_limit = match opts.rerank_candidate_limit {
@@ -1235,6 +1358,7 @@ pub async fn execute_pipeline(
                     note: floor_note,
                     floor: floor_stats,
                     boost: opts.boost.as_ref().map(|_| BoostStats::default()),
+                    adaptive: None,
                     timings,
                 });
             }
@@ -1306,7 +1430,8 @@ pub async fn execute_pipeline(
                 // one by weighted RRF; any failure keeps the order and is
                 // reported, never swallowed (AGENTS rule 6). Every page it sees
                 // comes from a hit that already passed scope.
-                if opts.rerank_enabled
+                if plan.rerank
+                    && opts.rerank_enabled
                     && let Some(vision) = arm.vision.as_ref()
                 {
                     let vision_sw = Stopwatch::start(clock);
@@ -1370,7 +1495,7 @@ pub async fn execute_pipeline(
 
     // 7. Neighbours (when window > 0)
     let neighbours_sw = Stopwatch::start(clock);
-    if opts.neighbour_window > 0 && !reranked_hits.is_empty() {
+    if plan.neighbour && opts.neighbour_window > 0 && !reranked_hits.is_empty() {
         let mut by_doc: HashMap<DocumentId, Vec<u32>> = HashMap::new();
         for h in &reranked_hits {
             if let Some(idx) = h.chunk.metadata.chunk_index {
@@ -1425,7 +1550,7 @@ pub async fn execute_pipeline(
 
     // 8. Figures (when figure_limit > 0)
     let figures_sw = Stopwatch::start(clock);
-    if opts.figure_limit > 0 && !reranked_hits.is_empty() {
+    if plan.figure && opts.figure_limit > 0 && !reranked_hits.is_empty() {
         let mut retrieved_doc_ids: Vec<DocumentId> = Vec::new();
         let mut seen_docs: HashSet<DocumentId> = HashSet::new();
         for c in &reranked_hits {
@@ -1529,6 +1654,7 @@ pub async fn execute_pipeline(
         note: floor_note,
         floor: floor_stats,
         boost: boost_stats,
+        adaptive: None,
         timings,
     })
 }

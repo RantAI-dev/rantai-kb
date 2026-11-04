@@ -115,6 +115,7 @@ kb-server eval … --gain exponential
 | `report.md` | the same numbers as a table, for a human |
 | `run.trec` | document-level TREC run (`qid Q0 docno rank score tag`) |
 | `run.page.trec` | page-level TREC run |
+| `latency.json` | one record per query: id, client latency, status, and the server's `queryClass` / skipped-arm count when adaptive mode ran (RET-5) |
 | `ingest-map.json` | `doc-key → documentId`, reused by `--skip-ingest` |
 
 The TREC files are the interoperability surface: `trec_eval` and `ranx` re-score

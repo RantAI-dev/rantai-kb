@@ -3,17 +3,24 @@
 #[cfg(test)]
 mod pipeline_tests {
     use std::sync::Arc;
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use crate::fakes::{
         FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeReranker, make_fake_hit,
         make_fake_scope,
     };
+    use crate::graph_arm::{GraphArm, GraphArmConfig};
+    use crate::in_memory_graph_store::InMemoryGraphStore;
+    use crate::in_memory_index::InMemoryIndex;
+    use crate::page_arm::{PageArm, PageArmConfig};
     use crate::retrieval::{RetrievalOptions, execute_pipeline};
     use crate::timing::{ManualClock, SystemClock};
+    use async_trait::async_trait;
     use kb_ports::{
-        ChunkType, DocumentFilter, DocumentId, DocumentMeta, DocumentStore, EngineError,
-        KnowledgeBaseId, ProvenanceArm, RetrievalDegrade, ScopeRequest, TenantId,
+        ChunkId, ChunkToStore, ChunkType, DocumentFilter, DocumentId, DocumentMeta, DocumentScope,
+        DocumentStore, Embedder, EngineError, EntityUpsert, GraphStore, IndexUnit, KnowledgeBaseId,
+        PageEmbedder, PageImage, PortError, ProvenanceArm, RelationUpsert, RetrievalDegrade,
+        RetrievalIndex, ScopeRequest, TenantGraph, TenantId,
     };
 
     fn setup() -> (
@@ -1668,5 +1675,456 @@ mod pipeline_tests {
             .expect("an intentionally empty answer says why");
         assert!(note.contains("relevance floor"), "{note}");
         assert_eq!(outcome.floor.expect("a floor ran").dropped, 1);
+    }
+
+    /// A page embedder that counts query embeds, so "the page arm did not run"
+    /// is a fact about a call and not an inference from an empty result.
+    struct CountingPageEmbedder {
+        calls: Arc<AtomicUsize>,
+        vector: Vec<f32>,
+    }
+
+    #[async_trait]
+    impl PageEmbedder for CountingPageEmbedder {
+        async fn embed_pages(&self, pages: &[PageImage]) -> Result<Vec<Vec<f32>>, PortError> {
+            Ok(pages.iter().map(|_| self.vector.clone()).collect())
+        }
+
+        async fn embed_query(&self, _text: &str) -> Result<Vec<f32>, PortError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.vector.clone())
+        }
+
+        fn dimension(&self) -> u32 {
+            self.vector.len() as u32
+        }
+    }
+
+    /// A graph store that counts every read the arm would make before deciding
+    /// it has nothing to say.
+    struct CountingGraphStore {
+        inner: InMemoryGraphStore,
+        reads: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl GraphStore for CountingGraphStore {
+        async fn upsert_entities(
+            &self,
+            tenant: &TenantId,
+            document_id: &DocumentId,
+            entities: Vec<EntityUpsert>,
+        ) -> Result<(), PortError> {
+            self.inner
+                .upsert_entities(tenant, document_id, entities)
+                .await
+        }
+
+        async fn relate(
+            &self,
+            tenant: &TenantId,
+            document_id: &DocumentId,
+            relations: Vec<RelationUpsert>,
+        ) -> Result<(), PortError> {
+            self.inner.relate(tenant, document_id, relations).await
+        }
+
+        async fn delete_document(
+            &self,
+            tenant: &TenantId,
+            document_id: &DocumentId,
+        ) -> Result<(), PortError> {
+            self.inner.delete_document(tenant, document_id).await
+        }
+
+        async fn load_tenant_graph(&self, scope: &DocumentScope) -> Result<TenantGraph, PortError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.load_tenant_graph(scope).await
+        }
+
+        async fn graph_version(&self, tenant: &TenantId) -> Result<u64, PortError> {
+            self.inner.graph_version(tenant).await
+        }
+
+        async fn match_entities(
+            &self,
+            scope: &DocumentScope,
+            query_terms: &[String],
+        ) -> Result<Vec<(String, f32)>, PortError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            self.inner.match_entities(scope, query_terms).await
+        }
+
+        async fn entity_mentions(
+            &self,
+            scope: &DocumentScope,
+            key: &str,
+        ) -> Result<Vec<ChunkId>, PortError> {
+            self.inner.entity_mentions(scope, key).await
+        }
+    }
+
+    fn page_unit(doc: &str, page: u32, chunk_ids: &[&str]) -> IndexUnit {
+        IndexUnit {
+            id: ChunkId(format!("{doc}_page_{page}")),
+            document_id: DocumentId(doc.to_string()),
+            tenant: TenantId("t1".into()),
+            knowledge_base_id: None,
+            category: None,
+            chunk_index: page,
+            page: Some(page),
+            chunk_type: ChunkType::Page,
+            content: String::new(),
+            contextual_prefix: None,
+            metadata: serde_json::json!({ "chunkIds": chunk_ids, "page": page }),
+            dense: vec![1.0, 0.0, 0.0],
+            sparse: <kb_core::sparse::SparseVector>::default(),
+        }
+    }
+
+    fn stored_chunk(index: u32, content: &str) -> ChunkToStore {
+        ChunkToStore {
+            content: content.to_string(),
+            chunk_index: index,
+            embedding: Vec::new(),
+            metadata: serde_json::json!({ "chunkIndex": index }),
+            contextual_prefix: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_with(
+        doc_store: &Arc<FakeDocumentStore>,
+        chunk_store: &Arc<FakeChunkStore>,
+        embedder: &Arc<FakeEmbedder>,
+        reranker: &Arc<FakeReranker>,
+        scope: &DocumentScope,
+        query: &str,
+        opts: &RetrievalOptions,
+    ) -> crate::RetrievalOutcome {
+        execute_pipeline(
+            &(doc_store.clone() as Arc<dyn DocumentStore>),
+            &(chunk_store.clone() as Arc<dyn RetrievalIndex>),
+            &(embedder.clone() as Arc<dyn Embedder>),
+            &(reranker.clone() as Arc<dyn kb_ports::Reranker>),
+            &noop_expander(),
+            scope,
+            query,
+            opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// With the switch off the pipeline must be the one every earlier release
+    /// ran. A factual query's plan is the full plan, so its on/off outcomes have
+    /// to match on every field that decides an answer.
+    #[tokio::test]
+    async fn adaptive_off_is_identical_to_the_full_plan() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        chunk_store.vector_hits.write().unwrap().extend([
+            make_fake_hit("d1_0", "d1", "Title 1", "Alpha", 0, 0.9),
+            make_fake_hit("d1_1", "d1", "Title 1", "Beta", 1, 0.8),
+        ]);
+        chunk_store
+            .bm25_hits
+            .write()
+            .unwrap()
+            .push(make_fake_hit("d1_0", "d1", "Title 1", "Alpha", 0, 0.7));
+        chunk_store
+            .neighbour_hits
+            .write()
+            .unwrap()
+            .push(make_fake_hit("d1_2", "d1", "Title 1", "Gamma", 2, 0.6));
+        chunk_store
+            .stored_chunks
+            .write()
+            .unwrap()
+            .insert(DocumentId("d1".into()), vec![stored_chunk(0, "Alpha")]);
+
+        let page_calls = Arc::new(AtomicUsize::new(0));
+        let page_index = Arc::new(InMemoryIndex::new(3));
+        page_index
+            .upsert(vec![page_unit("d1", 0, &["d1_0"])])
+            .await
+            .unwrap();
+        let page_arm = Arc::new(PageArm {
+            embedder: Arc::new(CountingPageEmbedder {
+                calls: page_calls,
+                vector: vec![1.0, 0.0, 0.0],
+            }),
+            index: page_index,
+            config: PageArmConfig::default(),
+            vision: None,
+        });
+        let graph_store: Arc<dyn GraphStore> = Arc::new(CountingGraphStore {
+            inner: InMemoryGraphStore::new(),
+            reads: Arc::new(AtomicUsize::new(0)),
+        });
+        let graph_arm = Arc::new(GraphArm::new(graph_store, GraphArmConfig::default()));
+
+        let opts = RetrievalOptions {
+            max_chunks: 5,
+            neighbour_window: 1,
+            figure_limit: 2,
+            rerank_enabled: true,
+            page_arm: Some(page_arm),
+            graph_arm: Some(graph_arm),
+            ..RetrievalOptions::default()
+        };
+        let off = run_with(
+            &doc_store,
+            &chunk_store,
+            &embedder,
+            &reranker,
+            &scope,
+            "who wrote the report?",
+            &opts,
+        )
+        .await;
+        let on = run_with(
+            &doc_store,
+            &chunk_store,
+            &embedder,
+            &reranker,
+            &scope,
+            "who wrote the report?",
+            &RetrievalOptions {
+                adaptive_arms: true,
+                ..opts.clone()
+            },
+        )
+        .await;
+
+        assert!(off.adaptive.is_none(), "off reports no adaptive stats");
+        let adaptive = on.adaptive.as_ref().expect("on reports the class");
+        assert_eq!(adaptive.class, kb_core::QueryClass::Factual);
+        assert!(adaptive.skipped_arms.is_empty(), "factual runs every arm");
+        let ids = |outcome: &crate::RetrievalOutcome| {
+            outcome
+                .chunks
+                .iter()
+                .map(|hit| (hit.chunk.id.0.clone(), hit.rank))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&off), ids(&on));
+        assert_eq!(off.degrades, on.degrades);
+        assert!(off.context == on.context);
+    }
+
+    #[tokio::test]
+    async fn an_exact_query_does_not_call_the_page_or_graph_arms() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+            "d1_0",
+            "d1",
+            "Title 1",
+            "X200 manual",
+            0,
+            0.9,
+        ));
+
+        let page_calls = Arc::new(AtomicUsize::new(0));
+        let graph_reads = Arc::new(AtomicUsize::new(0));
+        let opts = RetrievalOptions {
+            max_chunks: 5,
+            adaptive_arms: true,
+            page_arm: Some(Arc::new(PageArm {
+                embedder: Arc::new(CountingPageEmbedder {
+                    calls: page_calls.clone(),
+                    vector: vec![1.0, 0.0, 0.0],
+                }),
+                index: Arc::new(InMemoryIndex::new(3)),
+                config: PageArmConfig::default(),
+                vision: None,
+            })),
+            graph_arm: Some(Arc::new(GraphArm::new(
+                Arc::new(CountingGraphStore {
+                    inner: InMemoryGraphStore::new(),
+                    reads: graph_reads.clone(),
+                }),
+                GraphArmConfig::default(),
+            ))),
+            ..RetrievalOptions::default()
+        };
+        let outcome = run_with(
+            &doc_store,
+            &chunk_store,
+            &embedder,
+            &reranker,
+            &scope,
+            "reset Acme X200 router",
+            &opts,
+        )
+        .await;
+
+        assert_eq!(
+            page_calls.load(Ordering::SeqCst),
+            0,
+            "the page-image arm must not embed the query"
+        );
+        assert_eq!(
+            graph_reads.load(Ordering::SeqCst),
+            0,
+            "the graph arm must not read the graph"
+        );
+        let adaptive = outcome.adaptive.expect("adaptive stats are reported");
+        assert_eq!(adaptive.class, kb_core::QueryClass::Exact);
+        assert!(!adaptive.arm_plan_fallback);
+        let arms: Vec<&str> = adaptive
+            .skipped_arms
+            .iter()
+            .map(|skipped| skipped.arm.as_str())
+            .collect();
+        assert_eq!(arms, vec!["pageImage", "graph"]);
+        assert!(
+            adaptive
+                .skipped_arms
+                .iter()
+                .all(|skipped| skipped.reason == "exact query")
+        );
+        assert!(!outcome.chunks.is_empty(), "the text arms still answered");
+    }
+
+    #[tokio::test]
+    async fn an_empty_adaptive_plan_falls_back_to_the_full_plan_once() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        // The text arms find nothing; the page arm is the only thing that can
+        // answer, and the exact-class plan would skip it.
+        chunk_store.stored_chunks.write().unwrap().insert(
+            DocumentId("d1".into()),
+            vec![stored_chunk(0, "X200 manual")],
+        );
+        let page_calls = Arc::new(AtomicUsize::new(0));
+        let page_index = Arc::new(InMemoryIndex::new(3));
+        page_index
+            .upsert(vec![page_unit("d1", 0, &["d1_0"])])
+            .await
+            .unwrap();
+        let opts = RetrievalOptions {
+            max_chunks: 5,
+            adaptive_arms: true,
+            page_arm: Some(Arc::new(PageArm {
+                embedder: Arc::new(CountingPageEmbedder {
+                    calls: page_calls.clone(),
+                    vector: vec![1.0, 0.0, 0.0],
+                }),
+                index: page_index,
+                config: PageArmConfig::default(),
+                vision: None,
+            })),
+            ..RetrievalOptions::default()
+        };
+        let outcome = run_with(
+            &doc_store,
+            &chunk_store,
+            &embedder,
+            &reranker,
+            &scope,
+            "reset Acme X200 router",
+            &opts,
+        )
+        .await;
+
+        let adaptive = outcome.adaptive.expect("adaptive stats are reported");
+        assert_eq!(adaptive.class, kb_core::QueryClass::Exact);
+        assert!(
+            adaptive.arm_plan_fallback,
+            "the plan guessed wrong and must say so"
+        );
+        assert!(
+            adaptive.skipped_arms.is_empty(),
+            "a fallback ran every arm, so none were skipped in the end"
+        );
+        assert_eq!(
+            page_calls.load(Ordering::SeqCst),
+            1,
+            "the page arm ran once, in the fallback"
+        );
+        assert_eq!(outcome.chunks.len(), 1, "{:?}", outcome.chunks);
+        assert_eq!(outcome.chunks[0].chunk.id.0, "d1_0");
+    }
+
+    /// A plan may turn an arm off; it may never widen the scope. The arms that
+    /// do run still receive the caller's narrowed `DocumentScope`.
+    #[tokio::test]
+    async fn adaptive_mode_keeps_every_running_arm_inside_the_scope() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        doc_store.insert_doc(
+            TenantId("t1".into()),
+            DocumentMeta {
+                id: DocumentId("d2".into()),
+                title: "Hidden".into(),
+                categories: vec![],
+                subcategory: None,
+                status: "READY".into(),
+                external_ref: None,
+                chunk_count: 1,
+                file_type: None,
+                file_size: None,
+                mime_type: None,
+                s3_key: None,
+                created_at: "".into(),
+                updated_at: "".into(),
+                knowledge_base_ids: vec![],
+                metadata: None,
+            },
+        );
+        // Both documents have a matching vector hit; only d1 is in scope.
+        chunk_store.vector_hits.write().unwrap().extend([
+            make_fake_hit("d1_0", "d1", "Title 1", "Alpha report", 0, 0.9),
+            make_fake_hit("d2_0", "d2", "Hidden", "Alpha report", 0, 0.99),
+        ]);
+        let page_index = Arc::new(InMemoryIndex::new(3));
+        page_index
+            .upsert(vec![
+                page_unit("d1", 0, &["d1_0"]),
+                page_unit("d2", 0, &["d2_0"]),
+            ])
+            .await
+            .unwrap();
+        let opts = RetrievalOptions {
+            max_chunks: 10,
+            adaptive_arms: true,
+            page_arm: Some(Arc::new(PageArm {
+                embedder: Arc::new(CountingPageEmbedder {
+                    calls: Arc::new(AtomicUsize::new(0)),
+                    vector: vec![1.0, 0.0, 0.0],
+                }),
+                index: page_index,
+                config: PageArmConfig::default(),
+                vision: None,
+            })),
+            ..RetrievalOptions::default()
+        };
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        let outcome = run_with(
+            &doc_store,
+            &chunk_store,
+            &embedder,
+            &reranker,
+            &scope,
+            "what does the report say about Alpha?",
+            &opts,
+        )
+        .await;
+
+        assert!(!outcome.chunks.is_empty());
+        assert!(
+            outcome
+                .chunks
+                .iter()
+                .all(|hit| hit.chunk.document_id.0 == "d1"),
+            "an arm ran outside the scope: {:?}",
+            outcome
+                .chunks
+                .iter()
+                .map(|hit| hit.chunk.document_id.0.clone())
+                .collect::<Vec<_>>()
+        );
     }
 }

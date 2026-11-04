@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::dataset::{Dataset, DatasetError, Qrel, gold_for_documents, gold_for_pages, page_key};
@@ -47,6 +47,10 @@ pub struct RunnerConfig {
     /// Optional `boost` object sent with every search (`RET-4`). `None` is the
     /// off run and sends no member at all.
     pub boost: Option<serde_json::Value>,
+    /// Per-request `adaptiveArms` override (RET-5). `None` omits the field and
+    /// leaves the server's `KB_ADAPTIVE_ARMS` in charge; `Some(true/false)`
+    /// forces the mode for every query in the run, which is what an A/B needs.
+    pub adaptive_arms: Option<bool>,
 }
 
 impl RunnerConfig {
@@ -71,6 +75,7 @@ impl RunnerConfig {
             poll_interval: Duration::from_millis(500),
             ingest_concurrency: 16,
             boost: None,
+            adaptive_arms: None,
         }
     }
 }
@@ -153,6 +158,29 @@ struct Answered<'a> {
     stats: &'a serde_json::Value,
 }
 
+/// One query's latency, as written to `latency.json`.
+///
+/// The aggregate in `metrics.json` answers "what was p50"; this file answers
+/// "which query was slow, and which arms did the server say it ran". A
+/// measurement change (RET-5) needs both: an average can hide a whole class of
+/// questions getting slower.
+#[derive(Debug, Clone, Serialize)]
+struct QueryLatency {
+    #[serde(rename = "queryId")]
+    query_id: String,
+    #[serde(rename = "latencyMs")]
+    latency_ms: f64,
+    status: String,
+    /// The server's `stats.queryClass`, when adaptive mode ran.
+    #[serde(rename = "queryClass", skip_serializing_if = "Option::is_none")]
+    query_class: Option<String>,
+    /// How many arms the plan skipped.
+    #[serde(rename = "skippedArms", skip_serializing_if = "Option::is_none")]
+    skipped_arms: Option<usize>,
+    #[serde(rename = "armPlanFallback", skip_serializing_if = "Option::is_none")]
+    arm_plan_fallback: Option<bool>,
+}
+
 /// The per-query accounting of a run, kept separate from the HTTP loop so the
 /// scoring rules can be tested without a server.
 ///
@@ -177,6 +205,8 @@ struct Scoreboard {
     document_run: Vec<TrecRanking>,
     page_run: Vec<TrecRanking>,
     latencies: Vec<f64>,
+    /// One record per query, for `latency.json`.
+    query_latencies: Vec<QueryLatency>,
     /// Per-stage server-side timings, parsed off each response as it lands.
     stages: crate::stages::StageCollector,
     n_queries: usize,
@@ -193,6 +223,25 @@ impl Scoreboard {
     fn record_answer(&mut self, k: usize, answer: Answered<'_>) {
         self.n_queries += 1;
         self.latencies.push(answer.latency_ms);
+        self.query_latencies.push(QueryLatency {
+            query_id: answer.id.to_string(),
+            latency_ms: answer.latency_ms,
+            status: "answered".to_string(),
+            query_class: answer
+                .stats
+                .get("queryClass")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
+            skipped_arms: answer
+                .stats
+                .get("skippedArms")
+                .and_then(serde_json::Value::as_array)
+                .map(Vec::len),
+            arm_plan_fallback: answer
+                .stats
+                .get("armPlanFallback")
+                .and_then(serde_json::Value::as_bool),
+        });
         if !answer.stats.is_null() {
             self.stages.record(answer.stats);
         }
@@ -244,9 +293,24 @@ impl Scoreboard {
     ///
     /// It stays out of the run files and out of the answered-only means, and its
     /// cause is kept: a failure whose reason is not recorded cannot be fixed.
+    /// [`Self::record_failure`] with the client-side latency the query spent
+    /// before it failed, when the caller has one.
+    #[cfg(test)]
     fn record_failure(&mut self, qrels: &[Qrel], cause: Failure) {
+        self.record_failure_at(qrels, cause, None);
+    }
+
+    fn record_failure_at(&mut self, qrels: &[Qrel], cause: Failure, latency_ms: Option<f64>) {
         self.n_queries += 1;
         self.n_failed += 1;
+        self.query_latencies.push(QueryLatency {
+            query_id: cause.id.clone(),
+            latency_ms: latency_ms.unwrap_or_default(),
+            status: "failed".to_string(),
+            query_class: None,
+            skipped_arms: None,
+            arm_plan_fallback: None,
+        });
         self.failures.push(cause);
         if has_positive_gold(&gold_for_documents(qrels)) {
             self.document.push(QueryMetrics::ZERO);
@@ -296,7 +360,7 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
                 let mut cause = err.into_failure(FailureStage::Query, &query.id);
                 cause.redact(&config.api_key);
                 eprintln!("{}: {}", cause.summary(), cause.body);
-                board.record_failure(&dataset.qrels_for(&query.id), cause);
+                board.record_failure_at(&dataset.qrels_for(&query.id), cause, Some(elapsed_ms));
                 continue;
             }
         };
@@ -321,6 +385,7 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
 
     let server_version = fetch_server_version(&client, &config).await;
     let latency: LatencyReport = latency_report(std::mem::take(&mut board.latencies));
+    let query_latencies = std::mem::take(&mut board.query_latencies);
     let report = build_report(ReportParts {
         label: &config.label,
         dataset: &dataset.name,
@@ -346,6 +411,15 @@ pub async fn run(config: RunnerConfig) -> Result<RunReport, RunError> {
         page_run: board.page_run,
     });
     write_outputs(&config.out_dir, &report)?;
+    let latency_path = config.out_dir.join("latency.json");
+    let payload = json!({
+        "label": config.label,
+        "adaptiveArms": config.adaptive_arms,
+        "queries": query_latencies,
+    });
+    let text = serde_json::to_string_pretty(&payload)
+        .map_err(|err| RunError::Other(format!("latency.json: {err}")))?;
+    std::fs::write(&latency_path, text)?;
     Ok(report)
 }
 
@@ -601,6 +675,9 @@ async fn search_one(
     let mut body = json!({ "query": text, "maxChunks": config.max_chunks });
     if let Some(boost) = &config.boost {
         body["boost"] = boost.clone();
+    }
+    if let Some(adaptive) = config.adaptive_arms {
+        body["adaptiveArms"] = json!(adaptive);
     }
     let response = client
         .post(endpoint(&config.base_url, "/v1/search"))

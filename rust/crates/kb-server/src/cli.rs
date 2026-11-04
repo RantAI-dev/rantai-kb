@@ -11,6 +11,7 @@
 //! its `--flag value` parsing and its positional/flag split, so muscle memory
 //! carries over during cutover.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use kb_ports::{CreateJobInput, JobStore};
@@ -97,6 +98,8 @@ USAGE
     kb-server eval --base-url URL --dataset DIR  Measure retrieval quality
     kb-server eval score --qrels F --run F       Score an existing run offline
     kb-server eval compare --baseline F --current F  Compare two runs against a baseline
+    kb-server eval classify --queries FILE       Print the query-class distribution of a
+                                                 queries.tsv / queries.jsonl file (RET-5)
     kb-server bench search --base-url URL --queries F  Closed-loop load test for /v1/search
     kb-server check-boundary                   Fail if an inner crate depends on an adapter
 
@@ -303,10 +306,121 @@ async fn apply_schema() -> Result<(), CliError> {
 
 /// `kb-server eval …` — the retrieval-quality harness, from the `kb-eval` crate.
 async fn eval(args: &[String]) -> Result<(), CliError> {
+    // Classify is local and pure, so it stays here rather than in the black-box
+    // `kb-eval` crate: that crate is forbidden from linking `kb-core` (the
+    // boundary check enforces it), and duplicating the rules would let the
+    // reported distribution drift from what the pipeline actually does.
+    if args.first().map(String::as_str) == Some("classify") {
+        return classify_queries(&args[1..]);
+    }
     kb_eval::run(args).await.map_err(|err| match err {
         kb_eval::EvalError::Usage(message) => CliError::Usage(message),
         kb_eval::EvalError::Failed(message) => CliError::Failed(message),
     })
+}
+
+/// `kb-server eval classify --queries <file>` — the class distribution of a
+/// query file, using the same classifier the pipeline runs.
+///
+/// A MIRACL `queries.tsv` is `query-id<TAB>text`; a BEIR `queries.jsonl` is one
+/// `{"_id": "...", "text": "..."}` per line. A file with neither shape is read
+/// as one query per line, so a hand-written list still works.
+fn classify_queries(args: &[String]) -> Result<(), CliError> {
+    let path = args
+        .iter()
+        .position(|arg| arg == "--queries")
+        .and_then(|index| args.get(index + 1))
+        .ok_or_else(|| {
+            CliError::Usage(
+                "usage: kb-server eval classify --queries <queries.tsv|queries.jsonl>".to_string(),
+            )
+        })?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| CliError::Failed(format!("read {path}: {err}")))?;
+    let queries = parse_query_file(path, &text)?;
+    if queries.is_empty() {
+        return Err(CliError::Failed(format!("{path}: no queries found")));
+    }
+
+    let mut counts: HashMap<kb_core::QueryClass, usize> = HashMap::new();
+    for (_id, query) in &queries {
+        let class = kb_core::classify_query(query).class;
+        *counts.entry(class).or_insert(0) += 1;
+    }
+    let total = queries.len();
+    println!("{path}: {total} queries");
+    for class in kb_core::QueryClass::ALL {
+        let count = counts.get(&class).copied().unwrap_or(0);
+        println!(
+            "  {:<12} {:>6}  {:>5.1}%",
+            class.as_str(),
+            count,
+            (count as f64 / total as f64) * 100.0
+        );
+    }
+    Ok(())
+}
+
+/// Parse `<id, text>` pairs from a queries file, in the formats the eval
+/// datasets use. A malformed JSONL line names its number rather than being
+/// skipped: a count over half a file is worse than a failed command.
+fn parse_query_file(path: &str, text: &str) -> Result<Vec<(String, String)>, CliError> {
+    let lower = path.to_lowercase();
+    let mut queries = Vec::new();
+    if lower.ends_with(".tsv") {
+        for (line_number, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let mut fields = line.split('\t');
+            let id = fields.next().unwrap_or_default().trim();
+            if line_number == 0 && matches!(id, "query-id" | "_id" | "id") {
+                continue;
+            }
+            let query = fields.collect::<Vec<_>>().join("\t");
+            let query = query.trim();
+            if !query.is_empty() {
+                queries.push((id.to_string(), query.to_string()));
+            }
+        }
+    } else if lower.ends_with(".jsonl") || lower.ends_with(".json") {
+        for (line_number, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(line)
+                .map_err(|err| CliError::Failed(format!("{path}:{}: {err}", line_number + 1)))?;
+            let id = value
+                .get("_id")
+                .or_else(|| value.get("id"))
+                .or_else(|| value.get("queryId"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let query = value
+                .get("text")
+                .or_else(|| value.get("query"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if !query.trim().is_empty() {
+                queries.push((id.to_string(), query.trim().to_string()));
+            }
+        }
+    } else {
+        for (line_number, line) in text.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some((id, query)) = line.split_once('\t') {
+                if !query.trim().is_empty() {
+                    queries.push((id.trim().to_string(), query.trim().to_string()));
+                }
+            } else {
+                queries.push((format!("q{}", line_number + 1), line.to_string()));
+            }
+        }
+    }
+    Ok(queries)
 }
 
 /// `kb-server bench search …` — the closed-loop load test. Same crate as the
@@ -502,6 +616,36 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn a_tsv_query_file_skips_its_header() {
+        let parsed = parse_query_file(
+            "queries.tsv",
+            "query-id\ttext\nq1\tApa ibu kota?\nq2\tSiapa penulisnya?\n",
+        )
+        .expect("parse");
+        assert_eq!(
+            parsed,
+            vec![
+                ("q1".to_string(), "Apa ibu kota?".to_string()),
+                ("q2".to_string(), "Siapa penulisnya?".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_jsonl_query_file_reads_id_and_text() {
+        let parsed = parse_query_file(
+            "queries.jsonl",
+            r#"{"_id":"q1","text":"chapter 2"}
+{"_id":"q2","text":"main themes"}
+"#,
+        )
+        .expect("parse");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, "q1");
+        assert_eq!(parsed[1].1, "main themes");
     }
 
     #[test]

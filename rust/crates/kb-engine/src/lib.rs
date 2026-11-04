@@ -75,8 +75,8 @@ pub use page_arm::{
     PageVisionRerankConfig, RankedPage,
 };
 pub use retrieval::{
-    BoostStats, FloorScoreKind, FloorStats, RetrievalOptions, RetrievalOutcome, apply_boosts,
-    apply_boosts_now, enrich_titles, execute_pipeline,
+    AdaptiveStats, BoostStats, FloorScoreKind, FloorStats, RetrievalOptions, RetrievalOutcome,
+    apply_boosts, apply_boosts_now, enrich_titles, execute_pipeline,
 };
 pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
 
@@ -118,6 +118,10 @@ pub struct EngineSettings {
     /// 60 won live with the local embedder (commit 4c01a7d); 2 won offline
     /// with e5-large on MIRACL-id, so it is a per-deployment choice.
     pub rrf_k: u32,
+    /// Adaptive arm choice (`KB_ADAPTIVE_ARMS`, RET-5). Off by default: every
+    /// search runs the same arms it always has. A request's `adaptiveArms`
+    /// overrides this for that request.
+    pub adaptive_arms: bool,
 }
 
 impl Default for EngineSettings {
@@ -138,6 +142,7 @@ impl Default for EngineSettings {
             expansion_paraphrases: 3,
             hybrid_bm25_enabled: true,
             rerank_enabled: false,
+            adaptive_arms: false,
         }
     }
 }
@@ -266,6 +271,7 @@ impl Engine {
             request_max_chunks,
             request_min_score,
             request_boost,
+            None,
         )
         .await
     }
@@ -282,17 +288,53 @@ impl Engine {
         request_max_chunks: Option<u32>,
         request_min_score: Option<f32>,
     ) -> Result<RetrievalOutcome, EngineError> {
-        self.retrieve_inner(query, scope, request_max_chunks, request_min_score, None)
-            .await
+        self.retrieve_inner(
+            query,
+            scope,
+            request_max_chunks,
+            request_min_score,
+            None,
+            None,
+        )
+        .await
     }
 
-    async fn retrieve_inner(
+    /// [`Self::retrieve_with_floor`] with a per-request adaptive-arm override.
+    ///
+    /// `request_adaptive_arms` wins over the server default
+    /// (`KB_ADAPTIVE_ARMS`, [`EngineSettings::adaptive_arms`]). `None` means
+    /// "use the default", so a caller that has never heard of the field keeps
+    /// the operator's choice.
+    pub async fn retrieve_with_request(
+        &self,
+        query: &str,
+        scope: &DocumentScope,
+        request_max_chunks: Option<u32>,
+        request_min_score: Option<f32>,
+        request_adaptive_arms: Option<bool>,
+    ) -> Result<RetrievalOutcome, EngineError> {
+        self.retrieve_inner(
+            query,
+            scope,
+            request_max_chunks,
+            request_min_score,
+            None,
+            request_adaptive_arms,
+        )
+        .await
+    }
+
+    /// Every per-request option at once: floor (`RET-2`), boosts (`RET-4`) and
+    /// the adaptive-arm override (`RET-5`). The narrower `retrieve_*` methods
+    /// are this with the other options left at their defaults.
+    pub async fn retrieve_inner(
         &self,
         query: &str,
         scope: &DocumentScope,
         request_max_chunks: Option<u32>,
         request_min_score: Option<f32>,
         request_boost: Option<kb_core::BoostConfig>,
+        request_adaptive_arms: Option<bool>,
     ) -> Result<RetrievalOutcome, EngineError> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
@@ -304,6 +346,7 @@ impl Engine {
                 note: None,
                 floor: None,
                 boost: None,
+                adaptive: None,
                 timings: StageTimings::default(),
             });
         }
@@ -333,6 +376,7 @@ impl Engine {
             page_arm: self.inputs.page_arm.clone(),
             boost: request_boost,
             boost_now: None,
+            adaptive_arms: request_adaptive_arms.unwrap_or(self.settings.adaptive_arms),
         };
 
         execute_pipeline(
