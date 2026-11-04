@@ -21,6 +21,13 @@ Prisma migrations), Qdrant (chunks, vectors, BM25, page images — the only chun
 S3-compatible blobs. Docs: `docs/porting-plan.md`, `docs/rust-cutover.md`, `rust/README.md`,
 `rust/NOTES.md`.
 
+**Product and work tracking:**
+
+- `docs/core/` holds the product docs: `PRODUCT.md`, `BACKLOG.md`, `specs/`, `features/`
+  and `HANDOFF.md`.
+- `BACKLOG.md` is the one list of work. Pick work from it, and update its row (status, PR)
+  in the same PR that does the work.
+
 ## Commands
 
 | Check | Command |
