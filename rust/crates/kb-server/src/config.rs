@@ -496,6 +496,22 @@ impl Config {
         // constant used by the TypeScript retriever (`minSimilarity = 0.30`).
         let min_similarity: f32 = 0.30;
 
+        // Optional relevance floor (RET-2). Unset means no floor, which is
+        // rank-identical to every release before it. A request's `minScore`
+        // overrides it for that request. Calibration is still pending, so the
+        // default is deliberately unset rather than a guessed number.
+        let min_score = lookup("KB_MIN_SCORE")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .map(|v| {
+                v.parse::<f32>()
+                    .map_err(|_| anyhow::anyhow!("KB_MIN_SCORE must be a number, got {v:?}"))
+            })
+            .transpose()?;
+        if min_score.is_some_and(|v| !v.is_finite()) {
+            bail!("KB_MIN_SCORE must be a finite number");
+        }
+
         let engine = EngineSettings {
             candidate_pool_size: rerank_initial_k,
             rrf_k,
@@ -505,6 +521,7 @@ impl Config {
             rerank_final_k,
             max_chunks: default_max_chunks,
             min_similarity,
+            min_score,
             neighbour_window,
             figure_limit,
             expansion_enabled: query_expansion_enabled,
@@ -1110,6 +1127,32 @@ mod tests {
         assert_eq!(load(Some("2")), 2);
         // RRF divides by k + rank; zero is clamped rather than allowed.
         assert_eq!(load(Some("0")), 1);
+    }
+
+    #[test]
+    fn test_min_score_is_unset_by_default_and_settable() {
+        let load = |value: Option<&'static str>| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            if let Some(v) = value {
+                map.insert("KB_MIN_SCORE", v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .engine
+                .min_score
+        };
+        assert_eq!(load(None), None, "unset means no floor");
+        assert_eq!(load(Some("")), None, "empty is the same as unset");
+        assert_eq!(load(Some("0.42")), Some(0.42));
+
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_MIN_SCORE", "not-a-number");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        assert!(err.to_string().contains("KB_MIN_SCORE"), "{err}");
     }
 
     #[test]

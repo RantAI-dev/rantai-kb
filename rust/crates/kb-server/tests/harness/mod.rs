@@ -250,6 +250,7 @@ fn engine_settings() -> EngineSettings {
         rerank_final_k: 10,
         max_chunks: 10,
         min_similarity: 0.30,
+        min_score: None,
         neighbour_window: 1,
         figure_limit: 3,
         expansion_enabled: false,

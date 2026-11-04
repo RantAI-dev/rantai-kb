@@ -72,7 +72,9 @@ pub use page_arm::{
     PageRerankConfig, PageRerankContext, PageTextSemantics, PageVision, PageVisionContext,
     PageVisionRerankConfig, RankedPage,
 };
-pub use retrieval::{RetrievalOptions, RetrievalOutcome, enrich_titles, execute_pipeline};
+pub use retrieval::{
+    FloorScoreKind, FloorStats, RetrievalOptions, RetrievalOutcome, enrich_titles, execute_pipeline,
+};
 pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
 
 /// Tunable engine knobs.
@@ -92,6 +94,10 @@ pub struct EngineSettings {
     pub max_chunks: u32,
     /// Minimum similarity score for vector-only hits (`KB_MIN_SIMILARITY`).
     pub min_similarity: f32,
+    /// Default relevance floor (`KB_MIN_SCORE`). `None` means no floor, which
+    /// is rank-identical to every release before RET-2. A request's `minScore`
+    /// overrides this for that request.
+    pub min_score: Option<f32>,
     /// Chunks on either side of an anchor (`KB_NEIGHBOUR_WINDOW`).
     pub neighbour_window: u32,
     /// Figures kept per answer (`KB_FIGURE_MAX_PER_ANSWER`).
@@ -122,6 +128,7 @@ impl Default for EngineSettings {
             rerank_final_k: 5,
             max_chunks: 8,
             min_similarity: 0.30,
+            min_score: None,
             neighbour_window: 1,
             figure_limit: 3,
             expansion_enabled: false,
@@ -233,6 +240,22 @@ impl Engine {
         scope: &DocumentScope,
         request_max_chunks: Option<u32>,
     ) -> Result<RetrievalOutcome, EngineError> {
+        self.retrieve_with_floor(query, scope, request_max_chunks, None)
+            .await
+    }
+
+    /// [`Self::retrieve`] with a per-request relevance floor.
+    ///
+    /// `request_min_score` wins over the server default (`KB_MIN_SCORE`,
+    /// [`EngineSettings::min_score`]); `None` means "use the default", which is
+    /// itself `None` unless an operator set one.
+    pub async fn retrieve_with_floor(
+        &self,
+        query: &str,
+        scope: &DocumentScope,
+        request_max_chunks: Option<u32>,
+        request_min_score: Option<f32>,
+    ) -> Result<RetrievalOutcome, EngineError> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Ok(RetrievalOutcome {
@@ -240,6 +263,8 @@ impl Engine {
                 sources: Vec::new(),
                 context: String::new(),
                 degrades: Vec::new(),
+                note: None,
+                floor: None,
                 timings: StageTimings::default(),
             });
         }
@@ -251,6 +276,7 @@ impl Engine {
         let opts = RetrievalOptions {
             max_chunks,
             min_similarity: self.settings.min_similarity,
+            min_score: request_min_score.or(self.settings.min_score),
             candidate_pool_size: self.settings.candidate_pool_size,
             rrf_k: self.settings.rrf_k,
             rerank_candidate_limit: self.settings.rerank_candidate_limit,

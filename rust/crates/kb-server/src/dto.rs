@@ -104,6 +104,11 @@ pub struct SearchRequestDto {
     pub metadata: Option<serde_json::Value>,
     pub hybrid: Option<bool>,
     pub format: Option<String>,
+    /// Optional relevance floor for this request (RET-2). Overrides the
+    /// server's `KB_MIN_SCORE`; absent means "use the server default" (which
+    /// is unset unless an operator configured one).
+    #[serde(rename = "minScore", default)]
+    pub min_score: Option<f32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -163,6 +168,22 @@ pub struct SearchStatsDto {
     pub total_results: usize,
     #[serde(rename = "stageTimingsMs")]
     pub stage_timings_ms: StageTimingsDto,
+    /// Which comparable score the relevance floor used (`"rerank"` or
+    /// `"dense"`, ADDITIVE RET-2). Absent when no floor ran, so an old client
+    /// sees exactly the Bun shape.
+    #[serde(
+        rename = "floorScoreKind",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub floor_score_kind: Option<String>,
+    /// How many hits the floor removed. Absent when no floor ran.
+    #[serde(
+        rename = "floorDropped",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub floor_dropped: Option<usize>,
 }
 
 /// The per-stage breakdown, in milliseconds.
@@ -360,6 +381,12 @@ pub struct RetrievalDto {
     pub sparse_rank: Option<u32>,
     #[serde(rename = "fusedScore", skip_serializing_if = "Option::is_none")]
     pub fused_score: Option<f32>,
+    /// The cross-encoder score, when a reranker scored this chunk (ADDITIVE
+    /// RET-2). Omitted when no reranker ran, so the no-rerank response is
+    /// unchanged. It exists so a floor calibration can sweep thresholds
+    /// offline against the same score the server's floor uses.
+    #[serde(rename = "rerankScore", skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f32>,
 }
 
 impl From<RetrievalProvenance> for RetrievalDto {
@@ -374,6 +401,7 @@ impl From<RetrievalProvenance> for RetrievalDto {
             dense_rank: p.dense_rank,
             sparse_rank: p.sparse_rank,
             fused_score: p.fused_score,
+            rerank_score: None,
         }
     }
 }
@@ -426,49 +454,65 @@ impl SearchResponseDto {
 
 impl From<RetrievalOutcome> for SearchResponseDto {
     fn from(outcome: RetrievalOutcome) -> Self {
-        let vector_results = outcome.chunks.iter().filter(|h| !h.is_bm25).count();
-        let total_results = outcome.chunks.len();
-        let chunks: Vec<ChunkDto> = outcome.chunks.into_iter().map(ChunkDto::from).collect();
-        let sources = outcome.sources.into_iter().map(SourceDto::from).collect();
-        let degrades = outcome
-            .degrades
+        let RetrievalOutcome {
+            chunks: outcome_chunks,
+            sources: outcome_sources,
+            context: outcome_context,
+            degrades: outcome_degrades,
+            note: outcome_note,
+            floor: outcome_floor,
+            timings: outcome_timings,
+        } = outcome;
+        let vector_results = outcome_chunks.iter().filter(|h| !h.is_bm25).count();
+        let total_results = outcome_chunks.len();
+        let chunks: Vec<ChunkDto> = outcome_chunks.into_iter().map(ChunkDto::from).collect();
+        let sources = outcome_sources.into_iter().map(SourceDto::from).collect();
+        let degrades = outcome_degrades
             .into_iter()
             .map(|d| d.label().to_string())
             .collect();
+        let (floor_score_kind, floor_dropped) = outcome_floor.map_or((None, None), |floor| {
+            (
+                Some(floor.score_kind.as_str().to_string()),
+                Some(floor.dropped),
+            )
+        });
         // The route adds its own stages (scope build, serialisation) and the
         // total afterwards; what the engine knows goes in here.
         let stats = SearchStatsDto {
-            total_time_ms: outcome.timings.total_ms,
-            embedding_time_ms: outcome.timings.query_embed_ms,
-            vector_search_time_ms: outcome.timings.vector_arm_ms,
-            entity_search_time_ms: outcome.timings.entity_arm_ms,
+            total_time_ms: outcome_timings.total_ms,
+            embedding_time_ms: outcome_timings.query_embed_ms,
+            vector_search_time_ms: outcome_timings.vector_arm_ms,
+            entity_search_time_ms: outcome_timings.entity_arm_ms,
             graph_search_time_ms: 0.0,
-            fusion_time_ms: outcome.timings.fusion_ms,
+            fusion_time_ms: outcome_timings.fusion_ms,
             vector_results,
             entity_results: 0,
             graph_results: 0,
             total_results,
             stage_timings_ms: StageTimingsDto {
-                expand: outcome.timings.expand_ms,
-                arms: outcome.timings.arms_ms,
-                enrich: outcome.timings.enrich_ms,
-                fusion: outcome.timings.fusion_ms,
-                rerank: outcome.timings.rerank_ms,
-                pages: outcome.timings.pages_ms,
-                neighbours: outcome.timings.neighbours_ms,
-                figures: outcome.timings.figures_ms,
-                context: outcome.timings.context_ms,
-                detail: StageDetailDto::from(&outcome.timings),
+                expand: outcome_timings.expand_ms,
+                arms: outcome_timings.arms_ms,
+                enrich: outcome_timings.enrich_ms,
+                fusion: outcome_timings.fusion_ms,
+                rerank: outcome_timings.rerank_ms,
+                pages: outcome_timings.pages_ms,
+                neighbours: outcome_timings.neighbours_ms,
+                figures: outcome_timings.figures_ms,
+                context: outcome_timings.context_ms,
+                detail: StageDetailDto::from(&outcome_timings),
                 ..StageTimingsDto::default()
             },
+            floor_score_kind,
+            floor_dropped,
         };
         SearchResponseDto {
             chunks: Some(chunks),
             sources: Some(sources),
-            context: Some(outcome.context),
+            context: Some(outcome_context),
             results: None,
             stats: Some(stats),
-            note: None,
+            note: outcome_note,
             degrades,
         }
     }
@@ -495,6 +539,7 @@ impl From<SearchHit> for ChunkDto {
                 Some(Some(hit.chunk.chunk_type.as_storage().to_string())), // vector hit serializes chunkType: "text"
             )
         };
+        let rerank_score = hit.rerank_score;
         ChunkDto {
             id: chunk_id_for_client(&hit.chunk.id.0),
             content: hit.chunk.content,
@@ -509,7 +554,11 @@ impl From<SearchHit> for ChunkDto {
             asset_key,
             page,
             chunk_type,
-            retrieval: hit.retrieval.map(RetrievalDto::from),
+            retrieval: hit.retrieval.map(|p| {
+                let mut dto = RetrievalDto::from(p);
+                dto.rerank_score = rerank_score;
+                dto
+            }),
         }
     }
 }
@@ -600,6 +649,8 @@ mod tests {
             rank: 0,
             is_bm25: bm25,
             retrieval,
+            dense_score: (!bm25).then_some(0.81f32),
+            rerank_score: None,
         }
     }
 
@@ -905,6 +956,8 @@ mod tests {
             graph_results: 0,
             total_results: 3,
             stage_timings_ms: StageTimingsDto::empty(),
+            floor_score_kind: None,
+            floor_dropped: None,
         };
         let value = serde_json::to_value(&stats).unwrap();
         for key in [

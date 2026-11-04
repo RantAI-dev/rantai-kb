@@ -40,6 +40,28 @@
   `image` (whether the page JPEG was written), derived from the extraction result, so
   the structure read does not infer them from text. The text index is unchanged.
 
+- **Relevance floor (`RET-2`).** `POST /v1/search` accepts an optional
+  `minScore` (number) and the server accepts a default from `KB_MIN_SCORE`;
+  both are unset by default, so an unconfigured server is rank-identical to
+  before. The floor compares a score that is comparable across queries — the
+  reranker score when a reranker ran, otherwise the dense cosine similarity —
+  never the fused RRF score, which is rank-only. An exact-match / identifier
+  query (a quoted phrase, or a token that mixes letters and digits or has a
+  `-`/`_`/`/` separator) is exempt when the keyword arm matched the hit and the
+  hit's text literally contains the token. If the arm that supplies the score
+  degraded, the floor is skipped and `floor_skipped` is reported instead of
+  returning a silently empty answer; if the floor removes every hit, the
+  response is empty with a `note` and `stats.floorScoreKind` /
+  `stats.floorDropped`. `chunks[].retrieval.rerankScore` is now exposed
+  (additive) so thresholds can be calibrated offline.
+- **Off-topic evaluation sets and a floor calibrator (`RET-2`).**
+  `rust/crates/kb-eval/sets/off-topic/` holds 55 Indonesian and 55 English
+  questions written to have no answer in MIRACL-id and ViDoRe v3 HR/CS;
+  `rust/crates/kb-eval/scripts/floor_calibrate.py` sweeps thresholds over
+  per-query search responses and reports off-topic empty rate against in-domain
+  nDCG@10. The thresholds themselves are **not** shipped as a default until the
+  calibration has been run.
+
 ### Notes
 
 - **Structure caps.** The route reads at most 20,000 text units and 2,000 page units

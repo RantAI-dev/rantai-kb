@@ -54,6 +54,7 @@ fn engine_settings() -> EngineSettings {
         rerank_final_k: 10,
         max_chunks: 10,
         min_similarity: 0.30,
+        min_score: None,
         // Both weave and figures on, so those arms have something to return.
         neighbour_window: 1,
         figure_limit: 3,
@@ -106,6 +107,8 @@ fn hit(id: &str, doc_id: &str, content: &str, chunk_index: u32, similarity: f32)
         rank: 0,
         is_bm25: false,
         retrieval: None,
+        dense_score: Some(similarity),
+        rerank_score: None,
     }
 }
 
