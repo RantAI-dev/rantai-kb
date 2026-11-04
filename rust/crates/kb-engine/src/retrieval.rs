@@ -5,8 +5,11 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use kb_core::{
-    ContextItem, RrfOptions, SourceEntry, build_context_and_sources, reciprocal_rank_fusion_with,
+    BoostConfig, ContextItem, RecencyField, RrfOptions, SourceEntry, authority_factor,
+    authority_value, base_from_rank, base_from_rerank, build_context_and_sources, date_value,
+    normalise_authority, parse_date, recency_factor, reciprocal_rank_fusion_with,
     weave_neighbours_with,
 };
 use kb_ports::{
@@ -57,6 +60,13 @@ pub struct RetrievalOptions {
     pub graph_arm: Option<std::sync::Arc<GraphArm>>,
     /// The page-image arm, when configured. `None` leaves the pipeline as it was.
     pub page_arm: Option<std::sync::Arc<PageArm>>,
+    /// Optional recency/authority boost (`RET-4`). `None` — or a config with
+    /// neither boost — leaves the ranking exactly as it was.
+    pub boost: Option<BoostConfig>,
+    /// Evaluation instant for the recency boost. Tests pin it; production
+    /// leaves it `None` and the pipeline reads the clock once, at the boost
+    /// step.
+    pub boost_now: Option<DateTime<Utc>>,
 }
 
 impl fmt::Debug for RetrievalOptions {
@@ -78,6 +88,7 @@ impl fmt::Debug for RetrievalOptions {
             .field("hybrid_bm25_enabled", &self.hybrid_bm25_enabled)
             .field("graph_arm", &self.graph_arm.as_ref().map(|_| "<GraphArm>"))
             .field("page_arm", &self.page_arm.as_ref().map(|a| a.config))
+            .field("boost", &self.boost)
             .field(
                 "figure_gate",
                 &self.figure_gate.as_ref().map(|_| "<FigureGate>"),
@@ -107,6 +118,8 @@ impl Default for RetrievalOptions {
             rerank_enabled: false,
             graph_arm: None,
             page_arm: None,
+            boost: None,
+            boost_now: None,
         }
     }
 }
@@ -144,6 +157,17 @@ pub struct FloorStats {
     pub dropped: usize,
 }
 
+/// What a recency/authority boost did (`RET-4`), for `stats.boost`.
+///
+/// Each count is the number of returned hits that carried a usable field for
+/// that boost — a parseable date, or a numeric authority. A hit without the
+/// field is not an error and is counted nowhere: it kept its base relevance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BoostStats {
+    pub recency: usize,
+    pub authority: usize,
+}
+
 /// The outcome of the retrieval pipeline.
 #[derive(Debug, Clone)]
 pub struct RetrievalOutcome {
@@ -156,6 +180,10 @@ pub struct RetrievalOutcome {
     pub note: Option<String>,
     /// `Some` only when a floor was configured and actually applied.
     pub floor: Option<FloorStats>,
+    /// `Some` only when the request asked for a boost; absent (not zero) when
+    /// it did not, so a response that never boosted is byte-identical to one
+    /// from before `RET-4`.
+    pub boost: Option<BoostStats>,
     /// What each stage cost. Always present: a request nobody times is a
     /// request nobody can make faster, and the numbers are the only evidence
     /// a retrieval change can be judged by.
@@ -572,6 +600,124 @@ fn apply_relevance_floor(
         hit.rank = rank as u32;
     }
     (kept, dropped)
+}
+
+/// The document's date in the field the request named.
+///
+/// `createdAt`/`updatedAt` are the Postgres timestamps the store already
+/// returned with the document row; `metadata.<key>` reads the top-level JSONB
+/// key. An absent or unparseable value is `None` — no boost, never an error.
+fn recency_date(meta: &DocumentMeta, field: &RecencyField) -> Option<DateTime<Utc>> {
+    match field {
+        RecencyField::CreatedAt => parse_date(&meta.created_at),
+        RecencyField::UpdatedAt => parse_date(&meta.updated_at),
+        RecencyField::Metadata(key) => meta
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(key))
+            .and_then(date_value),
+    }
+}
+
+/// The document's authority value, when the JSONB metadata carries a number.
+fn authority_number(meta: &DocumentMeta, key: &str) -> Option<f64> {
+    meta.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(key))
+        .and_then(authority_value)
+}
+
+/// Apply the request's recency/authority boosts and re-order the hits.
+///
+/// Runs after fusion, the rerank and the relevance floor, and before the final
+/// truncation to `max_chunks`. It deliberately touches only the *order* and
+/// `rank`: `rerank_score`, `dense_score` and `similarity` are the scores the
+/// floor compares against, and the floor must keep meaning what RET-2 defined.
+///
+/// The new order is `final` descending, then the same deterministic keys
+/// `kb_ports::sort_candidates` uses (content, page, chunk index) — never a
+/// document or chunk uuid, so a tie does not depend on an ingest's random id.
+///
+/// Returns what was actually applied. When the request is off, or no hit
+/// carries a usable field, the hits are left exactly as they arrived: that is
+/// the "rank-identical when off" guarantee, and it also covers a request that
+/// asks for a boost the corpus cannot satisfy.
+pub fn apply_boosts(
+    hits: &mut Vec<SearchHit>,
+    meta: &HashMap<DocumentId, DocumentMeta>,
+    config: &BoostConfig,
+    now: DateTime<Utc>,
+) -> BoostStats {
+    let mut stats = BoostStats::default();
+    if config.is_off() || hits.is_empty() {
+        return stats;
+    }
+
+    let metas: Vec<Option<&DocumentMeta>> = hits
+        .iter()
+        .map(|hit| meta.get(&hit.chunk.document_id))
+        .collect();
+    let dates: Vec<Option<DateTime<Utc>>> = match &config.recency {
+        Some(recency) => metas
+            .iter()
+            .map(|meta| meta.and_then(|meta| recency_date(meta, &recency.field)))
+            .collect(),
+        None => vec![None; hits.len()],
+    };
+    let authority_values: Vec<Option<f64>> = match &config.authority {
+        Some(authority) => metas
+            .iter()
+            .map(|meta| meta.and_then(|meta| authority_number(meta, &authority.field)))
+            .collect(),
+        None => vec![None; hits.len()],
+    };
+    let authority_normalised = normalise_authority(&authority_values);
+
+    stats.recency = dates.iter().filter(|date| date.is_some()).count();
+    stats.authority = authority_values
+        .iter()
+        .filter(|value| value.is_some())
+        .count();
+    if stats.recency == 0 && stats.authority == 0 {
+        return stats;
+    }
+
+    let recency = config.recency.as_ref();
+    let authority = config.authority.as_ref();
+    let mut scored: Vec<(SearchHit, f64)> = std::mem::take(hits)
+        .into_iter()
+        .enumerate()
+        .map(|(index, hit)| {
+            let base = hit
+                .rerank_score
+                .map_or_else(|| base_from_rank(hit.rank), base_from_rerank);
+            let mut factor = 1.0_f64;
+            if let (Some(recency), Some(date)) = (recency, dates[index]) {
+                factor *= recency_factor(date, now, recency.half_life_days, recency.weight);
+            }
+            if let (Some(authority), Some(normalised)) = (authority, authority_normalised[index]) {
+                factor *= authority_factor(normalised, authority.weight);
+            }
+            (hit, base * factor)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        b.1.total_cmp(&a.1)
+            .then_with(|| a.0.chunk.content.cmp(&b.0.chunk.content))
+            .then_with(|| a.0.chunk.metadata.page.cmp(&b.0.chunk.metadata.page))
+            .then_with(|| {
+                a.0.chunk
+                    .metadata
+                    .chunk_index
+                    .cmp(&b.0.chunk.metadata.chunk_index)
+            })
+    });
+    for (rank, (mut hit, _)) in scored.into_iter().enumerate() {
+        hit.rank = rank as u32;
+        hits.push(hit);
+    }
+    stats
 }
 
 /// Execute the full retrieval pipeline.
@@ -1074,6 +1220,7 @@ pub async fn execute_pipeline(
                     degrades,
                     note: floor_note,
                     floor: floor_stats,
+                    boost: opts.boost.as_ref().map(|_| BoostStats::default()),
                     timings,
                 });
             }
@@ -1184,6 +1331,23 @@ pub async fn execute_pipeline(
         }
     }
     timings.pages_ms = pages_sw.elapsed_ms();
+
+    // 5d. Optional recency/authority boosts (`RET-4`). Deliberately after the
+    // floor: the floor must keep comparing the raw rerank/dense score, and a
+    // boost that moved a hit below the threshold would erase the only
+    // cross-query meaning the floor has. It runs before the cut to
+    // `max_chunks`, so a promoted hit is not lost to a pre-boost truncation.
+    // The document rows are the ones already read for title enrichment — no
+    // extra round trip — and a document missing from that map simply gets no
+    // boost, which is the same as "the document has no field".
+    let boost_stats = opts
+        .boost
+        .as_ref()
+        .filter(|config| !config.is_off())
+        .map(|config| {
+        let now = opts.boost_now.unwrap_or_else(Utc::now);
+        apply_boosts(&mut reranked_hits, &meta_cache, config, now)
+    });
 
     // 6. Cut to max_chunks (1..=50)
     reranked_hits.truncate(max_chunks);
@@ -1350,6 +1514,7 @@ pub async fn execute_pipeline(
         degrades,
         note: floor_note,
         floor: floor_stats,
+        boost: boost_stats,
         timings,
     })
 }

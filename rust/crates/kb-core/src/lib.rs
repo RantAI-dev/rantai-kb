@@ -4,6 +4,7 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod boost;
 pub mod chunk;
 mod context;
 pub mod figure_assets;
@@ -22,6 +23,11 @@ pub mod sparse;
 pub mod title;
 mod weave;
 
+pub use boost::{
+    AuthorityBoost, BoostConfig, MAX_METADATA_KEY_LEN, RecencyBoost, RecencyField,
+    authority_factor, authority_value, base_from_rank, base_from_rerank, date_value,
+    normalise_authority, parse_date, recency_decay, recency_factor, valid_metadata_key, weighted,
+};
 pub use chunk::{
     Chunk, ChunkMetadata, ChunkOptions, ChunkingStrategy, SmartChunk, SmartChunkMetadata,
     SmartChunkingOptions, chunk_document, prepare_chunk_for_embedding, smart_chunk,

@@ -16,6 +16,7 @@ test-utils = ["kb-ports/scope-adapter"]
 [dependencies]
 kb-ports = { path = "../kb-ports" }
 kb-core = { path = "../kb-core" }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

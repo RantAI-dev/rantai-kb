@@ -51,6 +51,8 @@ pub mod in_memory_graph_store;
 pub use in_memory_graph_store::InMemoryGraphStore;
 
 #[cfg(test)]
+mod boost_tests;
+#[cfg(test)]
 mod graph_arm_tests;
 #[cfg(all(test, feature = "test-utils"))]
 mod in_memory_graph_store_tests;
@@ -73,7 +75,8 @@ pub use page_arm::{
     PageVisionRerankConfig, RankedPage,
 };
 pub use retrieval::{
-    FloorScoreKind, FloorStats, RetrievalOptions, RetrievalOutcome, enrich_titles, execute_pipeline,
+    BoostStats, FloorScoreKind, FloorStats, RetrievalOptions, RetrievalOutcome, apply_boosts,
+    enrich_titles, execute_pipeline,
 };
 pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
 
@@ -244,6 +247,29 @@ impl Engine {
             .await
     }
 
+    /// [`Self::retrieve`] with optional recency/authority boosts (`RET-4`).
+    ///
+    /// `request_boost` is off when `None` or when both of its parts are `None`;
+    /// either way the pipeline never computes a factor or re-sorts, so the
+    /// answer is rank-identical to a request that never sent the field.
+    pub async fn retrieve_with_boost(
+        &self,
+        query: &str,
+        scope: &DocumentScope,
+        request_max_chunks: Option<u32>,
+        request_min_score: Option<f32>,
+        request_boost: Option<kb_core::BoostConfig>,
+    ) -> Result<RetrievalOutcome, EngineError> {
+        self.retrieve_inner(
+            query,
+            scope,
+            request_max_chunks,
+            request_min_score,
+            request_boost,
+        )
+        .await
+    }
+
     /// [`Self::retrieve`] with a per-request relevance floor.
     ///
     /// `request_min_score` wins over the server default (`KB_MIN_SCORE`,
@@ -256,6 +282,24 @@ impl Engine {
         request_max_chunks: Option<u32>,
         request_min_score: Option<f32>,
     ) -> Result<RetrievalOutcome, EngineError> {
+        self.retrieve_inner(
+            query,
+            scope,
+            request_max_chunks,
+            request_min_score,
+            None,
+        )
+        .await
+    }
+
+    async fn retrieve_inner(
+        &self,
+        query: &str,
+        scope: &DocumentScope,
+        request_max_chunks: Option<u32>,
+        request_min_score: Option<f32>,
+        request_boost: Option<kb_core::BoostConfig>,
+    ) -> Result<RetrievalOutcome, EngineError> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Ok(RetrievalOutcome {
@@ -265,6 +309,7 @@ impl Engine {
                 degrades: Vec::new(),
                 note: None,
                 floor: None,
+                boost: None,
                 timings: StageTimings::default(),
             });
         }
@@ -292,6 +337,8 @@ impl Engine {
             rerank_enabled: self.settings.rerank_enabled,
             graph_arm: self.inputs.graph_arm.clone(),
             page_arm: self.inputs.page_arm.clone(),
+            boost: request_boost,
+            boost_now: None,
         };
 
         execute_pipeline(
