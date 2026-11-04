@@ -332,6 +332,16 @@ async fn search(
             .collect();
         let vector_arm_ms = vector_sw.elapsed_ms();
         hits.retain(|h| h.similarity >= 0.30);
+        // This branch has no keyword arm, so the floor can only be dense and
+        // there is no exact-match exemption to grant (RET-2).
+        let (floor_score_kind, floor_dropped) =
+            if let Some(threshold) = body.min_score.or(state.engine.settings.min_score) {
+                let before = hits.len();
+                hits.retain(|h| h.similarity >= threshold);
+                (Some("dense".to_string()), Some(before - hits.len()))
+            } else {
+                (None, None)
+            };
         hits.truncate(max_chunks as usize);
         for h in hits.iter_mut() {
             if let Some(meta) = alive_map.get(&h.chunk.document_id) {
@@ -356,6 +366,16 @@ async fn search(
             None
         };
         let total_results = chunk_dtos.len();
+        let floor_note = (floor_dropped.unwrap_or(0) > 0 && total_results == 0).then(|| {
+            format!(
+                "No result passed the relevance floor (minScore={}, score=dense): {} \
+                 candidate(s) were dropped",
+                body.min_score
+                    .or(state.engine.settings.min_score)
+                    .unwrap_or_default(),
+                floor_dropped.unwrap_or(0)
+            )
+        });
         let stats = StageTimingsDto {
             scope_build: scope_build_ms,
             arms: query_embed_ms + vector_arm_ms,
@@ -373,8 +393,14 @@ async fn search(
             sources: None,
             context,
             results: None,
-            stats: Some(search_stats(stats, vector_results, total_results)),
-            note: None,
+            stats: Some(search_stats(
+                stats,
+                vector_results,
+                total_results,
+                floor_score_kind,
+                floor_dropped,
+            )),
+            note: floor_note,
             degrades: Vec::new(),
         };
         return Ok(finish_search(response, route_sw));
@@ -394,7 +420,7 @@ async fn search(
                 // Same shape as every other branch, every number zero: nothing
                 // ran here. `total` and `serialise` are stamped by
                 // `finish_search`, which is the only place that can measure them.
-                stats: Some(search_stats(StageTimingsDto::default(), 0, 0)),
+                stats: Some(search_stats(StageTimingsDto::default(), 0, 0, None, None)),
                 note: None,
                 // Nothing was searched, and an empty list here looks exactly
                 // like "no matches". A client that sent `hybrid: true` expecting
@@ -428,7 +454,7 @@ async fn search(
 
     let outcome = state
         .engine
-        .retrieve(&query, &scope, Some(max_chunks))
+        .retrieve_with_floor(&query, &scope, Some(max_chunks), body.min_score)
         .await
         .map_err(ApiError::from)?;
     let mut response = SearchResponseDto::from(outcome);
@@ -457,6 +483,8 @@ fn search_stats(
     stages: StageTimingsDto,
     vector_results: usize,
     total_results: usize,
+    floor_score_kind: Option<String>,
+    floor_dropped: Option<usize>,
 ) -> SearchStatsDto {
     SearchStatsDto {
         total_time_ms: stages.total,
@@ -470,6 +498,8 @@ fn search_stats(
         graph_results: 0,
         total_results,
         stage_timings_ms: stages,
+        floor_score_kind,
+        floor_dropped,
     }
 }
 
@@ -504,12 +534,20 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
             },
             0,
             0,
+            None,
+            None,
         )
     });
     let mut stages = stats.stage_timings_ms;
     stages.serialise = serialise_ms;
     stages.total = route_sw.elapsed_ms();
-    let stats = search_stats(stages, stats.vector_results, stats.total_results);
+    let stats = search_stats(
+        stages,
+        stats.vector_results,
+        stats.total_results,
+        stats.floor_score_kind,
+        stats.floor_dropped,
+    );
     let stats_json = match serde_json::to_vec(&stats) {
         Ok(json) => json,
         Err(err) => {

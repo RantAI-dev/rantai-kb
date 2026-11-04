@@ -99,6 +99,8 @@ pub fn make_fake_hit(
         rank: 0,
         is_bm25: false,
         retrieval: None,
+        dense_score: None,
+        rerank_score: None,
     }
 }
 

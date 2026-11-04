@@ -27,6 +27,12 @@ use crate::timing::{Clock, StageTimings, Stopwatch, stage_span};
 pub struct RetrievalOptions {
     pub max_chunks: u32,
     pub min_similarity: f32,
+    /// Optional relevance floor (RET-2). `None` leaves the pipeline exactly as
+    /// it was; `Some(t)` keeps only hits whose comparable score is `>= t`.
+    ///
+    /// The per-request `minScore` overrides the server default, which is
+    /// resolved by the caller ([`crate::Engine::retrieve_with_floor`]).
+    pub min_score: Option<f32>,
     pub candidate_pool_size: u32,
     /// RRF constant for the two-arm fusion (`EngineSettings::rrf_k`).
     pub rrf_k: u32,
@@ -58,6 +64,7 @@ impl fmt::Debug for RetrievalOptions {
         f.debug_struct("RetrievalOptions")
             .field("max_chunks", &self.max_chunks)
             .field("min_similarity", &self.min_similarity)
+            .field("min_score", &self.min_score)
             .field("candidate_pool_size", &self.candidate_pool_size)
             .field("rrf_k", &self.rrf_k)
             .field("rerank_candidate_limit", &self.rerank_candidate_limit)
@@ -84,6 +91,7 @@ impl Default for RetrievalOptions {
         Self {
             max_chunks: 8,
             min_similarity: 0.30,
+            min_score: None,
             candidate_pool_size: 20,
             rrf_k: 60,
             rerank_candidate_limit: 0,
@@ -103,6 +111,39 @@ impl Default for RetrievalOptions {
     }
 }
 
+/// Which comparable score the relevance floor compared against.
+///
+/// The fused RRF score is deliberately absent: it is a sum of `1/(k + rank)`
+/// terms, so it is rank-only and its absolute value says nothing about how
+/// relevant a hit is, let alone how relevant it is across queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloorScoreKind {
+    /// The cross-encoder reranker's score. Comparable across queries only
+    /// after calibration, which is why the default is unset.
+    Rerank,
+    /// The dense arm's cosine similarity.
+    Dense,
+}
+
+impl FloorScoreKind {
+    /// The wire spelling, matching `stats.floorScoreKind`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rerank => "rerank",
+            Self::Dense => "dense",
+        }
+    }
+}
+
+/// What the floor did, for the response's `stats` object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloorStats {
+    pub score_kind: FloorScoreKind,
+    /// Hits removed by the floor (before neighbours and figures are woven in).
+    pub dropped: usize,
+}
+
 /// The outcome of the retrieval pipeline.
 #[derive(Debug, Clone)]
 pub struct RetrievalOutcome {
@@ -110,6 +151,11 @@ pub struct RetrievalOutcome {
     pub sources: Vec<SourceEntry>,
     pub context: String,
     pub degrades: Vec<RetrievalDegrade>,
+    /// A human-readable explanation for a result that is empty on purpose,
+    /// e.g. "the floor removed every hit". `None` for an ordinary answer.
+    pub note: Option<String>,
+    /// `Some` only when a floor was configured and actually applied.
+    pub floor: Option<FloorStats>,
     /// What each stage cost. Always present: a request nobody times is a
     /// request nobody can make faster, and the numbers are the only evidence
     /// a retrieval change can be judged by.
@@ -216,11 +262,12 @@ fn candidate_to_hit_with(c: Candidate, retrieval: Option<RetrievalProvenance>) -
             .and_then(|v| v.as_u64())
             .map(|n| n as u32)
     });
-    let is_bm25 = c.scores.dense.is_none() && c.scores.sparse.is_some();
+    let dense_score = c.scores.dense;
+    let is_bm25 = dense_score.is_none() && c.scores.sparse.is_some();
     let similarity = if is_bm25 {
         0.0
     } else {
-        c.scores.dense.unwrap_or(c.scores.fused)
+        dense_score.unwrap_or(c.scores.fused)
     };
     SearchHit {
         chunk: Chunk {
@@ -245,6 +292,9 @@ fn candidate_to_hit_with(c: Candidate, retrieval: Option<RetrievalProvenance>) -
         rank: c.ranks.fused,
         is_bm25,
         retrieval,
+        dense_score,
+        // Set later, only when a reranker actually scored this hit.
+        rerank_score: None,
     }
 }
 
@@ -465,6 +515,63 @@ async fn fuse_graph(
         out.push(candidate);
     }
     Ok((out, ranks))
+}
+
+/// Did the keyword arm produce this hit?
+///
+/// A hit can carry both arms; the exemption the floor grants is for the
+/// keyword arm's exact match, so a hit the sparse arm never ranked is not
+/// exempt even when its text happens to contain the token.
+fn keyword_matched(hit: &SearchHit) -> bool {
+    hit.is_bm25
+        || hit
+            .retrieval
+            .as_ref()
+            .is_some_and(|p| p.has(ProvenanceArm::Sparse))
+}
+
+/// The comparable score the floor compares against, if this hit has one.
+///
+/// Missing is *not* the same as zero: a hit with no dense score (BM25-only, or
+/// fetched without scoring) has no evidence either way, and a floor that
+/// treated "unknown" as "passes" would let every keyword hit through.
+fn floor_score(hit: &SearchHit, kind: FloorScoreKind) -> Option<f32> {
+    match kind {
+        FloorScoreKind::Rerank => hit.rerank_score,
+        FloorScoreKind::Dense => hit.dense_score,
+    }
+}
+
+/// Keep hits at or above `threshold`, except an exact-match hit the keyword
+/// arm matched. Returns the kept hits (ranks renumbered) and how many dropped.
+fn apply_relevance_floor(
+    hits: Vec<SearchHit>,
+    kind: FloorScoreKind,
+    threshold: f32,
+    signature: &kb_core::QuerySignature,
+) -> (Vec<SearchHit>, usize) {
+    let mut kept: Vec<SearchHit> = Vec::with_capacity(hits.len());
+    let mut dropped = 0usize;
+    for hit in hits {
+        // The exemption is deliberately narrow: the query must be an
+        // identifier/quoted phrase, the keyword arm must have matched this
+        // hit, and the hit's text must literally contain the token. A question
+        // that merely mentions a model number does not get a free pass for
+        // unrelated passages.
+        let exempt = signature.is_exact()
+            && keyword_matched(&hit)
+            && signature.matches_content(&hit.chunk.content);
+        let passes = floor_score(&hit, kind).is_some_and(|score| score >= threshold);
+        if exempt || passes {
+            kept.push(hit);
+        } else {
+            dropped += 1;
+        }
+    }
+    for (rank, hit) in kept.iter_mut().enumerate() {
+        hit.rank = rank as u32;
+    }
+    (kept, dropped)
 }
 
 /// Execute the full retrieval pipeline.
@@ -858,6 +965,9 @@ pub async fn execute_pipeline(
                             if !hits_for_id.is_empty() {
                                 let mut hit = hits_for_id.remove(0);
                                 hit.rank = rank as u32;
+                                // Keep the score the floor will compare against.
+                                // It was previously thrown away after ordering.
+                                hit.rerank_score = Some(item.score);
                                 reordered.push(hit);
                             }
                         }
@@ -903,6 +1013,72 @@ pub async fn execute_pipeline(
         .instrument(stage_span("rerank", "RERANKER"))
         .await;
     timings.rerank_ms = rerank_sw.elapsed_ms();
+
+    // 5a. Optional relevance floor (RET-2). This is the only place the
+    // pipeline answers "nothing here is relevant" instead of "here is the
+    // nearest of nothing".
+    //
+    // It runs after the rerank because the reranker's score is the one that
+    // means the same across queries when a reranker ran. It runs before the
+    // page arm, neighbours and figures because those phases attach context to
+    // a ranked hit: with no hit left there is nothing to attach, and letting
+    // the page arm repopulate the answer would defeat the floor.
+    let mut floor_stats: Option<FloorStats> = None;
+    let mut floor_note: Option<String> = None;
+    if let Some(threshold) = opts.min_score {
+        let rerank_ran =
+            opts.rerank_enabled && reranked_hits.iter().any(|h| h.rerank_score.is_some());
+        let rerank_failed = degrades.contains(&RetrievalDegrade::RerankUnavailable);
+        let vector_failed = degrades.contains(&RetrievalDegrade::VectorArmFailed);
+        // A floor whose score arm failed must not run: an empty answer from a
+        // failed arm is indistinguishable from "nothing is relevant", which is
+        // exactly the silent failure AGENTS rule 6 forbids.
+        let skip = (opts.rerank_enabled && rerank_failed) || (!rerank_ran && vector_failed);
+        if skip {
+            tracing::warn!(
+                min_score = threshold,
+                "relevance floor skipped: the arm that supplies its score degraded"
+            );
+            degrades.push(RetrievalDegrade::FloorSkipped);
+        } else {
+            let kind = if rerank_ran {
+                FloorScoreKind::Rerank
+            } else {
+                FloorScoreKind::Dense
+            };
+            let signature = kb_core::classify_query(query);
+            let (kept, dropped) = apply_relevance_floor(reranked_hits, kind, threshold, &signature);
+            reranked_hits = kept;
+            floor_stats = Some(FloorStats {
+                score_kind: kind,
+                dropped,
+            });
+            if dropped > 0 && reranked_hits.is_empty() {
+                floor_note = Some(format!(
+                    "No result passed the relevance floor (minScore={threshold}, score={}): \
+                     {} candidate(s) were dropped",
+                    kind.as_str(),
+                    dropped
+                ));
+                // Nothing is left to rank, so do not let the page arm turn
+                // this into a non-empty visual answer.
+                if let Some(task) = page_task.as_ref() {
+                    task.abort();
+                }
+                timings.total_ms = total_sw.elapsed_ms();
+                timings.engine_total_ms = timings.total_ms;
+                return Ok(RetrievalOutcome {
+                    chunks: Vec::new(),
+                    sources: Vec::new(),
+                    context: String::new(),
+                    degrades,
+                    note: floor_note,
+                    floor: floor_stats,
+                    timings,
+                });
+            }
+        }
+    }
 
     // 5b. Fuse the page-image arm's pages with the ranked text hits, at page
     // level. A failed or slow arm degrades the search; it never empties it.
@@ -1172,6 +1348,8 @@ pub async fn execute_pipeline(
         sources,
         context,
         degrades,
+        note: floor_note,
+        floor: floor_stats,
         timings,
     })
 }

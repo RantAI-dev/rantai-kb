@@ -16,6 +16,7 @@ pub mod page_fusion;
 pub mod page_map;
 pub mod policy;
 mod progress;
+pub mod query_class;
 pub mod signals;
 pub mod sparse;
 pub mod title;
@@ -49,6 +50,7 @@ pub use policy::{
 pub use progress::{
     IngestStep, ProgressFlags, StepProgress, compute_eta_seconds, compute_overall_progress,
 };
+pub use query_class::{QueryClass, QuerySignature, classify_query};
 pub use signals::{RouterOpts, has_columnar_lines, has_dense_currency, is_unpdf_sufficient};
 pub use sparse::{
     BM25_AVGDL, BM25_B, BM25_K1, SparseVector, encode_document, encode_document_avgdl,

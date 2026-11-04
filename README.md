@@ -148,7 +148,7 @@ tenant; **there is no route that reads across tenants.**
 `knowledgeBaseIds`, `externalRef`, and `figures` — `auto` (default), `force` or `skip`.
 
 **Search options** (JSON): `query` (required), `maxChunks`, `knowledgeBaseIds`,
-`documentIds`, `category`, `hybrid`, `format`.
+`documentIds`, `category`, `hybrid`, `format`, `minScore`.
 
 ## What it does with a file
 
@@ -194,6 +194,16 @@ embedding model changes. RRF sidesteps that.
 notion of category, group or ownership. Every hit is resolved back to its parent
 document through the scoped document store, so a keyword arm cannot leak chunks from
 a document the caller cannot see.
+
+**A relevance floor is available but off by default.** `minScore` on the request
+(or `KB_MIN_SCORE` for the whole server) drops hits whose comparable score is
+below the threshold: the reranker score when a reranker ran, otherwise the dense
+cosine similarity — never the fused RRF score, which is rank-only. An
+exact-match / identifier query keeps a hit the keyword arm matched and whose text
+literally contains the identifier. If the arm that supplies the score fails, the
+floor is skipped and `floor_skipped` is reported, so a failed arm never becomes
+a silent empty answer. Unset means the floor does not run and the ranking is
+identical to a build without it.
 
 **Neighbour-window expansion is cheap and load-bearing.** `KB_NEIGHBOR_WINDOW=1` pulls
 ±1 adjacent chunk around each hit, woven into reading order next to its anchor and

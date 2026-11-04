@@ -404,6 +404,23 @@ pub struct SearchHit {
     /// the honest answer for a hit an adapter fetched rather than ranked.
     #[serde(default)]
     pub retrieval: Option<RetrievalProvenance>,
+    /// Raw dense-arm cosine similarity, when the dense arm ranked this hit.
+    ///
+    /// Deliberately separate from [`Self::similarity`]: that field is `0.0` for
+    /// a BM25-only hit and falls back to the fused (rank-only) score for a hit
+    /// a store fetched without an arm. A relevance floor needs to tell "no
+    /// dense evidence" apart from "dense similarity 0.0", or it either keeps
+    /// every keyword hit or drops scores that were never computed (RET-2).
+    #[serde(default)]
+    pub dense_score: Option<f32>,
+    /// Cross-encoder relevance score, when a reranker scored this hit.
+    ///
+    /// `None` when the reranker did not run, failed or did not return this hit.
+    /// The pipeline used to throw this score away after ordering; the floor
+    /// needs it because a reranker score is comparable across queries and the
+    /// fused RRF score is not.
+    #[serde(default)]
+    pub rerank_score: Option<f32>,
 }
 
 impl SearchHit {

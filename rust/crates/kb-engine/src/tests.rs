@@ -1381,4 +1381,290 @@ mod pipeline_tests {
             assert_eq!(ids, ["c5", "c1", "c2", "c3"]);
         }
     }
+
+    fn hit_id(hit: &kb_ports::SearchHit) -> &str {
+        hit.chunk.id.0.as_str()
+    }
+
+    #[tokio::test]
+    async fn an_unset_floor_leaves_the_result_untouched() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        chunk_store.vector_hits.write().unwrap().extend([
+            make_fake_hit("c_high", "d1", "Title 1", "High", 1, 0.9),
+            make_fake_hit("c_low", "d1", "Title 1", "Low", 2, 0.4),
+        ]);
+
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &RetrievalOptions::default(),
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.chunks.len(), 2);
+        assert!(outcome.floor.is_none(), "no floor ran");
+        assert!(outcome.note.is_none());
+        assert!(outcome.degrades.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_dense_floor_drops_hits_below_the_threshold_and_reports_the_kind() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        chunk_store.vector_hits.write().unwrap().extend([
+            make_fake_hit("c_high", "d1", "Title 1", "High", 1, 0.9),
+            make_fake_hit("c_low", "d1", "Title 1", "Low", 2, 0.4),
+        ]);
+
+        let opts = RetrievalOptions {
+            min_score: Some(0.5),
+            ..RetrievalOptions::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.chunks.len(), 1);
+        assert_eq!(hit_id(&outcome.chunks[0]), "c_high");
+        let floor = outcome.floor.expect("a floor ran");
+        assert_eq!(floor.score_kind, crate::retrieval::FloorScoreKind::Dense);
+        assert_eq!(floor.dropped, 1);
+        assert!(outcome.note.is_none(), "a non-empty answer needs no note");
+    }
+
+    #[tokio::test]
+    async fn a_reranked_search_floors_on_the_rerank_score() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        // The fake reranker scores 1.0, 0.95, 0.90, … in its output order, so
+        // a 0.97 floor keeps exactly the first hit even though its dense score
+        // is not the one being compared.
+        chunk_store.vector_hits.write().unwrap().extend([
+            make_fake_hit("c_first", "d1", "Title 1", "First", 1, 0.40),
+            make_fake_hit("c_second", "d1", "Title 1", "Second", 2, 0.39),
+        ]);
+
+        let opts = RetrievalOptions {
+            rerank_enabled: true,
+            min_score: Some(0.97),
+            ..RetrievalOptions::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.chunks.len(), 1);
+        assert_eq!(hit_id(&outcome.chunks[0]), "c_first");
+        assert_eq!(outcome.chunks[0].rerank_score, Some(1.0));
+        let floor = outcome.floor.expect("a floor ran");
+        assert_eq!(floor.score_kind, crate::retrieval::FloorScoreKind::Rerank);
+        assert_eq!(floor.dropped, 1);
+    }
+
+    #[tokio::test]
+    async fn an_identifier_query_keeps_the_hit_the_keyword_arm_matched_exactly() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        // A dense hit below the floor, and a BM25-only hit whose text really
+        // contains the identifier. The query mentions an ID, so the keyword
+        // hit is exact evidence the dense arm cannot rank.
+        chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+            "c_dense",
+            "d1",
+            "Title 1",
+            "Unrelated",
+            1,
+            0.40,
+        ));
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "c_exact",
+            "d1",
+            "Title 1",
+            "Acme X200 reset pin is under the flap",
+            2,
+            0.10,
+        ));
+
+        let opts = RetrievalOptions {
+            min_score: Some(0.90),
+            ..RetrievalOptions::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "how do I reset my Acme X200 router",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.chunks.len(), 1);
+        assert_eq!(hit_id(&outcome.chunks[0]), "c_exact");
+        assert_eq!(outcome.floor.expect("a floor ran").dropped, 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_dense_arm_skips_the_floor_instead_of_emptying_the_answer() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        chunk_store.fail_vector.store(true, Ordering::Relaxed);
+        chunk_store.bm25_hits.write().unwrap().push(make_fake_hit(
+            "c_bm25",
+            "d1",
+            "Title 1",
+            "Keyword match",
+            1,
+            0.8,
+        ));
+
+        let opts = RetrievalOptions {
+            min_score: Some(0.99),
+            ..RetrievalOptions::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.chunks.len(), 1, "normal results are returned");
+        assert!(outcome.floor.is_none(), "the floor did not run");
+        assert!(
+            outcome.degrades.contains(&RetrievalDegrade::FloorSkipped),
+            "a skipped floor is reported: {:?}",
+            outcome.degrades
+        );
+        assert!(
+            outcome
+                .degrades
+                .contains(&RetrievalDegrade::VectorArmFailed),
+            "{:?}",
+            outcome.degrades
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_reranker_skips_the_floor_instead_of_floating_on_dense() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        chunk_store.vector_hits.write().unwrap().extend([
+            make_fake_hit("c1", "d1", "Title 1", "One", 1, 0.8),
+            make_fake_hit("c2", "d1", "Title 1", "Two", 2, 0.7),
+        ]);
+        reranker.fail.store(true, Ordering::Relaxed);
+
+        let opts = RetrievalOptions {
+            rerank_enabled: true,
+            min_score: Some(0.99),
+            ..RetrievalOptions::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.chunks.len(), 2);
+        assert!(outcome.floor.is_none());
+        assert!(
+            outcome
+                .degrades
+                .contains(&RetrievalDegrade::RerankUnavailable),
+            "{:?}",
+            outcome.degrades
+        );
+        assert!(
+            outcome.degrades.contains(&RetrievalDegrade::FloorSkipped),
+            "{:?}",
+            outcome.degrades
+        );
+    }
+
+    #[tokio::test]
+    async fn a_floor_that_removes_every_hit_answers_empty_with_a_note() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        chunk_store
+            .vector_hits
+            .write()
+            .unwrap()
+            .push(make_fake_hit("c1", "d1", "Title 1", "Nearest", 1, 0.40));
+
+        let opts = RetrievalOptions {
+            min_score: Some(0.75),
+            ..RetrievalOptions::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "berapa harga tiket bioskop saya minggu lalu",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        assert!(outcome.chunks.is_empty());
+        assert!(outcome.sources.is_empty());
+        assert!(outcome.context.is_empty());
+        assert!(outcome.degrades.is_empty(), "nothing failed");
+        let note = outcome
+            .note
+            .expect("an intentionally empty answer says why");
+        assert!(note.contains("relevance floor"), "{note}");
+        assert_eq!(outcome.floor.expect("a floor ran").dropped, 1);
+    }
 }

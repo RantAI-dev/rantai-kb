@@ -198,6 +198,7 @@ numbers and how to override a setting.
 | `KB_CAPTION_*` | endpoint of the chat LLM used as the captioner | — |
 | `KB_OCR_*` | local OCR endpoint, model, prompt, DPI, concurrency and limits | off (`KB_OCR_BASE_URL` unset) |
 | `KB_CACHE_DIR` | directory for content-addressed caches | unset: no cache |
+| `KB_MIN_SCORE` | relevance floor: reranker score, else dense cosine (a request's `minScore` overrides it) | unset: no floor |
 
 A tier is a **preset**: it fills in role defaults; any explicit `KB_*` setting wins.
 `kb-server setup` checks the VRAM budget and refuses a combination that cannot fit next to
