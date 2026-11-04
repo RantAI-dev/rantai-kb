@@ -1,0 +1,53 @@
+{"_id": "18", "text": "Identify secure coding practices that can prevent buffer overflow vulnerabilities in C programs", "query_types": ["enumerative", "extractive"]}
+{"_id": "28", "text": "Explain the differences between lexical analysis and semantic analysis in compiler design, including specific optimization techniques used in each phase that are mentioned in the text.", "query_types": ["compare-contrast", "multi-hop"]}
+{"_id": "34", "text": "List the four fundamental components of computational thinking mentioned in the section that helps solve problems like managing a monthly budget.", "query_types": ["enumerative", "extractive"]}
+{"_id": "36", "text": "Which text alignment specifiers are commonly used in dynamic string formatting systems to control visual presentation of data in fixed-width layouts?", "query_types": ["enumerative", "extractive"]}
+{"_id": "53", "text": "List all Python exception types mentioned in the text that should be handled when validating data integrity, and describe the programming contexts in which each typically occurs", "query_types": ["enumerative", "open-ended"]}
+{"_id": "74", "text": "example database language commands for data control", "query_types": ["enumerative", "extractive"]}
+{"_id": "75", "text": "List the different types of operating system architectures and describe their structural characteristics and design principles.", "query_types": ["enumerative", "open-ended"]}
+{"_id": "80", "text": "What are all the data structures that use hierarchical node relationships and their corresponding traversal methods described in the text?", "query_types": ["enumerative", "extractive"]}
+{"_id": "90", "text": "Identify the core internet protocols that lack built-in authentication and encryption, making them vulnerable to spoofing and man-in-the-middle attacks.", "query_types": ["enumerative", "extractive"]}
+{"_id": "93", "text": "List all types of NoSQL databases mentioned and describe their primary use cases. Include details about the structure and scalability advantages of each type.", "query_types": ["enumerative", "open-ended"]}
+{"_id": "95", "text": "Explain how buffer overflows enable code injection and describe the defensive mechanisms that prevent such exploits, including how they address the underlying memory safety issues.", "query_types": ["multi-hop"]}
+{"_id": "99", "text": "Identify all functions mentioned in the document that demonstrate mutability effects during parameter passing and describe the specific data types altered in each case.", "query_types": ["enumerative", "extractive"]}
+{"_id": "100", "text": "List all programming examples provided in the document that illustrate edge case handling through return statements, including the conditions checked and the return values used.", "query_types": ["enumerative", "extractive"]}
+{"_id": "105", "text": "What are the main roles and key events in the Scrum framework?", "query_types": ["enumerative", "open-ended"]}
+{"_id": "107", "text": "What are the key differences in data warehouses and data lakes?", "query_types": ["compare-contrast", "enumerative"]}
+{"_id": "113", "text": "List the two primary benefits of the way dynamic access memory is organized.", "query_types": ["enumerative", "extractive"]}
+{"_id": "115", "text": "What packages must be installed to use Bootstrap and Web3 in a React app?", "query_types": ["enumerative", "extractive"]}
+{"_id": "120", "text": "State the correct order of the phases of the Waterfall model for software development.", "query_types": ["enumerative", "extractive"]}
+{"_id": "123", "text": "Provide all the registers of assembly language program.", "query_types": ["enumerative", "extractive"]}
+{"_id": "124", "text": "Three stages of the compilation process in HLLs", "query_types": ["enumerative", "open-ended"]}
+{"_id": "126", "text": "How do binary search trees and binary heaps differ in structure and application, and how do graphs complement these data structures in real-world scenarios like disaster response and contact tracing?", "query_types": ["compare-contrast", "multi-hop"]}
+{"_id": "129", "text": "What are some of the object types in Python that cannot be modified after creation?", "query_types": ["enumerative", "open-ended"]}
+{"_id": "134", "text": "Give some examples of magic methods for operator overloading in python.", "query_types": ["enumerative", "open-ended"]}
+{"_id": "135", "text": "What are all of the kinds of object files that relate to the executable and linkable module format?", "query_types": ["enumerative", "extractive"]}
+{"_id": "136", "text": "What are the high-level language compilers that are implemented in the C language?", "query_types": ["enumerative", "extractive"]}
+{"_id": "137", "text": "Advantages and disadvantages of a virtual data warehouse", "query_types": ["compare-contrast", "enumerative", "open-ended"]}
+{"_id": "138", "text": "Is the ALU used after the instruction is written in words or when it is written in 1s and 0s?", "query_types": ["multi-hop"]}
+{"_id": "142", "text": "List the ten steps in designing parallel computing programs.", "query_types": ["enumerative", "extractive"]}
+{"_id": "144", "text": "What are the tools that support experimental analysis by identifying resource-heavy functions in algorithm design and analysis?", "query_types": ["enumerative", "extractive"]}
+{"_id": "155", "text": "List the five key stages of data science life cycle.", "query_types": ["enumerative", "extractive"]}
+{"_id": "157", "text": "Determine the applications of using OLAP in Business Intelligence.", "query_types": ["enumerative", "open-ended"]}
+{"_id": "160", "text": "What architectures in multiprocessor systems are supported by OS?", "query_types": ["enumerative", "extractive"]}
+{"_id": "179", "text": "What are some secure coding practices mentioned for preventing buffer overflows?", "query_types": ["enumerative", "open-ended"]}
+{"_id": "193", "text": "How do the principles of string immutability and the use of string methods like find() and count() contribute to writing safe and efficient code?", "query_types": ["multi-hop"]}
+{"_id": "194", "text": "What are the functions used in the SQL statement to select a particular name?", "query_types": ["enumerative", "extractive"]}
+{"_id": "1182", "text": "What is a specific Java function signature used to pay an employee, and what are the impacts of using two mixed loops in a program?", "query_types": ["multi-hop"]}
+{"_id": "1183", "text": "What is a logical OR operator, and what is its precedence compared to other logical operators?", "query_types": ["compare-contrast", "multi-hop"]}
+{"_id": "1184", "text": "What is a while loop, and how is it used to create a nested loop?", "query_types": ["multi-hop"]}
+{"_id": "1185", "text": "Which built-in Python function facilitates the implementation of a magic method to attain polymorphic behavior by verifying an object's type?\n", "query_types": ["multi-hop"]}
+{"_id": "1186", "text": "What is the brief description of cognitive computing, and how is it correlated with Neuromorphic computing and Quantum Computing?", "query_types": ["compare-contrast", "multi-hop"]}
+{"_id": "1187", "text": "What properties are shown in computational integrity proofs, and which pillar is responsible for physical resources such as hardware and software?", "query_types": ["enumerative", "multi-hop"]}
+{"_id": "1188", "text": "Explain the primary benefit of a breadth-first search over a depth-first search, and analyze the worst-case runtime bound for comparison sorting algorithms.", "query_types": ["multi-hop"]}
+{"_id": "1189", "text": "What is the name of the platform OpenStax uses for Community Hubs, and what two types of questions does the Test Bank include beyond multiple-choice and true/false? ", "query_types": ["multi-hop"]}
+{"_id": "1190", "text": "How is the ternary operator in Python evaluated, and how do you evaluate conditions and execute code statements?", "query_types": ["multi-hop"]}
+{"_id": "1191", "text": "What would be the specific code for a desired output of \"Today? is? Monday!!I like string beans,\" and what Python writing variable is known as all lowercase with underscores?", "query_types": ["enumerative", "multi-hop"]}
+{"_id": "1192", "text": "What are the specific ranges of mechanisms in IPC that enable processes to have communication with each other, and what is the importance of time slice in CPU performance?", "query_types": ["multi-hop"]}
+{"_id": "1193", "text": "Explain the main focuses of the first and fourth pillars of responsible computing, and how they support them.", "query_types": ["compare-contrast", "multi-hop"]}
+{"_id": "1194", "text": "What potential issue arises if a recursive algorithm does not include a base case, and how does the factorial function avoid this problem?", "query_types": ["multi-hop"]}
+{"_id": "1195", "text": "Determine three characteristics of dictionary in Python and explain how the use of classes in object-oriented programming promotes code reusability.", "query_types": ["enumerative", "multi-hop"]}
+{"_id": "1196", "text": "What command installs the package needed to parse JSON requests, and which specific middleware configuration in server.js makes this parsed data available to the controller?", "query_types": ["multi-hop"]}
+{"_id": "1197", "text": "List all the required prerequisite versions of technologies and tools used to build a Todo application and define the impacts of React Native usage. ", "query_types": ["enumerative", "multi-hop"]}
+{"_id": "1198", "text": "Explain how authentication, authorization, and access enforcement work together to secure an operating system.", "query_types": ["multi-hop"]}
+{"_id": "1199", "text": "Provide the steps for setting up the Android emulator and enumerate the commands needed to install the packages required for the reactnativefrontend directory.", "query_types": ["enumerative", "multi-hop"]}
