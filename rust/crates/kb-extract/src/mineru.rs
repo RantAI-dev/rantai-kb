@@ -183,6 +183,7 @@ impl MineruExtractor {
             figures,
             pages_blocks,
             page_map,
+            outline: None,
             error: None,
         })
     }

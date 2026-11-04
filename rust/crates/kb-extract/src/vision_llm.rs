@@ -93,6 +93,7 @@ impl VisionLlmExtractor {
                 figures: Vec::new(),
                 pages_blocks: None,
                 page_map: None,
+                outline: None,
                 error: None,
             });
         }
@@ -132,6 +133,7 @@ impl VisionLlmExtractor {
             figures: Vec::new(),
             pages_blocks: None,
             page_map: None,
+            outline: None,
             error: None,
         })
     }

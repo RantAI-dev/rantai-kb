@@ -322,6 +322,7 @@ impl MineruApiExtractor {
             figures,
             pages_blocks: None,
             page_map,
+            outline: None,
             error: None,
         })
     }

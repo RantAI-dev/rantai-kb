@@ -548,6 +548,7 @@ fn search_stats(
         query_class: None,
         skipped_arms: None,
         arm_plan_fallback: None,
+        tree_arm: None,
     }
 }
 

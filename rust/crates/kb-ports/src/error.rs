@@ -69,6 +69,10 @@ pub enum RetrievalDegrade {
     /// the normal results are returned, because turning a failed arm into an
     /// empty answer would be a silent failure dressed as a clean result.
     FloorSkipped,
+    /// The tree arm could not read the outlines or the chunks on their pages.
+    /// The other arms' results are returned unchanged; the search is degraded,
+    /// not empty.
+    TreeArmFailed,
 }
 
 impl RetrievalDegrade {
@@ -86,6 +90,7 @@ impl RetrievalDegrade {
             Self::PageArmUnavailable => "page_arm_unavailable",
             Self::VisionRerankUnavailable => "vision_rerank_unavailable",
             Self::FloorSkipped => "floor_skipped",
+            Self::TreeArmFailed => "tree_arm_failed",
         }
     }
 }

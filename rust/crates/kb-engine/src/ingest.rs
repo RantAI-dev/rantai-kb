@@ -466,6 +466,22 @@ impl IngestWorker {
             .await
             .map_err(|e| format!("document update failed: {e}"))?;
 
+        // The section hierarchy the tree arm navigates (DEC-4). Stored
+        // additively in `metadata.outline` (JSONB, no schema migration) and
+        // only for a format that produced one. There is no model call: the
+        // extraction read bookmarks or numbered headings from the same bytes it
+        // and the page text already parsed. A failure here is logged and
+        // non-fatal; the document indexes normally and the tree arm simply has
+        // nothing for it until a re-ingest.
+        if let Some(outline) = extraction.outline.as_ref() {
+            let mut outline = outline.clone();
+            outline.document_title = Some(title.clone());
+            let patch = json!({ "outline": outline });
+            if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
+                tracing::warn!(error = %e, "could not store the document outline");
+            }
+        }
+
         self.progress(job, StepProgress::of(IngestStep::Chunking), started, &flags)
             .await;
         // A paged document whose content is exactly its pages (the PDF text

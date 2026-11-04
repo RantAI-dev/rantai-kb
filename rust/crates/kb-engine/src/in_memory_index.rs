@@ -307,6 +307,51 @@ impl RetrievalIndex for InMemoryIndex {
         Ok(out)
     }
 
+    async fn fetch_pages(
+        &self,
+        scope: &DocumentScope,
+        pages: &[(DocumentId, u32)],
+        per_page: usize,
+    ) -> Result<Vec<Candidate>, PortError> {
+        if pages.is_empty() || per_page == 0 || scope.document_ids().is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: std::collections::HashSet<(DocumentId, u32)> = pages
+            .iter()
+            .filter(|(document, _)| scope.document_ids().contains(document))
+            .cloned()
+            .collect();
+        let mut out: Vec<Candidate> = Vec::new();
+        let mut counts: std::collections::HashMap<(DocumentId, u32), usize> =
+            std::collections::HashMap::new();
+        for stored in self.in_scope(scope) {
+            let Some(page) = stored.unit.page else {
+                continue;
+            };
+            let key = (stored.unit.document_id.clone(), page);
+            if !wanted.contains(&key) {
+                continue;
+            }
+            let count = counts.entry(key).or_insert(0);
+            if *count >= per_page {
+                continue;
+            }
+            *count += 1;
+            out.push(candidate_of(
+                &stored.unit,
+                (ArmScores::default(), ArmRanks::default()),
+            ));
+        }
+        out.sort_by(|a, b| {
+            a.document_id
+                .as_str()
+                .cmp(b.document_id.as_str())
+                .then_with(|| a.page.cmp(&b.page))
+                .then_with(|| a.chunk_index.cmp(&b.chunk_index))
+        });
+        Ok(out)
+    }
+
     async fn health_check(&self) -> Result<(), PortError> {
         Ok(())
     }

@@ -313,6 +313,29 @@ pub trait RetrievalIndex: Send + Sync {
         document_ids: &[DocumentId],
     ) -> Result<Vec<Candidate>, PortError>;
 
+    /// Read the text units that sit on the given zero-based pages, within scope.
+    ///
+    /// This is the tree arm's second read (DEC-4): the outline names pages, and
+    /// the arm needs the chunks on them. A page with no chunk simply contributes
+    /// nothing. `per_page` bounds how many units one page contributes, so a
+    /// 30-page section cannot flood the candidate pool from one heading.
+    ///
+    /// The default is an error rather than an empty list: an adapter that has
+    /// not implemented the read would otherwise make the tree arm look like it
+    /// found nothing, which is exactly the silent degradation AGENTS rule 6
+    /// forbids. The engine turns the error into `tree_arm_failed` and returns
+    /// the other arms' results.
+    async fn fetch_pages(
+        &self,
+        _scope: &DocumentScope,
+        _pages: &[(DocumentId, u32)],
+        _per_page: usize,
+    ) -> Result<Vec<Candidate>, PortError> {
+        Err(PortError::Unavailable(
+            "this index does not support reading units by page".to_string(),
+        ))
+    }
+
     /// Retrieve all stored units of a single document, ordered by `chunk_index` ascending.
     /// Used by document inspection routes (`GET /v1/documents/:id`).
     async fn ordered_chunks(

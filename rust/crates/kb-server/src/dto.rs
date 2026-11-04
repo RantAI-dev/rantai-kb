@@ -224,6 +224,20 @@ pub struct SearchStatsDto {
         default
     )]
     pub arm_plan_fallback: Option<bool>,
+    /// Additive (`DEC-4`): what the tree arm did. `{"nodes": n, "pages": n}`.
+    /// Absent unless the arm ran for a structural query and found something, so
+    /// a default search keeps exactly the earlier shape.
+    #[serde(rename = "treeArm", skip_serializing_if = "Option::is_none", default)]
+    pub tree_arm: Option<TreeArmStatsDto>,
+}
+
+/// `stats.treeArm`: outline nodes the query scored and the distinct pages the
+/// arm read. Not a latency figure; the counts say how much structure the
+/// question actually reached.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TreeArmStatsDto {
+    pub nodes: usize,
+    pub pages: usize,
 }
 
 /// `stats.boost`: how many returned hits carried a usable field for each
@@ -519,6 +533,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             floor: outcome_floor,
             boost: outcome_boost,
             adaptive: outcome_adaptive,
+            tree: outcome_tree,
             timings: outcome_timings,
         } = outcome;
         let vector_results = outcome_chunks.iter().filter(|h| !h.is_bm25).count();
@@ -584,6 +599,10 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             query_class,
             skipped_arms,
             arm_plan_fallback,
+            tree_arm: outcome_tree.map(|tree| TreeArmStatsDto {
+                nodes: tree.nodes,
+                pages: tree.pages,
+            }),
         };
         SearchResponseDto {
             chunks: Some(chunks),
@@ -1050,6 +1069,7 @@ mod tests {
             query_class: None,
             skipped_arms: None,
             arm_plan_fallback: None,
+            tree_arm: None,
         };
         let value = serde_json::to_value(&stats).unwrap();
         for key in [
@@ -1094,6 +1114,7 @@ mod tests {
             skipped_arms: None,
             arm_plan_fallback: None,
             boost: None,
+            tree_arm: None,
         };
         let off = serde_json::to_value(&stats).unwrap();
         assert!(off.get("queryClass").is_none());

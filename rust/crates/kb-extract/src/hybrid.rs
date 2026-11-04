@@ -54,6 +54,7 @@ impl Extractor for HybridExtractor {
                     figures: struct_val.figures,
                     pages_blocks: struct_val.pages_blocks,
                     page_map: struct_val.page_map.or(tl_val.page_map),
+                    outline: None,
                     error: None,
                 })
             }

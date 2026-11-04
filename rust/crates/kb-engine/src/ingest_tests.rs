@@ -599,6 +599,49 @@ impl Embedder for ShortEmbedder {
 /// A PDF whose content is its pages is chunked page by page: every stored
 /// chunk names its page, and none holds text from two pages.
 #[tokio::test]
+async fn a_pdf_outline_is_stored_in_document_metadata() {
+    let outline = kb_core::tree::Outline {
+        document_title: None,
+        method: kb_core::tree::OutlineMethod::Bookmarks,
+        nodes: vec![kb_core::tree::OutlineNode {
+            title: "Chapter 2 Leave policy".into(),
+            level: 1,
+            start_page: 0,
+            end_page: 1,
+        }],
+    };
+    let h = harness(Arc::new(FakeExtractor::returning_result(
+        ExtractionResult {
+            content: long_text(),
+            file_type: "pdf".to_string(),
+            outline: Some(outline),
+            ..ExtractionResult::default()
+        },
+    )))
+    .await;
+    h.jobs.push(job());
+    assert!(h.worker.run_once().await.unwrap());
+
+    let docs = h.documents.docs.read().unwrap();
+    let meta = docs[&tenant()]
+        .iter()
+        .find(|d| d.id.as_str() == DOC)
+        .expect("the document");
+    let stored = meta
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("outline"))
+        .expect("metadata.outline");
+    assert_eq!(stored["method"], "bookmarks");
+    assert_eq!(stored["nodes"][0]["start_page"], 0);
+    // The title stored with the outline is the document's, so the tree arm can
+    // vote for a document by name without a second Postgres read.
+    assert_eq!(stored["document_title"], "Quarterly report");
+}
+
+/// A PDF whose content is its pages is chunked page by page: every stored
+/// chunk names its page, and none holds text from two pages.
+#[tokio::test]
 async fn a_paged_pdf_is_chunked_page_by_page() {
     let words = ["alpha", "beta", "gamma"];
     let page_map: Vec<PageText> = words
@@ -626,6 +669,7 @@ async fn a_paged_pdf_is_chunked_page_by_page() {
             figures: Vec::new(),
             pages_blocks: None,
             page_map: Some(page_map),
+            outline: None,
             error: None,
         },
     )))
@@ -690,6 +734,7 @@ async fn page_furniture_is_stripped_from_chunks_but_not_from_the_document() {
                 figures: Vec::new(),
                 pages_blocks: None,
                 page_map: Some(page_map),
+                outline: None,
                 error: None,
             })),
             Arc::new(FakeEmbedder::default()),
@@ -780,6 +825,7 @@ Alice works at Acme Corp."
         figures,
         pages_blocks: Some(pages_blocks),
         page_map: Some(page_map),
+        outline: None,
         error: None,
     };
 

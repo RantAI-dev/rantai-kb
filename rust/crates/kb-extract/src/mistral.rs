@@ -202,6 +202,7 @@ impl MistralOcrExtractor {
             } else {
                 Some(page_map)
             },
+            outline: None,
             error: None,
         })
     }

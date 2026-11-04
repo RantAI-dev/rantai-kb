@@ -641,3 +641,55 @@ commands are in `docs/core/specs/ret-5.md`.
 - **Next Step**: Bun is frozen. If it is ever unfrozen, key the pool and the RRF
   accumulator on `String(id)` instead of the `RecordId` instance.
 
+
+---
+
+## 7. Tree arm (DEC-4) — additive
+
+`KB_TREE_ARM` (default `false`) adds a retrieval arm that navigates a
+document's section hierarchy. It changes no existing request or response field
+when off.
+
+**Ingest.** PDF extraction reads the bookmark tree through pdfium and, when a
+document has no bookmarks, numbered headings from its page text (`3.4 Title`,
+`Chapter 3 …`, the same rules as `kb-eval/scripts/outline.py`). The result is
+written to `Document.metadata.outline`, an ordinary JSONB field, so no schema
+migration is needed:
+
+```json
+{
+  "document_title": "Joint Employment Report 2024",
+  "method": "bookmarks",
+  "nodes": [
+    { "title": "Chapter 4 Social policy", "level": 1, "start_page": 30, "end_page": 44 },
+    { "title": "4.2 Leave entitlement", "level": 2, "start_page": 33, "end_page": 36 }
+  ]
+}
+```
+
+`start_page` and `end_page` are **zero-based**, the same numbering as
+`PageText.page` and every chunk's `page`. `method` is `bookmarks`, `headings`
+or `none`. The extraction adds no model call and no second PDF parse: bookmarks
+come from the catalog and the heading fallback reuses the page text the text
+layer already read. **Existing documents have no outline until they are
+re-ingested**; `kb-server reindex` rebuilds them from the S3 originals.
+
+**Search.** When on, the arm runs only when `kb_core::classify_query` labels
+the question `structural`, independently of `KB_ADAPTIVE_ARMS`. It reads
+outlines through `DocumentStore::outlines(scope)`, which binds both the tenant
+and the caller's document ids, scores nodes with `kb_core::tree` (explicit
+section/chapter numbers plus BM25 over titles and the document title), and asks
+`RetrievalIndex::fetch_pages(scope, documents×pages, per_page)` for the chunks
+on the winning nodes' pages. That read repeats the scope in the adapter's own
+filter, so a bug in the arm cannot widen the scope. The tree list is fused with
+the text candidates by weighted RRF (`KB_TREE_ARM_WEIGHT`, default 0.5,
+`KB_TREE_ARM_NODES` default 5) before rerank.
+
+Response additions, all present only when the arm ran and found nodes:
+
+- `retrieval.arms` may contain `"tree"` on a chunk the outline brought in;
+- `stats.treeArm` is `{"nodes": n, "pages": n}`.
+
+`POST /v1/search` gains no request field and no response field changes for a
+deployment that leaves `KB_TREE_ARM` unset. A failed outline or page read adds
+the `tree_arm_failed` degrade; the other arms answer unchanged.

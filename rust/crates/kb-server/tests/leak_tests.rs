@@ -33,7 +33,7 @@ use kb_engine::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityStore, FakeJobStore,
     FakeReranker,
 };
-use kb_engine::{InMemoryIndex, PageArm, PageArmConfig};
+use kb_engine::{InMemoryIndex, PageArm, PageArmConfig, TreeArm, TreeArmConfig};
 use kb_eval::leak::{Arm, LeakMatrix, ScopeKind, SeedDocument, Status, plan};
 use kb_eval::leak_http::{LeakConfig, canaries_for, probe};
 use kb_ports::{
@@ -157,6 +157,9 @@ enum Mode {
     LeakingPagePath,
     /// Only the page index ignores the scope; the chunk fetch is still scoped.
     LeakingPageIndexOnly,
+    /// The document store returns every outline regardless of scope; the page
+    /// fetch that turns a tree node into chunks is still scoped.
+    LeakingTreeOutlines,
 }
 
 impl Mode {
@@ -166,6 +169,7 @@ impl Mode {
             Self::LeakingVector => "leaking-vector",
             Self::LeakingPagePath => "leaking-page-path",
             Self::LeakingPageIndexOnly => "leaking-page-index",
+            Self::LeakingTreeOutlines => "leaking-tree-outlines",
         }
     }
 }
@@ -296,13 +300,36 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
                         })
                         .collect(),
                 );
+                // The outline the tree arm scores. Its node title carries this
+                // document's vector canary, so the tree probe has a target only
+                // this document can hit.
+                documents.insert_outline(
+                    DocumentId(id.clone()),
+                    kb_core::tree::Outline {
+                        document_title: Some(id.clone()),
+                        method: kb_core::tree::OutlineMethod::Bookmarks,
+                        nodes: vec![kb_core::tree::OutlineNode {
+                            title: format!("1.1 {}", canaries.vector),
+                            level: 2,
+                            start_page: 0,
+                            end_page: 1,
+                        }],
+                    },
+                );
                 pages.upsert(page_units(tenant, &id)).await.unwrap();
             }
         }
     }
 
+    if mode == Mode::LeakingTreeOutlines {
+        documents
+            .outline_scope_hole
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let index: Arc<dyn RetrievalIndex> = match mode {
-        Mode::Honest | Mode::LeakingPageIndexOnly => Arc::new(chunks.clone()),
+        Mode::Honest | Mode::LeakingPageIndexOnly | Mode::LeakingTreeOutlines => {
+            Arc::new(chunks.clone())
+        }
         Mode::LeakingVector => Arc::new(LeakingChunkStore {
             inner: chunks.clone(),
             leak_search: true,
@@ -323,6 +350,7 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
         Mode::LeakingPagePath | Mode::LeakingPageIndexOnly => {
             Some(Arc::new(UnscopedPageIndex { inner: pages }))
         }
+        Mode::LeakingTreeOutlines => Some(Arc::new(pages)),
     };
 
     let mut state = AppState::from_parts(
@@ -343,6 +371,10 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
     );
     // `StateParts` has no page arm (it predates it); the engine reads it from
     // its inputs per request, so it is installed there.
+    // The tree arm is on for every mode, so the matrix's tree row has a
+    // positive control; the leaking-outline mode is what proves the probe can
+    // see a hole.
+    state.engine.inputs.tree_arm = Some(Arc::new(TreeArm::new(TreeArmConfig::default())));
     state.engine.inputs.page_arm = page_index.map(|index| {
         Arc::new(PageArm {
             embedder: Arc::new(SameVectorPageEmbedder),
@@ -544,6 +576,23 @@ async fn a_page_index_hole_alone_is_contained_by_the_scoped_chunk_fetch() {
     let (matrix, _plan) = run_matrix(Mode::LeakingPageIndexOnly).await;
     let page = matrix.arms.iter().find(|a| a.arm == Arm::Page).unwrap();
     assert_eq!(page.leaks, 0, "{:?}", page.leak_examples);
+    assert!(!matrix.any_leak(), "{matrix:?}");
+}
+
+/// The tree arm has two reads, and the matrix must see it work. The outline read
+/// is fenced by scope, and so is the page fetch that turns a node into chunks;
+/// this run opens the outline read only, and the second fence contains it. If
+/// this ever reports a leak, the tree arm gained a path that bypasses the
+/// scoped page read.
+#[tokio::test]
+async fn an_outline_read_that_ignores_scope_is_contained_by_the_scoped_page_fetch() {
+    let (matrix, _plan) = run_matrix(Mode::LeakingTreeOutlines).await;
+    let tree = matrix.arms.iter().find(|a| a.arm == Arm::Tree).unwrap();
+    assert_eq!(tree.leaks, 0, "{:?}", tree.leak_examples);
+    assert!(
+        tree.positive_hits > 0,
+        "the tree row never reached its own target: {tree:?}"
+    );
     assert!(!matrix.any_leak(), "{matrix:?}");
 }
 

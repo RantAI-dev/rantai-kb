@@ -30,6 +30,7 @@ pub mod ingest;
 pub mod page_arm;
 pub mod retrieval;
 pub mod timing;
+pub mod tree_arm;
 
 /// The reference `RetrievalIndex`. Under `test-utils` so an adapter's contract
 /// test can depend on it as a control; it is also the implementation the engine
@@ -64,6 +65,8 @@ mod ingest_tests;
 mod page_arm_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tree_arm_tests;
 
 pub use graph_arm::{GraphArm, GraphArmConfig, GraphCache, GraphRanking};
 pub use ingest::{
@@ -79,6 +82,7 @@ pub use retrieval::{
     apply_boosts, apply_boosts_now, enrich_titles, execute_pipeline,
 };
 pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
+pub use tree_arm::{TreeArm, TreeArmConfig, TreeRanking, TreeStats};
 
 /// Tunable engine knobs.
 #[derive(Debug, Clone)]
@@ -178,6 +182,8 @@ pub struct EngineInputs {
     pub graph_arm: Option<Arc<GraphArm>>,
     /// The page-image arm, or `None` when it is off.
     pub page_arm: Option<Arc<PageArm>>,
+    /// The tree arm, or `None` when `KB_TREE_ARM` is off.
+    pub tree_arm: Option<Arc<TreeArm>>,
 }
 
 /// Engine handle — cheap to clone (all state behind `Arc`s).
@@ -236,6 +242,7 @@ impl Engine {
             figure_gate: None,
             graph_arm: None,
             page_arm: None,
+            tree_arm: None,
         };
         Self::new(settings, inputs)
     }
@@ -347,6 +354,7 @@ impl Engine {
                 floor: None,
                 boost: None,
                 adaptive: None,
+                tree: None,
                 timings: StageTimings::default(),
             });
         }
@@ -374,6 +382,7 @@ impl Engine {
             rerank_enabled: self.settings.rerank_enabled,
             graph_arm: self.inputs.graph_arm.clone(),
             page_arm: self.inputs.page_arm.clone(),
+            tree_arm: self.inputs.tree_arm.clone(),
             boost: request_boost,
             boost_now: None,
             adaptive_arms: request_adaptive_arms.unwrap_or(self.settings.adaptive_arms),

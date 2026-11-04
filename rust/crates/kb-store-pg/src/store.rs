@@ -20,8 +20,8 @@ use crate::queries::{
     SELECT_ALIVE_BY_IDS, SELECT_BY_ID, SELECT_BY_ID_WITH_DELETED, SELECT_CATEGORIES,
     SELECT_CATEGORY_BY_ID_TENANT, SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB,
     SELECT_EXISTS_FOR_PATCH, SELECT_FOR_DOWNLOAD, SELECT_KB_BY_ID_TENANT, SELECT_KNOWLEDGE_BASES,
-    SELECT_OWNED_KB_IDS, SET_DOCUMENT_STATUS, UPDATE_CATEGORY, UPDATE_DOCUMENT_PATCH,
-    UPDATE_EXTRACTED_CONTENT, UPDATE_KNOWLEDGE_BASE, UPDATE_METADATA,
+    SELECT_OUTLINES, SELECT_OWNED_KB_IDS, SET_DOCUMENT_STATUS, UPDATE_CATEGORY,
+    UPDATE_DOCUMENT_PATCH, UPDATE_EXTRACTED_CONTENT, UPDATE_KNOWLEDGE_BASE, UPDATE_METADATA,
 };
 
 /// Open a connection pool from settings. A free function rather than a
@@ -350,6 +350,47 @@ impl DocumentStore for PgDocumentStore {
             out.push(
                 row_to_doc_meta(row).map_err(|e| PortError::Unavailable(format!("pg row: {e}")))?,
             );
+        }
+        Ok(out)
+    }
+
+    async fn outlines(
+        &self,
+        scope: &DocumentScope,
+    ) -> Result<Vec<(DocumentId, kb_core::tree::Outline)>, PortError> {
+        if scope.document_ids().is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<&str> = scope
+            .document_ids()
+            .iter()
+            .map(DocumentId::as_str)
+            .collect();
+        let rows = sqlx::query(SELECT_OUTLINES)
+            .bind(scope.tenant().0.as_str())
+            .bind(&ids)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg outlines: {e}")))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row
+                .try_get("id")
+                .map_err(|e| PortError::Unavailable(format!("pg outline id: {e}")))?;
+            let value: Option<serde_json::Value> = row
+                .try_get("outline")
+                .map_err(|e| PortError::Unavailable(format!("pg outline json: {e}")))?;
+            let Some(value) = value else {
+                continue;
+            };
+            // A malformed outline is a real failure, not "this document has no
+            // structure": the arm reports `tree_arm_failed` rather than quietly
+            // dropping the document and looking like it found nothing.
+            let outline: kb_core::tree::Outline = serde_json::from_value(value).map_err(|e| {
+                PortError::Malformed(format!("document {id} metadata.outline: {e}"))
+            })?;
+            out.push((DocumentId(id), outline));
         }
         Ok(out)
     }
@@ -831,6 +872,20 @@ mod tests {
     use kb_ports::{KnowledgeBaseId, MetadataFilter};
 
     use super::{DocumentFilter, ScopeBind, scope_sql};
+
+    #[test]
+    fn the_outline_query_binds_tenant_and_scope_and_never_interpolates() {
+        let sql = crate::queries::SELECT_OUTLINES;
+        assert!(sql.contains("d.\"tenantId\" = $1"), "{sql}");
+        assert!(sql.contains("d.id = ANY($2::text[])"), "{sql}");
+        assert!(sql.contains("d.\"deletedAt\" IS NULL"), "{sql}");
+        assert!(sql.contains("d.metadata -> 'outline'"), "{sql}");
+        // Exactly two caller-supplied parameters: tenant and scope ids. A third
+        // placeholder would mean a value this test has not accounted for.
+        assert!(!sql.contains("$3"), "{sql}");
+        // No document id is ever pasted into the statement.
+        assert!(!sql.contains("doc-"), "{sql}");
+    }
 
     #[test]
     fn an_empty_filter_binds_only_the_tenant() {

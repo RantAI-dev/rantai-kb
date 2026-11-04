@@ -4,6 +4,30 @@
 
 ### Added
 
+- **Tree arm (`DEC-4`, `RET-6`), off by default.** A structural question
+  ("what does section 4.2 say about…", "chapter 3 of the joint employment
+  report") can be answered by navigating a document's section hierarchy instead
+  of matching text. Opt in with `KB_TREE_ARM=1`; the rest of the switch is
+  `KB_TREE_ARM_WEIGHT` (RRF weight, `0.5`) and `KB_TREE_ARM_NODES` (heading
+  nodes per query, `5`).
+  - **Ingest** reads each PDF's bookmark tree through pdfium, and falls back to
+    numbered headings in the page text (`3.4 Title`, `Chapter 3 …`). The result
+    is stored additively in `Document.metadata.outline` (JSONB; no schema
+    migration): `method` is `bookmarks`, `headings` or `none`, and each node
+    carries `title`, `level`, `start_page` (zero-based) and `end_page`.
+    Bookmarks and page text are already parsed, so there is no model call and
+    no second parse. Existing documents get an outline on their next ingest or
+    `kb-server reindex`.
+  - **Search** runs the arm only when `KB_TREE_ARM` is on **and**
+    `kb_core::classify_query` labels the question `structural`. It reads
+    outlines only for documents in the caller's `DocumentScope`, scores nodes
+    with explicit section/chapter numbers plus BM25 over node titles, reads the
+    chunks on the winning nodes' pages through a scoped page read, and fuses
+    them into the candidate list by weighted RRF before rerank. Contributed
+    chunks carry `tree` in `retrieval.arms`; `stats.treeArm` reports
+    `{nodes, pages}`. A failed outline or page read adds the `tree_arm_failed`
+    degrade and the other arms answer unchanged.
+
 - **Search-time metadata filters (`RET-3`).** `POST /v1/search` accepts three
   additive, optional fields:
   - `externalRefs: string[]` — only documents whose `Document.externalRef` is in

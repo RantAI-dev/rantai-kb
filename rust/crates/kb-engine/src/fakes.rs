@@ -158,6 +158,15 @@ pub struct FakeDocumentStore {
     pub categories: Arc<RwLock<HashMap<TenantId, Vec<CategoryRecord>>>>,
     pub download_metas: Arc<RwLock<HashMap<(TenantId, DocumentId), DocumentDownloadMeta>>>,
     pub fail_scope: Arc<AtomicBool>,
+    /// Section outlines by document, for the tree arm (DEC-4).
+    pub outlines: Arc<RwLock<HashMap<DocumentId, kb_core::tree::Outline>>>,
+    /// Force [`DocumentStore::outlines`] to fail, so a test can assert the
+    /// tree arm degrades instead of emptying the search.
+    pub fail_outlines: Arc<AtomicBool>,
+    /// Return every outline regardless of scope, the way the old unscoped
+    /// `bm25_search_global` returned every tenant's hits. Only the red-team
+    /// matrix sets this, to prove the scoped page read contains the hole.
+    pub outline_scope_hole: Arc<AtomicBool>,
     /// Soft-deleted documents, kept so tests can assert on them.
     pub deleted: Arc<RwLock<Vec<DocumentMeta>>>,
 }
@@ -166,6 +175,11 @@ impl FakeDocumentStore {
     pub fn insert_doc(&self, tenant: TenantId, meta: DocumentMeta) {
         let mut map = self.docs.write().unwrap();
         map.entry(tenant).or_default().push(meta);
+    }
+
+    /// Store a document's outline for the tree arm.
+    pub fn insert_outline(&self, id: DocumentId, outline: kb_core::tree::Outline) {
+        self.outlines.write().unwrap().insert(id, outline);
     }
 
     pub fn insert_api_key(&self, key: &str, tenant: TenantId) {
@@ -336,6 +350,34 @@ impl DocumentStore for FakeDocumentStore {
         Ok(list
             .into_iter()
             .filter(|d| id_set.contains(&d.id))
+            .collect())
+    }
+
+    async fn outlines(
+        &self,
+        scope: &DocumentScope,
+    ) -> Result<Vec<(DocumentId, kb_core::tree::Outline)>, PortError> {
+        if self.fail_outlines.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable("forced outline failure".to_string()));
+        }
+        // The fake checks the scope exactly as the Postgres adapter does: a
+        // document outside the caller's visible ids is never returned, even
+        // when it has a matching outline.
+        let outlines = self.outlines.read().unwrap();
+        if self.outline_scope_hole.load(Ordering::Relaxed) {
+            return Ok(outlines
+                .iter()
+                .map(|(id, outline)| (id.clone(), outline.clone()))
+                .collect());
+        }
+        Ok(scope
+            .document_ids()
+            .iter()
+            .filter_map(|id| {
+                outlines
+                    .get(id)
+                    .map(|outline| (id.clone(), outline.clone()))
+            })
             .collect())
     }
 
@@ -1175,6 +1217,71 @@ impl RetrievalIndex for FakeChunkStore {
                 });
             }
         }
+        Ok(out)
+    }
+
+    async fn fetch_pages(
+        &self,
+        scope: &DocumentScope,
+        pages: &[(DocumentId, u32)],
+        per_page: usize,
+    ) -> Result<Vec<Candidate>, PortError> {
+        if pages.is_empty() || per_page == 0 || scope.document_ids().is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: std::collections::HashSet<(DocumentId, u32)> = pages
+            .iter()
+            .filter(|(document, _)| scope.document_ids().contains(document))
+            .cloned()
+            .collect();
+        let stored = self.stored_chunks.read().unwrap();
+        let mut out: Vec<Candidate> = Vec::new();
+        let mut counts: std::collections::HashMap<(DocumentId, u32), usize> =
+            std::collections::HashMap::new();
+        for (document, chunks) in stored.iter() {
+            if !scope.document_ids().contains(document) {
+                continue;
+            }
+            for c in chunks {
+                let meta = stored_chunk_metadata(&c.metadata);
+                let Some(page) = meta.page else {
+                    continue;
+                };
+                let key = (document.clone(), page);
+                if !wanted.contains(&key) {
+                    continue;
+                }
+                let count = counts.entry(key).or_insert(0);
+                if *count >= per_page {
+                    continue;
+                }
+                *count += 1;
+                out.push(Candidate {
+                    unit_id: ChunkId(format!("{document}_{}", meta.chunk_index.unwrap_or(0))),
+                    document_id: document.clone(),
+                    tenant: scope.tenant().clone(),
+                    chunk_index: meta.chunk_index.unwrap_or(0),
+                    page: meta.page,
+                    chunk_type: ChunkType::from_storage(
+                        c.metadata
+                            .get("chunkType")
+                            .and_then(serde_json::Value::as_str),
+                    ),
+                    content: c.content.clone(),
+                    contextual_prefix: c.contextual_prefix.clone(),
+                    metadata: c.metadata.clone(),
+                    scores: ArmScores::default(),
+                    ranks: ArmRanks::default(),
+                });
+            }
+        }
+        out.sort_by(|a, b| {
+            a.document_id
+                .as_str()
+                .cmp(b.document_id.as_str())
+                .then_with(|| a.page.cmp(&b.page))
+                .then_with(|| a.chunk_index.cmp(&b.chunk_index))
+        });
         Ok(out)
     }
 

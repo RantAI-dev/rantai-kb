@@ -163,6 +163,12 @@ pub struct ExtractionResult {
     /// `(page, text)` pairs in document order, so each chunk can carry the
     /// page it came from.
     pub page_map: Option<Vec<PageText>>,
+    /// The document's section hierarchy, when the format has one (PDF
+    /// bookmarks or numbered headings). `None` for formats with no structure
+    /// concept; an empty outline with [`OutlineMethod::None`] is a PDF that was
+    /// examined and had neither. ADDITIVE (DEC-4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<kb_core::tree::Outline>,
     /// Set when extraction failed; the caller must abort rather than index the
     /// empty content.
     pub error: Option<String>,
@@ -279,6 +285,10 @@ pub enum ProvenanceArm {
     Graph,
     /// Brought in by the page-image arm: its page matched the query as an image.
     Page,
+    /// Brought in by the tree arm (`DEC-4`): the query names a place in a
+    /// document, the outline scored the section, and a chunk on that section's
+    /// pages was fused into the candidate list.
+    Tree,
 }
 
 /// Which arms produced a chunk, and what each of them said about it.

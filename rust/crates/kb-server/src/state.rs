@@ -189,6 +189,9 @@ impl AppState {
             Arc::new(NoopExpander)
         };
 
+        let tree_arm = config
+            .tree_arm
+            .map(|tree| Arc::new(kb_engine::TreeArm::new(tree)));
         let inputs = EngineInputs {
             embedder: embedder.clone(),
             index: index.clone(),
@@ -198,6 +201,7 @@ impl AppState {
             figure_gate: None,
             graph_arm: graph_arm.clone(),
             page_arm,
+            tree_arm,
         };
         let engine = Engine::new(config.engine, inputs);
         Ok(Self {
@@ -234,6 +238,7 @@ impl AppState {
             figure_gate: None,
             graph_arm: parts.graph_arm.clone(),
             page_arm: None,
+            tree_arm: None,
         };
         let engine = Engine::new(settings, inputs);
         Self {
