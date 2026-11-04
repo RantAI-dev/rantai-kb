@@ -9,6 +9,8 @@
 
 pub mod api_keys;
 mod auth;
+mod community;
+pub(crate) mod community_queries;
 mod documents;
 mod graph;
 pub(crate) mod graph_queries;
@@ -20,6 +22,7 @@ mod store;
 
 pub use api_keys::{MintedApiKey, NewApiKey, generate_api_key, insert_api_key};
 pub use auth::hash_api_key;
+pub use community::{PgCommunityStore, TenantMention};
 pub use documents::row_to_doc_meta;
 pub use graph::PgGraphStore;
 pub use jobs::PgJobStore;

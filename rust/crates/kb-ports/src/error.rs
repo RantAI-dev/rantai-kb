@@ -69,6 +69,10 @@ pub enum RetrievalDegrade {
     /// the normal results are returned, because turning a failed arm into an
     /// empty answer would be a silent failure dressed as a clean result.
     FloorSkipped,
+    /// The global (community summary) arm failed: the community store or the
+    /// scoped chunk fetch did not answer. The other arms' results are returned
+    /// unchanged — a search that lost one arm is degraded, not empty.
+    GlobalArmFailed,
 }
 
 impl RetrievalDegrade {
@@ -86,6 +90,7 @@ impl RetrievalDegrade {
             Self::PageArmUnavailable => "page_arm_unavailable",
             Self::VisionRerankUnavailable => "vision_rerank_unavailable",
             Self::FloorSkipped => "floor_skipped",
+            Self::GlobalArmFailed => "global_arm_failed",
         }
     }
 }

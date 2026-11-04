@@ -7,6 +7,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod blob;
+pub mod community;
 mod error;
 pub mod graph;
 #[cfg(feature = "contract")]
@@ -19,6 +20,7 @@ mod traits;
 mod types;
 
 pub use blob::{BlobStore, asset_path, document_path, page_image_path, sanitize_filename};
+pub use community::{CommunityRecord, CommunityStore, NewCommunity};
 #[cfg(feature = "contract")]
 pub mod contract;
 pub use error::{EngineError, PortError, RetrievalDegrade};

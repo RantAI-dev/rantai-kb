@@ -279,6 +279,12 @@ pub enum ProvenanceArm {
     Graph,
     /// Brought in by the page-image arm: its page matched the query as an image.
     Page,
+    /// Brought in by the global (graph community) arm: a community summary
+    /// matched the query, and this chunk is one of that community's members.
+    ///
+    /// Appended last so every earlier variant keeps its position in the
+    /// `Ord`-derived arm list; the wire spelling is `global`.
+    Global,
 }
 
 /// Which arms produced a chunk, and what each of them said about it.
