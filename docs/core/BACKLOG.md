@@ -78,6 +78,7 @@ Started 2026-11-04 from:
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `ING-2` | Feature | Connectors that sync documents from Google Drive, SharePoint, Confluence and similar sources. Today a calling app uploads every file itself | Ingest | P3 | Idea | | PRODUCT §2 |
 | `DEP-5` | Feature | Parse and caption residency (`KB_PARSE_RESIDENCY`, `KB_CAPTION_RESIDENCY`) and a priority queue, as described in `docs/kb-tiers.md`. Documented, not built | Deployment | P3 | Idea | | `docs/tier-readiness-plan.md` |
+| `RET-7` | Feature | Global community arm (`DEC-5`): graph community summaries for broad/aggregative questions, behind `KB_GLOBAL_ARM` (off by default), with the operator build `kb-server communities build` and a scoped read that never returns the summary text. **`EVAL-3` measured a loss** (aggregative recall@10 −0.067 HR, −0.103 CS with an oracle gate), so this ships switchable, not on. `docs/rust-cutover.md` §21 | Retrieval | P3 | In Acceptance | | DEC-5 |
 
 ## Dates
 
@@ -95,6 +96,7 @@ Due dates are set by the product owner and stay empty until they are.
 | `EVAL-3` | 2026-11-04 | | |
 | `DEC-4` | 2026-11-04 | | |
 | `DEC-5` | 2026-11-04 | | |
+| `RET-7` | 2026-11-04 | | |
 
 ## Done and rejected
 

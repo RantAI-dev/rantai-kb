@@ -200,6 +200,8 @@ numbers and how to override a setting.
 | `KB_CACHE_DIR` | directory for content-addressed caches | unset: no cache |
 | `KB_MIN_SCORE` | relevance floor: reranker score, else dense cosine (a request's `minScore` overrides it) | unset: no floor |
 | `KB_ADAPTIVE_ARMS` | skip the arms a query's class cannot use (RET-5; a request's `adaptiveArms` overrides it); skipped arms are named in `stats.skippedArms` | `false` (every arm runs) |
+| `KB_GLOBAL_ARM` | global community-summary arm (`DEC-5`) for aggregative queries; **a measured loss in `EVAL-3`**, needs `KB_GRAPH_STORE=pg` and a build from `kb-server communities build`. `KB_GLOBAL_ARM_COMMUNITIES` (3), `KB_GLOBAL_ARM_WEIGHT` (0.5) and `KB_GLOBAL_ARM_CHUNKS` (200) tune it | `false` |
+| `ENTITY_EXTRACTION_LLM_*` | chat model for `communities build` (the entity extractor's settings; `OPENROUTER_API_KEY` is the key fallback). The build is an operator command, prints a `chars/4` estimate, requires `--max-usd`, caches every summary under `KB_CACHE_DIR`, and never caches an empty answer. `KB_COMMUNITY_PRICE_INPUT`/`KB_COMMUNITY_PRICE_OUTPUT` price it | model `openai/gpt-4.1-nano`; prices from a table |
 
 A tier is a **preset**: it fills in role defaults; any explicit `KB_*` setting wins.
 `kb-server setup` checks the VRAM budget and refuses a combination that cannot fit next to

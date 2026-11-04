@@ -3,6 +3,13 @@
 | `KB_FIGURE_VLM_TIMEOUT_MS` | Figure gate evaluation timeout in ms | `15000` |
 | `KB_MIN_SCORE` | Relevance floor for `/v1/search`: reranker score when a reranker ran, else dense cosine; a request's `minScore` overrides it | `None` (no floor) |
 | `KB_ADAPTIVE_ARMS` | Classify each query and skip the retrieval arms its class cannot use (RET-5); a request's `adaptiveArms` overrides it. Skipped arms are named in `stats.skippedArms` | `false` |
+| `KB_GLOBAL_ARM` | Global community-summary arm (`DEC-5`) for aggregative queries. **A measured loss in EVAL-3; off by default.** Needs `KB_GRAPH_STORE=pg` and communities built by `kb-server communities build` | `false` |
+| `KB_GLOBAL_ARM_COMMUNITIES` | Communities selected per aggregative query | `3` |
+| `KB_GLOBAL_ARM_WEIGHT` | RRF weight of the global arm's chunk list | `0.5` |
+| `KB_GLOBAL_ARM_CHUNKS` | Chunks the global arm may contribute per query | `200` |
+| `ENTITY_EXTRACTION_LLM_MODEL` / `_BASE_URL` / `_API_KEY` | Chat model the community build uses (the same settings as the LLM entity extractor; `OPENROUTER_API_KEY` is the key fallback) | `openai/gpt-4.1-nano` on OpenRouter |
+| `KB_COMMUNITY_PRICE_INPUT` / `KB_COMMUNITY_PRICE_OUTPUT` | USD per 1,000,000 tokens for the build's cost estimate (`--price-input`/`--price-output` override) | built-in table for known models |
+| `KB_CACHE_DIR` | Content-addressed disk cache. **Required for `communities build`** (every summary is cached by model + `sha256(prompt)`; an unset directory refuses a paid run) | unset: no cache |
 | **Qdrant Store (the only chunk store)** | | |
 | `QDRANT_GRPC_URL` | Qdrant gRPC endpoint (e.g. `http://127.0.0.1:16334`) | `http://127.0.0.1:16334` |
 | `QDRANT_URL` | Alternative Qdrant URL if gRPC URL is unset | `http://127.0.0.1:16334` |
