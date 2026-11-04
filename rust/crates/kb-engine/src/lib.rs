@@ -282,14 +282,8 @@ impl Engine {
         request_max_chunks: Option<u32>,
         request_min_score: Option<f32>,
     ) -> Result<RetrievalOutcome, EngineError> {
-        self.retrieve_inner(
-            query,
-            scope,
-            request_max_chunks,
-            request_min_score,
-            None,
-        )
-        .await
+        self.retrieve_inner(query, scope, request_max_chunks, request_min_score, None)
+            .await
     }
 
     async fn retrieve_inner(

@@ -267,7 +267,10 @@ mod tests {
         assert_eq!(noon, utc("2024-03-01T16:30:00+07:00"));
         assert_eq!(utc("2024-03-01T09:30:00"), noon);
         assert_eq!(utc("2024-03-01 09:30:00"), noon);
-        assert_eq!(utc("2024-03-01T09:30:00.500Z").timestamp(), noon.timestamp());
+        assert_eq!(
+            utc("2024-03-01T09:30:00.500Z").timestamp(),
+            noon.timestamp()
+        );
         assert!(parse_date("March 1, 2024").is_none());
         assert!(parse_date("2024-13-01").is_none());
         assert!(parse_date("").is_none());

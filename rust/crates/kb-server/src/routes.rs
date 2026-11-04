@@ -670,7 +670,9 @@ fn parse_metadata_filter(
 /// `> 0`, `weight` must be in `(0, 1]`, and a metadata key must match
 /// `[A-Za-z0-9_.-]{1,64}` — the same rule as the `metadata` filter. An absent,
 /// `null` or empty object means no boost, which is the off state.
-fn parse_boost(value: Option<&serde_json::Value>) -> Result<Option<kb_core::BoostConfig>, ApiError> {
+fn parse_boost(
+    value: Option<&serde_json::Value>,
+) -> Result<Option<kb_core::BoostConfig>, ApiError> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -700,10 +702,7 @@ fn parse_boost(value: Option<&serde_json::Value>) -> Result<Option<kb_core::Boos
     if recency.is_none() && authority.is_none() {
         return Ok(None);
     }
-    Ok(Some(kb_core::BoostConfig {
-        recency,
-        authority,
-    }))
+    Ok(Some(kb_core::BoostConfig { recency, authority }))
 }
 
 fn parse_recency_boost(value: &serde_json::Value) -> Result<kb_core::RecencyBoost, ApiError> {

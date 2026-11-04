@@ -149,7 +149,9 @@ async fn eval(args: &[String]) -> Result<(), EvalError> {
     config.boost = match flag(args, "--boost") {
         None => None,
         Some(raw) => Some(serde_json::from_str(&raw).map_err(|e| {
-            EvalError::Usage(format!("--boost must be a JSON object accepted by /v1/search: {e}"))
+            EvalError::Usage(format!(
+                "--boost must be a JSON object accepted by /v1/search: {e}"
+            ))
         })?),
     };
 

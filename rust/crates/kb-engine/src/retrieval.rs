@@ -1357,9 +1357,9 @@ pub async fn execute_pipeline(
         .as_ref()
         .filter(|config| !config.is_off())
         .map(|config| {
-        let now = opts.boost_now.unwrap_or_else(Utc::now);
-        apply_boosts(&mut reranked_hits, &meta_cache, config, now)
-    });
+            let now = opts.boost_now.unwrap_or_else(Utc::now);
+            apply_boosts(&mut reranked_hits, &meta_cache, config, now)
+        });
 
     // 6. Cut to max_chunks (1..=50)
     reranked_hits.truncate(max_chunks);

@@ -33,7 +33,9 @@ fn meta(id: &str, effective_date: Option<&str>, authority: Option<f64>) -> Docum
 fn fixture(docs: Vec<DocumentMeta>, pre_boost: &[&str]) -> Harness {
     let harness = Harness::new();
     let tenant = TenantId(TENANT.into());
-    harness.documents.insert_api_key(&tenant_key(TENANT), tenant.clone());
+    harness
+        .documents
+        .insert_api_key(&tenant_key(TENANT), tenant.clone());
     for doc in docs {
         harness.documents.insert_doc(tenant.clone(), doc);
     }
@@ -160,10 +162,7 @@ async fn recency_promotes_the_newer_document_and_reports_the_count() {
 #[tokio::test]
 async fn authority_promotes_the_higher_value() {
     let harness = fixture(
-        vec![
-            meta("low", None, Some(0.1)),
-            meta("high", None, Some(0.9)),
-        ],
+        vec![meta("low", None, Some(0.1)), meta("high", None, Some(0.9))],
         &["low", "high"],
     );
 

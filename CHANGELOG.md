@@ -62,6 +62,41 @@
   nDCG@10. The thresholds themselves are **not** shipped as a default until the
   calibration has been run.
 
+- **Recency and authority boosts (`RET-4`).** `POST /v1/search` accepts an
+  additive, optional `boost` object:
+  - `recency: {field, halfLifeDays, weight}` — `field` is `createdAt`,
+    `updatedAt` or `metadata.<key>`; `halfLifeDays` is a number `> 0`; `weight`
+    is in `(0, 1]`.
+  - `authority: {field, weight}` — `field` is `metadata.<key>` holding a JSON
+    number; `weight` is in `(0, 1]`.
+
+  A hit's base relevance is `sigmoid(rerankScore)` when a reranker scored it,
+  otherwise `1/(1+rank)`; the final value is
+  `base * (1 - w_r + w_r * 0.5^(age_days/halfLife)) * (1 - w_a + w_a * normalised_authority)`.
+  Authority is min-max normalised per request over the candidate documents
+  that carry the value. A missing or unparseable field means factor `1.0` —
+  never an error. The re-sort breaks ties on content, page and chunk index
+  (never a UUID). The boost runs after fusion, the rerank and the relevance
+  floor, and before the final `maxChunks` cut; the floor keeps comparing the
+  raw rerank/dense score. Absent (or an empty object) means **off**: no factor
+  is computed and no re-sort happens, so the ranking is identical to a server
+  before this release. `stats.boost: {recency, authority}` reports how many
+  returned hits carried a usable field; it is absent when the boost was off.
+  Metadata keys follow the `RET-3` rule (`[A-Za-z0-9_.-]{1,64}`); a bad shape,
+  field, half-life or weight is a **400**.
+- **Upload metadata (`RET-4`).** `POST /v1/documents` accepts an additive
+  multipart field `metadata`: a JSON object stored as `Document.metadata`, so
+  a caller can set the `effectiveDate`/`authority` (or any other) values the
+  boosts and filters read. Absent keeps the stored metadata as before; a value
+  that is not a JSON object is a **400**.
+- **Dated evaluation set (`RET-4`).**
+  `rust/crates/kb-eval/sets/dated-versions/` holds 55 document families with
+  2023/2024/2025 editions and 55 "current/latest" questions, judged only on
+  the newest edition; `generate.py` (Python stdlib, deterministic) rebuilds it.
+  `kb-server eval` gains `--boost <json>` so one tenant can be measured with
+  the boost off and on without re-ingesting, and dataset metadata sidecars
+  (`metadata/<key>.json`) are uploaded with each document.
+
 ### Notes
 
 - **Structure caps.** The route reads at most 20,000 text units and 2,000 page units

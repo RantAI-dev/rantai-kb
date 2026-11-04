@@ -86,18 +86,14 @@ impl Fixture {
             // A descending fused score makes the arm's pre-boost order exactly
             // the seeding order; the hits still share the same rank, so the
             // boost's base relevance (`1/(1+rank)`) is equal for all of them.
-            chunks
-                .vector_hits
-                .write()
-                .unwrap()
-                .push(make_fake_hit(
-                    &format!("{doc_id}_0"),
-                    doc_id,
-                    &format!("Title {doc_id}"),
-                    &format!("Body {doc_id}"),
-                    0,
-                    similarity - index as f32 * 0.01,
-                ));
+            chunks.vector_hits.write().unwrap().push(make_fake_hit(
+                &format!("{doc_id}_0"),
+                doc_id,
+                &format!("Title {doc_id}"),
+                &format!("Body {doc_id}"),
+                0,
+                similarity - index as f32 * 0.01,
+            ));
         }
         let scope = make_fake_scope(
             tenant,
@@ -182,8 +178,39 @@ async fn boost_absent_is_rank_identical_to_an_empty_boost() {
     assert_eq!(with_empty.boost, None, "an empty boost reports nothing");
 }
 
+#[test]
+fn recency_promotes_the_newer_when_base_relevance_is_exactly_equal() {
+    // Two hits with the same base relevance (same rank, no rerank score). The
+    // only difference is the date, so the flip can only come from the boost.
+    let mut metas = HashMap::new();
+    metas.insert(
+        DocumentId("old".into()),
+        doc("old", Some("2023-01-01"), None),
+    );
+    metas.insert(
+        DocumentId("new".into()),
+        doc("new", Some("2025-05-31"), None),
+    );
+    let old = make_fake_hit("old_0", "old", "Old", "Old body", 0, 0.9);
+    let new = make_fake_hit("new_0", "new", "New", "New body", 0, 0.9);
+    let mut hits = vec![old, new];
+    let stats = apply_boosts(
+        &mut hits,
+        &metas,
+        &recency(RecencyField::Metadata("effectiveDate".into()), 365.0, 0.5),
+        now(),
+    );
+    assert_eq!(stats.recency, 2);
+    assert_eq!(
+        hits.iter()
+            .map(|h| h.chunk.document_id.0.as_str())
+            .collect::<Vec<_>>(),
+        vec!["new", "old"]
+    );
+}
+
 #[tokio::test]
-async fn recency_promotes_the_newer_of_two_equally_relevant_docs() {
+async fn recency_promotes_the_newer_of_two_near_equal_reranked_docs() {
     let fixture = Fixture::new(
         vec![
             doc("old", Some("2023-01-01"), None),
@@ -198,7 +225,11 @@ async fn recency_promotes_the_newer_of_two_equally_relevant_docs() {
             // Reranked, so the two hits start with near-equal base relevance
             // (sigmoid 1.0 vs 0.95) and the pre-boost order is old → new.
             rerank_enabled: true,
-            boost: Some(recency(RecencyField::Metadata("effectiveDate".into()), 365.0, 0.5)),
+            boost: Some(recency(
+                RecencyField::Metadata("effectiveDate".into()),
+                365.0,
+                0.5,
+            )),
             ..Default::default()
         })
         .await;
@@ -229,7 +260,11 @@ async fn a_document_missing_the_date_keeps_its_place() {
 
     let boosted = fixture
         .run(RetrievalOptions {
-            boost: Some(recency(RecencyField::Metadata("effectiveDate".into()), 30.0, 1.0)),
+            boost: Some(recency(
+                RecencyField::Metadata("effectiveDate".into()),
+                30.0,
+                1.0,
+            )),
             ..Default::default()
         })
         .await;
@@ -298,7 +333,11 @@ async fn the_floor_still_reads_the_raw_dense_score() {
     let outcome = fixture
         .run(RetrievalOptions {
             min_score: Some(0.6),
-            boost: Some(recency(RecencyField::Metadata("effectiveDate".into()), 30.0, 1.0)),
+            boost: Some(recency(
+                RecencyField::Metadata("effectiveDate".into()),
+                30.0,
+                1.0,
+            )),
             ..Default::default()
         })
         .await;
@@ -318,17 +357,23 @@ async fn scope_is_still_the_callers_scope_with_a_boost_on() {
     // A document outside the scope exists in the store and in the arm. The arm
     // filters by scope, and the boost reads metadata only for hits that came
     // back, so the foreign document cannot appear.
+    fixture.docs.insert_doc(
+        TenantId("t1".into()),
+        doc("not-mine", Some("2025-05-31"), Some(9.9)),
+    );
     fixture
-        .docs
-        .insert_doc(TenantId("t1".into()), doc("not-mine", Some("2025-05-31"), Some(9.9)));
-    fixture.chunks.vector_hits.write().unwrap().push(make_fake_hit(
-        "not-mine_0",
-        "not-mine",
-        "Not Mine",
-        "secret",
-        0,
-        0.99,
-    ));
+        .chunks
+        .vector_hits
+        .write()
+        .unwrap()
+        .push(make_fake_hit(
+            "not-mine_0",
+            "not-mine",
+            "Not Mine",
+            "secret",
+            0,
+            0.99,
+        ));
 
     let outcome = fixture
         .run(RetrievalOptions {
@@ -380,7 +425,9 @@ fn ties_break_on_content_then_page_then_chunk_index_never_on_ids() {
     let mut hits = vec![b, a];
     apply_boosts(&mut hits, &meta_by_id, &config, now());
     assert_eq!(
-        hits.iter().map(|h| h.chunk.content.as_str()).collect::<Vec<_>>(),
+        hits.iter()
+            .map(|h| h.chunk.content.as_str())
+            .collect::<Vec<_>>(),
         vec!["alpha", "bravo"]
     );
 
@@ -407,7 +454,9 @@ fn ties_break_on_content_then_page_then_chunk_index_never_on_ids() {
     let mut hits = vec![a, b];
     apply_boosts(&mut hits, &meta_by_id, &config, now());
     assert_eq!(
-        hits.iter().map(|h| h.chunk.id.0.as_str()).collect::<Vec<_>>(),
+        hits.iter()
+            .map(|h| h.chunk.id.0.as_str())
+            .collect::<Vec<_>>(),
         vec!["zzz_a", "aaa_b"]
     );
 }
