@@ -287,3 +287,64 @@ async fn health_needs_no_key() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+// ─── SEC-1: a key limited to some knowledge bases ───────────────────────────
+
+#[tokio::test]
+async fn events_hide_progress_for_documents_outside_the_keys_knowledge_bases() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    h.documents.insert_api_key_with_scopes(
+        "limited",
+        TenantId(TENANT.to_string()),
+        vec!["kb:read".into()],
+        vec![kb_ports::KnowledgeBaseId("kb-a".to_string())],
+    );
+    let tenant = TenantId(TENANT.to_string());
+    for (id, kb) in [
+        ("doc-a", Some("kb-a")),
+        ("doc-b", Some("kb-b")),
+        ("doc-none", None),
+    ] {
+        let mut doc = doc_meta(id, id);
+        doc.knowledge_base_ids = kb.map(str::to_string).into_iter().collect();
+        h.documents.insert_doc(tenant.clone(), doc);
+    }
+
+    let response = h.send("GET", "/v1/events", "limited").await;
+
+    let bus = Arc::clone(&h.events);
+    let emitter = tokio::spawn(async move {
+        for (job, doc) in [
+            ("job-b", "doc-b"),
+            ("job-none", "doc-none"),
+            ("job-a", "doc-a"),
+        ] {
+            let payload = serde_json::json!({
+                "jobId": job,
+                "documentId": doc,
+                "status": "processing",
+                "step": "chunking",
+                "progress": 30,
+            });
+            ProgressSink::emit(
+                &*bus,
+                &TenantId(TENANT.into()),
+                "ingest:job:update",
+                payload,
+            )
+            .await
+            .unwrap();
+        }
+    });
+
+    // The out-of-scope frames are dropped before delivery, so the only frame
+    // after the greeting is the one for `doc-a`.
+    let frames = read_frames(response, 2).await;
+    emitter.await.unwrap();
+
+    assert_eq!(frames[0], ": connected\n\n");
+    assert!(frames[1].contains(r#""jobId":"job-a""#), "{}", frames[1]);
+    assert!(!frames[1].contains("job-b"), "{}", frames[1]);
+    assert!(!frames[1].contains("job-none"), "{}", frames[1]);
+}

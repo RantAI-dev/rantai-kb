@@ -453,6 +453,24 @@ like "no matches" (AGENTS.md rule 6). The MOCO-KF adapter sent the flag in its f
 and got empty results for every query; the default search already fuses the vector and
 keyword arms. Bun answers without the degrade.
 
+### 16. Deliberate Difference: by-ID document routes respect a key's knowledge-base limit (2026-11-04)
+
+Bun checks only the tenant on the routes that take a document ID (`GET`, `PATCH`,
+`DELETE /v1/documents/:id`, `/raw`, `/assets`, `/intelligence`), so a key limited with
+`create-api-key --kb kbA` could read, download, edit or delete a document that sits only in
+`kbB` if it knew the ID. Rust applies the limit in the one helper every by-ID route uses
+(`find_document`, including the `?hard=true` path that also sees soft-deleted rows): a
+document is visible to a limited key only when at least one of its knowledge bases is in the
+limit, and anything else answers the same **404 "Not found"** as a document in another
+tenant, so the ID's existence does not leak. A document in no knowledge base is not visible
+to a limited key, matching search and the document list. Unlimited keys (empty
+`knowledgeBaseIds`) are unchanged.
+
+The same rule covers `GET /v1/jobs/:id` and `POST /v1/jobs/:id/retry` when the job names a
+`documentId`, and `GET /v1/events`: a frame whose `documentId` is outside a limited key's
+knowledge bases is dropped, and a lookup failure fails closed (drop plus a warning). Bun
+enforces none of this.
+
 ---
 
 ## 6. Shared Known Issues

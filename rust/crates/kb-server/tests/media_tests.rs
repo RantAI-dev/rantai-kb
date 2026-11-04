@@ -304,3 +304,105 @@ async fn intelligence_across_tenants_is_a_404_and_queries_no_graph() {
         .await;
     assert_error(response, StatusCode::NOT_FOUND, "Not found").await;
 }
+
+// ─── SEC-1: a key limited to some knowledge bases ───────────────────────────
+
+const KB_A: &str = "kb-a";
+const KB_B: &str = "kb-b";
+const LIMITED: &str = "limited-key";
+
+fn limited_key(h: &Harness) {
+    h.documents.insert_api_key_with_scopes(
+        LIMITED,
+        TenantId(TENANT.to_string()),
+        vec!["kb:read".into()],
+        vec![kb_ports::KnowledgeBaseId(KB_A.to_string())],
+    );
+}
+
+fn doc_in_kb(h: &Harness, id: &str, kb: &str) {
+    let mut doc = doc_meta(id, id);
+    doc.knowledge_base_ids = vec![kb.to_string()];
+    h.documents.insert_doc(TenantId(TENANT.to_string()), doc);
+}
+
+#[tokio::test]
+async fn raw_assets_and_intelligence_of_a_document_outside_the_keys_knowledge_bases_are_404() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    limited_key(&h);
+    doc_in_kb(&h, "doc-b", KB_B);
+    h.blobs
+        .upload(
+            "documents/tenant-a/doc-b/doc-b.pdf",
+            b"%PDF-1.7 secret".to_vec(),
+            "application/pdf",
+        )
+        .await
+        .unwrap();
+    h.blobs
+        .upload(
+            "documents/tenant-a/doc-b/assets/fig-1.png",
+            b"\x89PNG-secret".to_vec(),
+            "image/png",
+        )
+        .await
+        .unwrap();
+
+    for uri in [
+        "/v1/documents/doc-b/raw",
+        "/v1/documents/doc-b/assets?key=documents%2Ftenant-a%2Fdoc-b%2Fassets%2Ffig-1.png",
+        "/v1/documents/doc-b/intelligence",
+    ] {
+        let response = h.send("GET", uri, LIMITED).await;
+        assert_error(response, StatusCode::NOT_FOUND, "Not found").await;
+    }
+}
+
+#[tokio::test]
+async fn raw_assets_and_intelligence_of_a_document_in_the_keys_knowledge_base_are_served() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    limited_key(&h);
+    doc_in_kb(&h, "doc-a", KB_A);
+    h.blobs
+        .upload(
+            "documents/tenant-a/doc-a/doc-a.pdf",
+            b"%PDF-1.7 mine".to_vec(),
+            "application/pdf",
+        )
+        .await
+        .unwrap();
+    h.blobs
+        .upload(
+            "documents/tenant-a/doc-a/assets/fig-1.png",
+            b"\x89PNG-mine".to_vec(),
+            "image/png",
+        )
+        .await
+        .unwrap();
+
+    let raw = h.send("GET", "/v1/documents/doc-a/raw", LIMITED).await;
+    assert_eq!(raw.status(), StatusCode::OK);
+    assert_eq!(
+        axum::body::to_bytes(raw.into_body(), 1024)
+            .await
+            .unwrap()
+            .as_ref(),
+        b"%PDF-1.7 mine"
+    );
+
+    let asset = h
+        .send(
+            "GET",
+            "/v1/documents/doc-a/assets?key=documents%2Ftenant-a%2Fdoc-a%2Fassets%2Ffig-1.png",
+            LIMITED,
+        )
+        .await;
+    assert_eq!(asset.status(), StatusCode::OK);
+
+    let intelligence = h
+        .send("GET", "/v1/documents/doc-a/intelligence", LIMITED)
+        .await;
+    assert_eq!(intelligence.status(), StatusCode::OK);
+}

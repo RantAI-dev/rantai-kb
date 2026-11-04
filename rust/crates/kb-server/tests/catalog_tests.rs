@@ -12,7 +12,7 @@ use harness::*;
 const TENANT: &str = "tenant-a";
 const OTHER: &str = "tenant-b";
 
-fn failed_job(h: &Harness, id: &str, tenant: &TenantId, document_id: Option<&str>) {
+fn failed_job_view(h: &Harness, id: &str, tenant: &TenantId, document_id: Option<&str>) {
     let mut view = kb_ports::JobView {
         id: id.to_string(),
         status: "failed".to_string(),
@@ -25,15 +25,19 @@ fn failed_job(h: &Harness, id: &str, tenant: &TenantId, document_id: Option<&str
         error: Some("extractor crashed".to_string()),
         document_id: document_id.map(str::to_string),
     };
-    if let Some(doc) = document_id {
-        h.documents.insert_doc(tenant.clone(), doc_meta(doc, "Doc"));
-    }
     view.attempt = 2;
     h.jobs
         .job_views
         .write()
         .unwrap()
         .insert((tenant.clone(), id.to_string()), view);
+}
+
+fn failed_job(h: &Harness, id: &str, tenant: &TenantId, document_id: Option<&str>) {
+    failed_job_view(h, id, tenant, document_id);
+    if let Some(doc) = document_id {
+        h.documents.insert_doc(tenant.clone(), doc_meta(doc, "Doc"));
+    }
 }
 
 #[tokio::test]
@@ -467,4 +471,74 @@ fn seed_kb(
         }],
     );
     id.to_string()
+}
+
+// ─── SEC-1: a key limited to some knowledge bases ───────────────────────────
+
+const KB_A: &str = "kb-a";
+const KB_B: &str = "kb-b";
+const LIMITED: &str = "limited-key";
+
+fn limited_key(h: &Harness) {
+    h.documents.insert_api_key_with_scopes(
+        LIMITED,
+        TenantId(TENANT.to_string()),
+        vec!["kb:read".into(), "kb:write".into()],
+        vec![kb_ports::KnowledgeBaseId(KB_A.to_string())],
+    );
+}
+
+fn doc_in_kb(h: &Harness, id: &str, kb: &str) {
+    let mut doc = doc_meta(id, id);
+    doc.knowledge_base_ids = vec![kb.to_string()];
+    h.documents.insert_doc(TenantId(TENANT.to_string()), doc);
+}
+
+#[tokio::test]
+async fn a_limited_key_cannot_read_or_retry_a_job_for_a_document_outside_its_knowledge_bases() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    limited_key(&h);
+    let tenant = TenantId(TENANT.to_string());
+    doc_in_kb(&h, "doc-b", KB_B);
+    failed_job_view(&h, "job-1", &tenant, Some("doc-b"));
+
+    let get = h.send("GET", "/v1/jobs/job-1", LIMITED).await;
+    assert_error(get, StatusCode::NOT_FOUND, "Not found").await;
+
+    let retry = h.send("POST", "/v1/jobs/job-1/retry", LIMITED).await;
+    assert_error(retry, StatusCode::NOT_FOUND, "Not found").await;
+
+    let views = h.jobs.job_views.read().unwrap();
+    let view = &views[&(tenant, "job-1".to_string())];
+    assert_eq!(view.status, "failed", "the job must not be requeued");
+    assert_eq!(view.attempt, 2);
+}
+
+#[tokio::test]
+async fn a_limited_key_can_read_and_retry_a_job_for_a_document_in_its_knowledge_base() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    limited_key(&h);
+    let tenant = TenantId(TENANT.to_string());
+    doc_in_kb(&h, "doc-a", KB_A);
+    failed_job_view(&h, "job-1", &tenant, Some("doc-a"));
+
+    let get = h.send("GET", "/v1/jobs/job-1", LIMITED).await;
+    assert_eq!(get.status(), StatusCode::OK);
+
+    let retry = h.send("POST", "/v1/jobs/job-1/retry", LIMITED).await;
+    assert_eq!(retry.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn an_unlimited_key_still_reads_a_job_for_any_document_in_its_tenant() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    let tenant = TenantId(TENANT.to_string());
+    doc_in_kb(&h, "doc-b", KB_B);
+    failed_job_view(&h, "job-1", &tenant, Some("doc-b"));
+
+    let get = h.send("GET", "/v1/jobs/job-1", &tenant_key(TENANT)).await;
+    assert_eq!(get.status(), StatusCode::OK);
 }
