@@ -70,7 +70,8 @@
   - `authority: {field, weight}` — `field` is `metadata.<key>` holding a JSON
     number; `weight` is in `(0, 1]`.
 
-  A hit's base relevance is `sigmoid(rerankScore)` when a reranker scored it,
+  A hit's base relevance is its `rerankScore` when a reranker scored it (passed
+  through a sigmoid only when the request's rerank scores are logits outside `[0, 1]`),
   otherwise `1/(1+rank)`; the final value is
   `base * (1 - w_r + w_r * 0.5^(age_days/halfLife)) * (1 - w_a + w_a * normalised_authority)`.
   Authority is min-max normalised per request over the candidate documents

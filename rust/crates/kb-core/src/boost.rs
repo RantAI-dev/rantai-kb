@@ -10,9 +10,9 @@
 //!
 //! Every boosted hit starts from a base relevance in `[0, 1]`:
 //!
-//! * `sigmoid(rerank_score) = 1 / (1 + e^-score)` when a reranker scored it —
-//!   monotone, so the base keeps the reranker's order, and bounded, so it can be
-//!   multiplied without a logit's unbounded scale dominating;
+//! * the rerank score itself when every rerank score of the request is already a
+//!   probability in `[0, 1]` (Cohere/Voyage, TEI), else `sigmoid(rerank_score)`
+//!   for logits — chosen once per request so the base keeps the reranker's order;
 //! * otherwise `1 / (1 + rank)` on the hit's post-fusion/post-rerank rank
 //!   (`rank` is 0-based, so the first hit has base `1.0` and the tenth `~0.09`).
 //!
@@ -132,6 +132,29 @@ impl BoostConfig {
 #[must_use]
 pub fn base_from_rerank(score: f32) -> f64 {
     1.0 / (1.0 + (-f64::from(score)).exp())
+}
+
+/// The base relevance of a reranked hit, choosing the mapping once per request.
+///
+/// Most rerankers here (Cohere/Voyage `relevance_score`, TEI's default) already
+/// return a probability in `[0, 1]`; a sigmoid on top squeezes those into
+/// `[0.5, 0.73]` and lets even a weak boost outweigh relevance. So when every
+/// rerank score of the request is in `[0, 1]` they are used as they are;
+/// otherwise (logits) every score goes through [`base_from_rerank`]. Deciding per
+/// request keeps the mapping monotone across the request's hits.
+#[must_use]
+pub fn base_from_rerank_in(score: f32, all_scores_are_probabilities: bool) -> f64 {
+    if all_scores_are_probabilities {
+        f64::from(score)
+    } else {
+        base_from_rerank(score)
+    }
+}
+
+/// True when every given rerank score lies in `[0, 1]`.
+#[must_use]
+pub fn rerank_scores_are_probabilities<I: IntoIterator<Item = f32>>(scores: I) -> bool {
+    scores.into_iter().all(|s| (0.0..=1.0).contains(&s))
 }
 
 /// The base relevance of a hit with no comparable score: `1 / (1 + rank)`.
@@ -329,6 +352,16 @@ mod tests {
         assert!((authority_factor(0.5, 1.0) - 0.5).abs() < 1e-12);
         // Out-of-range input is clamped, never allowed to exceed 1.
         assert!((authority_factor(2.0, 1.0) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn probability_rerank_scores_are_used_as_they_are() {
+        assert!(rerank_scores_are_probabilities([0.1, 0.9, 1.0, 0.0]));
+        assert!(!rerank_scores_are_probabilities([0.4, 2.5]));
+        assert!((base_from_rerank_in(0.9, true) - 0.9).abs() < 1e-6);
+        assert!((base_from_rerank_in(0.0, false) - 0.5).abs() < 1e-12);
+        // Logit mode stays monotone across the in-range/out-of-range boundary.
+        assert!(base_from_rerank_in(1.1, false) > base_from_rerank_in(0.9, false));
     }
 
     #[test]

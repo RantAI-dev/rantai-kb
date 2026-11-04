@@ -533,8 +533,9 @@ by-ID visibility helper as §16, so a key limited to other knowledge bases gets 
 a server before this release. The request is per call; there is no tenant-wide or
 env-configured default.
 
-**Formula.** Each hit gets a base relevance in `[0, 1]`: `sigmoid(rerankScore)` when a
-reranker scored it, otherwise `1/(1+rank)` on its post-fusion/post-rerank rank (`rank`
+**Formula.** Each hit gets a base relevance in `[0, 1]`: the `rerankScore` when a
+reranker scored it (a sigmoid only if the request's rerank scores are logits outside
+`[0, 1]`), otherwise `1/(1+rank)` on its post-fusion/post-rerank rank (`rank`
 is 0-based). Then
 
 ```text

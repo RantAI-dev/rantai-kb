@@ -25,8 +25,9 @@ mod weave;
 
 pub use boost::{
     AuthorityBoost, BoostConfig, MAX_METADATA_KEY_LEN, RecencyBoost, RecencyField,
-    authority_factor, authority_value, base_from_rank, base_from_rerank, date_value,
-    normalise_authority, parse_date, recency_decay, recency_factor, valid_metadata_key, weighted,
+    authority_factor, authority_value, base_from_rank, base_from_rerank, base_from_rerank_in,
+    date_value, normalise_authority, parse_date, recency_decay, recency_factor,
+    rerank_scores_are_probabilities, valid_metadata_key, weighted,
 };
 pub use chunk::{
     Chunk, ChunkMetadata, ChunkOptions, ChunkingStrategy, SmartChunk, SmartChunkMetadata,

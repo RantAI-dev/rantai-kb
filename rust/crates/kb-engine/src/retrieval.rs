@@ -8,9 +8,9 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use kb_core::{
     BoostConfig, ContextItem, RecencyField, RrfOptions, SourceEntry, authority_factor,
-    authority_value, base_from_rank, base_from_rerank, build_context_and_sources, date_value,
+    authority_value, base_from_rank, base_from_rerank_in, build_context_and_sources, date_value,
     normalise_authority, parse_date, recency_factor, reciprocal_rank_fusion_with,
-    weave_neighbours_with,
+    rerank_scores_are_probabilities, weave_neighbours_with,
 };
 use kb_ports::{
     Candidate, Chunk, ChunkId, ChunkMetadata, DocumentId, DocumentMeta, DocumentScope,
@@ -684,13 +684,15 @@ pub fn apply_boosts(
 
     let recency = config.recency.as_ref();
     let authority = config.authority.as_ref();
+    let probabilities = rerank_scores_are_probabilities(hits.iter().filter_map(|h| h.rerank_score));
     let mut scored: Vec<(SearchHit, f64)> = std::mem::take(hits)
         .into_iter()
         .enumerate()
         .map(|(index, hit)| {
-            let base = hit
-                .rerank_score
-                .map_or_else(|| base_from_rank(hit.rank), base_from_rerank);
+            let base = hit.rerank_score.map_or_else(
+                || base_from_rank(hit.rank),
+                |score| base_from_rerank_in(score, probabilities),
+            );
             let mut factor = 1.0_f64;
             if let (Some(recency), Some(date)) = (recency, dates[index]) {
                 factor *= recency_factor(date, now, recency.half_life_days, recency.weight);
