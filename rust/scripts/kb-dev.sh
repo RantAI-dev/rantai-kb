@@ -28,6 +28,7 @@ ENV_FILE="$DEPLOY_DIR/.env"
 TIER_FILE="$DEPLOY_DIR/.tier"
 PROJECT="${KB_DEV_PROJECT:-rantai-kb-dev}"
 IMAGE="rantai-kb-rust:${KB_IMAGE_TAG:-dev}"
+OCR_IMAGE="rantai-kb-ocr-ppocr:${KB_IMAGE_TAG:-dev}"
 TIERS=(lite lite-en desk studio station cloud)
 CMD=""
 
@@ -244,6 +245,15 @@ cmd_up() {
   if [ "$build" = "1" ]; then
     compose_for "$tier" build "kb-$tier"
   fi
+  # The lite tiers also run a locally built OCR sidecar (rust/deploy/ocr-ppocr).
+  case "$tier" in
+    lite | lite-en)
+      if [ "$build" = "1" ] || ! docker image inspect "$OCR_IMAGE" >/dev/null 2>&1; then
+        note "building the PP-OCRv6 sidecar image $OCR_IMAGE"
+        compose_for "$tier" build ocr-ppocr
+      fi
+      ;;
+  esac
   compose_for "$tier" up -d --no-build
 
   wait_healthy "$tier"
