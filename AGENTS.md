@@ -6,20 +6,18 @@ Instructions for any coding agent working in this repo (Claude Code, OpenCode, A
 
 rantai-kb is a standalone document ingest and retrieval service: upload a file, it is extracted,
 chunked, embedded and indexed; `/v1/search` returns scoped context with sources and figures.
-Two runtimes share the Postgres tables and the API shape:
+It has one runtime, in Rust (`rust/crates/`), hexagonal: `kb-core` (pure logic) ←
+`kb-ports` (interfaces) ← adapters (`kb-inference`, `kb-store-pg`, `kb-store-qdrant`,
+`kb-store-blob`, `kb-extract`) and `kb-engine` (pipelines) ← `kb-server` (composition root).
 
-- **Bun/TS** (`src/`): the frozen production service.
-- **Rust** (`rust/crates/`): the port that replaces it. Hexagonal: `kb-core` (pure logic) ←
-  `kb-ports` (interfaces) ← adapters (`kb-inference`, `kb-store-pg`, `kb-store-qdrant`,
-  `kb-store-blob`, `kb-extract`) and `kb-engine` (pipelines) ← `kb-server` (composition root).
-
-**All new work happens in Rust.** Bun is frozen: no features, no refactors. Touch it only if
-the user asks for a specific fix.
+The Bun/TypeScript service was removed in v0.2.0 (`DEC-3`); the last Bun release is tag
+`v0.1.0`. `docs/rust-cutover.md` is the migration guide for operators still on that release.
+(**All new work happens in Rust.**)
 
 Stores: Postgres (documents, jobs, KBs, keys, and the entity graph when `KB_GRAPH_STORE=pg`;
-Prisma migrations), Qdrant (chunks, vectors, BM25, page images — the only chunk store), and
-S3-compatible blobs. Docs: `docs/porting-plan.md`, `docs/rust-cutover.md`, `rust/README.md`,
-`rust/NOTES.md`.
+`kb-server migrate` applies the Prisma migrations in `prisma/migrations/`), Qdrant (chunks,
+vectors, BM25, page images — the only chunk store), and S3-compatible blobs. Docs:
+`docs/rust-cutover.md`, `rust/README.md`, `rust/deploy/README.md`, `rust/NOTES.md`.
 
 **Product and work tracking:**
 
@@ -32,8 +30,6 @@ S3-compatible blobs. Docs: `docs/porting-plan.md`, `docs/rust-cutover.md`, `rust
 
 | Check | Command |
 |---|---|
-| TS typecheck / tests | `bun run typecheck` · `bun run test` |
-| TS boundary | `bun run check:kb-boundary` |
 | Rust format / lint | `cargo fmt --all --manifest-path rust/Cargo.toml --check` · `cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings` |
 | Rust tests | `cargo test --manifest-path rust/Cargo.toml --workspace` (needs libpdfium: `./rust/scripts/fetch-pdfium.sh ./rust/.vendor/pdfium`) |
 | Rust boundary | `cargo run --manifest-path rust/Cargo.toml -p kb-server -- check-boundary` |
@@ -48,13 +44,12 @@ S3-compatible blobs. Docs: `docs/porting-plan.md`, `docs/rust-cutover.md`, `rust
    session with uncommitted work and no note of it. Do not push or open PRs unless asked.
 3. **Respect the boundaries.** `kb-core` does no I/O; `kb-engine` knows ports, never adapter
    names. Both boundary checks must pass.
-4. **Rust ↔ Bun share Postgres and the API, not the chunk store.** The PostgreSQL tables
-   (documents, jobs, KBs, keys), their record ids, the job queue and the HTTP shapes must
-   interoperate, so a key minted by one runtime works on the other and either worker can claim
-   either job. The chunk store is **not** shared: Rust is Qdrant-only and Bun keeps its own
-   SurrealDB store. Production data written by Bun is moved to Qdrant with
-   `kb-server reindex` (rebuild from the S3 originals), not by reading SurrealDB. Where Rust
-   deliberately differs from Bun (e.g. the BM25 scope fix), say so in `docs/rust-cutover.md`.
+4. **The Postgres schema and the HTTP API are the contract for calling apps** (RantAI
+   products). The PostgreSQL tables (documents, jobs, KBs, keys), their record ids, the job
+   queue and the HTTP shapes must keep working across upgrades. `/v1/*` changes must be
+   additive or noted in `CHANGELOG.md` and `docs/rust-cutover.md`. The chunk store is
+   **Qdrant only**; production data from a v0.1.0 Bun deployment moves with
+   `kb-server reindex` (rebuild from the S3 originals), not by reading SurrealDB.
 5. **Tenant scope is sacred.** Every retrieval arm (vector, BM25, entity, figure, neighbour)
    must be filtered to the caller's visible documents. Add a test for any new arm.
 6. **A failed search is not an empty result.** Degrade visibly (`degrades`), never silently.
