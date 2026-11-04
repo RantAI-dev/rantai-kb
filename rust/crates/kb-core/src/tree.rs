@@ -465,12 +465,12 @@ fn number_kinds(text: &str) -> Vec<(String, NumberKind)> {
     found
 }
 
-fn number_bonus(number: &str, kind: NumberKind, node: Option<&str>) -> f32 {
-    let Some(node_number) = node else {
+fn number_bonus(number: &str, kind: NumberKind, node: Option<(&str, bool)>) -> f32 {
+    let Some((node_number, is_chapter)) = node else {
         return 0.0;
     };
     if node_number == number {
-        return if kind == NumberKind::Chapter {
+        return if kind == NumberKind::Chapter && is_chapter {
             12.0
         } else {
             8.0
@@ -525,7 +525,7 @@ fn document_scores<'a>(
 }
 
 /// BM25 over one document's node titles, k1 1.2 / b 0.75.
-fn bm25(query: &[String], nodes: &[(Vec<String>, Option<String>)]) -> Vec<f32> {
+fn bm25(query: &[String], nodes: &[(Vec<String>, Option<(String, bool)>)]) -> Vec<f32> {
     if nodes.is_empty() || query.is_empty() {
         return vec![0.0; nodes.len()];
     }
@@ -622,13 +622,16 @@ pub fn score_tree(query: &str, documents: &[TreeDocument<'_>]) -> Vec<TreeMatch>
     let mut scored: Vec<TreeMatch> = Vec::new();
     for document_index in chosen {
         let document = documents[document_index];
-        let node_texts: Vec<(Vec<String>, Option<String>)> = document
+        let node_texts: Vec<(Vec<String>, Option<(String, bool)>)> = document
             .nodes
             .iter()
             .map(|node| {
                 let mut words = tokens(&node.title);
                 words.extend(document_words[document_index].iter().cloned());
-                (words, node_number(&node.title))
+                (
+                    words,
+                    node_number(&node.title).map(|number| (number, is_chapter_node(&node.title))),
+                )
             })
             .collect();
         let lexical = bm25(&query_tokens, &node_texts);
@@ -636,7 +639,14 @@ pub fn score_tree(query: &str, documents: &[TreeDocument<'_>]) -> Vec<TreeMatch>
             let bonus: f32 = numbers
                 .iter()
                 .map(|(number, kind)| {
-                    number_bonus(number, *kind, node_texts[node_index].1.as_deref())
+                    number_bonus(
+                        number,
+                        *kind,
+                        node_texts[node_index]
+                            .1
+                            .as_ref()
+                            .map(|(number, chapter)| (number.as_str(), *chapter)),
+                    )
                 })
                 .sum();
             let score = lexical.get(node_index).copied().unwrap_or(0.0) + bonus;
@@ -723,6 +733,23 @@ mod tests {
         let hits = score("what does section 4.2 say about leave?");
         let first = hits.first().expect("a hit");
         assert_eq!(outline()[first.node].title, "4.2 Leave entitlement");
+    }
+
+    #[test]
+    fn a_chapter_number_prefers_a_chapter_node_over_a_top_level_number() {
+        let nodes = vec![
+            node("2. Funding overview", 1, 10, 14),
+            node("Chapter 2 Funding", 1, 10, 14),
+        ];
+        let hits = score_tree(
+            "chapter 2",
+            &[TreeDocument {
+                key: "doc-a",
+                title: "Report",
+                nodes: &nodes,
+            }],
+        );
+        assert_eq!(nodes[hits[0].node].title, "Chapter 2 Funding");
     }
 
     #[test]
