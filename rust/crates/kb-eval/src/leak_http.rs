@@ -409,6 +409,7 @@ async fn upload_and_wait(
         .part("file", part)
         .text("title", format!("Leak canary {index:02}"))
         .text("categories", category_id.to_string())
+        .text("externalRef", format!("leak-ref-{index:02}"))
         .text("knowledgeBaseIds", knowledge_base_id.to_string());
 
     let response = client
@@ -448,6 +449,7 @@ async fn upload_and_wait(
         tenant: tenant_id.to_string(),
         knowledge_base_id: knowledge_base_id.to_string(),
         category_id: category_id.to_string(),
+        external_ref: format!("leak-ref-{index:02}"),
         canaries: canaries.clone(),
         n_chunks: detail
             .get("document")
@@ -524,6 +526,9 @@ pub fn search_body(scope: &Scope, query: &str, max_chunks: u32) -> Value {
     }
     if let Some(document_ids) = &scope.document_ids {
         body["documentIds"] = json!(document_ids);
+    }
+    if let Some(external_refs) = &scope.external_refs {
+        body["externalRefs"] = json!(external_refs);
     }
     body
 }
@@ -1099,6 +1104,10 @@ mod tests {
                 ScopeKind::DocumentIds => Some(vec!["a".to_string()]),
                 _ => None,
             },
+            external_refs: match kind {
+                ScopeKind::ExternalRef => Some(vec!["ref-a".to_string()]),
+                _ => None,
+            },
         }
     }
 
@@ -1119,6 +1128,10 @@ mod tests {
         assert_eq!(
             search_body(&scope(ScopeKind::DocumentIds), "q", 7),
             json!({"query": "q", "maxChunks": 7, "documentIds": ["a"]})
+        );
+        assert_eq!(
+            search_body(&scope(ScopeKind::ExternalRef), "q", 7),
+            json!({"query": "q", "maxChunks": 7, "externalRefs": ["ref-a"]})
         );
     }
 

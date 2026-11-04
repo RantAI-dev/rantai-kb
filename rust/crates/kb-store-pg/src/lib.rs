@@ -59,5 +59,8 @@ mod tests {
         let f = DocumentFilter::default();
         assert!(f.knowledge_base_ids.is_empty());
         assert!(f.category.is_none());
+        assert!(f.external_refs.is_none());
+        assert!(f.language.is_none());
+        assert!(f.metadata.is_empty());
     }
 }

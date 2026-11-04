@@ -824,6 +824,7 @@ mod pipeline_tests {
                 filter: DocumentFilter {
                     knowledge_base_ids: vec![KnowledgeBaseId("kb_a".into())],
                     category: None,
+                    ..DocumentFilter::default()
                 },
             })
             .await
@@ -887,6 +888,7 @@ mod pipeline_tests {
                 filter: DocumentFilter {
                     knowledge_base_ids: vec![],
                     category: Some("cat_a".into()),
+                    ..DocumentFilter::default()
                 },
             })
             .await

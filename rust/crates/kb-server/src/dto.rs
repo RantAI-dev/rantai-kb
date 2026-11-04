@@ -89,6 +89,19 @@ pub struct SearchRequestDto {
     #[serde(rename = "documentIds", default)]
     pub document_ids: Option<Vec<String>>,
     pub category: Option<String>,
+    /// Additive (`RET-3`): only documents whose `Document.externalRef` is one
+    /// of these. An explicit empty list selects nothing.
+    #[serde(rename = "externalRefs", default)]
+    pub external_refs: Option<Vec<String>>,
+    /// Additive (`RET-3`): only documents whose JSONB metadata `language` key
+    /// equals this value.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Additive (`RET-3`): top-level JSONB metadata predicates. Kept untyped
+    /// so an invalid key or a non-scalar value is a 400 from validation rather
+    /// than a deserialiser 422.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
     pub hybrid: Option<bool>,
     pub format: Option<String>,
 }

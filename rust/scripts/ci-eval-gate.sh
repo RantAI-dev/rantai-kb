@@ -79,7 +79,7 @@ test -f "$BASELINE_FILE" || { echo "ERROR: Baseline file $BASELINE_FILE does not
   --max-drop "$MAX_DROP" \
   --metric "$METRICS"
 
-echo "=== 6. Running cross-scope leak matrix ==="
+echo "=== 6. Running cross-scope leak matrix (tenant, KB, category, documentIds, externalRefs) ==="
 mkdir -p "$EVAL_OUT_DIR/leak"
 "$KB_SERVER_BIN" eval leak \
   --base-url "$KB_STACK_BASE_URL" \

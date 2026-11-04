@@ -32,7 +32,8 @@ use axum::{Json, Router};
 use kb_core::policy::MimeRegistry;
 use kb_engine::timing::{Stopwatch, SystemClock};
 use kb_ports::{
-    AuthContext, DocumentFilter, DocumentId, DocumentMeta, KnowledgeBaseId, ScopeRequest, SearchHit,
+    AuthContext, DocumentFilter, DocumentId, DocumentMeta, KnowledgeBaseId, MetadataFilter,
+    ScopeRequest, SearchHit,
 };
 use serde::{Deserialize, Serialize};
 
@@ -259,6 +260,7 @@ async fn search(
     }
     let requested_kbs = restrict_kbs(&auth, body.knowledge_base_ids.as_deref());
     let max_chunks = body.max_chunks.unwrap_or(8).clamp(1, 50);
+    let metadata_filter = parse_metadata_filter(body.metadata.as_ref())?;
 
     // A key bound to specific knowledge bases that asks for none of them gets
     // an explicit note rather than an empty result: "no results" and "you may
@@ -273,6 +275,24 @@ async fn search(
             .into_response());
         }
     }
+
+    // The one filter every branch resolves into a scope. `externalRefs`,
+    // `language` and `metadata` narrow the tenant's visible documents in
+    // Postgres (`build_scope` -> `resolve_filter`), so every retrieval arm sees
+    // the narrowed scope and none of them can spend top-k on an excluded
+    // document and then drop it after ranking.
+    let filter = DocumentFilter {
+        knowledge_base_ids: requested_kbs
+            .clone()
+            .unwrap_or_default()
+            .into_iter()
+            .map(KnowledgeBaseId::new_unchecked)
+            .collect(),
+        category: body.category.clone(),
+        external_refs: body.external_refs.clone(),
+        language: body.language.clone(),
+        metadata: metadata_filter,
+    };
 
     // Branch 1: documentIds filtering (TypeScript api.ts:139)
     if let Some(doc_ids) = body.document_ids.as_ref() {
@@ -295,15 +315,18 @@ async fn search(
         }
         let alive_map: HashMap<DocumentId, DocumentMeta> =
             alive.iter().map(|m| (m.id.clone(), m.clone())).collect();
-        let full_scope = state
+        // Narrow the *filtered* scope, not the whole tenant: the key's
+        // knowledge-base limit and every metadata filter still apply, so
+        // `documentIds` can only intersect them, never widen them.
+        let filtered_scope = state
             .documents
             .build_scope(&ScopeRequest {
                 tenant: auth.tenant_id.clone(),
-                filter: DocumentFilter::default(),
+                filter: filter.clone(),
             })
             .await
             .map_err(ApiError::from)?;
-        let scope = full_scope.narrowed_to(&requested);
+        let scope = filtered_scope.narrowed_to(&requested);
         let scope_build_ms = scope_sw.elapsed_ms();
         let embed_sw = Stopwatch::start(&SystemClock);
         let embedded = state
@@ -407,14 +430,6 @@ async fn search(
     }
 
     // Branch 3: standard retrieval
-    let filter = DocumentFilter {
-        knowledge_base_ids: requested_kbs
-            .unwrap_or_default()
-            .into_iter()
-            .map(KnowledgeBaseId::new_unchecked)
-            .collect(),
-        category: body.category.clone(),
-    };
     let scope_sw = Stopwatch::start(&SystemClock);
     let scope = state
         .documents
@@ -537,6 +552,64 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
         body,
     )
         .into_response()
+}
+
+/// Validate a `metadata` search filter and normalise its values.
+///
+/// Only top-level keys are accepted, each key must match
+/// `[A-Za-z0-9_.-]{1,64}`, and every value must be a string, number, boolean or
+/// an array of those. Anything else is a 400 like the other request-shape
+/// errors on this route; the values are compared as Postgres `->>` renders
+/// them, so `2024` and `"2024"` both match the JSON number/string.
+fn parse_metadata_filter(
+    value: Option<&serde_json::Value>,
+) -> Result<Vec<MetadataFilter>, ApiError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let Some(object) = value.as_object() else {
+        return Err(ApiError::BadRequest(
+            "'metadata' must be an object of key/value pairs".to_string(),
+        ));
+    };
+    let mut out = Vec::with_capacity(object.len());
+    for (key, value) in object {
+        if key.is_empty() || key.len() > 64 || !key.bytes().all(metadata_key_byte) {
+            return Err(ApiError::BadRequest(format!(
+                "Invalid metadata key '{key}': keys must match [A-Za-z0-9_.-]{{1,64}}"
+            )));
+        }
+        let values = metadata_scalar_values(value).ok_or_else(|| {
+            ApiError::BadRequest(format!(
+                "Invalid value for metadata key '{key}': values must be strings, numbers, booleans or arrays of those"
+            ))
+        })?;
+        out.push(MetadataFilter {
+            key: key.clone(),
+            values,
+        });
+    }
+    Ok(out)
+}
+
+fn metadata_key_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-')
+}
+
+fn metadata_scalar_values(value: &serde_json::Value) -> Option<Vec<String>> {
+    match value {
+        serde_json::Value::Array(items) => items.iter().map(metadata_scalar).collect(),
+        scalar => metadata_scalar(scalar).map(|value| vec![value]),
+    }
+}
+
+fn metadata_scalar(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 /// Narrow a caller-supplied knowledge-base filter to what the key may see.
