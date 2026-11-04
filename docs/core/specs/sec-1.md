@@ -57,11 +57,11 @@ Run on a running server by the product owner. A step not performed is never a pa
 
 | ID | Do this | Expect | Result |
 | --- | --- | --- | --- |
-| `SEC-1-AC1` | Make KB A and KB B in one tenant, upload doc X into B only, and make a key limited to A | — | Not run |
-| `SEC-1-AC2` | With the A key: `GET /v1/documents/<X>`, then `/raw`, `/assets`, `/intelligence` | Each is 404 | Not run |
-| `SEC-1-AC3` | With the A key: `PATCH` and `DELETE /v1/documents/<X>` | 404, and X is unchanged | Not run |
-| `SEC-1-AC4` | With an unlimited key in the same tenant: the same requests | They work as before | Not run |
-| `SEC-1-AC5` | With the A key: search for X's exact text | X is not returned (unchanged behaviour) | Not run |
+| `SEC-1-AC1` | Make KB A and KB B in one tenant, upload doc X into B only, and make a key limited to A | — | Pass (2026-11-04, live lite stack) |
+| `SEC-1-AC2` | With the A key: `GET /v1/documents/<X>`, then `/raw`, `/assets`, `/intelligence` | Each is 404 | Pass: all four 404 (2026-11-04, live) |
+| `SEC-1-AC3` | With the A key: `PATCH` and `DELETE /v1/documents/<X>` | 404, and X is unchanged | Pass: 404 and 404, title unchanged (2026-11-04, live) |
+| `SEC-1-AC4` | With an unlimited key in the same tenant: the same requests | They work as before | Pass for GET (200, live 2026-11-04); PATCH and DELETE with an unlimited key are covered by the route tests, not run live |
+| `SEC-1-AC5` | With the A key: search for X's exact text | X is not returned (unchanged behaviour) | Pass: 0 hits (2026-11-04, live) |
 | `SEC-1-AC6` (operator) | `cargo test -p kb-server` | A new test covering AC2 and AC3 passes, and so do the old tests | Pass (2026-11-04: `cargo test -p kb-server -p kb-ports -p kb-store-pg` — kb-server 138 unit + 121 integration tests, all passing) |
 
 ## Not included

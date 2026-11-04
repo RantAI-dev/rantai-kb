@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.2.0
+## 0.2.0 — 2026-11-04
 
 The first Rust release. `v0.1.0` remains the last Bun release.
 
@@ -23,12 +23,23 @@ The first Rust release. `v0.1.0` remains the last Bun release.
   main's 0.813; the CPU lite tier scores 0.802 on MIRACL-id-50 with a 42 ms median
   search on two cores.
 
+### Fixed
+
+- **Knowledge-base limits on by-ID routes (`SEC-1`).** A key limited to some knowledge
+  bases now gets 404 for any document outside them on `GET`/`PATCH`/`DELETE
+  /v1/documents/:id`, `/raw`, `/assets`, `/intelligence`, `/v1/jobs/:id`, retry and
+  `/v1/events`. The v0.1.0 Bun service did not check this.
+- **Deterministic ranking ties.** Equal fused scores are broken on the chunk's text, page
+  and index instead of the per-ingest document id, so re-ingesting the same corpus gives
+  the same order.
+
 ### Changed
 
 - Container image `ghcr.io/rantai-dev/rantai-kb` is built from `rust/Dockerfile` for
   amd64 and arm64.
-- The root compose file and `kb-dev.sh` now run the Rust stack; the image entrypoint is
-  `kb-server migrate && kb-server apply-schema && kb-server serve`.
+- `rust/deploy/compose.yaml`, driven by `rust/scripts/kb-dev.sh`, runs the stack. The image
+  runs `kb-server migrate` and `apply-schema` on boot (skip with `KB_SKIP_MIGRATE=1`),
+  then `kb-server serve`.
 
 ### Removed
 
