@@ -52,6 +52,23 @@ pub const SELECT_ALIVE_BY_IDS: &str = r#"
        AND d."deletedAt" IS NULL
 "#;
 
+/// Section outlines for the tree arm (DEC-4).
+///
+/// Tenant and the caller's visible document ids are both bound: `$1` is the
+/// tenant, `$2` the scope's document list. A document with no outline is
+/// filtered out rather than returned as a JSON `null`, so the arm can tell "no
+/// structure" from "never extracted". The whole contract is one statement, so
+/// there is no second read a scope bug could hide in.
+pub const SELECT_OUTLINES: &str = r#"
+    SELECT d.id,
+           d.metadata -> 'outline' AS outline
+      FROM "Document" d
+     WHERE d."tenantId" = $1
+       AND d.id = ANY($2::text[])
+       AND d."deletedAt" IS NULL
+       AND jsonb_typeof(d.metadata -> 'outline') = 'object'
+"#;
+
 pub const SELECT_DOCS_TENANT_ONLY: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
            d."externalRef" AS external_ref,

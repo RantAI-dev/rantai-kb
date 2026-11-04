@@ -178,6 +178,33 @@ pub fn scoped_ids_filter(scope: &DocumentScope, ids: &[ChunkId]) -> Filter {
     filter
 }
 
+/// `tenant == t AND document_id == d AND page IN (there, pages)`.
+///
+/// Every half is required, exactly like [`chunk_range_filter`]: the tenant
+/// alone is not scope, and the page list alone could cross into another
+/// document. The caller (the tree arm) only passes documents it read from a
+/// [`DocumentScope`], and this filter repeats the tenant/document condition so
+/// a bug in that caller cannot widen the read.
+#[must_use]
+pub fn pages_filter(tenant: &TenantId, document: &DocumentId, pages: &[u32]) -> Filter {
+    Filter::must([
+        Condition::matches(
+            KEY_TENANT_ID,
+            MatchValue::Keyword(tenant.as_str().to_string()),
+        ),
+        Condition::matches(
+            KEY_DOCUMENT_ID,
+            MatchValue::Keyword(document.as_str().to_string()),
+        ),
+        Condition::matches(
+            KEY_PAGE,
+            MatchValue::Integers(qdrant_client::qdrant::RepeatedIntegers {
+                integers: pages.iter().map(|page| i64::from(*page)).collect(),
+            }),
+        ),
+    ])
+}
+
 /// The payload of one unit, as Qdrant stores it.
 #[must_use]
 pub fn unit_payload(unit: &IndexUnit) -> Payload {
@@ -374,6 +401,14 @@ mod tests {
         let scope = test_scope(&[]);
         let filter = scope_filter(&scope);
         assert_eq!(filter.must.len(), 2);
+    }
+
+    #[test]
+    fn a_pages_filter_names_tenant_document_and_page() {
+        let tenant = TenantId::new_unchecked("tenant-a");
+        let document = DocumentId::new_unchecked("doc-a1");
+        let filter = pages_filter(&tenant, &document, &[3, 4]);
+        assert_eq!(filter.must.len(), 3, "tenant, document and pages");
     }
 
     #[test]
