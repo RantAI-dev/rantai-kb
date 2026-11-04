@@ -12,6 +12,7 @@
 
 mod jobs;
 mod media;
+mod structure;
 mod taxonomy;
 mod upload;
 
@@ -98,6 +99,10 @@ pub fn router() -> Router<Arc<AppState>> {
                 .delete(delete_document),
         )
         .route("/v1/documents/:id/raw", get(media::get_document_raw))
+        .route(
+            "/v1/documents/:id/structure",
+            get(structure::get_document_structure),
+        )
         .route("/v1/documents/:id/assets", get(media::get_document_asset))
         .route(
             "/v1/documents/:id/intelligence",

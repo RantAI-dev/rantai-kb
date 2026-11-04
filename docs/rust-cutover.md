@@ -490,6 +490,19 @@ the tenant, soft-delete, knowledge-base and category predicates
 figure, neighbour, graph, entity — inherits the narrowed scope before ranking. Bun has no
 equivalent; a client that filters after the fact spends top-k on documents it then drops.
 The fields are additive and Bun ignores them.
+### 18. Additive: `GET /v1/documents/:id/structure` (2026-11-04)
+
+A new read-only route returns a document's `pages`, `figures` and chunk → page map, with
+`documentId`, `externalRef` and `title`. Bun has no equivalent, so nothing changes for an
+existing client. Every value is read from what ingest already stored: page units in the
+page-image index, figure chunks in the text index merged with `Document.metadata.figures`
+for bbox/caption, and text-index units for the chunk map. `hasTextLayer`, `ocrText` and
+`imageAssetKey` are recorded on page units from this release on; a document ingested
+before that answers `null` for them rather than inferring an answer. Figure OCR is not
+extracted today, so `figures[].ocrText` is null. The read is capped at 20,000 text units
+and 2,000 page units and sets `truncated: true` when a cap is reached. It uses the same
+by-ID visibility helper as §16, so a key limited to other knowledge bases gets the same
+404 as an unknown document.
 
 ---
 

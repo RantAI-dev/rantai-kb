@@ -50,6 +50,14 @@ pub const EXACT_SEARCH_THRESHOLD: u64 = 20_000;
 /// *fast* an answer comes, never whether it is right.
 const POINT_COUNT_TTL_MS: u64 = 60_000;
 
+/// Points read per scroll call by [`RetrievalIndex::document_units`].
+///
+/// The structure read only needs ids, pages, types and metadata, but the
+/// payload always carries the text, so the window bounds one response's memory
+/// rather than the whole document's. 512 keeps a single response small enough
+/// to be cheap while a 20,000-unit cap costs at most ~40 round trips.
+const DOCUMENT_SCROLL_WINDOW: u32 = 512;
+
 /// The Qdrant adapter for `RetrievalIndex`.
 #[derive(Clone)]
 pub struct QdrantIndex {
@@ -734,6 +742,51 @@ impl RetrievalIndex for QdrantIndex {
                 out.push(c);
             }
         }
+        out.sort_by_key(|c| c.chunk_index);
+        Ok(out)
+    }
+
+    async fn document_units(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+        max_units: usize,
+    ) -> Result<Vec<Candidate>, PortError> {
+        if max_units == 0 {
+            return Ok(Vec::new());
+        }
+        let filter = crate::payload::one_document_filter(tenant, document_id);
+        let mut out: Vec<Candidate> = Vec::with_capacity(max_units.min(1024));
+        let mut offset: Option<PointId> = None;
+        while out.len() < max_units {
+            let remaining = max_units - out.len();
+            let window = u32::try_from(remaining)
+                .unwrap_or(u32::MAX)
+                .min(DOCUMENT_SCROLL_WINDOW);
+            let mut builder = ScrollPointsBuilder::new(&self.collection)
+                .filter(filter.clone())
+                .limit(window)
+                .with_payload(true);
+            if let Some(offset) = offset.take() {
+                builder = builder.offset(offset);
+            }
+            let response = self.client.scroll(builder).await.map_err(map)?;
+            if response.result.is_empty() {
+                break;
+            }
+            for point in response.result {
+                if let Some(candidate) =
+                    candidate_from(&point.payload, ArmScores::default(), ArmRanks::default())
+                {
+                    out.push(candidate);
+                }
+            }
+            match response.next_page_offset {
+                Some(next) => offset = Some(next),
+                None => break,
+            }
+        }
+        out.truncate(max_units);
         out.sort_by_key(|c| c.chunk_index);
         Ok(out)
     }

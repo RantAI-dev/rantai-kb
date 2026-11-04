@@ -132,6 +132,7 @@ tenant; **there is no route that reads across tenants.**
 | `GET` `PATCH` `DELETE` | `/v1/documents/:id` | Read, edit or delete one document. |
 | `GET` | `/v1/documents/:id/raw` | Download the stored original. |
 | `GET` | `/v1/documents/:id/assets` | Fetch a document figure or page image. |
+| `GET` | `/v1/documents/:id/structure` | Pages, figures and the chunk → page map. |
 | `GET` | `/v1/documents/:id/intelligence` | Extracted entities and relations. |
 | `POST` | `/v1/search` | Retrieve chunks for a query. The reason this service exists. |
 | `GET` | `/v1/jobs/:id` | Ingest progress: step, percentage, ETA, error. |
@@ -149,6 +150,20 @@ tenant; **there is no route that reads across tenants.**
 
 **Search options** (JSON): `query` (required), `maxChunks`, `knowledgeBaseIds`,
 `documentIds`, `category`, `hybrid`, `format`.
+
+**Document structure.** `GET /v1/documents/:id/structure` returns the document's
+`pages` (`number`, 0-based like every other `page` in the API), `figures` (`key`,
+`page`, `bbox`, `caption`, `assetKey`) and the `chunks` → page map, plus
+`documentId`, `externalRef` and `title`. It never re-parses the file: pages come from
+the page-image index, figures from the figure chunks a search can return and the
+document's figure records, and chunks from the text index. `hasTextLayer` and
+`ocrText` are recorded at ingest from this release on; `ocrText` is the page's stored
+text (at most 8,000 characters) and omits the visual description the caption stage
+appends. `imageAssetKey` is present only when ingest recorded that the page JPEG was
+written. A document ingested before these fields were recorded answers `null` for
+them, never a guess. The read is capped at 20,000 chunks and 2,000 pages and sets
+`truncated` when either cap is reached. Like every by-ID route it enforces the tenant
+and the key's knowledge-base limit.
 
 ## What it does with a file
 

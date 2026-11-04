@@ -603,6 +603,10 @@ impl IngestWorker {
                 )));
             }
         }
+        // What the extractor knows about each page's text origin, so the page
+        // unit can carry it for the structure read. Derived from the extraction
+        // result, never guessed from the text later.
+        let page_semantics = crate::page_arm::PageTextSemantics::from_extraction(&extraction);
         let pages = async {
             let pages = self.page_ingest.as_ref()?;
             let page_texts: HashMap<u32, String> = extraction
@@ -617,7 +621,7 @@ impl IngestWorker {
             );
             Some(
                 pages
-                    .index_document(
+                    .index_document_with_semantics(
                         &job.tenant_id,
                         document_id,
                         category,
@@ -625,6 +629,7 @@ impl IngestWorker {
                         &bytes,
                         &chunks_by_page,
                         &page_texts,
+                        &page_semantics,
                     )
                     .await,
             )
