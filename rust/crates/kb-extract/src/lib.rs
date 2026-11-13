@@ -48,6 +48,7 @@ mod testkit;
 mod text;
 pub mod tiff_pages;
 pub mod vision_llm;
+pub mod visuals;
 mod xlsx;
 mod xml;
 mod zip_read;
@@ -82,6 +83,7 @@ pub use pdfium::{
 pub use scanned::is_pdf_scanned;
 pub use smart_router::SmartRouterExtractor;
 pub use vision_llm::VisionLlmExtractor;
+pub use visuals::{LocalVisualCollector, normalize_image};
 
 use async_trait::async_trait;
 use kb_ports::{ExtractionOptions, ExtractionResult, Extractor, PortError};
