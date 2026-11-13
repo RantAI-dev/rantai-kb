@@ -85,10 +85,17 @@ pub struct FigureStructure {
     /// `[x0, y0, x1, y1]` in page points, from `Document.metadata.figures`.
     pub bbox: Option<[f32; 4]>,
     pub caption: Option<String>,
-    /// Figure OCR is not extracted or stored today, so this is always null.
-    /// The field stays so a caller's shape does not change when it is.
+    /// Text legible in the picture, as the image describer read it (`ING-5`);
+    /// null when the picture was not read or shows no text.
     pub ocr_text: Option<String>,
     pub asset_key: Option<String>,
+    /// What the picture shows, as the image describer read it (`ING-5`).
+    /// Additive; absent for figures from before it existed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The picture's kind (`photo`, `chart`, `diagram`, …), when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 /// One text chunk's place in the document.
@@ -108,6 +115,9 @@ struct StoredFigure {
     page: Option<u32>,
     bbox: Option<[f32; 4]>,
     caption: Option<String>,
+    text: Option<String>,
+    description: Option<String>,
+    kind: Option<String>,
 }
 
 /// `GET /v1/documents/:id/structure`.
@@ -274,8 +284,10 @@ fn collect_figures(
             page: unit.page.or_else(|| merged.and_then(|s| s.page)),
             bbox: merged.and_then(|s| s.bbox),
             caption,
-            ocr_text: None,
+            ocr_text: merged.and_then(|s| s.text.clone()),
             asset_key: asset_key.clone(),
+            description: merged.and_then(|s| s.description.clone()),
+            kind: merged.and_then(|s| s.kind.clone()),
         });
         if let Some(key) = asset_key {
             used_assets.push(key);
@@ -293,12 +305,21 @@ fn collect_figures(
             page: stored.page,
             bbox: stored.bbox,
             caption: stored.caption.clone(),
-            ocr_text: None,
+            ocr_text: stored.text.clone(),
             asset_key: Some(stored.asset_key.clone()),
+            description: stored.description.clone(),
+            kind: stored.kind.clone(),
         });
     }
     figures.sort_by(|a, b| a.page.cmp(&b.page).then_with(|| a.key.cmp(&b.key)));
     figures
+}
+
+fn non_empty_str(v: Option<&serde_json::Value>) -> Option<String> {
+    v.and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Parse `Document.metadata.figures`, keeping bbox and page, which the other
@@ -333,6 +354,11 @@ fn read_stored_figures(metadata: Option<&serde_json::Value>) -> Vec<StoredFigure
                     .get("caption")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string),
+                text: non_empty_str(f.get("text")),
+                description: non_empty_str(f.get("description")),
+                // `type` is the layout kind for old rows and the describer's
+                // kind for read pictures; only a read picture has `origin`.
+                kind: f.get("origin").and_then(|_| non_empty_str(f.get("type"))),
             })
         })
         .collect()
@@ -355,7 +381,7 @@ fn read_bbox(value: &serde_json::Value) -> Option<[f32; 4]> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{page_ocr_text, read_bbox, read_stored_figures};
+    use super::{collect_figures, page_ocr_text, read_bbox, read_stored_figures};
 
     #[test]
     fn a_page_without_ocr_text_is_null_not_empty() {
@@ -400,5 +426,26 @@ mod tests {
         assert_eq!(figures[0].page, Some(3));
         assert_eq!(figures[0].bbox, Some([1.0, 2.0, 3.0, 4.0]));
         assert_eq!(figures[0].caption.as_deref(), Some("C"));
+    }
+
+    #[test]
+    fn a_read_picture_lists_its_description_kind_and_text_and_an_old_figure_does_not() {
+        let metadata = serde_json::json!({"figures": [
+            {"assetKey": "p.jpg", "page": 0, "type": "photo", "origin": "upload",
+             "description": "A red bicycle.", "text": "STOP"},
+            {"assetKey": "old.png", "page": 1, "type": "image", "caption": "Gambar 1"}
+        ]});
+        let figures = collect_figures(&[], &read_stored_figures(Some(&metadata)));
+        assert_eq!(figures.len(), 2);
+        assert_eq!(figures[0].description.as_deref(), Some("A red bicycle."));
+        assert_eq!(figures[0].kind.as_deref(), Some("photo"));
+        assert_eq!(figures[0].ocr_text.as_deref(), Some("STOP"));
+        assert_eq!(figures[1].description, None);
+        assert_eq!(figures[1].kind, None, "a layout kind is not a reading");
+        let json = serde_json::to_value(&figures[1]).unwrap();
+        assert!(
+            json.get("description").is_none(),
+            "absent, not null: {json}"
+        );
     }
 }

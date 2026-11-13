@@ -323,6 +323,7 @@ pub async fn index_visuals(
             "type": kind.unwrap_or("image"),
             "origin": visual.origin.as_str(),
             "description": reading.as_ref().map(|r| r.description.clone()),
+            "text": reading.as_ref().map(|r| r.text.clone()).filter(|t| !t.is_empty()),
         }));
         outcome.indexed += 1;
         fig_chunks.push(Chunk {
