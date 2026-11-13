@@ -33,7 +33,9 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 anyhow = "1.0.97"
 pdfium-render = { version = "0.9.4", features = ["thread_safe", "image_latest"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff"] }
+cfb = "0.16.0"
+tiff = "0.10.3"
 base64 = "0.22.1"
 uuid = { version = "1.26.1", features = ["v4"] }
 

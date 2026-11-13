@@ -389,7 +389,7 @@ fn parse_content(bytes: &[u8]) -> Result<String, ExtractError> {
 /// `content` is the non-empty pages joined by a blank line, which is exactly
 /// the shape `kb_core::chunk::content_is_pages` recognises: each page is
 /// chunked on its own and every chunk carries its true page.
-fn paged_result(texts: Vec<String>, file_type: &str) -> ExtractionResult {
+pub(crate) fn paged_result(texts: Vec<String>, file_type: &str) -> ExtractionResult {
     let mut content_pages = Vec::new();
     let mut page_map = Vec::new();
     let mut pages_blocks = Vec::new();
@@ -444,6 +444,13 @@ impl Extractor for PageOcrExtractor {
                 .extract_pdf(file_bytes, filename)
                 .await
                 .map_err(PortError::from),
+            Some(SupportedFileType::Image)
+                if crate::tiff_pages::is_tiff_extension(&crate::detect::extension_of(filename)) =>
+            {
+                crate::tiff_pages::ocr_tiff(self, file_bytes, filename)
+                    .await
+                    .map_err(PortError::from)
+            }
             Some(SupportedFileType::Image) => {
                 let mime = if mime_type.is_empty() {
                     image_mime(filename).unwrap_or("image/png")
@@ -454,7 +461,7 @@ impl Extractor for PageOcrExtractor {
                     .await
                     .map_err(PortError::from)
             }
-            // `detect_file_type` accepts the uploader's image list; `.tif` is
+            // `detect_file_type` accepts the uploader's image list; `.bmp` is
             // not on it, but the adapter can still read one when it is handed
             // straight to it (a scanner export, a test).
             _ => match image_mime(filename) {
@@ -490,7 +497,7 @@ impl ScannedPageOcr for PageOcrExtractor {
     }
 }
 
-/// The mime implied by an image file name, including `.tif`, which the
+/// The mime implied by an image file name, including `.bmp`, which the
 /// uploader's extension list does not accept.
 fn image_mime(filename: &str) -> Option<&'static str> {
     let lower = filename.to_ascii_lowercase();
@@ -889,28 +896,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_tif_handed_straight_to_the_adapter_is_one_page() {
+    async fn a_tif_handed_straight_to_the_adapter_is_sent_as_png_pages() {
         let (url, seen, _calls) = mock(0, 500).await;
         let extractor = PageOcrExtractor::new(settings(url)).unwrap();
+        let mut tif = std::io::Cursor::new(Vec::new());
+        let mut encoder = tiff::encoder::TiffEncoder::new(&mut tif).unwrap();
+        for _ in 0..2 {
+            encoder
+                .write_image::<tiff::encoder::colortype::Gray8>(1, 1, &[128])
+                .unwrap();
+        }
         let out = extractor
             .extract_with_options(
                 "scan.tif",
                 "",
-                b"II*\x00",
+                &tif.into_inner(),
                 kb_ports::ExtractionOptions::default(),
             )
             .await
             .unwrap();
         assert!(out.content.starts_with("PAGE-"), "{}", out.content);
-        let seen = seen.lock().unwrap();
-        assert!(
-            seen.bodies[0]
-                .pointer("/messages/0/content/0/image_url/url")
-                .and_then(|u| u.as_str())
-                .unwrap_or_default()
-                .starts_with("data:image/tiff;base64,"),
-            "the extension supplies the mime"
+        assert_eq!(
+            out.page_map.unwrap().len(),
+            2,
+            "one result page per TIFF page"
         );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.bodies.len(), 2);
+        for body in &seen.bodies {
+            assert!(
+                body.pointer("/messages/0/content/0/image_url/url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or_default()
+                    .starts_with("data:image/png;base64,"),
+                "vision endpoints get PNG, not TIFF"
+            );
+        }
     }
 
     #[tokio::test]

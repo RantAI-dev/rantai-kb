@@ -8,8 +8,10 @@
 //!    back to the mime the uploader supplied, then to `text/plain`;
 //! 3. that mime picks the parser.
 //!
-//! An unknown extension is not an error: it is read as UTF-8 text, which is what
-//! the TypeScript `else` branch does.
+//! An unknown extension is refused with a reason. The upload route already
+//! rejects it with a 415, so this guards the other ways a job reaches the
+//! extractor (a job row written by a calling app, a reindex of an older
+//! upload): reading arbitrary bytes as text would index binary noise.
 
 use kb_ports::{ExtractionOptions, ExtractionResult};
 
@@ -22,6 +24,7 @@ use crate::docx;
 use crate::epub;
 use crate::gltf;
 use crate::html;
+use crate::legacy::{self, Claimed};
 use crate::mime::ext_to_mime;
 use crate::ods;
 use crate::odt;
@@ -30,6 +33,7 @@ use crate::pptx;
 use crate::rtf;
 use crate::scanned::is_pdf_scanned;
 use crate::text::to_utf8;
+use crate::tiff_pages;
 use crate::xlsx;
 
 const MIME_DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -42,12 +46,23 @@ const MIME_GLB: &str = "model/gltf-binary";
 const MIME_ODT: &str = "application/vnd.oasis.opendocument.text";
 const MIME_ODS: &str = "application/vnd.oasis.opendocument.spreadsheet";
 
-/// The legacy binary formats that are not supported by officeparser v6 or rantai-kb.
-const LEGACY_BINARY_MIMES: &[&str] = &[
-    "application/msword",
-    "application/vnd.ms-excel",
-    "application/vnd.ms-powerpoint",
-];
+const MIME_DOC: &str = "application/msword";
+const MIME_XLS: &str = "application/vnd.ms-excel";
+const MIME_PPT: &str = "application/vnd.ms-powerpoint";
+
+/// The failure for a file whose extension no parser claims.
+fn unsupported_type(filename: &str) -> ExtractionResult {
+    let ext = extension_of(filename);
+    let what = if ext.is_empty() {
+        "has no file extension".to_string()
+    } else {
+        format!("has an unsupported file type ({ext})")
+    };
+    ExtractionResult::failed(
+        "markdown",
+        format!("\"{filename}\" {what}; see GET /v1/formats for the accepted list"),
+    )
+}
 
 /// Synchronous local extraction for stored uploads.
 pub fn extract(
@@ -90,7 +105,7 @@ pub fn extract(
                 ),
             })
         }
-        None => Ok(ExtractionResult::text(to_utf8(bytes), "markdown")),
+        None => Ok(unsupported_type(filename)),
     }
 }
 
@@ -148,6 +163,21 @@ pub async fn extract_document(
             }
         }
         Some(SupportedFileType::Image) => {
+            if let (Some(ocr), true) = (
+                vision_ocr,
+                tiff_pages::is_tiff_extension(&extension_of(filename)),
+            ) {
+                return Ok(match tiff_pages::ocr_tiff(ocr, bytes, filename).await {
+                    Ok(res) => res,
+                    Err(err) => ExtractionResult::failed(
+                        "image",
+                        format!(
+                            "Image OCR failed for \"{filename}\": {}",
+                            clip_reason(&err.to_string())
+                        ),
+                    ),
+                });
+            }
             if let Some(ocr) = vision_ocr {
                 let ext = extension_of(filename);
                 let img_mime = match ext.as_str() {
@@ -201,7 +231,7 @@ pub async fn extract_document(
                 ),
             })
         }
-        None => Ok(ExtractionResult::text(to_utf8(bytes), "markdown")),
+        None => Ok(unsupported_type(filename)),
     }
 }
 
@@ -221,9 +251,9 @@ pub fn extract_from_buffer(
         MIME_EPUB => epub::parse(bytes, file_name),
         MIME_ODT => odt::parse_odt(bytes),
         MIME_ODS => ods::parse_ods(bytes),
-        other if LEGACY_BINARY_MIMES.contains(&other) => Err(ExtractError::Unsupported(format!(
-            "{other} is a legacy binary format that neither officeparser v6 nor rantai-kb supports (\"{file_name}\")"
-        ))),
+        MIME_DOC => legacy::parse(bytes, Claimed::Word, file_name),
+        MIME_XLS => legacy::parse(bytes, Claimed::Excel, file_name),
+        MIME_PPT => legacy::parse(bytes, Claimed::PowerPoint, file_name),
         MIME_GLTF => gltf::parse_gltf(bytes, file_name),
         MIME_GLB => gltf::parse_glb(bytes, file_name),
         "text/html" => Ok(html::strip_html(&to_utf8(bytes))),
@@ -407,9 +437,38 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_extension_is_read_as_utf8() {
+    fn an_unknown_extension_is_refused_with_a_reason_not_indexed_as_text() {
         let result = extract("archive.bin", "application/octet-stream", b"raw bytes").unwrap();
-        assert_eq!(result.content, "raw bytes");
+        assert_eq!(result.content, "");
+        let error = result.error.expect("a reason");
+        assert!(error.contains("unsupported file type (.bin)"), "{error}");
+        assert!(error.contains("/v1/formats"), "{error}");
+
+        let result = extract("README", "text/plain", b"text").unwrap();
+        assert!(
+            result
+                .error
+                .expect("a reason")
+                .contains("no file extension"),
+            "an extensionless name is refused too"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_production_path_refuses_an_unknown_extension_too() {
+        let chain = LayoutExtractorChain::new(Vec::new(), None);
+        let result = extract_document(
+            "tool.exe",
+            "application/octet-stream",
+            b"MZ\x90\x00",
+            ExtractionOptions::default(),
+            &chain,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.content, "");
+        assert!(result.error.expect("a reason").contains("(.exe)"));
     }
 
     #[test]
@@ -434,16 +493,26 @@ mod tests {
     }
 
     #[test]
-    fn legacy_binary_formats_name_themselves_as_unported() {
-        for (file_name, mime) in [
-            ("old.doc", "application/msword"),
-            ("old.xls", "application/vnd.ms-excel"),
-            ("old.ppt", "application/vnd.ms-powerpoint"),
+    fn legacy_formats_route_by_their_bytes_and_explain_garbage() {
+        // Not an OLE file and not text: the reason names the claimed format
+        // and the bytes, instead of indexing them.
+        for (file_name, mime, label) in [
+            ("old.doc", "application/msword", "Word 97-2003"),
+            ("old.xls", "application/vnd.ms-excel", "Excel 97-2003"),
+            (
+                "old.ppt",
+                "application/vnd.ms-powerpoint",
+                "PowerPoint 97-2003",
+            ),
         ] {
-            let result = extract(file_name, mime, b"binary").unwrap();
+            let result = extract(file_name, mime, b"\x00\x01binary").unwrap();
             let error = result.error.unwrap_or_else(|| panic!("{file_name}"));
-            assert!(error.contains("officeparser"), "{file_name}: {error}");
-            assert!(error.contains(mime), "{file_name}: {error}");
+            assert!(error.contains(label), "{file_name}: {error}");
+            assert!(error.contains("00 01 62"), "{file_name}: {error}");
         }
+        // An HTML report saved as .xls is read.
+        let result = extract("report.xls", "", b"<html><td>Total</td></html>").unwrap();
+        assert_eq!(result.error, None);
+        assert!(result.content.contains("Total"));
     }
 }

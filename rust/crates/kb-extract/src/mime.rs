@@ -14,6 +14,7 @@ pub const DOCUMENT_MIME_TYPES: &[&str] = &[
     "image/gif",
     "image/webp",
     "image/heic",
+    "image/tiff",
     "text/plain",
     "text/markdown",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -51,6 +52,8 @@ pub const EXT_TO_MIME: &[(&str, &str)] = &[
     (".gif", "image/gif"),
     (".webp", "image/webp"),
     (".heic", "image/heic"),
+    (".tif", "image/tiff"),
+    (".tiff", "image/tiff"),
     (".md", "text/markdown"),
     (".markdown", "text/markdown"),
     (".txt", "text/plain"),
@@ -176,6 +179,7 @@ mod tests {
         assert!(is_document_mime("application/epub+zip"));
         assert!(is_document_mime("image/heic"));
         assert!(!is_document_mime("application/zip"));
-        assert_eq!(DOCUMENT_MIME_TYPES.len(), 32);
+        assert!(is_document_mime("image/tiff"));
+        assert_eq!(DOCUMENT_MIME_TYPES.len(), 33);
     }
 }

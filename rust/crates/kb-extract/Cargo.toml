@@ -24,6 +24,8 @@ calamine = { workspace = true }
 reqwest = { workspace = true }
 pdfium-render = { workspace = true }
 image = { workspace = true }
+cfb = { workspace = true }
+tiff = { workspace = true }
 base64 = { workspace = true }
 fancy-regex = { workspace = true }
 futures = { workspace = true }
