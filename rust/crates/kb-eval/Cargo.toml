@@ -27,5 +27,3 @@ chrono = { workspace = true }
 hdrhistogram = { version = "7.5", default-features = false }
 
 [dev-dependencies]
-kb-extract = { path = "../kb-extract" }
-kb-ports = { path = "../kb-ports" }

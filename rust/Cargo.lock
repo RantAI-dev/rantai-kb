@@ -1367,8 +1367,6 @@ dependencies = [
  "futures",
  "hdrhistogram",
  "image",
- "kb-extract",
- "kb-ports",
  "reqwest",
  "serde",
  "serde_json",

@@ -405,7 +405,7 @@ fn build_visuals(
         }
     };
     Ok(kb_engine::visuals::VisualPipeline::new(
-        Arc::new(kb_extract::LocalVisualCollector::default()),
+        Arc::new(kb_extract::LocalVisualCollector),
         describer,
         visuals.settings.clone(),
     ))

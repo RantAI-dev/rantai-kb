@@ -1439,41 +1439,39 @@ mod tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod docx_corpus_tests {
-    use super::*;
-    use kb_ports::VisualCollector as _;
+    use std::io::Read as _;
 
-    #[tokio::test]
-    async fn the_docx_canary_is_a_picture_with_the_figure_canary_as_alt_text() {
+    use super::*;
+
+    /// kb-eval is a black-box client, so this reads the package with `zip`
+    /// rather than the server's own parser; the live leak run is what proves
+    /// the server indexes the picture.
+    #[test]
+    fn the_docx_canary_is_a_picture_with_the_figure_canary_as_alt_text() {
         let canaries = canaries_for(7, 3);
         let docx = document_docx(3, &canaries, 7);
-        let text = kb_extract::extract_from_buffer(
-            &docx,
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "leak-03.docx",
-        )
-        .unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(docx)).unwrap();
+        let mut document = String::new();
+        zip.by_name("word/document.xml")
+            .unwrap()
+            .read_to_string(&mut document)
+            .unwrap();
         assert!(
-            text.contains(&canaries.bm25),
+            document.contains(&canaries.bm25),
             "the text canaries are in the body"
         );
-        assert!(
-            !text.contains(&canaries.figure),
-            "the figure canary is only on the picture"
-        );
-        let scan = kb_extract::LocalVisualCollector
-            .collect(
-                "leak-03.docx",
-                "",
-                &docx,
-                kb_ports::VisualOptions::default(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(scan.visuals.len(), 1);
         assert_eq!(
-            scan.visuals[0].alt_text.as_deref(),
-            Some(canaries.figure.as_str())
+            document.matches(&canaries.figure).count(),
+            1,
+            "the figure canary is only the picture's alt text"
         );
-        assert_eq!((scan.visuals[0].width, scan.visuals[0].height), (256, 256));
+        assert!(document.contains(&format!("descr=\"{}\"", canaries.figure)));
+        let mut png = Vec::new();
+        zip.by_name("word/media/figure.png")
+            .unwrap()
+            .read_to_end(&mut png)
+            .unwrap();
+        let img = image::load_from_memory(&png).unwrap();
+        assert_eq!((img.width(), img.height()), (256, 256));
     }
 }
