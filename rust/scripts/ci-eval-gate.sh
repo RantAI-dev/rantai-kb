@@ -80,11 +80,15 @@ test -f "$BASELINE_FILE" || { echo "ERROR: Baseline file $BASELINE_FILE does not
   --metric "$METRICS"
 
 echo "=== 6. Running cross-scope leak matrix (tenant, KB, category, documentIds, externalRefs) ==="
+# --docx: each seeded document carries a picture whose alt text is the figure
+# canary, so the figure arm and the asset route are probed (ING-5) instead of
+# reported UNTESTED.
 mkdir -p "$EVAL_OUT_DIR/leak"
 "$KB_SERVER_BIN" eval leak \
   --base-url "$KB_STACK_BASE_URL" \
   --api-key "$KEY_A" \
   --peer-key "$KEY_B" \
+  --docx \
   --out "$EVAL_OUT_DIR/leak"
 
 echo "=== 7. Verifying artifacts ==="

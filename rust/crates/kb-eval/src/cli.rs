@@ -107,6 +107,8 @@ LEAK FLAGS
     --strict            also exit non-zero when an arm is UNTESTED
     --pdf               seed the corpus as two-page PDFs instead of markdown;
                         the page-image arm only sees PDFs, so its row needs it
+    --docx              seed the corpus as .docx files with a picture whose alt text
+                        is the figure canary, so the figure arm has something to find
 
 OUTPUTS (in --out)
     metrics.json  every metric with a 95% bootstrap CI, plus latency
@@ -252,6 +254,12 @@ async fn leak(args: &[String]) -> Result<(), EvalError> {
     config.keep = has_flag(args, "--keep");
     config.strict = has_flag(args, "--strict");
     config.pdf_corpus = has_flag(args, "--pdf");
+    config.docx_corpus = has_flag(args, "--docx");
+    if config.pdf_corpus && config.docx_corpus {
+        return Err(EvalError::Usage(
+            "--pdf and --docx are mutually exclusive".to_string(),
+        ));
+    }
 
     let run = leak_http::run(config)
         .await

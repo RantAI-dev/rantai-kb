@@ -101,14 +101,22 @@ fn drawing_refs(xml_text: &str) -> Vec<(String, Option<String>)> {
             continue;
         };
         match e.local_name().as_ref() {
+            // Word writes the alt text on `wp:docPr` and then a second,
+            // usually bare `pic:cNvPr` inside the picture: a properties element
+            // without alt text must not wipe the one before it.
             b"docPr" | b"cNvPr" => {
-                alt = attr_local(&e, "descr")
+                if let Some(found) = attr_local(&e, "descr")
                     .filter(|d| !d.trim().is_empty())
-                    .or_else(|| attr_local(&e, "title").filter(|t| !t.trim().is_empty()));
+                    .or_else(|| attr_local(&e, "title").filter(|t| !t.trim().is_empty()))
+                {
+                    alt = Some(found);
+                }
             }
+            // Each picture consumes the alt text pending for it, so it never
+            // carries over to the next picture.
             b"blip" => {
                 if let Some(id) = attr_local(&e, "embed") {
-                    out.push((id, alt.clone()));
+                    out.push((id, alt.take()));
                 }
             }
             // Legacy VML pictures (`v:imagedata r:id`, alt in `o:title`).
@@ -119,7 +127,8 @@ fn drawing_refs(xml_text: &str) -> Vec<(String, Option<String>)> {
                         .then(|| String::from_utf8_lossy(&a.value).into_owned())
                 });
                 if let Some(id) = id {
-                    out.push((id, attr_local(&e, "title").or_else(|| alt.clone())));
+                    let pending = alt.take();
+                    out.push((id, attr_local(&e, "title").or(pending)));
                 }
             }
             _ => {}
@@ -382,6 +391,29 @@ fn html_attr(tag: &str, name: &str) -> Option<String> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+
+    #[test]
+    fn word_alt_text_survives_the_bare_inner_cnvpr_and_does_not_carry_over() {
+        let xml = r#"<w:document xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:pic="pic" xmlns:r="r"><w:body>
+            <w:p><w:r><w:drawing><wp:inline><wp:docPr id="1" name="Picture 1" descr="Lane map of the old town"/>
+              <a:graphic><a:graphicData><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="image1.png"/></pic:nvPicPr>
+              <pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>
+            <w:p><w:r><w:drawing><wp:inline><wp:docPr id="2" name="Picture 2"/>
+              <a:graphic><a:graphicData><pic:pic><pic:nvPicPr><pic:cNvPr id="0" name="image2.png"/></pic:nvPicPr>
+              <pic:blipFill><a:blip r:embed="rId6"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>
+            </w:body></w:document>"#;
+        assert_eq!(
+            drawing_refs(xml),
+            vec![
+                (
+                    "rId5".to_string(),
+                    Some("Lane map of the old town".to_string())
+                ),
+                ("rId6".to_string(), None),
+            ]
+        );
+    }
+
     use super::*;
 
     #[test]

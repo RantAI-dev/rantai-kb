@@ -1366,11 +1366,15 @@ dependencies = [
  "chrono",
  "futures",
  "hdrhistogram",
+ "image",
+ "kb-extract",
+ "kb-ports",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "zip",
 ]
 
 [[package]]

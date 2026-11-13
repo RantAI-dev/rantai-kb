@@ -50,6 +50,11 @@ pub struct LeakConfig {
     /// Seed the corpus as PDFs instead of markdown. The page-image arm renders
     /// only PDFs, so its row has nothing to find without this.
     pub pdf_corpus: bool,
+    /// Seed the corpus as `.docx` files, each holding a picture whose alt text
+    /// is the figure canary (`ING-5`). The picture becomes a figure chunk with
+    /// an asset key, so the figure arm and the asset route have something to
+    /// find without a layout extractor or a vision model.
+    pub docx_corpus: bool,
 }
 
 impl LeakConfig {
@@ -67,6 +72,7 @@ impl LeakConfig {
             keep: false,
             strict: false,
             pdf_corpus: false,
+            docx_corpus: false,
         }
     }
 }
@@ -224,6 +230,96 @@ pub fn document_pdf(index: usize, canaries: &Canaries, seed: u64) -> Vec<u8> {
             .collect()
     };
     crate::pdf::text_pdf(&[lines(first, None), lines(second, Some("3. Annex"))])
+}
+
+/// A seeded `.docx`: the document's text as paragraphs, *without* the figure
+/// canary, plus one picture whose alt text is the figure canary. A figure-arm
+/// hit can then only come from the picture's own chunk.
+#[must_use]
+pub fn document_docx(index: usize, canaries: &Canaries, seed: u64) -> Vec<u8> {
+    use std::io::Write as _;
+    let body = document_body(index, canaries, seed).replace(&canaries.figure, "");
+    let escape = |t: &str| {
+        t.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    let paragraphs: String = body
+        .lines()
+        .map(|l| l.trim_start_matches('#').trim())
+        .filter(|l| !l.is_empty())
+        .map(|l| {
+            format!(
+                "<w:p><w:r><w:t xml:space=\"preserve\">{}</w:t></w:r></w:p>",
+                escape(l)
+            )
+        })
+        .collect();
+    let picture = format!(
+        "<w:p><w:r><w:drawing><wp:inline><wp:extent cx=\"2743200\" cy=\"2743200\"/>\
+         <wp:docPr id=\"1\" name=\"Picture 1\" descr=\"{}\"/><a:graphic><a:graphicData \
+         uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><pic:pic><pic:nvPicPr>\
+         <pic:cNvPr id=\"0\" name=\"figure.png\"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill>\
+         <a:blip r:embed=\"rId5\"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData>\
+         </a:graphic></wp:inline></w:drawing></w:r></w:p>",
+        escape(&canaries.figure)
+    );
+    let document = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+         <w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" \
+         xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" \
+         xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" \
+         xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" \
+         xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">\
+         <w:body>{paragraphs}{picture}</w:body></w:document>"
+    );
+    let parts: [(&str, Vec<u8>); 5] = [
+        (
+            "[Content_Types].xml",
+            br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec(),
+        ),
+        (
+            "_rels/.rels",
+            br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec(),
+        ),
+        (
+            "word/_rels/document.xml.rels",
+            br#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/figure.png"/></Relationships>"#.to_vec(),
+        ),
+        ("word/document.xml", document.into_bytes()),
+        ("word/media/figure.png", canary_png(index)),
+    ];
+    let mut out = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut out);
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, bytes) in parts {
+            // Writing to memory cannot fail short of allocation failure.
+            if zip.start_file(name, options).is_ok() {
+                let _ = zip.write_all(&bytes);
+            }
+        }
+        let _ = zip.finish();
+    }
+    out.into_inner()
+}
+
+/// A 256 × 256 picture, different per document, large enough that the visual
+/// stage's size filter keeps it.
+fn canary_png(index: usize) -> Vec<u8> {
+    let shade = u8::try_from(index % 200).unwrap_or(0);
+    let img = image::RgbImage::from_fn(256, 256, |x, y| {
+        image::Rgb([
+            shade,
+            u8::try_from(x % 256).unwrap_or(0),
+            u8::try_from(y % 256).unwrap_or(0),
+        ])
+    });
+    let mut png = Vec::new();
+    let _ = image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png);
+    png
 }
 
 // ─── HTTP plumbing ───────────────────────────────────────────────────────────
@@ -408,7 +504,16 @@ async fn upload_and_wait(
     canaries: &Canaries,
     body: &str,
 ) -> Result<SeedDocument, LeakError> {
-    let (file_name, part) = if config.pdf_corpus {
+    let (file_name, part) = if config.docx_corpus {
+        let file_name = format!("leak-{index:02}.docx");
+        let part =
+            reqwest::multipart::Part::bytes(document_docx(index, canaries, config.canary_seed))
+                .file_name(file_name.clone())
+                .mime_str(
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                )?;
+        (file_name, part)
+    } else if config.pdf_corpus {
         let file_name = format!("leak-{index:02}.pdf");
         let part =
             reqwest::multipart::Part::bytes(document_pdf(index, canaries, config.canary_seed))
@@ -984,11 +1089,11 @@ pub async fn run(config: LeakConfig) -> Result<LeakRun, LeakError> {
 
     if !plan.documents.iter().any(|d| d.has_figures) {
         matrix.notes.push(
-            "no seeded document produced a figure: figures only come from a layout \
-             extractor (kb-extract: the MinerU sidecar, mineru-api or Mistral), which this \
-             stack does not run. The figure arm therefore has nothing to retrieve and is \
-             reported UNTESTED rather than passing; the asset route is probed only once a \
-             figure exists."
+            "no seeded document produced a figure. Pass --docx: each seeded .docx holds a \
+             picture whose alt text is the figure canary, which the visual stage (ING-5, \
+             KB_IMAGES) indexes as a figure chunk with no model. Without it the figure arm \
+             has nothing to retrieve and is reported UNTESTED rather than passing; the asset \
+             route is probed only once a figure exists."
                 .to_string(),
         );
     }
@@ -1328,5 +1433,47 @@ mod tests {
             // arm has something to weave.
             assert!(body.len() > 900, "{index}: body was {} bytes", body.len());
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod docx_corpus_tests {
+    use super::*;
+    use kb_ports::VisualCollector as _;
+
+    #[tokio::test]
+    async fn the_docx_canary_is_a_picture_with_the_figure_canary_as_alt_text() {
+        let canaries = canaries_for(7, 3);
+        let docx = document_docx(3, &canaries, 7);
+        let text = kb_extract::extract_from_buffer(
+            &docx,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "leak-03.docx",
+        )
+        .unwrap();
+        assert!(
+            text.contains(&canaries.bm25),
+            "the text canaries are in the body"
+        );
+        assert!(
+            !text.contains(&canaries.figure),
+            "the figure canary is only on the picture"
+        );
+        let scan = kb_extract::LocalVisualCollector
+            .collect(
+                "leak-03.docx",
+                "",
+                &docx,
+                kb_ports::VisualOptions::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(scan.visuals.len(), 1);
+        assert_eq!(
+            scan.visuals[0].alt_text.as_deref(),
+            Some(canaries.figure.as_str())
+        );
+        assert_eq!((scan.visuals[0].width, scan.visuals[0].height), (256, 256));
     }
 }
