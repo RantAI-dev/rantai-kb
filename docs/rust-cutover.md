@@ -178,8 +178,20 @@ for scanned pages and images, so a local tier never sends a page to a paid API. 
 and the served commands are in `docs/kb-tiers.md` ("Local OCR"). Unset, behaviour is identical
 to Bun's vision path.
 
-### 2. Legacy Binary Office Formats Unsupported
-In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`) and throws `EXTENSION_UNSUPPORTED` on legacy binary `.doc`, `.xls`, and `.ppt` files. The Rust port matches this exact behavior by returning `ExtractError::Unsupported`.
+### 2. Legacy Binary Office Formats, TIFF and Unknown Extensions
+In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`) and throws `EXTENSION_UNSUPPORTED` on legacy binary `.doc`, `.xls`, and `.ppt` files. Rust v0.2.0 matched that.
+
+**Since `ING-1` / `ING-4` (after v0.2.0) Rust differs from Bun here, additively:**
+
+- `.doc` (Word 6.0 to 2003), `.xls` (Excel 5.0 to 2003) and `.ppt` (PowerPoint 95 to 2003) are extracted. A document that failed with `Unsupported` under Bun or v0.2.0 succeeds on `kb-server reindex`.
+- `.tif` / `.tiff` are accepted at upload (`GET /v1/formats` lists them) and OCR'd page by page through the vision provider.
+- An unknown or missing extension is a failed extraction instead of UTF-8 text. Upload already refused such files with a 415 in both services, so only a job created outside the upload route (or a reindex of such a document) sees the difference. Reindex takes the filename from the last segment of `s3Key`, so count stored documents by extension before reindexing and compare the list with `GET /v1/formats` (a `NULL` extension is a name without one):
+
+  ```sql
+  SELECT lower(substring(regexp_replace("s3Key", '^.*/', '') FROM '(\.[^./]+)$')) AS ext, count(*)
+  FROM "Document" WHERE "deletedAt" IS NULL AND "s3Key" IS NOT NULL
+  GROUP BY 1 ORDER BY 2 DESC;
+  ```
 
 ### 3. PDFium vs pdf.js Smart Router Thresholds
 - Bun uses `unpdf` (Mozilla `pdf.js`), which renders text streams through JS code.

@@ -19,7 +19,7 @@
 
 use std::io::Cursor;
 
-use calamine::{Data, Range, Reader, Sheets, open_workbook_auto_from_rs};
+use calamine::{Data, Range, Reader, Sheets, Xls, XlsError, open_workbook_auto_from_rs};
 
 use crate::ExtractError;
 
@@ -29,9 +29,32 @@ const RS: &str = "\n";
 
 /// Text of a spreadsheet: a heading, then one block per non-empty sheet.
 pub fn parse(bytes: &[u8], file_name: &str) -> Result<String, ExtractError> {
-    let mut workbook: Sheets<Cursor<&[u8]>> = open_workbook_auto_from_rs(Cursor::new(bytes))
+    let workbook: Sheets<Cursor<&[u8]>> = open_workbook_auto_from_rs(Cursor::new(bytes))
         .map_err(|e| ExtractError::Container(format!("not a spreadsheet: {e}")))?;
+    Ok(render(workbook, file_name))
+}
 
+/// Text of a BIFF `.xls` (Excel 5.0 to 2003) from an OLE compound file.
+///
+/// Opened with calamine's `Xls` reader directly rather than its format
+/// auto-detection, which replaces every reason with "Cannot detect file
+/// format": here a password-protected or damaged workbook says so.
+pub fn parse_xls(bytes: &[u8], file_name: &str) -> Result<String, ExtractError> {
+    let workbook: Xls<Cursor<&[u8]>> = Xls::new(Cursor::new(bytes)).map_err(|e| match e {
+        XlsError::Password => ExtractError::Unsupported(
+            "the workbook is password-protected; remove the password and upload it again"
+                .to_string(),
+        ),
+        other => ExtractError::Container(format!("not a readable Excel 97-2003 workbook: {other}")),
+    })?;
+    Ok(render(workbook, file_name))
+}
+
+/// A heading, then one block per non-empty sheet.
+fn render<'a, R>(mut workbook: R, file_name: &str) -> String
+where
+    R: Reader<Cursor<&'a [u8]>>,
+{
     let mut sections: Vec<String> = Vec::new();
     for (name, range) in workbook.worksheets() {
         let csv = sheet_to_csv(&range);
@@ -41,12 +64,9 @@ pub fn parse(bytes: &[u8], file_name: &str) -> Result<String, ExtractError> {
     }
 
     if sections.is_empty() {
-        Ok(format!("[Spreadsheet: {file_name}]\n\n(empty)"))
+        format!("[Spreadsheet: {file_name}]\n\n(empty)")
     } else {
-        Ok(format!(
-            "[Spreadsheet: {file_name}]\n\n{}",
-            sections.join("\n\n")
-        ))
+        format!("[Spreadsheet: {file_name}]\n\n{}", sections.join("\n\n"))
     }
 }
 

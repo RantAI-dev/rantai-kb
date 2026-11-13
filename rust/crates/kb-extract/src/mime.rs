@@ -183,3 +183,36 @@ mod tests {
         assert_eq!(DOCUMENT_MIME_TYPES.len(), 33);
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod contract_tests {
+    use super::*;
+    use crate::detect::detect_file_type;
+    use kb_core::policy::MimeRegistry;
+
+    /// The upload route accepts `kb-core`'s list; this crate routes by its own
+    /// tables. A format in one and not the other is either accepted and then
+    /// refused by the extractor, or parsed but never accepted (which is how
+    /// `.tif` sat readable by OCR yet rejected at upload).
+    #[test]
+    fn every_accepted_extension_is_routed_and_every_routed_one_is_accepted() {
+        for ext in MimeRegistry::kb_accepted_extensions() {
+            assert!(
+                detect_file_type(&format!("file{ext}")).is_some(),
+                "{ext} is accepted for upload but no parser claims it"
+            );
+            assert_eq!(
+                ext_to_mime(ext),
+                MimeRegistry::ext_to_mime(ext),
+                "{ext} maps to different mimes in kb-core and kb-extract"
+            );
+        }
+        for (ext, _) in EXT_TO_MIME {
+            assert!(
+                MimeRegistry::kb_accepted_extensions().contains(ext),
+                "{ext} is routed here but the upload route rejects it"
+            );
+        }
+    }
+}

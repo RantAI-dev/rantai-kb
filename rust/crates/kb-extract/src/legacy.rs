@@ -52,6 +52,8 @@ enum Signature {
     WebArchive,
     Utf16Text,
     Utf8Text,
+    /// Word for Windows 1.x/2.0, which predates the OLE container.
+    Word2,
     Unknown,
 }
 
@@ -65,6 +67,9 @@ fn signature(bytes: &[u8]) -> Signature {
     }
     if bytes.starts_with(b"PK\x03\x04") {
         return Signature::Zip;
+    }
+    if bytes.starts_with(&[0xDB, 0xA5]) || bytes.starts_with(&[0x9B, 0xA5]) {
+        return Signature::Word2;
     }
     if bytes.starts_with(&[0xFF, 0xFE]) {
         return Signature::Utf16Text;
@@ -111,8 +116,8 @@ pub fn parse(bytes: &[u8], claimed: Claimed, file_name: &str) -> Result<String, 
     match signature(bytes) {
         Signature::Ole => match claimed {
             Claimed::Word => doc::parse(bytes),
-            // calamine reads BIFF8 `.xls` from the compound file itself.
-            Claimed::Excel => xlsx::parse(bytes, file_name),
+            // calamine reads BIFF5/BIFF8 `.xls` from the compound file itself.
+            Claimed::Excel => xlsx::parse_xls(bytes, file_name),
             Claimed::PowerPoint => ppt::parse(bytes),
         },
         Signature::Zip => match claimed {
@@ -135,6 +140,9 @@ pub fn parse(bytes: &[u8], claimed: Claimed, file_name: &str) -> Result<String, 
             "\"{file_name}\" is a web archive (.mht) saved under a {} name; save it as a real {} or as .docx/.xlsx/.pptx",
             claimed.label(),
             claimed.label()
+        ))),
+        Signature::Word2 => Err(ExtractError::Unsupported(format!(
+            "\"{file_name}\" is a Word for Windows 1.x/2.0 document, which is not supported; re-save it as .docx"
         ))),
         Signature::Unknown => {
             let head: Vec<String> = bytes.iter().take(8).map(|b| format!("{b:02X}")).collect();
@@ -166,6 +174,7 @@ mod tests {
         assert_eq!(signature(b"MIME-Version: 1.0\r\n"), Signature::WebArchive);
         assert_eq!(signature(b"\xFF\xFEa\x00"), Signature::Utf16Text);
         assert_eq!(signature("a,b\nç,d".as_bytes()), Signature::Utf8Text);
+        assert_eq!(signature(b"\xDB\xA5-\x00"), Signature::Word2);
         assert_eq!(signature(b"MZ\x90\x00\x03"), Signature::Unknown);
         assert_eq!(signature(b""), Signature::Unknown);
     }

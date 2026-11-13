@@ -32,6 +32,7 @@ use crate::ExtractError;
 use crate::doc::{read_stream, u16_at, u32_at};
 
 const RT_DOCUMENT: u16 = 0x03E8;
+const RT_CURRENT_USER_ATOM: u16 = 0x0FF6;
 const RT_SLIDE: u16 = 0x03EE;
 const RT_SLIDE_ATOM: u16 = 0x03EF;
 const RT_NOTES: u16 = 0x03F0;
@@ -57,13 +58,37 @@ pub fn parse(bytes: &[u8]) -> Result<String, ExtractError> {
                 .to_string(),
         ));
     }
-    let stream = read_stream(&mut file, "/PowerPoint Document")?;
-    let current_user = read_stream(&mut file, "/Current User").ok();
-
-    let lines = current_user
-        .and_then(|cu| structured_text(&stream, &cu))
-        .unwrap_or_else(|| scan_all_text(&stream));
-    Ok(lines.join("\n"))
+    // A PowerPoint 97 file's Current User stream is a CurrentUserAtom. A
+    // PowerPoint 95 file has another layout; when it was saved "for 95 and
+    // 97", the 97 copy sits under PP97_DUALSTORAGE, and 95 itself writes the
+    // slide text, as 8-bit text, to Text_Content.
+    for prefix in ["", "/PP97_DUALSTORAGE"] {
+        let Ok(current_user) = read_stream(&mut file, &format!("{prefix}/Current User")) else {
+            continue;
+        };
+        if u16_at(&current_user, 2) != Some(RT_CURRENT_USER_ATOM) {
+            continue;
+        }
+        let stream = read_stream(&mut file, &format!("{prefix}/PowerPoint Document"))?;
+        let lines =
+            structured_text(&stream, &current_user).unwrap_or_else(|| scan_all_text(&stream));
+        return Ok(lines.join("\n"));
+    }
+    if let Ok(text) = read_stream(&mut file, "/Text_Content") {
+        let decoded = crate::doc::decode_ansi(&text);
+        return Ok(paragraphs(&decoded).join("\n"));
+    }
+    if let Ok(stream) = read_stream(&mut file, "/PowerPoint Document") {
+        // No Current User at all: read what the records hold.
+        let lines = scan_all_text(&stream);
+        if !lines.is_empty() {
+            return Ok(lines.join("\n"));
+        }
+    }
+    Err(ExtractError::Unsupported(
+        "this is a PowerPoint 95 or older presentation with no readable text; re-save it as .pptx"
+            .to_string(),
+    ))
 }
 
 /// One record header.
@@ -131,7 +156,9 @@ fn atom_text(stream: &[u8], record: &Record) -> Option<Vec<String>> {
     Some(paragraphs(&text))
 }
 
-/// Paragraphs are separated by `\r`; `\v` is a line break inside one.
+/// Paragraphs are separated by `\r`; `\v` is a line break inside one. A
+/// paragraph that is only `*` is the placeholder PowerPoint stores for a
+/// slide-number, date or footer field, not text.
 fn paragraphs(text: &str) -> Vec<String> {
     text.split(['\r', '\n', '\u{b}'])
         .map(|line| {
@@ -141,7 +168,7 @@ fn paragraphs(text: &str) -> Vec<String> {
                 .trim()
                 .to_string()
         })
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.is_empty() && line != "*")
         .collect()
 }
 
@@ -211,26 +238,28 @@ fn structured_text(stream: &[u8], current_user: &[u8]) -> Option<Vec<String>> {
     if document.kind != RT_DOCUMENT {
         return None;
     }
-    let slide_list = children(stream, document.body, document.end)
-        .into_iter()
+    let lists = children(stream, document.body, document.end);
+    let slide_list = lists
+        .iter()
         .find(|r| r.kind == RT_SLIDE_LIST_WITH_TEXT && r.instance == 0)?;
-
-    // (persist id, placeholder lines) per slide, in presentation order.
-    let mut slides: Vec<(u32, Vec<String>)> = Vec::new();
-    for record in children(stream, slide_list.body, slide_list.end) {
-        if record.kind == RT_SLIDE_PERSIST_ATOM {
-            slides.push((u32_at(stream, record.body)?, Vec::new()));
-        } else if let Some((_, lines)) = slides.last_mut() {
-            text_under(stream, &record, lines);
-        }
-    }
+    let slides = persist_list(stream, slide_list)?;
+    // Notes pages are listed in their own SlideListWithText (instance 2),
+    // keyed by the notes id that a slide's `SlideAtom.notesIdRef` names.
+    let notes_list: HashMap<u32, (u32, Vec<String>)> = lists
+        .iter()
+        .find(|r| r.kind == RT_SLIDE_LIST_WITH_TEXT && r.instance == 2)
+        .and_then(|list| persist_list(stream, list))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| (entry.slide_id, (entry.persist_id, entry.lines)))
+        .collect();
 
     let mut out: Vec<String> = Vec::new();
     let mut notes_ids: Vec<u32> = Vec::new();
-    for (persist_id, placeholder_lines) in slides {
-        out.extend(placeholder_lines);
+    for entry in slides {
+        out.extend(entry.lines);
         let Some(slide) = directory
-            .get(&persist_id)
+            .get(&entry.persist_id)
             .and_then(|at| record_at(stream, *at))
             .filter(|r| r.kind == RT_SLIDE)
         else {
@@ -239,7 +268,7 @@ fn structured_text(stream: &[u8], current_user: &[u8]) -> Option<Vec<String>> {
         for child in children(stream, slide.body, slide.end) {
             if child.kind == RT_SLIDE_ATOM {
                 // SlideAtom: geom u32, rgPlaceholderTypes [u8; 8],
-                // masterIdRef u32, notesIdRef u32.
+                // masterIdRef u32, notesIdRef u32 (a notes id, not a persist id).
                 if let Some(notes) = u32_at(stream, child.body + 16).filter(|id| *id != 0) {
                     notes_ids.push(notes);
                 }
@@ -249,8 +278,12 @@ fn structured_text(stream: &[u8], current_user: &[u8]) -> Option<Vec<String>> {
         }
     }
     for notes_id in notes_ids {
+        let Some((persist_id, lines)) = notes_list.get(&notes_id) else {
+            continue;
+        };
+        out.extend(lines.iter().cloned());
         if let Some(notes) = directory
-            .get(&notes_id)
+            .get(persist_id)
             .and_then(|at| record_at(stream, *at))
             .filter(|r| r.kind == RT_NOTES)
         {
@@ -258,6 +291,32 @@ fn structured_text(stream: &[u8], current_user: &[u8]) -> Option<Vec<String>> {
         }
     }
     Some(out)
+}
+
+/// One entry of a `SlideListWithText`: the slide's persist id and slide id
+/// (from its `SlidePersistAtom`) and the text atoms listed after it.
+struct ListEntry {
+    persist_id: u32,
+    slide_id: u32,
+    lines: Vec<String>,
+}
+
+fn persist_list(stream: &[u8], list: &Record) -> Option<Vec<ListEntry>> {
+    let mut entries: Vec<ListEntry> = Vec::new();
+    for record in children(stream, list.body, list.end) {
+        if record.kind == RT_SLIDE_PERSIST_ATOM {
+            // SlidePersistAtom: persistIdRef u32, flags u32, cTexts i32,
+            // slideId u32.
+            entries.push(ListEntry {
+                persist_id: u32_at(stream, record.body)?,
+                slide_id: u32_at(stream, record.body + 12)?,
+                lines: Vec::new(),
+            });
+        } else if let Some(entry) = entries.last_mut() {
+            text_under(stream, &record, &mut entry.lines);
+        }
+    }
+    Some(entries)
 }
 
 /// Every text atom in the stream, in stream order: the fallback when the
@@ -294,6 +353,15 @@ mod tests {
         out
     }
 
+    fn persist_atom(persist_id: u32, slide_id: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend(persist_id.to_le_bytes());
+        out.extend([0u8; 8]);
+        out.extend(slide_id.to_le_bytes());
+        out.extend([0u8; 4]);
+        out
+    }
+
     fn chars(text: &str) -> Vec<u8> {
         text.encode_utf16().flat_map(u16::to_le_bytes).collect()
     }
@@ -301,7 +369,7 @@ mod tests {
     #[test]
     fn paragraphs_split_on_carriage_returns_and_vertical_tabs() {
         assert_eq!(
-            paragraphs("Title\rline one\u{b}line two\r\r"),
+            paragraphs("Title\rline one\u{b}line two\r\r*\r"),
             vec!["Title", "line one", "line two"]
         );
     }
@@ -342,7 +410,9 @@ mod tests {
         );
         // Slide persist 3 (shown second) with a text box; slide 4 (shown first).
         let mut slide_atom_with_notes = vec![0u8; 24];
-        slide_atom_with_notes[16..20].copy_from_slice(&5u32.to_le_bytes());
+        // notesIdRef is the notes *id* 0x100, which the notes list maps to
+        // persist id 5 — not the persist id itself.
+        slide_atom_with_notes[16..20].copy_from_slice(&0x100u32.to_le_bytes());
         place(
             &mut stream,
             3,
@@ -366,16 +436,23 @@ mod tests {
             container(
                 RT_DOCUMENT,
                 0,
-                &[container(
-                    RT_SLIDE_LIST_WITH_TEXT,
-                    0,
-                    &[
-                        atom(RT_SLIDE_PERSIST_ATOM, 0, &[4, 0, 0, 0, 0, 0, 0, 0]),
-                        atom(RT_TEXT_CHARS_ATOM, 0, &chars("First title\rfirst body")),
-                        atom(RT_SLIDE_PERSIST_ATOM, 0, &[3, 0, 0, 0, 0, 0, 0, 0]),
-                        atom(RT_TEXT_CHARS_ATOM, 0, &chars("Second title")),
-                    ],
-                )],
+                &[
+                    container(
+                        RT_SLIDE_LIST_WITH_TEXT,
+                        0,
+                        &[
+                            atom(RT_SLIDE_PERSIST_ATOM, 0, &persist_atom(4, 0x101)),
+                            atom(RT_TEXT_CHARS_ATOM, 0, &chars("First title\rfirst body")),
+                            atom(RT_SLIDE_PERSIST_ATOM, 0, &persist_atom(3, 0x102)),
+                            atom(RT_TEXT_CHARS_ATOM, 0, &chars("Second title")),
+                        ],
+                    ),
+                    container(
+                        RT_SLIDE_LIST_WITH_TEXT,
+                        2,
+                        &[atom(RT_SLIDE_PERSIST_ATOM, 0, &persist_atom(5, 0x100))],
+                    ),
+                ],
             ),
         );
         let mut dir_body = Vec::new();

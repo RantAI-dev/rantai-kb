@@ -26,6 +26,9 @@ pdfium-render = { workspace = true }
 image = { workspace = true }
 cfb = { workspace = true }
 tiff = { workspace = true }
+fax = { workspace = true }
+encoding_rs = { workspace = true }
+chardetng = { workspace = true }
 base64 = { workspace = true }
 fancy-regex = { workspace = true }
 futures = { workspace = true }

@@ -26,8 +26,9 @@
 //!   anchors) and `0x1F` (soft hyphen) carry no text; `0x1E` is a
 //!   non-breaking hyphen.
 //!
-//! Not supported, with a reason rather than garbage: Word 6.0/95 files (an
-//! older FIB with no piece table) and encrypted or obfuscated files.
+//! Word 6.0 and Word 95 files have an older FIB and no table stream; they are
+//! read by [`parse_word6`]. Encrypted or obfuscated files are refused with a
+//! reason rather than read as garbage.
 
 use std::io::{Cursor, Read};
 
@@ -35,6 +36,8 @@ use crate::ExtractError;
 
 /// `wIdent` of a Word binary FIB.
 const WORD_IDENT: u16 = 0xA5EC;
+/// `wIdent`s Word 6.0 and Word 95 write (the second by some localised builds).
+const WORD6_IDENTS: [u16; 2] = [0xA5DC, 0xA699];
 /// The first `nFib` of Word 97. Word 6.0 and 95 write 101–105.
 const NFIB_WORD97: u16 = 0xC0;
 /// `FibBase` flag bits ([MS-DOC] 2.5.2).
@@ -49,6 +52,11 @@ pub fn parse(bytes: &[u8]) -> Result<String, ExtractError> {
     let mut file = cfb::CompoundFile::open(Cursor::new(bytes))
         .map_err(|e| ExtractError::Container(format!("not a Word 97-2003 document: {e}")))?;
     let word = read_stream(&mut file, "/WordDocument")?;
+    let ident = u16_at(&word, 0).ok_or_else(|| container("the FIB is truncated"))?;
+    let n_fib = u16_at(&word, 2).unwrap_or(0);
+    if WORD6_IDENTS.contains(&ident) || (ident == WORD_IDENT && n_fib < NFIB_WORD97) {
+        return parse_word6(&word);
+    }
     let fib = Fib::parse(&word)?;
     let table = read_stream(&mut file, fib.table_stream)?;
     let clx = slice(&table, fib.fc_clx, fib.lcb_clx)
@@ -75,11 +83,11 @@ pub(crate) fn read_stream<F: Read + std::io::Seek>(
 ) -> Result<Vec<u8>, ExtractError> {
     let mut stream = file
         .open_stream(path)
-        .map_err(|e| container(&format!("the {path} stream is missing: {e}")))?;
+        .map_err(|e| ExtractError::Container(format!("the {path} stream is missing: {e}")))?;
     let mut out = Vec::new();
-    stream
-        .read_to_end(&mut out)
-        .map_err(|e| container(&format!("the {path} stream could not be read: {e}")))?;
+    stream.read_to_end(&mut out).map_err(|e| {
+        ExtractError::Container(format!("the {path} stream could not be read: {e}"))
+    })?;
     Ok(out)
 }
 
@@ -175,6 +183,197 @@ impl Fib {
             (edn, self.ccp_edn),
             (txbx, self.ccp_txbx),
         ]
+    }
+}
+
+/// Word 6.0 / Word 95 FIB offsets (antiword's `word6.c`, Apache POI's
+/// `HWPFOldDocument`): the same 32-byte base, then fixed fields.
+const W6_FC_MIN: usize = 0x18;
+const W6_CCP_TEXT: usize = 0x34;
+const W6_FC_CLX: usize = 0x160;
+const W6_LCB_CLX: usize = 0x164;
+const F_COMPLEX: u16 = 0x0004;
+const F_EXT_CHAR: u16 = 0x1000;
+
+/// Text of a Word 6.0 / Word 95 document.
+///
+/// Its text is 8-bit in the Windows codepage of the language Word was
+/// installed in (the FIB's `lid`), not Unicode. A normally saved file keeps
+/// the text as one run from `fcMin`; a fast-saved ("complex") one has a piece
+/// table, in the WordDocument stream itself, whose offsets are plain bytes.
+fn parse_word6(word: &[u8]) -> Result<String, ExtractError> {
+    let flags = u16_at(word, 0x0A).unwrap_or(0);
+    if flags & F_ENCRYPTED != 0 {
+        return Err(ExtractError::Unsupported(
+            "the Word document is password-protected; remove the password and upload it again"
+                .to_string(),
+        ));
+    }
+    let lid = u16_at(word, 0x06).unwrap_or(0x0409);
+    let ccp = |index: usize| -> Result<usize, ExtractError> {
+        u32_at(word, W6_CCP_TEXT + index * 4)
+            .map(|v| v as usize)
+            .ok_or_else(|| container("the Word 6 FIB is truncated"))
+    };
+    // ccpText, ccpFtn, ccpHdd, ccpMcr, ccpAtn, ccpEdn, ccpTxbx, ccpHdrTxbx.
+    let lens: Vec<usize> = (0..8).map(ccp).collect::<Result<_, _>>()?;
+    let total: usize = lens.iter().sum();
+
+    let complex_clx = || -> Result<Vec<Piece>, ExtractError> {
+        let fc_clx = u32_at(word, W6_FC_CLX).unwrap_or(0) as usize;
+        let lcb_clx = u32_at(word, W6_LCB_CLX).unwrap_or(0) as usize;
+        let clx = slice(word, fc_clx, lcb_clx)
+            .ok_or_else(|| container("the piece table lies outside the document stream"))?;
+        parse_clx(clx)
+    };
+    if flags & F_COMPLEX != 0 && flags & F_EXT_CHAR != 0 {
+        // Some Word 95 builds set `fExtChar` and write Word 97-style pieces:
+        // UTF-16 unless bit 30 marks an 8-bit (Windows-1252) one.
+        let pieces = complex_clx()?;
+        let mut stories = Vec::new();
+        for (start, len) in word6_stories(&lens) {
+            if len > 0 {
+                let text = render(&characters(word, &pieces, start, start + len)?);
+                if !text.is_empty() {
+                    stories.push(text);
+                }
+            }
+        }
+        return Ok(stories.join("\n\n"));
+    }
+    let pieces = if flags & F_COMPLEX != 0 {
+        complex_clx()?
+            .into_iter()
+            .map(|piece| Piece {
+                // Word 6 offsets are byte offsets with no compression flag.
+                offset: piece.offset * if piece.compressed { 2 } else { 1 },
+                compressed: true,
+                ..piece
+            })
+            .collect()
+    } else {
+        let fc_min = u32_at(word, W6_FC_MIN).unwrap_or(0) as usize;
+        vec![Piece {
+            cp_start: 0,
+            cp_end: total,
+            offset: fc_min,
+            compressed: true,
+        }]
+    };
+
+    let mut runs = Vec::new();
+    for (start, len) in word6_stories(&lens) {
+        if len > 0 {
+            runs.push(raw_bytes(word, &pieces, start, start + len)?);
+        }
+    }
+    let encoding = word6_encoding(lid, &runs.concat());
+    let mut stories = Vec::new();
+    for bytes in runs {
+        let (decoded, _, _) = encoding.decode(&bytes);
+        let units: Vec<u16> = decoded.encode_utf16().collect();
+        let text = render(&units);
+        if !text.is_empty() {
+            stories.push(text);
+        }
+    }
+    Ok(stories.join("\n\n"))
+}
+
+/// `(first character position, length)` of the Word 6 stories read — main
+/// text, footnotes, endnotes, text boxes — given `ccpText` … `ccpHdrTxbx`.
+fn word6_stories(lens: &[usize]) -> [(usize, usize); 4] {
+    let ftn = lens[0];
+    let atn = ftn + lens[1] + lens[2] + lens[3];
+    let edn = atn + lens[4];
+    let txbx = edn + lens[5];
+    [
+        (0, lens[0]),
+        (ftn, lens[1]),
+        (edn, lens[5]),
+        (txbx, lens[6]),
+    ]
+}
+
+/// The 8-bit bytes of character positions `[from, to)` (Word 6 pieces).
+fn raw_bytes(
+    word: &[u8],
+    pieces: &[Piece],
+    from: usize,
+    to: usize,
+) -> Result<Vec<u8>, ExtractError> {
+    let mut out = Vec::with_capacity(to.saturating_sub(from));
+    for piece in pieces {
+        let start = piece.cp_start.max(from);
+        let end = piece.cp_end.min(to);
+        if start >= end {
+            continue;
+        }
+        let bytes = slice(word, piece.offset + (start - piece.cp_start), end - start)
+            .ok_or_else(|| container("a text piece lies outside the document stream"))?;
+        out.extend_from_slice(bytes);
+    }
+    Ok(out)
+}
+
+/// The codepage Word 6/95 wrote `text` in.
+///
+/// The FIB's `lid` is the language Word was installed in, which is often
+/// English on a machine whose documents are Russian or Greek. So a `lid` that
+/// names a non-Western codepage is trusted, and the Western default is
+/// checked against the bytes with `chardetng` (Firefox's legacy-charset
+/// detector), limited to the single-byte Windows codepages Word 6 used.
+fn word6_encoding(lid: u16, text: &[u8]) -> &'static encoding_rs::Encoding {
+    let by_lid = codepage_for_lid(lid);
+    if by_lid != encoding_rs::WINDOWS_1252 {
+        return by_lid;
+    }
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Deny);
+    detector.feed(text, true);
+    let guess = detector.guess(None, chardetng::Utf8Detection::Deny);
+    let windows_single_byte = [
+        encoding_rs::WINDOWS_1250,
+        encoding_rs::WINDOWS_1251,
+        encoding_rs::WINDOWS_1253,
+        encoding_rs::WINDOWS_1254,
+        encoding_rs::WINDOWS_1255,
+        encoding_rs::WINDOWS_1256,
+        encoding_rs::WINDOWS_1257,
+        encoding_rs::WINDOWS_1258,
+        encoding_rs::WINDOWS_874,
+    ];
+    if windows_single_byte.contains(&guess) {
+        guess
+    } else {
+        encoding_rs::WINDOWS_1252
+    }
+}
+
+/// Decode 8-bit text of unknown Windows codepage (Word 6 runs, PowerPoint 95
+/// `Text_Content`), detecting the codepage from the bytes.
+pub(crate) fn decode_ansi(bytes: &[u8]) -> String {
+    word6_encoding(0x0409, bytes).decode(bytes).0.into_owned()
+}
+
+/// The Windows ANSI codepage of a Windows language id.
+fn codepage_for_lid(lid: u16) -> &'static encoding_rs::Encoding {
+    let primary = lid & 0x03FF;
+    let sub = lid >> 10;
+    match primary {
+        // Russian, Ukrainian, Belarusian, Bulgarian, Macedonian; Serbian
+        // Cyrillic is Serbo-Croatian with sublanguage 3.
+        0x19 | 0x22 | 0x23 | 0x02 | 0x2F => encoding_rs::WINDOWS_1251,
+        0x1A if sub == 3 => encoding_rs::WINDOWS_1251,
+        // Czech, Polish, Hungarian, Slovak, Slovenian, Croatian, Romanian, Albanian.
+        0x05 | 0x15 | 0x0E | 0x1B | 0x24 | 0x1A | 0x18 | 0x1C => encoding_rs::WINDOWS_1250,
+        0x08 => encoding_rs::WINDOWS_1253,
+        0x1F => encoding_rs::WINDOWS_1254,
+        0x0D => encoding_rs::WINDOWS_1255,
+        0x01 | 0x29 | 0x20 => encoding_rs::WINDOWS_1256,
+        0x25..=0x27 => encoding_rs::WINDOWS_1257,
+        0x2A => encoding_rs::WINDOWS_1258,
+        0x1E => encoding_rs::WINDOWS_874,
+        _ => encoding_rs::WINDOWS_1252,
     }
 }
 
@@ -420,6 +619,65 @@ mod tests {
         }];
         let err = characters(&[0u8; 8], &pieces, 0, 10).unwrap_err();
         assert!(err.to_string().contains("outside"), "{err}");
+    }
+
+    #[test]
+    fn word6_text_is_decoded_in_the_codepage_of_its_language() {
+        assert_eq!(codepage_for_lid(0x0419), encoding_rs::WINDOWS_1251);
+        assert_eq!(codepage_for_lid(0x0C1A), encoding_rs::WINDOWS_1251);
+        assert_eq!(codepage_for_lid(0x041A), encoding_rs::WINDOWS_1250);
+        assert_eq!(codepage_for_lid(0x0409), encoding_rs::WINDOWS_1252);
+        assert_eq!(
+            codepage_for_lid(0x0421),
+            encoding_rs::WINDOWS_1252,
+            "Indonesian"
+        );
+    }
+
+    /// A minimal non-complex Word 6 stream: FIB, then the text at `fcMin`.
+    fn word6_stream(lid: u16, text: &[u8], ccp_ftn: u32) -> Vec<u8> {
+        let mut word = vec![0u8; 0x200];
+        word[0..2].copy_from_slice(&0xA5DCu16.to_le_bytes());
+        word[2..4].copy_from_slice(&101u16.to_le_bytes());
+        word[6..8].copy_from_slice(&lid.to_le_bytes());
+        word[W6_FC_MIN..W6_FC_MIN + 4].copy_from_slice(&0x200u32.to_le_bytes());
+        let ccp_text = u32::try_from(text.len()).unwrap() - ccp_ftn;
+        word[W6_CCP_TEXT..W6_CCP_TEXT + 4].copy_from_slice(&ccp_text.to_le_bytes());
+        word[W6_CCP_TEXT + 4..W6_CCP_TEXT + 8].copy_from_slice(&ccp_ftn.to_le_bytes());
+        word.extend_from_slice(text);
+        word
+    }
+
+    #[test]
+    fn a_word6_document_reads_its_body_and_footnotes() {
+        let text = parse_word6(&word6_stream(
+            0x0409,
+            b"Body \x93quoted\x94\rnext\rA note\r",
+            7,
+        ))
+        .unwrap();
+        assert_eq!(text, "Body \u{201c}quoted\u{201d}\n\nnext\n\nA note");
+        let cyrillic =
+            parse_word6(&word6_stream(0x0419, b"\xcf\xf0\xe8\xe2\xe5\xf2\r", 0)).unwrap();
+        assert_eq!(cyrillic, "Привет");
+    }
+
+    #[test]
+    fn an_english_lid_does_not_hide_russian_text() {
+        // An English-install Word 95 writing Russian in windows-1251.
+        let (bytes, _, _) = encoding_rs::WINDOWS_1251
+            .encode("Компания предлагает со склада в Москве следующий ассортимент вин");
+        let mut text = bytes.into_owned();
+        text.push(b'\r');
+        let got = parse_word6(&word6_stream(0x0409, &text, 0)).unwrap();
+        assert!(got.starts_with("Компания предлагает"), "{got}");
+        let western = parse_word6(&word6_stream(
+            0x0409,
+            b"The quick brown fox jumps over the lazy dog\r",
+            0,
+        ))
+        .unwrap();
+        assert_eq!(western, "The quick brown fox jumps over the lazy dog");
     }
 
     #[test]

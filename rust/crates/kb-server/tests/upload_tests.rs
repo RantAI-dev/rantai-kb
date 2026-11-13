@@ -178,6 +178,22 @@ async fn upload_without_a_file_is_a_400() {
 }
 
 #[tokio::test]
+async fn tiff_scans_and_legacy_office_files_are_accepted() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    for name in ["fax.tif", "SCAN.TIFF", "memo.doc", "budget.xls", "deck.ppt"] {
+        let response = h
+            .send_multipart(
+                "/v1/documents",
+                &tenant_key(TENANT),
+                vec![("file", format!("{name}\u{1}bytes"))],
+            )
+            .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED, "{name}");
+    }
+}
+
+#[tokio::test]
 async fn upload_of_an_unaccepted_extension_is_a_415() {
     let h = Harness::new();
     h.with_tenant(TENANT);

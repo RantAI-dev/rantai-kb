@@ -46,7 +46,7 @@ pub mod smart_router;
 #[cfg(test)]
 mod testkit;
 mod text;
-mod tiff_pages;
+pub mod tiff_pages;
 pub mod vision_llm;
 mod xlsx;
 mod xml;

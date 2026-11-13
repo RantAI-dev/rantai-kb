@@ -36,7 +36,7 @@ pub fn pages_as_png(bytes: &[u8]) -> Result<Vec<Vec<u8>>, ExtractError> {
     let mut pages = Vec::new();
     loop {
         let page = pages.len() + 1;
-        let image = decode_page(&mut decoder)
+        let image = decode_page(&mut decoder, bytes)
             .map_err(|e| ExtractError::Container(format!("TIFF page {page}: {e}")))?;
         let mut png = Vec::new();
         image
@@ -56,20 +56,101 @@ pub fn pages_as_png(bytes: &[u8]) -> Result<Vec<Vec<u8>>, ExtractError> {
     Ok(pages)
 }
 
-fn decode_page(decoder: &mut Decoder<Cursor<&[u8]>>) -> Result<DynamicImage, String> {
+/// TIFF tag values this module reads by number.
+const COMPRESSION_FAX3: u16 = 3;
+const PHOTOMETRIC_PALETTE: u16 = 3;
+const TAG_T4_OPTIONS: u16 = 292;
+
+fn decode_page(decoder: &mut Decoder<Cursor<&[u8]>>, file: &[u8]) -> Result<DynamicImage, String> {
     let (width, height) = decoder.dimensions().map_err(|e| e.to_string())?;
+    let compression = decoder
+        .get_tag_unsigned::<u16>(Tag::Compression)
+        .unwrap_or(1);
+    if compression == COMPRESSION_FAX3 {
+        return decode_g3_page(decoder, file, width, height);
+    }
+    if decoder
+        .get_tag_unsigned::<u16>(Tag::PhotometricInterpretation)
+        .ok()
+        == Some(PHOTOMETRIC_PALETTE)
+    {
+        return Err(
+            "palette (indexed-colour) TIFF pages are not supported; rescan as black-and-white, grayscale or colour"
+                .to_string(),
+        );
+    }
     let color = decoder.colortype().map_err(|e| e.to_string())?;
-    let palette = if matches!(color, ColorType::Palette(_)) {
-        Some(
-            decoder
-                .get_tag_u16_vec(Tag::ColorMap)
-                .map_err(|e| e.to_string())?,
-        )
-    } else {
-        None
-    };
     let data = decoder.read_image().map_err(|e| e.to_string())?;
-    to_image(width, height, color, data, palette.as_deref())
+    to_image(width, height, color, data)
+}
+
+/// A CCITT Group 3 (T.4) page: the compression TIFF Class F faxes use, which
+/// the `tiff` crate does not decode. One-dimensional (Modified Huffman with
+/// EOLs) coding is read with the `fax` crate; each strip is coded on its own.
+fn decode_g3_page(
+    decoder: &mut Decoder<Cursor<&[u8]>>,
+    file: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<DynamicImage, String> {
+    let t4_options = decoder
+        .get_tag_unsigned::<u32>(Tag::Unknown(TAG_T4_OPTIONS))
+        .unwrap_or(0);
+    if t4_options & 1 != 0 {
+        return Err("two-dimensional Group 3 fax pages are not supported".to_string());
+    }
+    // FillOrder 2: the bits of each byte are stored least significant first.
+    let lsb_first = decoder.get_tag_unsigned::<u16>(Tag::FillOrder).unwrap_or(1) == 2;
+    let offsets = decoder
+        .get_tag_u64_vec(Tag::StripOffsets)
+        .map_err(|e| e.to_string())?;
+    let counts = decoder
+        .get_tag_u64_vec(Tag::StripByteCounts)
+        .map_err(|e| e.to_string())?;
+    // A CCITT "white" run is a run of 0 bits; what a 0 bit looks like is the
+    // page's photometric interpretation. Class F faxes are WhiteIsZero (0).
+    let zero_is_white = decoder
+        .get_tag_unsigned::<u16>(Tag::PhotometricInterpretation)
+        .unwrap_or(0)
+        == 0;
+    let (white, black) = if zero_is_white { (255, 0) } else { (0, 255) };
+    let line_width = u16::try_from(width).map_err(|_| "the fax page is too wide".to_string())?;
+    let (w, h) = (width as usize, height as usize);
+
+    let mut pixels: Vec<u8> = Vec::with_capacity(w * h);
+    let mut rows = 0usize;
+    for (offset, count) in offsets.iter().zip(&counts) {
+        let start = usize::try_from(*offset).map_err(|_| bad_size())?;
+        let len = usize::try_from(*count).map_err(|_| bad_size())?;
+        let strip = crate::doc::slice(file, start, len)
+            .ok_or_else(|| "a fax strip lies outside the file".to_string())?;
+        // libtiff ends a strip after its last line, with no EOL; the `fax`
+        // decoder only hands a line over once the EOL after it is read, so
+        // the last line would be lost. Zero fill bits then a 1 is an EOL.
+        let input = strip
+            .iter()
+            .map(|b| if lsb_first { b.reverse_bits() } else { *b })
+            .chain([0x00, 0x01]);
+        fax::decoder::decode_g3(input, |transitions| {
+            if rows < h {
+                pixels.extend(
+                    fax::decoder::pels(transitions, line_width).map(|c| match c {
+                        fax::Color::White => white,
+                        fax::Color::Black => black,
+                    }),
+                );
+                rows += 1;
+            }
+        });
+    }
+    if rows == 0 {
+        return Err("the Group 3 fax data could not be decoded".to_string());
+    }
+    // A short last strip leaves the bottom of the page blank.
+    pixels.resize(w * h, white);
+    Ok(DynamicImage::ImageLuma8(
+        GrayImage::from_raw(width, height, pixels).ok_or_else(bad_size)?,
+    ))
 }
 
 fn bad_size() -> String {
@@ -82,7 +163,6 @@ fn to_image(
     height: u32,
     color: ColorType,
     data: DecodingResult,
-    palette: Option<&[u16]>,
 ) -> Result<DynamicImage, String> {
     let (w, h) = (width as usize, height as usize);
     let image = match (color, data) {
@@ -127,27 +207,6 @@ fn to_image(
                 .flat_map(|p| {
                     let k = 255 - u16::from(p[3]);
                     [0, 1, 2].map(|i| ((255 - u16::from(p[i])) * k / 255) as u8)
-                })
-                .collect();
-            DynamicImage::ImageRgb8(RgbImage::from_raw(width, height, rgb).ok_or_else(bad_size)?)
-        }
-        (ColorType::Palette(bits @ (1 | 2 | 4 | 8)), DecodingResult::U8(v)) => {
-            let map = palette.ok_or("a palette page has no colour map")?;
-            let entries = 1usize << bits;
-            if map.len() < entries * 3 {
-                return Err("the colour map is shorter than the palette".to_string());
-            }
-            let indices = if bits == 8 {
-                v
-            } else {
-                unpack(&v, w, h, bits)?
-            };
-            #[allow(clippy::cast_possible_truncation)]
-            let rgb: Vec<u8> = indices
-                .into_iter()
-                .flat_map(|i| {
-                    let i = usize::from(i);
-                    [0, 1, 2].map(|c| (map[c * entries + i] >> 8) as u8)
                 })
                 .collect();
             DynamicImage::ImageRgb8(RgbImage::from_raw(width, height, rgb).ok_or_else(bad_size)?)
@@ -254,27 +313,10 @@ mod tests {
             1,
             ColorType::Gray(1),
             DecodingResult::U8(vec![0b1010_0000, 0b0100_0000]),
-            None,
         )
         .unwrap()
         .to_luma8();
         assert_eq!(image.into_raw()[..3], [255, 0, 255]);
-    }
-
-    #[test]
-    fn a_palette_page_maps_through_its_colour_map() {
-        // Two-entry, 1-bit palette: 0 → red, 1 → blue (16-bit map values).
-        let map = [0xFFFF, 0, /* G */ 0, 0, /* B */ 0, 0xFFFF];
-        let image = to_image(
-            2,
-            1,
-            ColorType::Palette(1),
-            DecodingResult::U8(vec![0b0100_0000]),
-            Some(&map),
-        )
-        .unwrap()
-        .to_rgb8();
-        assert_eq!(image.into_raw(), vec![255, 0, 0, 0, 0, 255]);
     }
 
     #[test]

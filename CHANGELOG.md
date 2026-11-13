@@ -4,6 +4,41 @@
 
 ### Added
 
+- **Legacy Office files are extracted (`ING-1`):** `.doc`, `.xls` and `.ppt`
+  were accepted at upload but always failed extraction. They are now read by
+  pure-Rust parsers, with no LibreOffice or other runtime dependency:
+  - `.doc`: Word 97–2003 through the piece table (fast-saved files included;
+    field instructions dropped, field results kept; footnotes, endnotes and
+    text boxes read; headers and comments skipped, as for `.docx`). Word 6.0
+    and Word 95 files are read too, with the 8-bit codepage detected from the
+    text (Cyrillic, Central European and other Windows codepages).
+  - `.ppt`: PowerPoint 97–2003 through the persist directory, so slides come in
+    presentation order, then speaker notes. PowerPoint 95 files are read from
+    their 97 dual-storage copy or their `Text_Content` stream.
+  - `.xls`: Excel 5.0–2003 (BIFF5/BIFF8) through calamine.
+  - A legacy file is routed by its bytes, not its name: RTF, HTML, XML
+    (SpreadsheetML), UTF-16 or UTF-8 text, and OOXML packages saved under a
+    `.doc`/`.xls`/`.ppt` name are read by the matching parser.
+  - Password-protected, Word 2.0, PowerPoint 4.0 and damaged files fail with a
+    reason that says which, never with garbage text.
+- **TIFF scans (`ING-4`):** `.tif` and `.tiff` are accepted (`GET /v1/formats`
+  lists them; `image/tiff` is an accepted mime). Every page of a multi-page
+  TIFF is decoded (uncompressed, PackBits, LZW, Deflate, JPEG, CCITT Group 3
+  1-D and Group 4) and sent to the configured vision OCR as PNG, one page per
+  request, and each page keeps its page number in the page map. Like other
+  images, a TIFF needs a vision OCR provider. Palette (indexed-colour) and
+  two-dimensional Group 3 pages are refused with a reason.
+
+### Changed
+
+- **An unknown or missing file extension is refused by the extractor
+  (`ING-4`).** The upload route already answered 415 for one; a job that
+  reached the extractor another way (a job row written by a calling app, a
+  `kb-server reindex` of a document stored before the upload check) used to
+  have its bytes indexed as UTF-8 text. It now fails with `"<name>" has an
+  unsupported file type (.ext); see GET /v1/formats for the accepted list`.
+  No HTTP shape changes.
+
 - **Tree arm (`DEC-4`, `RET-6`), off by default.** A structural question
   ("what does section 4.2 say about…", "chapter 3 of the joint employment
   report") can be answered by navigating a document's section hierarchy instead
