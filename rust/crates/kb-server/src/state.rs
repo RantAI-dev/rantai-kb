@@ -332,6 +332,12 @@ impl AppState {
                 .with_graph_store(Arc::clone(graph))
                 .with_entity_extractor(entity_extractor);
         }
+        if config.visuals.enabled {
+            worker = worker.with_visuals(Arc::new(build_visuals(
+                &config.visuals,
+                config.cache.as_ref(),
+            )?));
+        }
         if let (Some(arm), Some(pages)) =
             (self.engine.inputs.page_arm.as_ref(), config.pages.as_ref())
         {
@@ -361,6 +367,48 @@ impl AppState {
         }
         Ok(worker)
     }
+}
+
+/// The visual stage (`ING-5`): the local collector, and the image describer
+/// wrapped in its disk cache when `KB_CACHE_DIR` is set. The fingerprint names
+/// everything but the image that changes an answer.
+fn build_visuals(
+    visuals: &crate::config::VisualConfig,
+    cache: Option<&crate::config::CacheConfig>,
+) -> anyhow::Result<kb_engine::visuals::VisualPipeline> {
+    let describer = match &visuals.describer {
+        None => None,
+        Some(settings) => {
+            let inner: Arc<dyn kb_ports::ImageDescriber> = Arc::new(
+                kb_inference::HttpImageDescriber::new(settings.clone())
+                    .map_err(|e| anyhow::anyhow!("image describer: {e}"))?,
+            );
+            Some(match cache {
+                Some(cache) => {
+                    let fingerprint = format!(
+                        "image-read|{}|prompt={}|lang={}|tokens={}|reasoning={}",
+                        settings.model,
+                        kb_inference::IMAGE_READ_PROMPT_VERSION,
+                        settings.language,
+                        settings.max_tokens,
+                        if settings.no_reasoning { "off" } else { "on" },
+                    );
+                    tracing::info!(%fingerprint, "image reading disk cache on");
+                    Arc::new(kb_cache::CachedImageDescriber::new(
+                        inner,
+                        kb_cache::DiskCache::new(&cache.dir),
+                        fingerprint,
+                    )) as Arc<dyn kb_ports::ImageDescriber>
+                }
+                None => inner,
+            })
+        }
+    };
+    Ok(kb_engine::visuals::VisualPipeline::new(
+        Arc::new(kb_extract::LocalVisualCollector::default()),
+        describer,
+        visuals.settings.clone(),
+    ))
 }
 
 /// The opt-in ingest-time page describer, wrapped in its disk cache when

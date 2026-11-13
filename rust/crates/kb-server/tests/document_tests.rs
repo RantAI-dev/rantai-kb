@@ -631,3 +631,42 @@ async fn hard_delete_cannot_reach_a_soft_deleted_document_outside_the_keys_knowl
     assert_error(hard, StatusCode::NOT_FOUND, "Not found").await;
     assert_eq!(h.documents.deleted.read().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn hard_delete_removes_the_documents_picture_assets_and_nothing_else() {
+    use kb_ports::BlobStore;
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    let own = kb_ports::asset_path(Some(TENANT), "doc-1", "fig-p0-1.jpg");
+    let foreign = kb_ports::asset_path(Some(TENANT), "doc-2", "fig-p0-1.jpg");
+    for key in [&own, &foreign] {
+        h.blobs
+            .upload(key, b"jpeg".to_vec(), "image/jpeg")
+            .await
+            .unwrap();
+    }
+    let mut doc = doc_meta("doc-1", "Doc");
+    // A metadata value naming another document's object must not reach it.
+    doc.metadata = Some(serde_json::json!({
+        "figures": [{"assetKey": own}, {"assetKey": foreign}, {"assetKey": 7}]
+    }));
+    h.documents.insert_doc(TenantId(TENANT.to_string()), doc);
+
+    let response = h
+        .send(
+            "DELETE",
+            "/v1/documents/doc-1?hard=true",
+            &tenant_key(TENANT),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let objects = h.blobs.objects.read().unwrap();
+    assert!(
+        !objects.contains_key(&own),
+        "the document's own picture is gone"
+    );
+    assert!(
+        objects.contains_key(&foreign),
+        "another document's picture is untouched"
+    );
+}

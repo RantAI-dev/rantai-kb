@@ -205,12 +205,14 @@ pub async fn extract_document(
                     )),
                 }
             } else {
-                Ok(ExtractionResult::failed(
-                    "image",
-                    format!(
-                        "Image OCR failed for \"{filename}\": no vision OCR provider configured"
-                    ),
-                ))
+                // No OCR: the picture is still read by the visual stage when an
+                // image describer is configured, and ingest fails it visibly
+                // when nothing can (`ING-5`), so an empty text is not a lie.
+                tracing::info!(
+                    file = filename,
+                    "no vision OCR provider; image text left empty"
+                );
+                Ok(ExtractionResult::text(String::new(), "image"))
             }
         }
         Some(

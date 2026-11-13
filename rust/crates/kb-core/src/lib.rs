@@ -23,6 +23,7 @@ pub mod signals;
 pub mod sparse;
 pub mod title;
 pub mod tree;
+pub mod visuals;
 mod weave;
 
 pub use boost::{

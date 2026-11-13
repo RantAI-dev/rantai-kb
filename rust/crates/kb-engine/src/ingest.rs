@@ -169,6 +169,9 @@ pub struct IngestWorker {
     graph: Option<Arc<dyn GraphStore>>,
     /// The page-image arm's ingest side, when configured.
     page_ingest: Option<Arc<crate::page_arm::PageIngest>>,
+    /// The visual stage (`ING-5`), when configured. Without it, layout crops
+    /// are indexed by caption and page text exactly as before.
+    visuals: Option<Arc<crate::visuals::VisualPipeline>>,
     progress_sink: Option<Arc<dyn ProgressSink>>,
     /// Per-job throttle state for progress emits, mirroring `lastEmit` in
     /// `src/lib/ingest/job.ts`: always emit on a step change, otherwise at most
@@ -200,6 +203,7 @@ impl IngestWorker {
             entity_extractor: None,
             graph: None,
             page_ingest: None,
+            visuals: None,
             progress_sink: None,
             emit_state: Mutex::new(HashMap::new()),
             settings,
@@ -229,6 +233,13 @@ impl IngestWorker {
     #[must_use]
     pub fn with_page_ingest(mut self, page_ingest: Arc<crate::page_arm::PageIngest>) -> Self {
         self.page_ingest = Some(page_ingest);
+        self
+    }
+
+    /// Make every picture in a document searchable by what it shows (`ING-5`).
+    #[must_use]
+    pub fn with_visuals(mut self, visuals: Arc<crate::visuals::VisualPipeline>) -> Self {
+        self.visuals = Some(visuals);
         self
     }
 
@@ -603,8 +614,68 @@ impl IngestWorker {
             }
         }
 
-        // Figure asset layer (multimodal RAG): upload crops + append searchable figure chunks
-        if !extraction.figures.is_empty() {
+        // The visual stage (ING-5): every picture in the document, read by what
+        // it shows. Without a pipeline, the figure asset layer below runs as it
+        // always has.
+        if let Some(pipeline) = self.visuals.clone() {
+            self.progress(
+                job,
+                StepProgress::at(
+                    IngestStep::ProcessingFigures,
+                    0,
+                    u32::try_from(extraction.figures.len()).unwrap_or(u32::MAX),
+                ),
+                started,
+                &flags,
+            )
+            .await;
+            let outcome = self
+                .run_visuals(
+                    &pipeline,
+                    job,
+                    document_id,
+                    &title,
+                    category_of(&params),
+                    subcategory_of(&params).as_deref(),
+                    mime,
+                    &bytes,
+                    &extraction,
+                    &mut chunks,
+                )
+                .await;
+            // An image upload that nothing can find is a failure, not a ready
+            // document with zero chunks. The page arm, when on, still gives the
+            // picture a visual embedding, so it is searchable that way.
+            if chunks.is_empty()
+                && (outcome.is_upload || extraction.file_type == "image")
+                && self.page_ingest.is_none()
+            {
+                return Err(crate::visuals::nothing_searchable_reason(
+                    &job.filename,
+                    &outcome,
+                    pipeline.can_describe(),
+                ));
+            }
+            if !outcome.is_empty() {
+                let patch = crate::visuals::metadata_patch(&outcome);
+                if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
+                    tracing::warn!(error = %e, "could not record the visual outcome");
+                }
+                tracing::info!(
+                    found = outcome.found,
+                    indexed = outcome.indexed,
+                    described = outcome.described,
+                    failed = outcome.describe_failed,
+                    "[kb-ingest] visuals"
+                );
+            }
+        } else if chunks.is_empty() && extraction.file_type == "image" && self.page_ingest.is_none()
+        {
+            return Err(format!(
+                "nothing searchable in \"{}\": OCR found no text and no image describer is configured (set KB_IMAGE_DESCRIBE_MODEL)",
+                job.filename
+            ));
+        } else if !extraction.figures.is_empty() {
             self.progress(
                 job,
                 StepProgress::at(
@@ -1173,6 +1244,49 @@ impl IngestWorker {
         );
     }
 
+    /// The visual stage for one document: page text and figure anchors from
+    /// the chunks, then [`crate::visuals::index_visuals`].
+    #[allow(clippy::too_many_arguments)]
+    async fn run_visuals(
+        &self,
+        pipeline: &crate::visuals::VisualPipeline,
+        job: &JobRecord,
+        document_id: &DocumentId,
+        document_title: &str,
+        category: &str,
+        subcategory: Option<&str>,
+        mime: &str,
+        bytes: &[u8],
+        extraction: &kb_ports::ExtractionResult,
+        chunks: &mut Vec<Chunk>,
+    ) -> crate::visuals::VisualOutcome {
+        let page_text_tuples: Vec<(Option<u32>, &str)> = chunks
+            .iter()
+            .map(|c| (c.metadata.page, c.content.as_str()))
+            .collect();
+        let page_text = build_page_text(&page_text_tuples);
+        let anchors = figure_anchors(extraction.pages_blocks.as_deref(), chunks);
+        crate::visuals::index_visuals(
+            pipeline,
+            self.blobs.as_ref(),
+            crate::visuals::VisualInput {
+                tenant_id: job.tenant_id.as_str(),
+                document_id,
+                document_title,
+                category,
+                subcategory,
+                filename: &job.filename,
+                mime,
+                bytes,
+                layout_figures: &extraction.figures,
+                page_text: &page_text,
+                anchors: &anchors,
+            },
+            chunks,
+        )
+        .await
+    }
+
     /// Process figure crops: upload images to BlobStore, compute captions and anchors,
     /// and build searchable figure chunks. Non-fatal: logs warning and continues.
     #[allow(clippy::too_many_arguments)]
@@ -1193,36 +1307,7 @@ impl IngestWorker {
             .collect();
         let page_text = build_page_text(&page_text_tuples);
 
-        // Convert pages_blocks to LayoutBlockRef if present
-        let core_pages_blocks: Option<Vec<Vec<LayoutBlockRef<'_>>>> = pages_blocks.map(|pbs| {
-            pbs.iter()
-                .map(|page| {
-                    page.iter()
-                        .map(|b| LayoutBlockRef {
-                            kind: match b.kind {
-                                kb_ports::PageBlockKind::Text => "text",
-                                kb_ports::PageBlockKind::Caption => "caption",
-                                kb_ports::PageBlockKind::Figure => "figure",
-                            },
-                            id: b.id.as_deref(),
-                            text: b.text.as_deref(),
-                        })
-                        .collect()
-                })
-                .collect()
-        });
-
-        let text_chunk_tuples: Vec<(u32, &str)> = chunks
-            .iter()
-            .filter(|c| c.metadata.chunk_type.as_deref() != Some("figure"))
-            .map(|c| (c.metadata.chunk_index, c.content.as_str()))
-            .collect();
-
-        let anchors = if let Some(pbs) = &core_pages_blocks {
-            resolve_figure_anchors(pbs, &text_chunk_tuples)
-        } else {
-            HashMap::new()
-        };
+        let anchors = figure_anchors(pages_blocks, chunks);
 
         let mut fig_chunks = Vec::new();
         let mut assets = Vec::new();
@@ -1686,6 +1771,39 @@ fn relation_name(relation: &kb_core::Relation, field: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// Layout figure id → the text chunk it belongs to, from the layout parser's
+/// reading-order blocks; empty when there are none.
+fn figure_anchors(
+    pages_blocks: Option<&[Vec<kb_ports::PageBlock>]>,
+    chunks: &[Chunk],
+) -> HashMap<String, u32> {
+    let Some(pbs) = pages_blocks else {
+        return HashMap::new();
+    };
+    let core_pages_blocks: Vec<Vec<LayoutBlockRef<'_>>> = pbs
+        .iter()
+        .map(|page| {
+            page.iter()
+                .map(|b| LayoutBlockRef {
+                    kind: match b.kind {
+                        kb_ports::PageBlockKind::Text => "text",
+                        kb_ports::PageBlockKind::Caption => "caption",
+                        kb_ports::PageBlockKind::Figure => "figure",
+                    },
+                    id: b.id.as_deref(),
+                    text: b.text.as_deref(),
+                })
+                .collect()
+        })
+        .collect();
+    let text_chunk_tuples: Vec<(u32, &str)> = chunks
+        .iter()
+        .filter(|c| c.metadata.chunk_type.as_deref() != Some("figure"))
+        .map(|c| (c.metadata.chunk_index, c.content.as_str()))
+        .collect();
+    resolve_figure_anchors(&core_pages_blocks, &text_chunk_tuples)
 }
 
 /// Title for the embedding prefix and the chunk metadata: the job's explicit

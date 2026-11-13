@@ -32,6 +32,7 @@ pub mod page_arm;
 pub mod retrieval;
 pub mod timing;
 pub mod tree_arm;
+pub mod visuals;
 
 /// The reference `RetrievalIndex`. Under `test-utils` so an adapter's contract
 /// test can depend on it as a control; it is also the implementation the engine
@@ -70,6 +71,8 @@ mod page_arm_tests;
 mod tests;
 #[cfg(test)]
 mod tree_arm_tests;
+#[cfg(test)]
+mod visuals_tests;
 
 pub use global_arm::{GlobalArm, GlobalArmConfig, GlobalRanking, fuse_global};
 pub use graph_arm::{GraphArm, GraphArmConfig, GraphCache, GraphRanking};

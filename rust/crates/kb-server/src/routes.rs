@@ -1318,6 +1318,26 @@ async fn delete_document(
             tracing::warn!(error = %err, %key, "page-image blob delete failed during hard delete");
         }
     }
+    // Figure and picture assets ingest stored (`metadata.figures`). Only keys
+    // under this document's own asset prefix are deleted, so a metadata value
+    // can never name someone else's object.
+    let asset_prefix = kb_ports::asset_path(Some(&auth.tenant_id.0), &doc.id.0, "");
+    let asset_keys: Vec<String> = doc
+        .metadata
+        .as_ref()
+        .and_then(|m| m.get("figures"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.get("assetKey").and_then(serde_json::Value::as_str))
+        .filter(|k| k.starts_with(&asset_prefix) && !k.contains(".."))
+        .map(str::to_string)
+        .collect();
+    for key in asset_keys {
+        if let Err(err) = state.blob.delete(&key).await {
+            tracing::warn!(error = %err, %key, "asset blob delete failed during hard delete");
+        }
+    }
     if let Some(graph) = state.graph.as_ref()
         && let Err(err) = graph.delete_document(&auth.tenant_id, &doc_id).await
     {

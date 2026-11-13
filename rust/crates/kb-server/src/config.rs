@@ -132,9 +132,117 @@ pub struct Config {
     pub cache: Option<CacheConfig>,
     /// The page-image arm (`KB_PAGE_EMBEDDING_MODEL`). `None` turns it off.
     pub pages: Option<PageArmSettings>,
+    /// The visual stage of ingest (`KB_IMAGES`, `KB_IMAGE_*`, `ING-5`).
+    pub visuals: VisualConfig,
     /// The deployment tier preset that shaped this config (`KB_TIER`), with
     /// the variables it filled. `None` when no tier is set.
     pub tier: Option<crate::tier::TierPlan>,
+}
+
+/// The visual stage (`ING-5`): every picture in a document read by what it
+/// shows. On by default (`KB_IMAGES`): without an image describer it still
+/// indexes pictures that carry alt text or a caption; with one
+/// (`KB_IMAGE_DESCRIBE_MODEL`), every picture.
+#[derive(Clone, Debug)]
+pub struct VisualConfig {
+    pub enabled: bool,
+    pub describer: Option<kb_inference::ImageDescriberSettings>,
+    pub settings: kb_engine::visuals::VisualSettings,
+}
+
+/// The default image-describer endpoint: OpenRouter's chat completions.
+pub const DEFAULT_IMAGE_DESCRIBE_BASE_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+
+fn visual_config<F>(lookup: &F) -> Result<VisualConfig>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let enabled = bool_flag(lookup, "KB_IMAGES", true);
+    let describer = match lookup("KB_IMAGE_DESCRIBE_MODEL")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        None => None,
+        Some(model) => {
+            let base_url = lookup("KB_IMAGE_DESCRIBE_BASE_URL")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| DEFAULT_IMAGE_DESCRIBE_BASE_URL.to_string());
+            // The OpenRouter key is only a fallback for OpenRouter itself: a
+            // local server must never be sent it.
+            let api_key = lookup("KB_IMAGE_DESCRIBE_API_KEY")
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    if base_url.contains("openrouter.ai") {
+                        lookup("OPENROUTER_API_KEY").filter(|s| !s.trim().is_empty())
+                    } else {
+                        None
+                    }
+                });
+            Some(kb_inference::ImageDescriberSettings {
+                base_url,
+                model,
+                api_key,
+                request_timeout: Duration::from_millis(
+                    int_var(lookup, "KB_IMAGE_DESCRIBE_TIMEOUT_MS", 120_000u64)?.max(1_000),
+                ),
+                max_tokens: int_var(lookup, "KB_IMAGE_DESCRIBE_MAX_TOKENS", 400u32)?.max(32),
+                no_reasoning: bool_flag(lookup, "KB_IMAGE_DESCRIBE_NO_REASONING", false),
+                language: lookup("KB_IMAGE_DESCRIBE_LANGUAGE")
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| "English".to_string()),
+                max_attempts: int_var(lookup, "KB_IMAGE_DESCRIBE_ATTEMPTS", 4u32)?.clamp(1, 10),
+            })
+        }
+    };
+    let defaults = kb_engine::visuals::VisualSettings::default();
+    let rules = kb_core::visuals::SelectRules {
+        min_side: int_var(lookup, "KB_IMAGE_MIN_SIDE", defaults.rules.min_side)?,
+        min_area: int_var(lookup, "KB_IMAGE_MIN_AREA", defaults.rules.min_area)?,
+        max_aspect: match lookup("KB_IMAGE_MAX_ASPECT").map(|v| v.trim().to_string()) {
+            Some(v) if !v.is_empty() => {
+                v.parse::<f32>().ok().filter(|a| *a >= 1.0).ok_or_else(|| {
+                    anyhow::anyhow!("KB_IMAGE_MAX_ASPECT must be a number >= 1, got {v:?}")
+                })?
+            }
+            _ => defaults.rules.max_aspect,
+        },
+        repeat_ornament: int_var(
+            lookup,
+            "KB_IMAGE_REPEAT_ORNAMENT",
+            defaults.rules.repeat_ornament,
+        )?,
+        max_per_document: int_var(
+            lookup,
+            "KB_IMAGE_MAX_PER_DOCUMENT",
+            defaults.rules.max_per_document,
+        )?,
+    };
+    let describe_timeout = describer.as_ref().map_or(defaults.describe_timeout, |d| {
+        d.request_timeout * d.max_attempts.max(1)
+    });
+    let settings = kb_engine::visuals::VisualSettings {
+        rules,
+        describe_concurrency: int_var(lookup, "KB_IMAGE_DESCRIBE_CONCURRENCY", 2usize)?
+            .clamp(1, 32),
+        describe_timeout,
+        pdf_images: bool_flag(lookup, "KB_IMAGE_PDF", false),
+        context_chars: int_var(lookup, "KB_IMAGE_CONTEXT_CHARS", defaults.context_chars)?,
+    };
+    if enabled {
+        match &describer {
+            Some(d) => tracing::info!(model = %d.model, url = %d.base_url, "image describing on"),
+            None => tracing::info!(
+                "images: no describer (KB_IMAGE_DESCRIBE_MODEL unset); pictures are indexed by alt text and captions only"
+            ),
+        }
+    }
+    Ok(VisualConfig {
+        enabled,
+        describer,
+        settings,
+    })
 }
 
 /// Page-image arm wiring: which multimodal embedder, how pages are rendered,
@@ -926,8 +1034,10 @@ impl Config {
             }
         };
 
+        let visuals = visual_config(&lookup)?;
         Ok(Config {
             pages,
+            visuals,
             cache,
             qdrant,
             qdrant_collection_override,
