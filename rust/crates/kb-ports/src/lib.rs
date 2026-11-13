@@ -18,6 +18,7 @@ mod retrieval;
 mod scope;
 mod traits;
 mod types;
+pub mod visuals;
 
 pub use blob::{BlobStore, asset_path, document_path, page_image_path, sanitize_filename};
 pub use community::{CommunityRecord, CommunityStore, NewCommunity};
@@ -50,4 +51,8 @@ pub use types::{
     NewDocument, PageBlock, PageBlockKind, PageText, PatchCategory, PatchDocument,
     PatchKnowledgeBase, ProvenanceArm, ReapableJob, Relation, RelationView, RerankCandidate,
     RerankResult, RerankScore, RetrievalProvenance, RetryJobOutcome, SearchHit, StoredChunk,
+};
+pub use visuals::{
+    ImageDescriber, ImageReading, NormalizedImage, Visual, VisualCollector, VisualKind,
+    VisualOptions, VisualOrigin, VisualScan, VisualScanSkips,
 };
