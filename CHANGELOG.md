@@ -4,6 +4,36 @@
 
 ### Added
 
+- **Pictures are searchable by what they show (`ING-5`).** Before, an image was
+  found only by the text OCR read off it: a photo or diagram without text became a
+  `ready` document with zero chunks, pictures inside Office and EPUB files were
+  dropped (alt text included), and PDF figure crops were indexed by caption and page
+  text only. Now one visual stage handles every picture a reader can see:
+  - **Sources:** standalone uploads (each TIFF page), pictures in `.docx`, `.pptx`,
+    `.xlsx`, `.odt`, `.ods` and `.epub` (with their alt text), PDF figure crops from
+    the layout chain, and (opt-in, `KB_IMAGE_PDF=true`) image objects in text-layer
+    PDFs.
+  - **Filtering:** pictures are normalised (longest side ≤ 1568 px, JPEG) and
+    filtered: icons, strips, duplicates and a logo repeated on every slide are
+    counted and skipped, with a per-document cap (`KB_IMAGE_MAX_PER_DOCUMENT`, 100).
+  - **Reading:** each picture is read by an image describer
+    (`KB_IMAGE_DESCRIBE_MODEL`, any OpenAI-compatible chat endpoint) that returns
+    its kind, a description and its visible text. Readings are cached on disk by
+    model, prompt version and image hash, and rate limits are retried with backoff.
+  - **Indexing:** each picture becomes a `figure` chunk with its `assetKey`, so the
+    dense, BM25 and figure arms find it. Pictures the describer calls a logo or
+    decoration are counted, not indexed.
+  - **Outcomes:** `Document.metadata.visuals` records what happened to every
+    picture; `metadata.figures` entries gain `origin` and `description`.
+  - **Tiers:** a Qwen3-VL-2B-Instruct sidecar on llama.cpp reads pictures on the
+    local tiers (CPU on Lite, GPU from Desk); Cloud uses
+    `nvidia/nemotron-3.5-super-vl` (about $0.22 per 1,000 images at the listed
+    price). `kb-server setup --tier cloud` now also asks for
+    `--accept-licence nvidia/nemotron-3.5-super-vl`.
+  - **Leak gate:** `kb-server eval leak --docx` seeds pictures whose alt text is
+    the figure canary, so the figure arm and the asset route are probed; the CI
+    gate uses it.
+
 - **Legacy Office files are extracted (`ING-1`):** `.doc`, `.xls` and `.ppt`
   were accepted at upload but always failed extraction. They are now read by
   pure-Rust parsers, with no LibreOffice or other runtime dependency:
@@ -30,6 +60,17 @@
   two-dimensional Group 3 pages are refused with a reason.
 
 ### Changed
+
+- **An image upload with nothing searchable fails visibly (`ING-5`).** When OCR
+  finds no text and no picture reading is possible (no describer configured, or
+  the describer failed), the job fails with `nothing searchable in "<name>": …`,
+  naming the setting to change, instead of finishing `ready` with zero chunks. An
+  image upload without an OCR provider no longer fails before the describer can
+  read it. The page arm, when on, still gives such an image a visual embedding,
+  so it is not failed there.
+- **Hard delete removes picture assets.** `DELETE /v1/documents/:id?hard=true`
+  now also deletes the assets listed in `metadata.figures`, limited to the
+  document's own asset prefix.
 
 - **An unknown or missing file extension is refused by the extractor
   (`ING-4`).** The upload route already answered 415 for one; a job that

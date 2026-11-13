@@ -35,7 +35,7 @@ Metal); that is accepted for the chat model only.
 | Reranker | tiny text reranker, or none | bge-reranker-v2-m3 (text) | Qwen3-VL-Reranker-2B, full precision | Qwen3-VL-Reranker-8B | voyage rerank-2.5 / cohere rerank-4 / qwen3-reranker-8b |
 | Digital PDF text | pdfium text layer | text layer | text layer | text layer | text layer |
 | Scans / complex pages | PP-OCRv6 (ONNX, CPU) | PaddleOCR-VL-1.6, loaded during ingest | PaddleOCR-VL-1.6, resident | MinerU2.5-Pro / PaddleOCR-VL | Mistral OCR |
-| Charts / figures | small VLM on figure crops, background queue | chat LLM's vision, idle time | chat LLM's vision | chat LLM's vision | Gemini Flash |
+| Pictures (photos, charts, diagrams, embedded images; `ING-5`) | Qwen3-VL-2B-Instruct Q4 on CPU (llama.cpp sidecar `vlm-cpu`) | Qwen3-VL-2B-Instruct on GPU (`vlm-gpu`, ~2.5 GB) | same | same | nemotron-3.5-super-vl (API) |
 | Page-image search | optional tiny model (colSmol-256M), off by default | off (text-only embedder) | yes | yes | yes |
 | Est. VRAM chat / KB | — | ~3.5 / ~4.5 GB (tight) | ~9 / ~10 GB | ~26 / ~20 GB on 48 GB | — |
 
@@ -155,6 +155,32 @@ did run end to end under llama.cpp on this CPU (102.5 s per page, text identical
 layer: `docs/tier-readiness-plan.md`). PP-OCRv6 on Lite runs in `rust/deploy/ocr-ppocr`
 (RapidOCR 3.10, ONNX Runtime, CPU), a sidecar that answers the same chat shape; it is
 **built but not yet run** (the image has not been built on this machine).
+
+## Picture reading (`ING-5`)
+
+Every picture a reader of a document can see (a standalone upload, a picture in a
+Word/PowerPoint/Excel/ODF/EPUB file, a PDF figure crop, and with `KB_IMAGE_PDF=true`
+a PDF image object) is read at ingest by one vision-language model, which returns
+the picture's kind, a description and its visible text. The picture becomes a
+`figure` chunk with its asset key. On the local tiers the model is
+Qwen3-VL-2B-Instruct (Apache-2.0) under llama.cpp's server, the `vlm-cpu` or
+`vlm-gpu` compose service on port 8085 bare-metal; Cloud calls
+`nvidia/nemotron-3.5-super-vl` through OpenRouter.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `KB_IMAGES` | the visual stage on or off | `true` |
+| `KB_IMAGE_DESCRIBE_MODEL` | model name; empty means pictures are indexed by alt text and captions only | empty |
+| `KB_IMAGE_DESCRIBE_BASE_URL` | full chat-completions URL | OpenRouter |
+| `KB_IMAGE_DESCRIBE_API_KEY` | bearer token; `OPENROUTER_API_KEY` is used only for an OpenRouter URL | empty |
+| `KB_IMAGE_DESCRIBE_LANGUAGE` | language of the descriptions (use `Indonesian` for Indonesian corpora) | `English` |
+| `KB_IMAGE_DESCRIBE_CONCURRENCY` / `_TIMEOUT_MS` / `_MAX_TOKENS` / `_ATTEMPTS` / `_NO_REASONING` | throughput and retries | `2` / `120000` / `400` / `4` / `false` |
+| `KB_IMAGE_MIN_SIDE` / `KB_IMAGE_MIN_AREA` / `KB_IMAGE_MAX_ASPECT` | size filters for pictures inside documents | `48` / `16384` / `8` |
+| `KB_IMAGE_REPEAT_ORNAMENT` | a picture repeated this often in one document is page furniture | `3` |
+| `KB_IMAGE_MAX_PER_DOCUMENT` | pictures indexed per document | `100` |
+| `KB_IMAGE_PDF` | also read image objects in text-layer PDFs | `false` |
+
+Measured quality, speed and cost: `docs/eval-ab/images/README.md`.
 
 ## The one-model-per-role rule
 

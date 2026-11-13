@@ -193,6 +193,15 @@ In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.d
   GROUP BY 1 ORDER BY 2 DESC;
   ```
 
+**Pictures (`ING-5`, after v0.2.0), also additive for callers:** pictures become
+`figure` chunks with an `assetKey` (fetch them through
+`GET /v1/documents/:id/assets?key=`), `Document.metadata` gains `visuals`, and
+`metadata.figures` entries gain `origin` and `description`. One behaviour differs
+from Bun and v0.2.0: an image upload with no OCR text that no image describer can
+read now **fails** (`nothing searchable in "<name>": …`) instead of finishing
+`ready` with zero chunks. Set `KB_IMAGE_DESCRIBE_MODEL` (or use a `KB_TIER` that
+fills it) before reindexing image uploads.
+
 ### 3. PDFium vs pdf.js Smart Router Thresholds
 - Bun uses `unpdf` (Mozilla `pdf.js`), which renders text streams through JS code.
 - Rust uses dynamically loaded `libpdfium`, which extracts glyphs directly from native PDF operators.
