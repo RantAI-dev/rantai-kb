@@ -685,6 +685,18 @@ pub const LICENCES: &[LicenceEntry] = &[
         "OCR, station alternative (not in the preset)",
     ),
     entry(
+        "Qwen/Qwen3-VL-2B-Instruct",
+        "Apache-2.0",
+        LicenceClass::Green,
+        "picture reading (ING-5), every local tier",
+    ),
+    entry(
+        "nvidia/nemotron-3.5-super-vl",
+        "hosted service, provider terms",
+        LicenceClass::Yellow,
+        "cloud picture reading (ING-5); billed per token",
+    ),
+    entry(
         "Qwen/Qwen3-VL-Embedding-2B",
         "Apache-2.0",
         LicenceClass::Green,
@@ -736,21 +748,28 @@ pub fn licence_entry(model: &str) -> Option<&'static LicenceEntry> {
 #[must_use]
 pub fn tier_models(tier: Tier) -> Vec<&'static str> {
     match tier {
-        Tier::Lite => vec!["intfloat/multilingual-e5-small", "PaddlePaddle/PP-OCRv6"],
+        Tier::Lite => vec![
+            "intfloat/multilingual-e5-small",
+            "PaddlePaddle/PP-OCRv6",
+            "Qwen/Qwen3-VL-2B-Instruct",
+        ],
         Tier::LiteEn => vec![
             "sentence-transformers/all-MiniLM-L6-v2",
             "PaddlePaddle/PP-OCRv6",
+            "Qwen/Qwen3-VL-2B-Instruct",
         ],
         Tier::Desk => vec![
             "Qwen/Qwen3-Embedding-0.6B",
             "BAAI/bge-reranker-v2-m3",
             "PaddlePaddle/PaddleOCR-VL-1.6",
+            "Qwen/Qwen3-VL-2B-Instruct",
         ],
         Tier::Studio => vec![
             "Qwen/Qwen3-Embedding-0.6B",
             "Qwen/Qwen3-VL-Reranker-2B",
             "PaddlePaddle/PaddleOCR-VL-1.6",
             "Qwen/Qwen3-VL-Embedding-2B",
+            "Qwen/Qwen3-VL-2B-Instruct",
         ],
         // MinerU2.5-Pro stays in the licence table as Station's alternative
         // parser (`KB_LAYOUT_EXTRACTOR_ORDER=sidecar`); the preset and the
@@ -760,8 +779,13 @@ pub fn tier_models(tier: Tier) -> Vec<&'static str> {
             "Qwen/Qwen3-VL-Reranker-8B",
             "PaddlePaddle/PaddleOCR-VL-1.6",
             "Qwen/Qwen3-VL-Embedding-8B",
+            "Qwen/Qwen3-VL-2B-Instruct",
         ],
-        Tier::Cloud => vec!["voyageai/voyage-multimodal-3.5", "voyageai/rerank-2.5"],
+        Tier::Cloud => vec![
+            "voyageai/voyage-multimodal-3.5",
+            "voyageai/rerank-2.5",
+            "nvidia/nemotron-3.5-super-vl",
+        ],
     }
 }
 
@@ -2637,10 +2661,11 @@ mod tests {
         let accepted = vec![
             "voyageai/voyage-multimodal-3.5".to_string(),
             "voyageai/rerank-2.5".to_string(),
+            "nvidia/nemotron-3.5-super-vl".to_string(),
         ];
         let report = gate_licences(&models, &accepted).expect("accepted");
         assert!(report.green.is_empty());
-        assert_eq!(report.yellow_accepted.len(), 2);
+        assert_eq!(report.yellow_accepted.len(), 3);
     }
 
     #[test]
@@ -2697,6 +2722,7 @@ mod tests {
             accepted: vec![
                 "voyageai/voyage-multimodal-3.5".to_string(),
                 "voyageai/rerank-2.5".to_string(),
+                "nvidia/nemotron-3.5-super-vl".to_string(),
             ],
             ..SetupArgs::default()
         };
@@ -2730,6 +2756,7 @@ mod tests {
             accepted: vec![
                 "voyageai/voyage-multimodal-3.5".to_string(),
                 "voyageai/rerank-2.5".to_string(),
+                "nvidia/nemotron-3.5-super-vl".to_string(),
             ],
             write_secrets: true,
             openrouter_key_env: Some("TEST_OPENROUTER_KEY".to_string()),

@@ -55,6 +55,14 @@ const LOCAL_RERANK_URL: &str = "http://127.0.0.1:8082";
 /// The local OCR server's chat endpoint: the PP-OCRv6 sidecar on Lite,
 /// PaddleOCR-VL-1.6 (llama.cpp or vLLM) from Desk up.
 const LOCAL_OCR_URL: &str = "http://127.0.0.1:8083/v1/chat/completions";
+/// The local vision-language model that reads pictures at ingest (`ING-5`):
+/// llama.cpp's server, on the CPU on Lite and on the GPU from Desk up.
+const LOCAL_VLM_URL: &str = "http://127.0.0.1:8085/v1/chat/completions";
+/// Qwen3-VL-2B-Instruct: measured on `images-v1` on a CPU (see
+/// `docs/eval-ab/images/README.md`).
+const QWEN3_VL_2B_INSTRUCT: &str = "Qwen/Qwen3-VL-2B-Instruct";
+/// The cloud describer: the paid twin of the model measured free.
+const NEMOTRON_VL: &str = "nvidia/nemotron-3.5-super-vl";
 /// The local vLLM page embedder (Chat Embeddings API).
 const LOCAL_PAGE_EMBEDDINGS: &str = "http://127.0.0.1:8084/v1/embeddings";
 /// OpenRouter's rerank router, which takes the Cohere request shape.
@@ -193,6 +201,24 @@ const VL_PAGES_8B: &[(&str, &str)] = &[
     ("KB_PAGE_EMBEDDING_DIM", "4096"),
 ];
 
+/// Lite and Lite-en: pictures read by Qwen3-VL-2B on the CPU, one at a time
+/// and with a long timeout: a picture takes tens of seconds there, and ingest
+/// is a background job.
+const CPU_DESCRIBE: &[(&str, &str)] = &[
+    ("KB_IMAGE_DESCRIBE_MODEL", QWEN3_VL_2B_INSTRUCT),
+    ("KB_IMAGE_DESCRIBE_BASE_URL", LOCAL_VLM_URL),
+    ("KB_IMAGE_DESCRIBE_CONCURRENCY", "1"),
+    ("KB_IMAGE_DESCRIBE_TIMEOUT_MS", "300000"),
+];
+
+/// Desk and up: the same model on the GPU.
+const GPU_DESCRIBE: &[(&str, &str)] = &[
+    ("KB_IMAGE_DESCRIBE_MODEL", QWEN3_VL_2B_INSTRUCT),
+    ("KB_IMAGE_DESCRIBE_BASE_URL", LOCAL_VLM_URL),
+    ("KB_IMAGE_DESCRIBE_CONCURRENCY", "4"),
+    ("KB_IMAGE_DESCRIBE_TIMEOUT_MS", "60000"),
+];
+
 /// Lite: no reranker, one embedding at a time.
 ///
 /// Embedding concurrency is filled as `KB_EMBED_CONCURRENCY`, the name Bun
@@ -240,6 +266,11 @@ const CLOUD: &[(&str, &str)] = &[
     ("KB_RERANK_BASE_URL", OPENROUTER_RERANK),
     ("KB_RERANK_MODEL", VOYAGE_RERANKER),
     ("KB_RERANK_CANDIDATE_LIMIT", "20"),
+    // Pictures read over the same OpenRouter key: about $0.22 per 1,000
+    // images at the listed price (~1,000 tokens in, ~150 out each).
+    ("KB_IMAGE_DESCRIBE_MODEL", NEMOTRON_VL),
+    ("KB_IMAGE_DESCRIBE_NO_REASONING", "true"),
+    ("KB_IMAGE_DESCRIBE_CONCURRENCY", "4"),
     // Entity extraction is an LLM call per document (OpenRouter) whose output
     // goes only to the Postgres graph when `KB_GRAPH_STORE=pg`: pure spend
     // otherwise.
@@ -313,15 +344,23 @@ impl Tier {
     /// The preset tables that apply to this tier, most general first.
     fn tables(self) -> &'static [&'static [(&'static str, &'static str)]] {
         match self {
-            Self::Lite => &[LOCAL, E5_SMALL_TEXT, PP_OCR_PAGES, LITE],
-            Self::LiteEn => &[LOCAL, MINILM_TEXT, PP_OCR_PAGES, LITE],
-            Self::Desk => &[LOCAL, QWEN3_TEXT, LOCAL_RERANK, PADDLE_OCR_PAGES, DESK],
+            Self::Lite => &[LOCAL, E5_SMALL_TEXT, PP_OCR_PAGES, CPU_DESCRIBE, LITE],
+            Self::LiteEn => &[LOCAL, MINILM_TEXT, PP_OCR_PAGES, CPU_DESCRIBE, LITE],
+            Self::Desk => &[
+                LOCAL,
+                QWEN3_TEXT,
+                LOCAL_RERANK,
+                PADDLE_OCR_PAGES,
+                GPU_DESCRIBE,
+                DESK,
+            ],
             Self::Studio => &[
                 LOCAL,
                 QWEN3_TEXT,
                 VL_RERANK_2B,
                 PADDLE_OCR_PAGES,
                 VL_PAGES_2B,
+                GPU_DESCRIBE,
                 STUDIO,
             ],
             Self::Station => &[
@@ -330,6 +369,7 @@ impl Tier {
                 VL_RERANK_8B,
                 PADDLE_OCR_PAGES,
                 VL_PAGES_8B,
+                GPU_DESCRIBE,
                 STATION,
             ],
             Self::Cloud => &[CLOUD],
