@@ -959,6 +959,11 @@ def run(args) -> int:
     agent_b = summarise(questions, per, "agent_b", args.resamples) if args.agent else {}
     all_ids = [q["id"] for q in questions]
     delta = paired_delta(per, all_ids, args.resamples) if args.agent else {}
+    delta_by_slice = (
+        {name: paired_delta(per, ids, args.resamples) for name, ids in slice_rows(questions) if len(ids) >= 5}
+        if args.agent
+        else {}
+    )
 
     ingest_failed = [name for name, entry in state.items() if entry.get("status") != "ready"]
     results = {
@@ -991,6 +996,7 @@ def run(args) -> int:
             "text": agent_a,
             "table": agent_b,
             "delta": delta,
+            "delta_by_slice": delta_by_slice,
         }
         if args.agent
         else None,
@@ -1114,13 +1120,18 @@ def report(results: dict, per: dict, questions: list[dict]) -> str:
         lines += ["", "## Score 3 — end to end", ""]
         lines += [_table_block("(a) answer from retrieved text", results["agent"]["text"]), ""]
         lines += [_table_block("(b) table summary → TableQuery → API", results["agent"]["table"]), ""]
+        delta_rows = results["agent"].get("delta_by_slice") or {}
         lines += [
-            "Paired delta (b) − (a):",
+            "Paired delta (b) − (a), per slice (n ≥ 5):",
             "",
-            f"- overall: {results['agent']['delta']['mean']:+.3f} "
-            f"[{results['agent']['delta']['ci_low']:+.3f}, {results['agent']['delta']['ci_high']:+.3f}] "
-            f"(n={results['agent']['delta']['n']})",
+            "| slice | Δ [95% CI] |",
+            "|---|---|",
         ]
+        for name, entry in delta_rows.items():
+            lines.append(
+                f"| {name} | {entry['mean']:+.3f} [{entry['ci_low']:+.3f}, {entry['ci_high']:+.3f}] "
+                f"(n={entry['n']}) |"
+            )
     lines += ["", "## Failures, counted", ""]
     if results["failures"]:
         lines += ["| kind | n | examples |", "|---|---:|---|"]
