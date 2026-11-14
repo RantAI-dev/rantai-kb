@@ -19,7 +19,9 @@ use calamine::{
     open_workbook_auto_from_rs,
 };
 use kb_core::tables::{
-    Cell, MAX_TABLE_ROWS, TableGrid, TableSource, cell_from_text, render_table_markdown,
+    Cell, MAX_TABLE_ROWS, TableGrid, TableSource, cell_from_text, is_placeholder,
+    normalize_header_name, placeholder_note, render_table_markdown, single_distinct_value,
+    take_title_rows, unique_header_names,
 };
 
 use crate::ExtractError;
@@ -208,20 +210,30 @@ fn render_sheet(sheet_name: &str, grids: &[TableGrid]) -> String {
 }
 
 fn grids_for_sheet(source: TableSource, sheet: &RawSheet) -> Vec<TableGrid> {
-    let matrix = sheet_matrix(&sheet.range);
+    let (matrix, placeholders) = sheet_matrix(&sheet.range);
     let formula_cells = formula_cells(&sheet.formulas);
     let mut grids: Vec<TableGrid> = Vec::new();
+    // A title row alone between blank rows belongs to the table below it, not
+    // to a one-column table of its own.
+    let mut carried_titles: Vec<String> = Vec::new();
 
-    for (rows, columns) in regions(&matrix) {
-        let mut grid = region_grid(
+    let regions = regions(&matrix);
+    for (index, (rows, columns)) in regions.iter().enumerate() {
+        let more_regions = index + 1 < regions.len();
+        let Some(mut grid) = region_grid(
             source,
             &sheet.name,
             &matrix,
-            &rows,
-            &columns,
+            &placeholders,
+            rows,
+            columns,
             &sheet.merges,
             &formula_cells,
-        );
+            more_regions,
+            &mut carried_titles,
+        ) else {
+            continue;
+        };
         if grid.header.iter().all(String::is_empty) {
             continue;
         }
@@ -234,25 +246,28 @@ fn grids_for_sheet(source: TableSource, sheet: &RawSheet) -> Vec<TableGrid> {
     grids
 }
 
-/// The used part of a range as a rectangle of typed cells.
-fn sheet_matrix(range: &Range<Data>) -> Vec<Vec<Cell>> {
+/// The used part of a range as a rectangle of typed cells, plus a rectangle
+/// that marks the cells whose text was a statistical placeholder (`-`, `...`,
+/// `NA`) read as empty.
+fn sheet_matrix(range: &Range<Data>) -> (Vec<Vec<Cell>>, Vec<Vec<bool>>) {
     let (Some((start_row, start_col)), Some((end_row, end_col))) = (range.start(), range.end())
     else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut matrix = Vec::new();
+    let mut placeholders = Vec::new();
     for row in start_row..=end_row {
         let mut cells = Vec::new();
+        let mut flags = Vec::new();
         for column in start_col..=end_col {
-            cells.push(
-                range
-                    .get_value((row, column))
-                    .map_or(Cell::Empty, cell_from_data),
-            );
+            let value = range.get_value((row, column));
+            flags.push(matches!(value, Some(Data::String(text)) if is_placeholder(text)));
+            cells.push(value.map_or(Cell::Empty, cell_from_data));
         }
         matrix.push(cells);
+        placeholders.push(flags);
     }
-    matrix
+    (matrix, placeholders)
 }
 
 fn formula_cells(range: &Range<String>) -> Vec<(u32, u32)> {
@@ -329,27 +344,42 @@ fn regions(matrix: &[Vec<Cell>]) -> Vec<(std::ops::Range<usize>, std::ops::Range
     regions
 }
 
+#[allow(clippy::too_many_arguments)]
 fn region_grid(
     source: TableSource,
     sheet_name: &str,
     matrix: &[Vec<Cell>],
+    placeholders: &[Vec<bool>],
     rows: &std::ops::Range<usize>,
     columns: &std::ops::Range<usize>,
     merges: &[Dimensions],
     formula_cells: &[(u32, u32)],
-) -> TableGrid {
+    more_regions: bool,
+    carried_titles: &mut Vec<String>,
+) -> Option<TableGrid> {
     let mut cells: Vec<Vec<Cell>> = rows
         .clone()
         .map(|row| matrix[row][columns.clone()].to_vec())
         .collect();
     spread_merges(&mut cells, rows, columns, merges);
 
-    let mut title = None;
-    let mut title_offset = 0usize;
-    if let Some(title_index) = title_row(&cells) {
-        title = Some(cell_text(&cells[title_index][0]));
-        cells.remove(title_index);
-        title_offset = 1;
+    let mut titles = std::mem::take(carried_titles);
+    let taken = take_title_rows(&mut cells);
+    let title_rows = taken.len();
+    titles.extend(taken);
+    if cells.is_empty() {
+        *carried_titles = titles;
+        return None;
+    }
+    // One row holding one distinct value, alone between blank rows: that is the
+    // next table's title (BPS puts "Tabel 25.8" above a blank line), not a
+    // one-column table.
+    if cells.len() == 1 && more_regions {
+        if let Some(title) = single_distinct_value(&cells[0]) {
+            titles.push(title);
+            *carried_titles = titles;
+            return None;
+        }
     }
 
     let (header_rows, header) = header_and_rows(&cells);
@@ -366,26 +396,43 @@ fn region_grid(
         .collect();
 
     let formula_rows = formula_rows(
-        rows.start + title_offset,
+        rows.start + title_rows,
         header_rows,
         columns.start,
         &grid_rows,
         formula_cells,
     );
+    let mut placeholder_count = 0usize;
+    for row in (rows.start + title_rows + header_rows)..rows.end {
+        for column in columns.clone() {
+            if placeholders
+                .get(row)
+                .and_then(|flags| flags.get(column))
+                .copied()
+                .unwrap_or(false)
+            {
+                placeholder_count += 1;
+            }
+        }
+    }
 
-    TableGrid {
+    Some(TableGrid {
         source: Some(source),
         sheet: Some(sheet_name.to_string()),
         page_span: None,
-        title: title.or_else(|| Some(sheet_name.to_string())),
+        title: if titles.is_empty() {
+            Some(sheet_name.to_string())
+        } else {
+            Some(titles.join(" — "))
+        },
         caption: None,
         header,
         header_rows: header_rows as u32,
         rows: grid_rows,
         formula_rows,
-        notes: Vec::new(),
+        notes: placeholder_note(placeholder_count).into_iter().collect(),
         truncated: false,
-    }
+    })
 }
 
 /// Fill every cell of a merged span with the span's top-left value, clipped to
@@ -416,31 +463,6 @@ fn spread_merges(
     }
 }
 
-/// A title row is a leading row whose non-empty cells are all the same text
-/// (a merged title spread by [`spread_merges`]), or a single cell above a
-/// wider header.
-fn title_row(cells: &[Vec<Cell>]) -> Option<usize> {
-    if cells.len() < 2 {
-        return None;
-    }
-    let first = &cells[0];
-    let non_empty: Vec<&Cell> = first.iter().filter(|cell| **cell != Cell::Empty).collect();
-    if non_empty.is_empty() {
-        return None;
-    }
-    let all_same = non_empty.iter().all(|cell| cell == &non_empty[0]);
-    let width = non_empty.len();
-    let next_non_empty = cells[1].iter().filter(|cell| **cell != Cell::Empty).count();
-    if all_same && (width >= 2 || next_non_empty >= 2) {
-        // A one-cell first row is a title only when the header is wider.
-        if width == 1 && next_non_empty < 2 {
-            return None;
-        }
-        return Some(0);
-    }
-    None
-}
-
 /// Decide how many leading rows are headers and flatten them.
 fn header_and_rows(cells: &[Vec<Cell>]) -> (usize, Vec<String>) {
     if cells.is_empty() {
@@ -459,14 +481,15 @@ fn header_and_rows(cells: &[Vec<Cell>]) -> (usize, Vec<String>) {
                     .get(column)
                     .is_some_and(|cell| *cell != Cell::Empty)
         });
-        let second_row_text = cells[1].iter().all(|cell| {
-            matches!(
-                cell,
-                Cell::Empty | Cell::Text(_) | Cell::Date(_) | Cell::Bool(_)
-            )
+        // A year row is a header level too: a year read as a number is a
+        // label, not data. Any other number in the second row means the row
+        // below the first is data.
+        let second_row_labels = cells[1].iter().all(|cell| match cell {
+            Cell::Empty | Cell::Text(_) | Cell::Date(_) | Cell::Bool(_) => true,
+            Cell::Number(number) => number.fract() == 0.0 && (1900.0..=2100.0).contains(number),
         });
         let third_row_data = cells[2].iter().any(|cell| matches!(cell, Cell::Number(_)));
-        if (adjacent_duplicates || first_gap_filled) && second_row_text && third_row_data {
+        if (adjacent_duplicates || first_gap_filled) && second_row_labels && third_row_data {
             header_rows = 2;
         }
     }
@@ -476,40 +499,19 @@ fn header_and_rows(cells: &[Vec<Cell>]) -> (usize, Vec<String>) {
             let mut parts: Vec<String> = Vec::new();
             for row in cells.iter().take(header_rows) {
                 let text = row.get(column).map_or(String::new(), cell_text);
-                let text = text.trim();
+                let text = normalize_header_name(&text);
                 if !text.is_empty()
                     && parts
                         .last()
                         .is_none_or(|previous| previous.as_str() != text)
                 {
-                    parts.push(text.to_string());
+                    parts.push(text);
                 }
             }
-            if parts.is_empty() {
-                format!("Column {}", column + 1)
-            } else {
-                parts.join(" / ")
-            }
+            parts.join(" / ")
         })
         .collect();
-    (header_rows, unique_names(header))
-}
-
-fn unique_names(names: Vec<String>) -> Vec<String> {
-    let mut seen: Vec<String> = Vec::new();
-    let mut unique = Vec::with_capacity(names.len());
-    for name in names {
-        let base = name.clone();
-        let mut candidate = name;
-        let mut suffix = 2usize;
-        while seen.iter().any(|existing| existing == &candidate) {
-            candidate = format!("{base} ({suffix})");
-            suffix += 1;
-        }
-        seen.push(candidate.clone());
-        unique.push(candidate);
-    }
-    unique
+    (header_rows, unique_header_names(&header))
 }
 
 /// Data-row indices whose numeric cells carry a formula (absolute sheet rows).
@@ -559,6 +561,7 @@ fn format_number(value: f64) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use kb_core::tables::{ColumnKind, ColumnRole, Confidence, build_manifest};
     use rust_xlsxwriter::{Format, Workbook};
 
     #[test]
@@ -680,5 +683,149 @@ mod tests {
     fn bytes_that_are_not_a_spreadsheet_are_a_container_error() {
         let err = parse(b"not a spreadsheet", "book.xlsx").unwrap_err();
         assert!(matches!(err, ExtractError::Container(_)), "{err}");
+    }
+
+    /// A BPS Klaten sheet as the portal publishes it: a table number, a merged
+    /// title, a two-row bilingual header with line breaks, a kode column, year
+    /// columns with `-` placeholders, and a "Kabupaten Klaten" total row that
+    /// holds the column sums without a formula.
+    #[test]
+    fn a_bps_sheet_is_titled_normalised_quantified_and_its_total_is_derived() {
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        let format = Format::default();
+        sheet.write_string(0, 0, "Tabel 25.8").unwrap();
+        sheet
+            .merge_range(
+                1,
+                0,
+                1,
+                6,
+                "Data Uji Kendaraan Bermotor di Kabupaten Klaten Tahun 2018-2022",
+                &format,
+            )
+            .unwrap();
+        sheet.write_string(2, 0, "Kode\nCode").unwrap();
+        sheet.write_string(2, 1, "Kecamatan\nDistrict").unwrap();
+        sheet
+            .merge_range(2, 2, 2, 6, "Kendaraan Bermotor\nMotor Vehicles", &format)
+            .unwrap();
+        for (column, year) in (2018..=2022).enumerate() {
+            sheet
+                .write_string(3, column as u16 + 2, year.to_string())
+                .unwrap();
+        }
+        let regions = [
+            ("331001", "Klaten Utara", ["120", "-", "150", "160", "170"]),
+            ("331002", "Klaten Tengah", ["130", "140", "—", "150", "160"]),
+            (
+                "331003",
+                "Klaten Selatan",
+                ["140", "150", "160", "170", "180"],
+            ),
+        ];
+        for (offset, (code, name, values)) in regions.iter().enumerate() {
+            let row = (4 + offset) as u32;
+            sheet.write_string(row, 0, *code).unwrap();
+            sheet.write_string(row, 1, *name).unwrap();
+            for (column, value) in values.iter().enumerate() {
+                match value.parse::<f64>() {
+                    Ok(number) => sheet.write_number(row, column as u16 + 2, number).unwrap(),
+                    Err(_) => sheet.write_string(row, column as u16 + 2, *value).unwrap(),
+                };
+            }
+        }
+        // The total row carries the sums; no formula, and the label is the
+        // region, not "Jumlah".
+        sheet
+            .merge_range(7, 0, 7, 1, "Kabupaten Klaten", &format)
+            .unwrap();
+        for (column, total) in [390.0, 290.0, 310.0, 480.0, 510.0].iter().enumerate() {
+            sheet.write_number(7, column as u16 + 2, *total).unwrap();
+        }
+
+        let bytes = workbook.save_to_buffer().unwrap();
+        let sheet_data = parse_with_tables(&bytes, "bps.xlsx").unwrap();
+        assert_eq!(sheet_data.tables.len(), 1, "{:?}", sheet_data.tables);
+        let grid = &sheet_data.tables[0];
+        assert_eq!(
+            grid.title.as_deref(),
+            Some("Tabel 25.8 — Data Uji Kendaraan Bermotor di Kabupaten Klaten Tahun 2018-2022")
+        );
+        assert_eq!(
+            grid.header,
+            vec![
+                "Kode Code",
+                "Kecamatan District",
+                "Kendaraan Bermotor Motor Vehicles / 2018",
+                "Kendaraan Bermotor Motor Vehicles / 2019",
+                "Kendaraan Bermotor Motor Vehicles / 2020",
+                "Kendaraan Bermotor Motor Vehicles / 2021",
+                "Kendaraan Bermotor Motor Vehicles / 2022",
+            ]
+        );
+        assert_eq!(grid.header_rows, 2);
+        assert_eq!(grid.rows.len(), 4);
+        assert_eq!(grid.rows[0][3], Cell::Empty);
+        assert_eq!(grid.rows[1][4], Cell::Empty);
+        assert!(
+            grid.notes
+                .iter()
+                .any(|note| note == "2 placeholder cells treated as empty"),
+            "{:?}",
+            grid.notes
+        );
+        assert!(!sheet_data.content.contains("Kode\nCode"));
+
+        let manifest = build_manifest(grid);
+        assert_eq!(manifest.columns[0].role, ColumnRole::Code);
+        assert_eq!(manifest.columns[1].role, ColumnRole::Identifier);
+        for column in 2..7 {
+            assert_eq!(manifest.columns[column].kind, ColumnKind::Number);
+            assert_eq!(
+                manifest.columns[column].role,
+                ColumnRole::Quantity,
+                "{} is a year of numbers, not Mixed",
+                manifest.columns[column].name
+            );
+        }
+        assert_eq!(manifest.derived_rows, vec![3]);
+        assert_eq!(manifest.confidence, Confidence::Medium);
+        assert!(
+            manifest
+                .notes
+                .iter()
+                .any(|note| note.contains("proven by arithmetic")),
+            "{:?}",
+            manifest.notes
+        );
+    }
+
+    /// The table number sits above a blank line in many BPS exports. It is the
+    /// next table's title, not a one-column table of its own.
+    #[test]
+    fn a_title_row_alone_between_blank_rows_titles_the_table_below_it() {
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        sheet.write_string(0, 0, "Tabel 25.39").unwrap();
+        for (column, value) in ["Kecamatan", "2018", "2019"].iter().enumerate() {
+            sheet.write_string(2, column as u16, *value).unwrap();
+        }
+        sheet.write_string(3, 0, "Klaten Utara").unwrap();
+        sheet.write_number(3, 1, 1.0).unwrap();
+        sheet.write_number(3, 2, 2.0).unwrap();
+        sheet.write_string(4, 0, "Klaten Tengah").unwrap();
+        sheet.write_number(4, 1, 3.0).unwrap();
+        sheet.write_number(4, 2, 4.0).unwrap();
+
+        let bytes = workbook.save_to_buffer().unwrap();
+        let sheet_data = parse_with_tables(&bytes, "bps.xlsx").unwrap();
+        assert_eq!(sheet_data.tables.len(), 1, "{:?}", sheet_data.tables);
+        assert_eq!(sheet_data.tables[0].title.as_deref(), Some("Tabel 25.39"));
+        assert_eq!(
+            sheet_data.tables[0].header,
+            vec!["Kecamatan", "2018", "2019"]
+        );
+        assert_eq!(sheet_data.tables[0].rows.len(), 2);
     }
 }

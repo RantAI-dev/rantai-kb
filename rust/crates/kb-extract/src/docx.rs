@@ -13,7 +13,10 @@
 //!   takes the value from the cell above;
 //! - the title is the paragraph just above the table.
 
-use kb_core::tables::{Cell, TableGrid, TableSource, cell_from_text, render_table_markdown};
+use kb_core::tables::{
+    Cell, TableGrid, TableSource, cell_from_text, is_placeholder, normalize_header_name,
+    placeholder_note, render_table_markdown, take_title_rows, unique_header_names,
+};
 use quick_xml::events::{BytesStart, Event};
 
 use crate::ExtractError;
@@ -352,51 +355,49 @@ fn finish_table(raw_rows: Vec<Vec<RawCell>>, title: Option<String>) -> Option<Ta
             cells
         })
         .collect();
+    // A title row inside the table (a merged caption above the header) is not
+    // data; the paragraph above stays the title and the row is appended to it.
+    let taken = take_title_rows(&mut rows);
+    if rows.is_empty() {
+        return None;
+    }
+    let title_rows = taken.len();
     let header_row = rows.remove(0);
-    let header = unique_names(
-        header_row
-            .iter()
-            .enumerate()
-            .map(|(index, cell)| {
-                let text = cell_text(cell);
-                if text.trim().is_empty() {
-                    format!("Column {}", index + 1)
-                } else {
-                    text
-                }
-            })
-            .collect(),
-    );
+    let names: Vec<String> = header_row.iter().map(cell_text).collect();
+    let header = unique_header_names(&names);
+    let mut title_parts: Vec<String> = title
+        .map(|value| normalize_header_name(&value))
+        .filter(|value| !value.is_empty())
+        .into_iter()
+        .collect();
+    for part in taken {
+        if !title_parts.contains(&part) {
+            title_parts.push(part);
+        }
+    }
+    let placeholders = raw_rows
+        .iter()
+        .skip(title_rows + 1)
+        .flatten()
+        .filter(|cell| is_placeholder(&cell.text))
+        .count();
     Some(TableGrid {
         source: Some(TableSource::Docx),
         sheet: None,
         page_span: None,
-        title: title.filter(|value| !value.trim().is_empty()),
+        title: if title_parts.is_empty() {
+            None
+        } else {
+            Some(title_parts.join(" — "))
+        },
         caption: None,
         header,
         header_rows: 1,
         rows,
         formula_rows: Vec::new(),
-        notes: Vec::new(),
+        notes: placeholder_note(placeholders).into_iter().collect(),
         truncated: false,
     })
-}
-
-fn unique_names(names: Vec<String>) -> Vec<String> {
-    let mut seen: Vec<String> = Vec::new();
-    let mut unique = Vec::with_capacity(names.len());
-    for name in names {
-        let base = name.clone();
-        let mut candidate = name;
-        let mut suffix = 2usize;
-        while seen.iter().any(|existing| existing == &candidate) {
-            candidate = format!("{base} ({suffix})");
-            suffix += 1;
-        }
-        seen.push(candidate.clone());
-        unique.push(candidate);
-    }
-    unique
 }
 
 fn cell_text(cell: &Cell) -> String {
@@ -572,6 +573,38 @@ mod tests {
         assert_eq!(grid.header, vec!["Group", "Group (2)", "C"]);
         assert_eq!(grid.rows[0][0], Cell::Text("merged".to_string()));
         assert_eq!(grid.rows[1][0], Cell::Text("merged".to_string()));
+    }
+
+    #[test]
+    fn a_header_with_a_tab_is_normalised_and_a_caption_row_becomes_the_title() {
+        let document = r#"<w:document xmlns:w="urn:w"><w:body>
+             <w:p><w:r><w:t>Tabel 25.8</w:t></w:r></w:p>
+             <w:tbl>
+               <w:tr><w:tc><w:tcPr><w:gridSpan w:val="3"/></w:tcPr>
+                     <w:p><w:r><w:t>Data Uji Kendaraan</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>Kode</w:t></w:r><w:tab/><w:r><w:t>Code</w:t></w:r></w:p></w:tc>
+                     <w:tc><w:p><w:r><w:t>Kecamatan</w:t></w:r><w:tab/><w:r><w:t>District</w:t></w:r></w:p></w:tc>
+                     <w:tc><w:p><w:r><w:t>2018</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>331001</w:t></w:r></w:p></w:tc>
+                     <w:tc><w:p><w:r><w:t>Klaten Utara</w:t></w:r></w:p></w:tc>
+                     <w:tc><w:p><w:r><w:t>-</w:t></w:r></w:p></w:tc></w:tr>
+             </w:tbl></w:body></w:document>"#;
+        let (_, tables) = render_with_tables(document).unwrap();
+        let grid = &tables[0];
+        assert_eq!(
+            grid.title.as_deref(),
+            Some("Tabel 25.8 — Data Uji Kendaraan")
+        );
+        assert_eq!(grid.header, vec!["Kode Code", "Kecamatan District", "2018"]);
+        assert_eq!(grid.rows.len(), 1);
+        assert_eq!(grid.rows[0][2], Cell::Empty);
+        assert!(
+            grid.notes
+                .iter()
+                .any(|note| note == "1 placeholder cells treated as empty"),
+            "{:?}",
+            grid.notes
+        );
     }
 
     #[test]

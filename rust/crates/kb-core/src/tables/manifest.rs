@@ -63,18 +63,23 @@ pub fn build_manifest(grid: &TableGrid) -> TableManifest {
         }
     }
 
-    let mut derived_rows = derived_rows(grid, &roles);
+    let seeded = derived_rows(grid, &roles);
+    let (derived_rows, arithmetic) = arithmetic_derived_rows(grid, &roles, seeded);
+    let mut derived_rows = derived_rows;
     if grid.truncated || n_rows as u32 > MAX_TABLE_ROWS {
         derived_rows.retain(|row| *row < MAX_TABLE_ROWS);
     }
     let formulas_known = !grid.formula_rows.is_empty();
-    let notes = manifest_notes(grid);
+    let mut notes = manifest_notes(grid);
+    if let Some(note) = arithmetic_note(&arithmetic) {
+        notes.push(note);
+    }
 
     TableManifest {
         columns,
         derived_rows,
         formulas_known,
-        confidence: confidence(grid, formulas_known, &notes),
+        confidence: confidence(grid, formulas_known, !arithmetic.is_empty(), &notes),
         n_rows: n_rows.min(MAX_TABLE_ROWS as usize) as u32,
         n_cols: n_cols as u32,
         truncated: grid.truncated || n_rows as u32 > MAX_TABLE_ROWS,
@@ -90,7 +95,7 @@ pub fn build_manifest(grid: &TableGrid) -> TableManifest {
 #[must_use]
 pub fn locale_number(text: &str) -> Option<f64> {
     let mut value = text.trim();
-    if value.is_empty() {
+    if value.is_empty() || is_placeholder(value) {
         return None;
     }
 
@@ -379,13 +384,46 @@ fn unit_from_header(name: &str) -> Option<String> {
     None
 }
 
+/// True for the placeholders an Indonesian statistical table (BPS) writes in a
+/// cell that has no value: `-`, `–`, `—`, `...`, `…`, `x`, `X`, `NA`, `N/A`,
+/// `n.a.`, `*`.
+///
+/// The match is exact after trimming, so `-0,25` (a negative number) and
+/// `n.a. something` are not placeholders. Such a cell is read as
+/// [`Cell::Empty`], which keeps a year column of numbers `Number`/`Quantity`
+/// instead of "mixed" and stops it sorting as text.
+#[must_use]
+pub fn is_placeholder(text: &str) -> bool {
+    matches!(
+        text.trim(),
+        "-" | "\u{2013}"
+            | "\u{2014}"
+            | "..."
+            | "\u{2026}"
+            | "x"
+            | "X"
+            | "NA"
+            | "N/A"
+            | "n.a."
+            | "*"
+    )
+}
+
+/// The manifest note for placeholder cells read as empty, or `None` when a grid
+/// has none.
+#[must_use]
+pub fn placeholder_note(count: usize) -> Option<String> {
+    (count > 0).then(|| format!("{count} placeholder cells treated as empty"))
+}
+
 /// Read a text cell into the typed contract: booleans, ISO dates, numbers and
 /// the rest as text. A zero-padded digit string (`00123`, a NIK) stays text so
-/// its leading zeros survive.
+/// its leading zeros survive, and a statistical placeholder (`-`, `...`, `NA`)
+/// is empty rather than a label.
 #[must_use]
 pub fn cell_from_text(text: &str) -> Cell {
     let trimmed = text.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || is_placeholder(trimmed) {
         return Cell::Empty;
     }
     if trimmed.eq_ignore_ascii_case("true") {
@@ -468,6 +506,144 @@ fn derived_rows(grid: &TableGrid, roles: &[ColumnRole]) -> Vec<u32> {
     rows
 }
 
+/// Derived rows proven by arithmetic rather than by a label or a formula.
+///
+/// BPS total rows are often labelled with the region (`Kabupaten Klaten`,
+/// `Kota X`, `Provinsi X`, `Indonesia`), and a DOCX or CSV copy of the same
+/// table carries no formulas. Language-independent rule: a row whose Quantity
+/// cells each equal the sum of the data rows above it is a subtotal, and one
+/// that equals the sum of every other data row is a grand total.
+///
+/// `(a)` is checked on the last row and on the first (a total placed on top);
+/// `(b)` walks the rows and takes a row that sums the contiguous block since the
+/// previous derived row. A row needs at least two rows to sum before arithmetic
+/// may call it derived, so a `[100, 100]` table never loses its last row.
+fn arithmetic_derived_rows(
+    grid: &TableGrid,
+    roles: &[ColumnRole],
+    seeded: Vec<u32>,
+) -> (Vec<u32>, Vec<u32>) {
+    let quantity: Vec<usize> = roles
+        .iter()
+        .enumerate()
+        .filter(|(_, role)| **role == ColumnRole::Quantity)
+        .map(|(index, _)| index)
+        .collect();
+    let mut derived = seeded;
+    if quantity.is_empty() || grid.rows.len() < 3 {
+        return (derived, Vec::new());
+    }
+    derived.sort_unstable();
+    derived.dedup();
+    let mut found: Vec<u32> = Vec::new();
+
+    // (b) A subtotal sums the contiguous block since the last derived row.
+    let mut block_start = 0usize;
+    for row in 0..grid.rows.len() {
+        if derived.contains(&(row as u32)) {
+            block_start = row + 1;
+            continue;
+        }
+        if row >= block_start + 2 && row_equals_sum(grid, row, block_start..row, &quantity) {
+            found.push(row as u32);
+            derived.push(row as u32);
+            derived.sort_unstable();
+            block_start = row + 1;
+        }
+    }
+
+    // (a) A grand total equals every other non-derived data row, whether it sits
+    // at the bottom or (as some BPS sheets do) at the top.
+    for candidate in [grid.rows.len() - 1, 0] {
+        if derived.contains(&(candidate as u32)) {
+            continue;
+        }
+        let others: Vec<usize> = (0..grid.rows.len())
+            .filter(|row| *row != candidate && !derived.contains(&(*row as u32)))
+            .collect();
+        if others.len() < 2 {
+            continue;
+        }
+        if row_equals_sum(grid, candidate, others.iter().copied(), &quantity) {
+            found.push(candidate as u32);
+            derived.push(candidate as u32);
+        }
+    }
+
+    found.sort_unstable();
+    found.dedup();
+    (derived, found)
+}
+
+/// True when every non-empty Quantity cell of `row` equals the sum of the same
+/// column over `rows`, within `abs ≤ 0.5` or `rel ≤ 0.1%`.
+///
+/// A row with more than one quantity column needs at least two filled quantity
+/// cells to be a total, and every checked column needs at least two contributing
+/// rows: a single row above is a coincidence, not a subtotal.
+fn row_equals_sum(
+    grid: &TableGrid,
+    row: usize,
+    rows: impl Iterator<Item = usize>,
+    quantity: &[usize],
+) -> bool {
+    let Some(cells) = grid.rows.get(row) else {
+        return false;
+    };
+    let actual: Vec<(usize, f64)> = quantity
+        .iter()
+        .filter_map(|column| match cells.get(*column) {
+            Some(Cell::Number(value)) if value.is_finite() => Some((*column, *value)),
+            _ => None,
+        })
+        .collect();
+    if actual.is_empty() || (quantity.len() > 1 && actual.len() < 2) {
+        return false;
+    }
+    let rows: Vec<usize> = rows.collect();
+    if rows.len() < 2 {
+        return false;
+    }
+    actual.into_iter().all(|(column, value)| {
+        let mut expected = 0.0;
+        let mut contributions = 0usize;
+        for other in &rows {
+            if let Some(Cell::Number(number)) =
+                grid.rows.get(*other).and_then(|row| row.get(column))
+            {
+                if number.is_finite() {
+                    expected += number;
+                    contributions += 1;
+                }
+            }
+        }
+        contributions >= 2 && close_enough(value, expected)
+    })
+}
+
+/// `abs ≤ 0.5` or `rel ≤ 0.1%`: the tolerance a rounded table needs.
+fn close_enough(actual: f64, expected: f64) -> bool {
+    let difference = (actual - expected).abs();
+    if difference <= 0.5 {
+        return true;
+    }
+    let scale = expected.abs().max(actual.abs());
+    scale > 0.0 && difference / scale <= 0.001
+}
+
+/// The manifest note for rows proven derived by arithmetic.
+fn arithmetic_note(rows: &[u32]) -> Option<String> {
+    if rows.is_empty() {
+        return None;
+    }
+    let indices = rows
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("derived rows proven by arithmetic: {indices}"))
+}
+
 fn manifest_notes(grid: &TableGrid) -> Vec<String> {
     let mut notes = grid.notes.clone();
     if grid.truncated || grid.rows.len() as u32 > MAX_TABLE_ROWS {
@@ -478,7 +654,12 @@ fn manifest_notes(grid: &TableGrid) -> Vec<String> {
     notes
 }
 
-fn confidence(grid: &TableGrid, formulas_known: bool, notes: &[String]) -> Confidence {
+fn confidence(
+    grid: &TableGrid,
+    formulas_known: bool,
+    arithmetic_derived: bool,
+    notes: &[String],
+) -> Confidence {
     if formulas_known {
         return Confidence::High;
     }
@@ -489,13 +670,19 @@ fn confidence(grid: &TableGrid, formulas_known: bool, notes: &[String]) -> Confi
     let ragged = grid.rows.iter().any(|row| row.len() != grid.header.len());
     let stitched = notes.iter().any(|note| note.contains("stitched"));
     if guessed_structure || ragged || stitched {
-        return Confidence::Low;
+        // A row proven by arithmetic is stronger evidence than a guessed
+        // structure is weak: a markdown table with a real total is Medium.
+        return if arithmetic_derived {
+            Confidence::Medium
+        } else {
+            Confidence::Low
+        };
     }
     let label_derived = grid.rows.iter().any(|row| {
         row.iter()
             .any(|cell| matches!(cell, Cell::Text(text) if is_derived_label(text)))
     });
-    if label_derived {
+    if label_derived || arithmetic_derived {
         Confidence::Medium
     } else {
         Confidence::High
@@ -676,5 +863,153 @@ mod tests {
         for label in ["Totally unrelated", "Jumlahkan", "Substantial"] {
             assert!(!is_derived_label(label), "{label}");
         }
+    }
+
+    #[test]
+    fn bps_placeholders_are_empty_and_a_year_column_stays_a_quantity() {
+        let placeholders = [
+            "-", "\u{2013}", "\u{2014}", "...", "\u{2026}", "x", "X", "NA", "N/A", "n.a.", "*",
+        ];
+        for placeholder in placeholders {
+            assert_eq!(
+                cell_from_text(placeholder),
+                Cell::Empty,
+                "{placeholder:?} is a placeholder"
+            );
+            assert_eq!(cell_from_text(&format!("  {placeholder}  ")), Cell::Empty);
+            assert_eq!(locale_number(placeholder), None);
+        }
+        // Only the exact placeholder is empty: a negative number and a label
+        // that merely starts with one are values.
+        assert_eq!(cell_from_text("-0,25"), Cell::Number(-0.25));
+        assert_eq!(
+            cell_from_text("n.a. belum tersedia"),
+            Cell::Text("n.a. belum tersedia".to_string())
+        );
+        assert_eq!(placeholder_note(0), None);
+        assert_eq!(
+            placeholder_note(3).as_deref(),
+            Some("3 placeholder cells treated as empty")
+        );
+
+        let manifest = build_manifest(&grid(
+            &["Kecamatan", "2018", "2019", "2020"],
+            vec![
+                vec![
+                    text("Klaten Utara"),
+                    number(120.0),
+                    Cell::Empty,
+                    number(140.0),
+                ],
+                vec![
+                    text("Klaten Tengah"),
+                    number(130.0),
+                    number(150.0),
+                    Cell::Empty,
+                ],
+            ],
+        ));
+        assert_eq!(manifest.columns[1].kind, ColumnKind::Number);
+        assert_eq!(manifest.columns[1].role, ColumnRole::Quantity);
+        assert_eq!(manifest.columns[2].role, ColumnRole::Quantity);
+        assert_eq!(manifest.columns[3].role, ColumnRole::Quantity);
+    }
+
+    #[test]
+    fn a_total_row_labelled_with_the_region_is_found_by_arithmetic() {
+        // The shape of a BPS health table: 26 kecamatan rows and a last row
+        // "Kabupaten Klaten" holding the column sums, with no formula.
+        let mut rows: Vec<Vec<Cell>> = (0..26)
+            .map(|index| vec![text(&format!("Kecamatan {index}")), number(1.0)])
+            .collect();
+        rows.push(vec![text("Kabupaten Klaten"), number(26.0)]);
+        let manifest = build_manifest(&grid(&["Kecamatan", "Dokter"], rows));
+
+        assert_eq!(manifest.derived_rows, vec![26]);
+        assert!(!manifest.formulas_known);
+        assert_eq!(manifest.confidence, Confidence::Medium);
+        assert!(
+            manifest
+                .notes
+                .iter()
+                .any(|note| note.contains("proven by arithmetic")),
+            "{:?}",
+            manifest.notes
+        );
+    }
+
+    #[test]
+    fn a_group_subtotal_and_the_grand_total_are_both_derived() {
+        let manifest = build_manifest(&grid(
+            &["Kecamatan", "Dokter"],
+            vec![
+                vec![text("A"), number(10.0)],
+                vec![text("B"), number(20.0)],
+                vec![text("Subtotal A"), number(30.0)],
+                vec![text("C"), number(5.0)],
+                vec![text("D"), number(5.0)],
+                vec![text("Subtotal B"), number(10.0)],
+                vec![text("Kabupaten Klaten"), number(40.0)],
+            ],
+        ));
+        assert_eq!(manifest.derived_rows, vec![2, 5, 6]);
+        assert_eq!(manifest.confidence, Confidence::Medium);
+    }
+
+    #[test]
+    fn a_grand_total_on_the_first_row_is_derived_too() {
+        let manifest = build_manifest(&grid(
+            &["Kecamatan", "Dokter"],
+            vec![
+                vec![text("Kabupaten Klaten"), number(30.0)],
+                vec![text("A"), number(10.0)],
+                vec![text("B"), number(20.0)],
+            ],
+        ));
+        assert_eq!(manifest.derived_rows, vec![0]);
+    }
+
+    #[test]
+    fn a_row_is_never_derived_when_there_are_fewer_than_two_rows_to_sum() {
+        let manifest = build_manifest(&grid(
+            &["Kecamatan", "Dokter"],
+            vec![
+                vec![text("A"), number(100.0)],
+                vec![text("B"), number(100.0)],
+            ],
+        ));
+        assert!(
+            manifest.derived_rows.is_empty(),
+            "{:?}",
+            manifest.derived_rows
+        );
+        assert_eq!(manifest.confidence, Confidence::High);
+
+        // Two rows above that happen to add up differently are data, not a total.
+        let not_a_total = build_manifest(&grid(
+            &["Kecamatan", "Dokter"],
+            vec![
+                vec![text("A"), number(10.0)],
+                vec![text("B"), number(20.0)],
+                vec![text("C"), number(35.0)],
+            ],
+        ));
+        assert!(not_a_total.derived_rows.is_empty());
+    }
+
+    #[test]
+    fn arithmetic_proof_lifts_a_guessed_markdown_table_to_medium() {
+        let mut guessed = grid(
+            &["Region", "Value"],
+            vec![
+                vec![text("A"), number(1.0)],
+                vec![text("B"), number(2.0)],
+                vec![text("Indonesia"), number(3.0)],
+            ],
+        );
+        guessed.source = Some(TableSource::Markdown);
+        let manifest = build_manifest(&guessed);
+        assert_eq!(manifest.derived_rows, vec![2]);
+        assert_eq!(manifest.confidence, Confidence::Medium);
     }
 }
