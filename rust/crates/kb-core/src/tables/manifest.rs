@@ -536,6 +536,18 @@ fn arithmetic_derived_rows(
     derived.sort_unstable();
     derived.dedup();
     let mut found: Vec<u32> = Vec::new();
+    // One quantity column is weak evidence: in [1, 2, 3] the 3 "sums" the rows
+    // above by coincidence. Several columns all matching is not a coincidence.
+    // A single-column table needs three summed rows, or two when the row is
+    // labelled like a total ("Kabupaten Klaten", "Indonesia", "Jumlah").
+    let single = quantity.len() == 1;
+    let min_rows_for = |row: usize| {
+        if single && !row_has_total_label(grid, row) {
+            3
+        } else {
+            2
+        }
+    };
 
     // (b) A subtotal sums the contiguous block since the last derived row.
     let mut block_start = 0usize;
@@ -544,7 +556,9 @@ fn arithmetic_derived_rows(
             block_start = row + 1;
             continue;
         }
-        if row >= block_start + 2 && row_equals_sum(grid, row, block_start..row, &quantity) {
+        if row >= block_start + min_rows_for(row)
+            && row_equals_sum(grid, row, block_start..row, &quantity)
+        {
             found.push(row as u32);
             derived.push(row as u32);
             derived.sort_unstable();
@@ -561,7 +575,7 @@ fn arithmetic_derived_rows(
         let others: Vec<usize> = (0..grid.rows.len())
             .filter(|row| *row != candidate && !derived.contains(&(*row as u32)))
             .collect();
-        if others.len() < 2 {
+        if others.len() < min_rows_for(candidate) {
             continue;
         }
         if row_equals_sum(grid, candidate, others.iter().copied(), &quantity) {
@@ -573,6 +587,35 @@ fn arithmetic_derived_rows(
     found.sort_unstable();
     found.dedup();
     (derived, found)
+}
+
+/// A label that names an aggregate: a region level (BPS labels its total row
+/// with the regency, city, province or the country) or a total word.
+fn row_has_total_label(grid: &TableGrid, row: usize) -> bool {
+    let Some(cells) = grid.rows.get(row) else {
+        return false;
+    };
+    cells.iter().any(|cell| match cell {
+        Cell::Text(text) => {
+            let t = text.trim().to_lowercase();
+            is_derived_label(&t)
+                || [
+                    "kabupaten",
+                    "kab.",
+                    "kota ",
+                    "provinsi",
+                    "prov.",
+                    "indonesia",
+                    "nasional",
+                    "national",
+                    "total",
+                    "jumlah",
+                ]
+                .iter()
+                .any(|p| t.starts_with(p))
+        }
+        _ => false,
+    })
 }
 
 /// True when every non-empty Quantity cell of `row` equals the sum of the same
@@ -621,11 +664,15 @@ fn row_equals_sum(
     })
 }
 
-/// `abs ≤ 0.5` or `rel ≤ 0.1%`: the tolerance a rounded table needs.
+/// Equal as a total: exactly, when both are whole numbers (a count table's
+/// total is its exact sum), else within `rel ≤ 0.1%` (a rounded decimal
+/// table). An absolute slack would make small decimals "sum" by accident:
+/// 0.3 is within 0.5 of 0.2 + 0.2.
 fn close_enough(actual: f64, expected: f64) -> bool {
     let difference = (actual - expected).abs();
-    if difference <= 0.5 {
-        return true;
+    let whole = |v: f64| (v - v.round()).abs() < 1e-9;
+    if whole(actual) && whole(expected) {
+        return difference < 1e-9;
     }
     let scale = expected.abs().max(actual.abs());
     scale > 0.0 && difference / scale <= 0.001
@@ -995,6 +1042,57 @@ mod tests {
             ],
         ));
         assert!(not_a_total.derived_rows.is_empty());
+    }
+
+    #[test]
+    fn a_single_column_coincidence_is_not_a_total() {
+        // [1, 2, 3]: the 3 equals 1 + 2, but one column and two rows prove nothing.
+        let manifest = build_manifest(&grid(
+            &["Kecamatan", "Jumlah Sekolah"],
+            vec![
+                vec![text("A"), number(1.0)],
+                vec![text("B"), number(2.0)],
+                vec![text("C"), number(3.0)],
+            ],
+        ));
+        assert!(
+            manifest.derived_rows.is_empty(),
+            "{:?}",
+            manifest.derived_rows
+        );
+    }
+
+    #[test]
+    fn small_decimals_do_not_sum_by_tolerance() {
+        // 0.3 is within 0.5 of 0.2 + 0.2 + 0.1; it is a rate, not a total.
+        let manifest = build_manifest(&grid(
+            &["Wilayah", "Rasio", "Laju"],
+            vec![
+                vec![text("A"), number(0.2), number(0.1)],
+                vec![text("B"), number(0.2), number(0.1)],
+                vec![text("C"), number(0.1), number(0.1)],
+                vec![text("D"), number(0.3), number(0.2)],
+            ],
+        ));
+        assert!(
+            manifest.derived_rows.is_empty(),
+            "{:?}",
+            manifest.derived_rows
+        );
+    }
+
+    #[test]
+    fn a_single_column_total_over_three_rows_is_found() {
+        let manifest = build_manifest(&grid(
+            &["Kecamatan", "Jumlah"],
+            vec![
+                vec![text("A"), number(10.0)],
+                vec![text("B"), number(20.0)],
+                vec![text("C"), number(30.0)],
+                vec![text("Kabupaten Klaten"), number(60.0)],
+            ],
+        ));
+        assert_eq!(manifest.derived_rows, vec![3]);
     }
 
     #[test]
