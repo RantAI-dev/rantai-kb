@@ -36,9 +36,9 @@ spreadsheets with the properties that break a naive pipeline.
   still be retrievable and must never be summed.
 
 The World Bank CSVs add English, a country-code column and long year series, and are 16 MB of
-real data rather than a fixture. Two files have no questions: `klaten-umkm.xlsx` (its first
-column repeats section labels, so it has no row key — it stays in the corpus as a distractor)
-and none else; 29 of 30 files carry questions.
+real data rather than a fixture. One file has no questions: `klaten-umkm.xlsx` (its first
+column repeats section labels, so it has no row key). It stays in the corpus as a distractor;
+29 of 30 files carry questions.
 
 The DOCX files are **generated** from five of the spreadsheets with python-docx and marked
 `generated: true` with their parent file in `sources.jsonl`. That is the spec's sanctioned path
