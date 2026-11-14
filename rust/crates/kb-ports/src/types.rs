@@ -234,6 +234,11 @@ pub struct ExtractionResult {
     pub used_ocr: bool,
     /// Figures the layout parser found. Empty for text-only formats.
     pub figures: Vec<ExtractedFigure>,
+    /// Tables found as grids (`TBL-1`): spreadsheet sheets, DOCX tables,
+    /// markdown tables from OCR/layout output. Empty when none were found or
+    /// the extractor does not read tables.
+    #[serde(default)]
+    pub tables: Vec<kb_core::tables::TableGrid>,
     /// Per-page reading-order blocks, with figures inline at their own
     /// position, so a figure can be anchored to the text chunk it belongs to
     /// instead of to whatever caption matched.

@@ -1061,6 +1061,7 @@ impl PageTexts {
                 Some(page_map)
             },
             outline,
+            tables: Vec::new(),
             ocr: Some(report),
             error: None,
         }

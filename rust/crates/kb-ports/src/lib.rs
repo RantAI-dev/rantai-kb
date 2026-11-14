@@ -17,6 +17,7 @@ pub mod ocr;
 mod pages;
 mod retrieval;
 mod scope;
+pub mod tables;
 mod traits;
 mod types;
 pub mod visuals;
@@ -40,6 +41,7 @@ pub use retrieval::{
 pub use scope::DocumentScope;
 #[cfg(feature = "scope-adapter")]
 pub use scope::adapter;
+pub use tables::{TableId, TableQueryFailure, TableRecord, TableStore};
 pub use traits::{
     ChunkStore, DocumentFilter, DocumentStore, Embedder, EntityExtractor, EntityStore, Extractor,
     FigureGate, JobStore, MetadataFilter, NeighbourAnchor, ProgressSink, QueryEmbedding, Reranker,

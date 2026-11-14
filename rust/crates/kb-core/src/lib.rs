@@ -21,6 +21,7 @@ mod progress;
 pub mod query_class;
 pub mod signals;
 pub mod sparse;
+pub mod tables;
 pub mod title;
 pub mod tree;
 pub mod visuals;

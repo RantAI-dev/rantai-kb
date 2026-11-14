@@ -316,6 +316,7 @@ impl MineruApiExtractor {
         }
 
         Ok(ExtractionResult {
+            tables: Vec::new(),
             ocr: None,
             content: md_text,
             file_type: "pdf".to_string(),

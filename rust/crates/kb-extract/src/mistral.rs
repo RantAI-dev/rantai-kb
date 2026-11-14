@@ -109,6 +109,7 @@ impl MistralOcrExtractor {
         }
 
         Ok(ExtractionResult {
+            tables: Vec::new(),
             ocr: None,
             content: text,
             file_type: "pdf".to_string(),
