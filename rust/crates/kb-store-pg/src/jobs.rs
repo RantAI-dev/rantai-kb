@@ -79,6 +79,11 @@ fn read_job(row: &sqlx::postgres::PgRow) -> Result<JobRecord, PortError> {
     let params: Option<serde_json::Value> = row
         .try_get("params")
         .map_err(|e| PortError::Unavailable(format!("pg job params: {e}")))?;
+    // The upload time, so the ingest seats can serve the oldest job first
+    // (`ING-6`). `None` when the row has no creation time to report.
+    let created_at: Option<i64> = row
+        .try_get("created_at_ms")
+        .map_err(|e| PortError::Unavailable(format!("pg job createdAt: {e}")))?;
 
     Ok(JobRecord {
         id,
@@ -90,6 +95,7 @@ fn read_job(row: &sqlx::postgres::PgRow) -> Result<JobRecord, PortError> {
         mime_type,
         attempt,
         params,
+        created_at,
     })
 }
 
@@ -432,6 +438,9 @@ mod tests {
             "\"mimeType\"",
             "attempt",
             "params",
+            // The upload time, so the ingest seats can serve the oldest job
+            // first (`ING-6`).
+            "\"createdAt\"",
         ] {
             assert!(CLAIM_NEXT_PENDING.contains(column), "missing {column}");
         }

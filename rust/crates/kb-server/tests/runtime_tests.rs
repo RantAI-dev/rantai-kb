@@ -49,10 +49,11 @@ async fn test_worker() -> (IngestWorker, FakeJobStore, FakeDocumentStore, FakeBl
         mime_type: Some("text/plain".into()),
         attempt: 1,
         params: None,
+        created_at: None,
     });
 
     let settings = IngestSettings {
-        claims_per_tick: 1,
+        job_workers: 1,
         poll_interval: Duration::from_millis(20),
         heartbeat_interval: Duration::from_secs(3600),
         ..IngestSettings::default()

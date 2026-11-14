@@ -124,6 +124,13 @@ pub struct JobRecord {
     pub attempt: i32,
     /// Job parameters written at enqueue time (title, categories, figure mode…).
     pub params: Option<serde_json::Value>,
+    /// When the job was created, in epoch milliseconds. `None` when the
+    /// adapter does not report it.
+    ///
+    /// The ingest seats serve the oldest upload first, so a small file never
+    /// waits behind a big one (`ING-6`). That order needs the upload time,
+    /// which the claim already sorts by; the worker reads it from here.
+    pub created_at: Option<i64>,
 }
 
 /// Options passed to [`Extractor::extract_with_options`](crate::Extractor::extract_with_options).

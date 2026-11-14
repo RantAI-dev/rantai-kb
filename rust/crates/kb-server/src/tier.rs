@@ -225,10 +225,17 @@ const GPU_DESCRIBE: &[(&str, &str)] = &[
 /// reads, which the Rust config honours when `KB_EMBEDDING_CONCURRENCY` is
 /// unset. Filling the Rust name instead would shadow an operator's Bun-name
 /// setting; this way neither name can be shadowed by the preset.
+///
+/// The ingest worker runs two documents at a time on Lite (`ING-6`): the
+/// preset fills the alias `KB_INGEST_CONCURRENCY`, not the new name
+/// `KB_JOB_WORKERS`, so an operator who set either name explicitly still
+/// wins — the new name wins when both are set, and the alias is what the
+/// preset fills, so it never shadows an explicit value. The other tiers leave
+/// it unset and take the default of 6.
 const LITE: &[(&str, &str)] = &[
     ("KB_EMBED_CONCURRENCY", "1"),
     ("KB_EMBEDDING_BATCH_SIZE", "16"),
-    ("KB_INGEST_CONCURRENCY", "1"),
+    ("KB_INGEST_CONCURRENCY", "2"),
     ("KB_RERANK_ENABLED", "false"),
 ];
 

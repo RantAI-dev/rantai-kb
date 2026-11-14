@@ -69,6 +69,7 @@ fn job() -> JobRecord {
             "categories": ["finance"],
             "subcategory": "q3",
         })),
+        created_at: None,
     }
 }
 
@@ -478,7 +479,7 @@ async fn a_backlog_drains_without_sleeping_between_jobs() {
         IngestSettings::default().poll_interval,
         Duration::from_secs(3)
     );
-    assert_eq!(IngestSettings::default().claims_per_tick, 1);
+    assert_eq!(IngestSettings::default().job_workers, 6);
 
     let cancel = CancelToken::new();
     let token = cancel.clone();

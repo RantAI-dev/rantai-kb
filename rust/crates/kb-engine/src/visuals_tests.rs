@@ -165,6 +165,7 @@ async fn ingest(
         mime_type: None,
         attempt: 1,
         params: Some(serde_json::json!({"categories": ["c"]})),
+        created_at: None,
     };
     let outcome = worker.run_job(job).await;
     Run {

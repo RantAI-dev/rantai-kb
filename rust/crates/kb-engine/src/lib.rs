@@ -30,6 +30,7 @@ pub mod graph_arm;
 pub mod ingest;
 pub mod page_arm;
 pub mod retrieval;
+pub mod seats;
 pub mod timing;
 pub mod tree_arm;
 pub mod visuals;
@@ -64,9 +65,13 @@ mod in_memory_graph_store_tests;
 #[cfg(all(test, feature = "test-utils"))]
 mod in_memory_index_tests;
 #[cfg(test)]
+mod ingest_concurrency_tests;
+#[cfg(test)]
 mod ingest_tests;
 #[cfg(test)]
 mod page_arm_tests;
+#[cfg(test)]
+mod seats_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -77,7 +82,8 @@ mod visuals_tests;
 pub use global_arm::{GlobalArm, GlobalArmConfig, GlobalRanking, fuse_global};
 pub use graph_arm::{GraphArm, GraphArmConfig, GraphCache, GraphRanking};
 pub use ingest::{
-    CancelToken, INGEST_CHUNKING, IngestSettings, IngestWorker, JobOutcome, reap_failed_job_uploads,
+    CancelToken, DEFAULT_JOB_WORKERS, INGEST_CHUNKING, IngestSettings, IngestWorker, JobOutcome,
+    reap_failed_job_uploads,
 };
 pub use page_arm::{
     MergeOutcome, PageArm, PageArmConfig, PageCaption, PageCaptionConfig, PageIngest, PageOutcome,
@@ -88,6 +94,7 @@ pub use retrieval::{
     AdaptiveStats, BoostStats, FloorScoreKind, FloorStats, RetrievalOptions, RetrievalOutcome,
     apply_boosts, apply_boosts_now, enrich_titles, execute_pipeline,
 };
+pub use seats::{SeatCapacity, SeatGuard, SeatPriority, Seats, StageSeats};
 pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
 pub use tree_arm::{TreeArm, TreeArmConfig, TreeRanking, TreeStats};
 
