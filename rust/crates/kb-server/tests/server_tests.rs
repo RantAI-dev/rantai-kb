@@ -1034,6 +1034,7 @@ async fn test_ingest_worker_with_real_local_extractor() {
         mime_type: Some("text/plain".into()),
         attempt: 1,
         params: None,
+        created_at: None,
     };
     jobs.push(job);
 

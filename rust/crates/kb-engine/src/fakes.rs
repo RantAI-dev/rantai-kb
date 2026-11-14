@@ -1607,6 +1607,9 @@ impl JobStore for FakeJobStore {
             mime_type: input.mime_type.clone(),
             attempt: 1,
             params: Some(input.params.clone()),
+            // The fake has no clock: a job created here reports no creation
+            // time, and the seats serve such a job last.
+            created_at: None,
         });
         Ok(job_id)
     }

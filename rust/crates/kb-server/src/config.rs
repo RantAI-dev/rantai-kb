@@ -299,8 +299,12 @@ pub struct CacheConfig {
 pub struct WorkerConfig {
     /// `KB_WORKER_ENABLED=false` serves the API without running the worker.
     pub enabled: bool,
-    /// Jobs in flight at once (`KB_INGEST_CONCURRENCY`, floor 1).
-    pub concurrency: usize,
+    /// Jobs in flight at once (`KB_JOB_WORKERS`, default 6; floor 1).
+    /// `KB_INGEST_CONCURRENCY` is accepted as an alias.
+    pub job_workers: usize,
+    /// How many jobs may be in each stage of the pipeline at once
+    /// (`KB_SEATS`).
+    pub seats: kb_engine::SeatCapacity,
     /// Claim poll interval (`KB_INGEST_POLL_MS`, floor 500).
     pub poll_ms: u64,
     /// "processing" staleness cutoff (`KB_INGEST_STALE_MS`, floor 60_000).
@@ -334,7 +338,7 @@ impl WorkerConfig {
     #[must_use]
     pub fn ingest_settings(&self) -> IngestSettings {
         IngestSettings {
-            claims_per_tick: self.concurrency,
+            job_workers: self.job_workers,
             poll_interval: Duration::from_millis(self.poll_ms),
             stale_after: Duration::from_millis(self.stale_ms),
             max_attempts: self.max_attempts,
@@ -342,6 +346,7 @@ impl WorkerConfig {
             strip_page_furniture: self.strip_page_furniture,
             entity_extraction_enabled: self.entity_extraction_enabled,
             embedding_max_chars: self.embedding_max_chars,
+            seats: self.seats,
             chunking: kb_core::chunk::SmartChunkingOptions {
                 max_chunk_size: Some(self.chunk_size),
                 overlap_size: Some(self.chunk_overlap),
@@ -352,18 +357,72 @@ impl WorkerConfig {
     }
 }
 
-fn read_worker<F>(lookup: &F) -> WorkerConfig
+/// Read the seat capacities from `KB_SEATS="extract=2,embed=4,store=2"`.
+///
+/// An unknown stage name or a count of `0` is a startup error, not a silent
+/// fallback: a stage with no seats never runs, and a mistyped stage name
+/// would leave the operator believing a limit is in place that is not.
+fn read_seats<F>(lookup: &F) -> Result<kb_engine::SeatCapacity>
 where
     F: Fn(&str) -> Option<String>,
 {
-    WorkerConfig {
+    let mut capacity = kb_engine::SeatCapacity::default();
+    let Some(raw) = lookup("KB_SEATS")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(capacity);
+    };
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((name, count)) = entry.split_once('=') else {
+            bail!("KB_SEATS entry {entry:?} must be name=count (extract=2,embed=4,store=2)");
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let count: usize = count.trim().parse().map_err(|_| {
+            anyhow::anyhow!("KB_SEATS {name} must be a whole number, got {count:?}")
+        })?;
+        if count == 0 {
+            bail!("KB_SEATS {name} must be at least 1: a stage with no seats never runs");
+        }
+        match name.as_str() {
+            "extract" => capacity.extract = count,
+            "embed" => capacity.embed = count,
+            "store" => capacity.store = count,
+            other => {
+                bail!("KB_SEATS has no stage {other:?}: the stages are extract, embed and store")
+            }
+        }
+    }
+    Ok(capacity)
+}
+
+fn read_worker<F>(lookup: &F) -> Result<WorkerConfig>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    // `KB_JOB_WORKERS` is the name; `KB_INGEST_CONCURRENCY` stays accepted as
+    // an alias so an existing deployment keeps working. When both are set the
+    // new name wins.
+    let job_workers = if lookup("KB_JOB_WORKERS").is_some() {
+        int_var(lookup, "KB_JOB_WORKERS", kb_engine::DEFAULT_JOB_WORKERS)?
+    } else {
+        int_var(
+            lookup,
+            "KB_INGEST_CONCURRENCY",
+            kb_engine::DEFAULT_JOB_WORKERS,
+        )?
+    };
+    Ok(WorkerConfig {
         enabled: lookup("KB_WORKER_ENABLED").as_deref() != Some("false"),
         // `Math.max(floor, parseInt(value, 10))` in the TypeScript worker: a
         // missing or unparsable value takes the documented default, and a
         // value below the floor is raised to it.
-        concurrency: int_var(lookup, "KB_INGEST_CONCURRENCY", 1)
-            .unwrap_or(1)
-            .max(1) as usize,
+        job_workers: job_workers.max(1) as usize,
+        seats: read_seats(lookup)?,
         poll_ms: int_var(lookup, "KB_INGEST_POLL_MS", 3000)
             .unwrap_or(3000)
             .max(500),
@@ -389,7 +448,7 @@ where
             .unwrap_or(800)
             .max(100),
         chunk_overlap: int_var(lookup, "KB_CHUNK_OVERLAP", 200u32).unwrap_or(200),
-    }
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -802,7 +861,7 @@ impl Config {
                  entity extraction writes them)"
             );
         }
-        let worker = read_worker(&lookup);
+        let worker = read_worker(&lookup)?;
         let version = lookup("KB_VERSION")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| crate::state::DEFAULT_VERSION.to_string());
@@ -1521,7 +1580,7 @@ mod tests {
         assert_eq!(cfg.extract.ocr_fallback_model, "custom-ocr-model");
         assert_eq!(cfg.version, "9.9.9");
         assert!(!cfg.worker.enabled);
-        assert_eq!(cfg.worker.concurrency, 4);
+        assert_eq!(cfg.worker.job_workers, 4);
         assert_eq!(cfg.worker.poll_ms, 1500);
         assert_eq!(cfg.worker.stale_ms, 900_000);
         assert_eq!(cfg.worker.max_attempts, 5);
@@ -1567,7 +1626,9 @@ mod tests {
         assert!(matches!(cfg.reranker, RerankerConfig::Disabled));
         // Worker defaults match `src/lib/ingest/worker.ts`.
         assert!(cfg.worker.enabled);
-        assert_eq!(cfg.worker.concurrency, 1);
+        // The worker runs several documents at once (`ING-6`); the alias
+        // `KB_INGEST_CONCURRENCY` still sets it.
+        assert_eq!(cfg.worker.job_workers, 6);
         assert_eq!(cfg.worker.poll_ms, 3000);
         assert_eq!(cfg.worker.stale_ms, 300_000);
         assert_eq!(cfg.worker.max_attempts, 3);
@@ -1596,7 +1657,7 @@ mod tests {
         map.insert("KB_INGEST_RECLAIM_MS", "1");
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
-        assert_eq!(cfg.worker.concurrency, 1);
+        assert_eq!(cfg.worker.job_workers, 1);
         assert_eq!(cfg.worker.poll_ms, 500);
         assert_eq!(cfg.worker.stale_ms, 60_000);
         assert_eq!(cfg.worker.max_attempts, 1);
@@ -1610,6 +1671,67 @@ mod tests {
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
         assert!(cfg.worker.enabled);
+    }
+
+    #[test]
+    fn test_the_job_workers_name_wins_over_the_alias() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        // The alias is still accepted.
+        map.insert("KB_INGEST_CONCURRENCY", "3");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.worker.job_workers, 3);
+
+        // The new name wins when both are set.
+        map.insert("KB_JOB_WORKERS", "8");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.worker.job_workers, 8);
+    }
+
+    #[test]
+    fn test_the_seats_are_read_and_validated() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        // The default: two extractions, four embeddings, two writes.
+        assert_eq!(cfg.worker.seats.extract, 2);
+        assert_eq!(cfg.worker.seats.embed, 4);
+        assert_eq!(cfg.worker.seats.store, 2);
+
+        map.insert("KB_SEATS", "extract=1,embed=8,store=3");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.worker.seats.extract, 1);
+        assert_eq!(cfg.worker.seats.embed, 8);
+        assert_eq!(cfg.worker.seats.store, 3);
+
+        // A stage with no seats never runs: that is a startup error.
+        map.insert("KB_SEATS", "extract=0");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect_err("a stage with no seats is refused")
+            .to_string();
+        assert!(err.contains("KB_SEATS"), "{err}");
+        assert!(err.contains("extract"), "{err}");
+
+        // An unknown stage name is refused too, and the message says which
+        // stages exist.
+        map.insert("KB_SEATS", "extract=1,ocr=2");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect_err("an unknown stage is refused")
+            .to_string();
+        assert!(err.contains("KB_SEATS"), "{err}");
+        assert!(err.contains("ocr"), "{err}");
+
+        // A malformed entry is refused as well.
+        map.insert("KB_SEATS", "extract");
+        assert!(Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).is_err());
+        map.insert("KB_SEATS", "extract=two");
+        assert!(Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).is_err());
     }
 
     #[test]
@@ -1902,7 +2024,7 @@ mod tests {
         assert_eq!(cfg.embedder.request_timeout, Duration::from_secs(15));
         assert!(matches!(cfg.reranker, RerankerConfig::Disabled));
         assert_eq!(cfg.engine.rerank_candidate_limit, 0);
-        assert_eq!(cfg.worker.concurrency, 1);
+        assert_eq!(cfg.worker.job_workers, 6);
         assert!(cfg.worker.entity_extraction_enabled);
         assert!(cfg.pages.is_none());
 
@@ -1922,7 +2044,7 @@ mod tests {
         explicit.insert("KB_EMBEDDING_TIMEOUT_MS", "15000");
         explicit.insert("KB_RERANK_ENABLED", "false");
         explicit.insert("KB_RERANK_CANDIDATE_LIMIT", "0");
-        explicit.insert("KB_INGEST_CONCURRENCY", "1");
+        explicit.insert("KB_INGEST_CONCURRENCY", "6");
         explicit.insert("KB_ENTITY_EXTRACTION_ENABLED", "true");
         assert_eq!(
             format!("{cfg:#?}"),
@@ -2002,9 +2124,12 @@ mod tests {
                 if tier == "lite" {
                     assert!(matches!(cfg.reranker, RerankerConfig::Disabled));
                     assert_eq!(cfg.embedder.batch_size, 16);
-                    assert_eq!(cfg.worker.concurrency, 1);
+                    // Lite runs two documents at a time (`ING-6`).
+                    assert_eq!(cfg.worker.job_workers, 2);
                 } else {
                     assert_eq!(cfg.embedder.batch_size, 32);
+                    // The other tiers leave the worker width to the default.
+                    assert_eq!(cfg.worker.job_workers, 6);
                     match (tier, &cfg.reranker) {
                         ("desk", RerankerConfig::Tei { base_url, model }) => {
                             assert_eq!(base_url, "http://127.0.0.1:8082");
@@ -2125,7 +2250,7 @@ mod tests {
 
         assert_eq!(cfg.embedder.model, "operator/model");
         assert_eq!(cfg.embedder.embed_concurrency, 6);
-        assert_eq!(cfg.worker.concurrency, 3);
+        assert_eq!(cfg.worker.job_workers, 3);
         assert!(
             cfg.worker.entity_extraction_enabled,
             "an empty explicit value suppresses the preset"

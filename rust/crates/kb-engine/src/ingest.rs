@@ -28,6 +28,7 @@ use kb_ports::{
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 
 /// Chunking settings, copied from the call the Bun worker makes
 /// (`src/lib/ingest/index-document.ts`, `smartChunkDocument` options).
@@ -48,6 +49,10 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 /// `updateIngestJobProgress` throttles in `src/lib/ingest/job.ts:72`.
 pub const PROGRESS_EMIT_MIN_GAP: Duration = Duration::from_millis(900);
 
+/// How many jobs the worker runs at once when nothing says otherwise
+/// (`KB_JOB_WORKERS`).
+pub const DEFAULT_JOB_WORKERS: usize = 6;
+
 /// How a claimed job ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobOutcome {
@@ -63,10 +68,11 @@ pub enum JobOutcome {
 /// Tunables, one per `KB_INGEST_*` environment variable.
 #[derive(Debug, Clone)]
 pub struct IngestSettings {
-    /// Jobs claimed per poll. This slice runs a claimed job to completion
-    /// before claiming the next one, so a value above 1 only widens the batch
-    /// a single tick takes.
-    pub claims_per_tick: usize,
+    /// How many jobs may run at once (`KB_JOB_WORKERS`, default 6).
+    ///
+    /// Each admitted job runs as its own task with its own heartbeat, so a
+    /// long document no longer holds every small file behind it.
+    pub job_workers: usize,
     /// How often the queue is polled for work.
     pub poll_interval: Duration,
     /// How long a `processing` job may go without an update before it is
@@ -98,12 +104,14 @@ pub struct IngestSettings {
     /// e5-small at 128 tokens embeds ~2x the chunks/s of a full ~234-token chunk
     /// (`docs/eval-ab/lite-2core`).
     pub embedding_max_chars: usize,
+    /// How many seats each stage of the pipeline has (`KB_SEATS`).
+    pub seats: crate::seats::SeatCapacity,
 }
 
 impl Default for IngestSettings {
     fn default() -> Self {
         Self {
-            claims_per_tick: 1,
+            job_workers: DEFAULT_JOB_WORKERS,
             poll_interval: Duration::from_secs(3),
             stale_after: Duration::from_secs(300),
             max_attempts: 3,
@@ -114,6 +122,7 @@ impl Default for IngestSettings {
             strip_page_furniture: false,
             entity_extraction_enabled: true,
             embedding_max_chars: 0,
+            seats: crate::seats::SeatCapacity::default(),
         }
     }
 }
@@ -156,6 +165,11 @@ impl Default for CancelToken {
 }
 
 /// The ingest pipeline. Holds ports, names no adapter.
+///
+/// Cloning a worker shares it: the ports, the seat pools and the progress
+/// throttle are the same, which is what lets the worker run several jobs at
+/// once.
+#[derive(Clone)]
 pub struct IngestWorker {
     jobs: Arc<dyn JobStore>,
     documents: Arc<dyn DocumentStore>,
@@ -177,7 +191,10 @@ pub struct IngestWorker {
     /// `src/lib/ingest/job.ts`: always emit on a step change, otherwise at most
     /// one emit per `PROGRESS_EMIT_MIN_GAP`. Without it a large book produces
     /// hundreds of socket frames per second for a single document.
-    emit_state: Mutex<HashMap<String, (Instant, String)>>,
+    emit_state: Arc<Mutex<HashMap<String, (Instant, String)>>>,
+    /// The stage seats (`ING-6`): how many jobs may be in each stage at once.
+    /// Shared by every job the worker runs.
+    seats: crate::seats::StageSeats,
     settings: IngestSettings,
 }
 
@@ -205,7 +222,8 @@ impl IngestWorker {
             page_ingest: None,
             visuals: None,
             progress_sink: None,
-            emit_state: Mutex::new(HashMap::new()),
+            emit_state: Arc::new(Mutex::new(HashMap::new())),
+            seats: settings.seats.seats(),
             settings,
         }
     }
@@ -252,59 +270,79 @@ impl IngestWorker {
 
     /// Poll until cancelled, sweeping for stranded jobs on `reclaim_interval`.
     ///
-    /// The job in flight is never abandoned: cancellation is only observed
-    /// between claims, because a half-indexed document is exactly the state the
-    /// stale reclaim exists to clean up.
+    /// Up to `job_workers` jobs run at once, each in its own task with its own
+    /// heartbeat, progress events and terminal events. A claimed job is never
+    /// abandoned: cancellation stops the claiming, and the jobs already
+    /// admitted are given until they finish (the caller bounds that wait with
+    /// its drain timeout), because a half-indexed document is exactly the
+    /// state the stale reclaim exists to clean up.
     pub async fn run(&self, cancel: CancelToken) {
         let mut cancelled = cancel.subscribe();
         let mut last_reclaim = Instant::now();
         self.reclaim().await;
+        let mut inflight = JoinSet::new();
         loop {
             if *cancelled.borrow() {
-                return;
+                break;
             }
-            let queue_may_have_more = self.tick().await;
+            // Fill the free slots with claimed jobs.
+            self.claim_into(&mut inflight).await;
+            if inflight.is_empty() {
+                // Nothing is running and nothing was claimed: wait for work.
+                tokio::select! {
+                    () = tokio::time::sleep(self.settings.poll_interval) => {}
+                    _ = cancelled.changed() => {}
+                }
+            } else {
+                // Work is in flight: wait for a job to finish, so a freed
+                // slot is refilled at once instead of after a poll interval.
+                tokio::select! {
+                    joined = inflight.join_next() => {
+                        if let Some(Err(err)) = joined {
+                            tracing::error!(error = %err, "ingest job task failed");
+                        }
+                    }
+                    _ = cancelled.changed() => {}
+                }
+            }
+            if *cancelled.borrow() {
+                break;
+            }
             if last_reclaim.elapsed() >= self.settings.reclaim_interval {
                 self.reclaim().await;
                 last_reclaim = Instant::now();
             }
-            // A full tick means the queue may still hold work: claim again at
-            // once. Sleeping here put a whole poll interval between every
-            // `claims_per_tick` jobs, so a 3,000-file upload at the default 3 s
-            // poll spent hours asleep with work waiting.
-            if queue_may_have_more {
-                continue;
-            }
-            tokio::select! {
-                () = tokio::time::sleep(self.settings.poll_interval) => {}
-                _ = cancelled.changed() => {
-                    if *cancelled.borrow() {
-                        // One last sweep, so a job the departing worker was
-                        // holding does not sit stranded until the next boot.
-                        self.reclaim().await;
-                        return;
-                    }
-                }
+        }
+        // The jobs that were admitted are finished before the worker returns.
+        // One last sweep, so a job the departing worker was holding does not
+        // sit stranded until the next boot.
+        self.reclaim().await;
+        while let Some(joined) = inflight.join_next().await {
+            if let Err(err) = joined {
+                tracing::error!(error = %err, "ingest job task failed");
             }
         }
     }
 
-    /// Claim up to `claims_per_tick` jobs and run them. Returns `true` when
-    /// every claim found a job, so the queue may hold more.
-    async fn tick(&self) -> bool {
-        for _ in 0..self.settings.claims_per_tick.max(1) {
+    /// Claim jobs into the free slots and start them.
+    ///
+    /// Claims as many as there is room for, so a backlog does not wait for a
+    /// poll interval between documents.
+    async fn claim_into(&self, inflight: &mut JoinSet<JobOutcome>) {
+        let slots = self.settings.job_workers.max(1);
+        while inflight.len() < slots {
             match self.jobs.claim_next_pending().await {
                 Ok(Some(job)) => {
-                    self.run_job(job).await;
+                    let worker = self.clone();
+                    inflight.spawn(async move { worker.run_job(job).await });
                 }
-                Ok(None) => return false,
+                Ok(None) => return,
                 Err(err) => {
                     tracing::warn!(error = %err, "ingest claim failed");
-                    return false;
+                    return;
                 }
             }
         }
-        true
     }
 
     /// Claim and run one job. Returns `false` when the queue was empty.
@@ -332,7 +370,10 @@ impl IngestWorker {
         let _heartbeat = self.start_heartbeat(&job.id);
         let started = Instant::now();
         tracing::info!(job_id = %job.id, filename = %job.filename, "ingest claimed");
-        let outcome = match self.index(&job, started).await {
+        // The job's place in every queue it waits in: the oldest upload is
+        // served first (`ING-6`).
+        let priority = crate::seats::SeatPriority::of_job(&job);
+        let outcome = match self.index(&job, started, &priority).await {
             Ok((chunks, document_id)) => {
                 if let Err(err) = self.jobs.finish_success(&job.id, &document_id).await {
                     // The chunks are already stored and the document is ready;
@@ -343,7 +384,7 @@ impl IngestWorker {
                 JobOutcome::Ready { chunks }
             }
             Err(reason) => {
-                self.mark_failed(&job, &reason).await;
+                self.mark_failed(&job, &reason, &priority).await;
                 JobOutcome::Failed { reason }
             }
         };
@@ -385,6 +426,7 @@ impl IngestWorker {
         &self,
         job: &JobRecord,
         started: Instant,
+        priority: &crate::seats::SeatPriority,
     ) -> Result<(usize, DocumentId), String> {
         if job.tenant_id.as_str().trim().is_empty() {
             return Err("job has no tenant".to_string());
@@ -439,11 +481,18 @@ impl IngestWorker {
             force_layout: policy.force_layout,
             document_type: doc_type,
         };
-        let extraction = self
-            .extractor
-            .extract_with_options(&job.filename, mime, &bytes, options)
-            .await
-            .map_err(|e| e.to_string())?;
+        // The extract seat covers the whole extractor call, OCR included: the
+        // local parsers do their page reads inside the extraction, so there is
+        // nothing narrower to hold yet. When the OCR offload (ING-6 part B)
+        // moves the page reads out of the extractor, this seat shrinks to the
+        // local parsing and a document waiting on OCR holds no seat at all.
+        let extraction = {
+            let _seat = self.seats.extract.acquire(priority.clone()).await;
+            self.extractor
+                .extract_with_options(&job.filename, mime, &bytes, options)
+                .await
+                .map_err(|e| e.to_string())?
+        };
 
         // A parser that could not read the file reports the reason and leaves
         // `content` empty (`extract.ts:192`). Indexing that would put an empty
@@ -467,15 +516,19 @@ impl IngestWorker {
         );
 
         let file_size = i32::try_from(bytes.len()).unwrap_or(i32::MAX);
-        self.documents
-            .update_extracted_content(
-                document_id,
-                &content,
-                Some(&extraction.file_type),
-                Some(file_size),
-            )
-            .await
-            .map_err(|e| format!("document update failed: {e}"))?;
+        {
+            // The store seat: the document row is a write like any other.
+            let _seat = self.seats.store.acquire(priority.clone()).await;
+            self.documents
+                .update_extracted_content(
+                    document_id,
+                    &content,
+                    Some(&extraction.file_type),
+                    Some(file_size),
+                )
+                .await
+                .map_err(|e| format!("document update failed: {e}"))?;
+        }
 
         // The section hierarchy the tree arm navigates (DEC-4). Stored
         // additively in `metadata.outline` (JSONB, no schema migration) and
@@ -513,6 +566,7 @@ impl IngestWorker {
             let mut outline = outline.clone();
             outline.document_title = Some(title.clone());
             let patch = json!({ "outline": outline });
+            let _seat = self.seats.store.acquire(priority.clone()).await;
             if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
                 tracing::warn!(error = %e, "could not store the document outline");
             }
@@ -588,8 +642,15 @@ impl IngestWorker {
                     &flags,
                 )
                 .await;
-                self.extract_and_store_entities(job, document_id, &content, &chunks, use_combined)
-                    .await;
+                self.extract_and_store_entities(
+                    job,
+                    document_id,
+                    &content,
+                    &chunks,
+                    use_combined,
+                    priority,
+                )
+                .await;
             }
         }
 
@@ -747,7 +808,7 @@ impl IngestWorker {
             )
         };
         let (text, pages) = tokio::join!(
-            self.embed_and_store(job, document_id, &title, &chunks, started, &flags),
+            self.embed_and_store(job, document_id, &title, &chunks, started, &flags, priority),
             pages
         );
         let written = match text {
@@ -772,7 +833,7 @@ impl IngestWorker {
                 Ok(outcome) => outcome.descriptions.clone(),
                 Err(_) => Vec::new(),
             };
-            self.record_pages(document_id, pages).await;
+            self.record_pages(document_id, pages, priority).await;
             // The caption stage's second use: make chart and table content
             // searchable as text. Best-effort — the document is ready either
             // way, and a failure here is counted, not raised.
@@ -789,18 +850,20 @@ impl IngestWorker {
                     subcategory_of(&params).as_deref(),
                     &descriptions,
                     written,
+                    priority,
                 )
                 .await;
             }
         }
 
-        self.finish_ready(job, document_id, written, started, &flags)
+        self.finish_ready(job, document_id, written, started, &flags, priority)
             .await
     }
 
     /// Embed and store a document's text chunks; returns how many were stored.
     /// No chunks: nothing is touched, as in the Bun worker (`storeChunks`
     /// returns early on an empty batch and the document is still ready).
+    #[allow(clippy::too_many_arguments)]
     async fn embed_and_store(
         &self,
         job: &JobRecord,
@@ -809,6 +872,7 @@ impl IngestWorker {
         chunks: &[Chunk],
         started: Instant,
         flags: &ProgressFlags,
+        priority: &crate::seats::SeatPriority,
     ) -> Result<usize, String> {
         if chunks.is_empty() {
             return Ok(0);
@@ -847,11 +911,14 @@ impl IngestWorker {
             flags,
         )
         .await;
-        let embeddings = self
-            .embedder
-            .embed_passages(&texts)
-            .await
-            .map_err(|e| format!("embedding failed: {e}"))?;
+        let embeddings = {
+            // The embed seat: one document's embedding requests at a time.
+            let _seat = self.seats.embed.acquire(priority.clone()).await;
+            self.embedder
+                .embed_passages(&texts)
+                .await
+                .map_err(|e| format!("embedding failed: {e}"))?
+        };
         if embeddings.len() != chunks.len() {
             // `generateEmbeddings` degrades to a short list rather than
             // throwing, and a short list would index some chunks with nothing.
@@ -906,15 +973,19 @@ impl IngestWorker {
             .collect();
 
         // Clear first: `delete_document` removes old units for this document within tenant.
-        self.index
-            .delete_document(&job.tenant_id, document_id)
-            .await
-            .map_err(|e| format!("clearing old chunks failed: {e}"))?;
         let written = units.len();
-        self.index
-            .upsert(units)
-            .await
-            .map_err(|e| format!("storing chunks failed: {e}"))?;
+        {
+            // The store seat: the vector upsert is a write like any other.
+            let _seat = self.seats.store.acquire(priority.clone()).await;
+            self.index
+                .delete_document(&job.tenant_id, document_id)
+                .await
+                .map_err(|e| format!("clearing old chunks failed: {e}"))?;
+            self.index
+                .upsert(units)
+                .await
+                .map_err(|e| format!("storing chunks failed: {e}"))?;
+        }
         Ok(written)
     }
 
@@ -925,6 +996,7 @@ impl IngestWorker {
         &self,
         document_id: &DocumentId,
         pages: Result<crate::page_arm::PageOutcome, PortError>,
+        priority: &crate::seats::SeatPriority,
     ) {
         let patch = match pages {
             Ok(o) if o.indexed == 0 && o.failed == 0 => return,
@@ -963,6 +1035,7 @@ impl IngestWorker {
                 json!({"pageImages": {"indexed": 0, "error": e.to_string()}})
             }
         };
+        let _seat = self.seats.store.acquire(priority.clone()).await;
         if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
             tracing::warn!(error = %e, "could not record the page-image outcome");
         }
@@ -985,13 +1058,19 @@ impl IngestWorker {
         subcategory: Option<&str>,
         descriptions: &[(u32, String)],
         first_index: usize,
+        priority: &crate::seats::SeatPriority,
     ) {
         let contents: Vec<(u32, String)> = descriptions
             .iter()
             .map(|(page, description)| (*page, format!("[Visual] {description}")))
             .collect();
         let texts: Vec<String> = contents.iter().map(|(_, text)| text.clone()).collect();
-        let embeddings = match self.embedder.embed_passages(&texts).await {
+        let embeddings = {
+            // The embed seat, like every other embedding request.
+            let _seat = self.seats.embed.acquire(priority.clone()).await;
+            self.embedder.embed_passages(&texts).await
+        };
+        let embeddings = match embeddings {
             Ok(vectors) if vectors.len() == descriptions.len() => vectors,
             Ok(vectors) => {
                 tracing::warn!(
@@ -999,13 +1078,13 @@ impl IngestWorker {
                     descriptions = descriptions.len(),
                     "visual description embedding returned the wrong count (non-fatal)"
                 );
-                self.record_visual_chunks(document_id, 0, descriptions.len())
+                self.record_visual_chunks(document_id, 0, descriptions.len(), priority)
                     .await;
                 return;
             }
             Err(e) => {
                 tracing::warn!(error = %e, "visual description embedding failed (non-fatal)");
-                self.record_visual_chunks(document_id, 0, descriptions.len())
+                self.record_visual_chunks(document_id, 0, descriptions.len(), priority)
                     .await;
                 return;
             }
@@ -1048,14 +1127,21 @@ impl IngestWorker {
             })
             .collect();
         let written = units.len();
-        match self.index.upsert(units).await {
+        let outcome = {
+            // The store seat: the visual chunks are a vector write.
+            let _seat = self.seats.store.acquire(priority.clone()).await;
+            self.index.upsert(units).await
+        };
+        match outcome {
             Ok(()) => {
                 tracing::info!(chunks = written, "page visual descriptions indexed");
-                self.record_visual_chunks(document_id, written, 0).await;
+                self.record_visual_chunks(document_id, written, 0, priority)
+                    .await;
             }
             Err(e) => {
                 tracing::warn!(error = %e, chunks = written, "visual descriptions not indexed (non-fatal)");
-                self.record_visual_chunks(document_id, 0, written).await;
+                self.record_visual_chunks(document_id, 0, written, priority)
+                    .await;
             }
         }
     }
@@ -1063,11 +1149,18 @@ impl IngestWorker {
     /// Put how the visual-description chunk write went on the document. Only
     /// when there was something to write, so an ingest without captions keeps
     /// exactly the metadata it had.
-    async fn record_visual_chunks(&self, document_id: &DocumentId, written: usize, failed: usize) {
+    async fn record_visual_chunks(
+        &self,
+        document_id: &DocumentId,
+        written: usize,
+        failed: usize,
+        priority: &crate::seats::SeatPriority,
+    ) {
         if written == 0 && failed == 0 {
             return;
         }
         let patch = json!({"visualChunks": {"written": written, "failed": failed}});
+        let _seat = self.seats.store.acquire(priority.clone()).await;
         if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
             tracing::warn!(error = %e, "could not record the visual-chunk outcome");
         }
@@ -1085,6 +1178,7 @@ impl IngestWorker {
         content: &str,
         chunks: &[Chunk],
         use_combined: bool,
+        priority: &crate::seats::SeatPriority,
     ) {
         if self.graph.is_none() {
             return;
@@ -1096,7 +1190,7 @@ impl IngestWorker {
             return;
         };
 
-        self.store_entities_graph(job, document_id, chunks, &entities, &relations)
+        self.store_entities_graph(job, document_id, chunks, &entities, &relations, priority)
             .await;
     }
 
@@ -1175,10 +1269,15 @@ impl IngestWorker {
         chunks: &[Chunk],
         entities: &[kb_core::Entity],
         relations: &[kb_core::Relation],
+        priority: &crate::seats::SeatPriority,
     ) {
         let Some(graph) = &self.graph else {
             return;
         };
+
+        // The graph writes are writes: they hold the store seat, like the
+        // vector upsert and the document row.
+        let _seat = self.seats.store.acquire(priority.clone()).await;
 
         if let Err(e) = graph.delete_document(&job.tenant_id, document_id).await {
             tracing::warn!(
@@ -1408,11 +1507,16 @@ impl IngestWorker {
         chunks: usize,
         started: Instant,
         flags: &ProgressFlags,
+        priority: &crate::seats::SeatPriority,
     ) -> Result<(usize, DocumentId), String> {
-        self.documents
-            .set_status(document_id, "ready")
-            .await
-            .map_err(|e| format!("marking document ready failed: {e}"))?;
+        {
+            // The store seat: the document row is a write like any other.
+            let _seat = self.seats.store.acquire(priority.clone()).await;
+            self.documents
+                .set_status(document_id, "ready")
+                .await
+                .map_err(|e| format!("marking document ready failed: {e}"))?;
+        }
 
         self.progress(job, StepProgress::of(IngestStep::Done), started, flags)
             .await;
@@ -1425,11 +1529,17 @@ impl IngestWorker {
     }
 
     /// Terminal failure: job row plus, when known, the document.
-    async fn mark_failed(&self, job: &JobRecord, reason: &str) {
+    async fn mark_failed(
+        &self,
+        job: &JobRecord,
+        reason: &str,
+        priority: &crate::seats::SeatPriority,
+    ) {
         if let Err(err) = self.jobs.finish_failure(&job.id, reason).await {
             tracing::error!(error = %err, job_id = %job.id, "could not mark job failed");
         }
         if let Some(document_id) = &job.document_id {
+            let _seat = self.seats.store.acquire(priority.clone()).await;
             if let Err(err) = self.documents.set_status(document_id, "failed").await {
                 tracing::error!(error = %err, "could not mark document failed");
             }

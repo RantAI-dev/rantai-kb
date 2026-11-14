@@ -211,7 +211,8 @@ pub const CLAIM_NEXT_PENDING: &str = r#"
         LIMIT 1
         FOR UPDATE SKIP LOCKED
      )
-    RETURNING id, "tenantId", "externalRef", "documentId", "s3Key", filename, "mimeType", attempt, params
+    RETURNING id, "tenantId", "externalRef", "documentId", "s3Key", filename, "mimeType", attempt, params,
+              (EXTRACT(EPOCH FROM ("createdAt" AT TIME ZONE 'UTC')) * 1000)::bigint AS created_at_ms
 "#;
 
 /// Persist step, overall progress and per-step counters.
