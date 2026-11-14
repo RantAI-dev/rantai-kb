@@ -13,8 +13,8 @@
 //!   takes the value from the cell above;
 //! - the title is the paragraph just above the table.
 
-use quick_xml::events::{BytesStart, Event};
 use kb_core::tables::{Cell, TableGrid, TableSource, cell_from_text, render_table_markdown};
+use quick_xml::events::{BytesStart, Event};
 
 use crate::ExtractError;
 use crate::xml;
@@ -103,7 +103,9 @@ pub fn render_with_tables(document: &str) -> Result<(String, Vec<TableGrid>), Ex
                             cell.span = value.trim().parse::<usize>().unwrap_or(1).clamp(1, 100);
                         }
                     }
-                    b"tab" if skip_depth == 0 => push_char('\t', &mut cell, &mut body_text, in_table),
+                    b"tab" if skip_depth == 0 => {
+                        push_char('\t', &mut cell, &mut body_text, in_table)
+                    }
                     b"noBreakHyphen" if skip_depth == 0 => {
                         push_char('\u{2011}', &mut cell, &mut body_text, in_table);
                     }
@@ -224,7 +226,8 @@ pub fn render_with_tables(document: &str) -> Result<(String, Vec<TableGrid>), Ex
                             nested_tables -= 1;
                         } else if in_table {
                             in_table = false;
-                            if let Some(grid) = finish_table(std::mem::take(&mut rows), table_title.take())
+                            if let Some(grid) =
+                                finish_table(std::mem::take(&mut rows), table_title.take())
                             {
                                 for piece in render_table_markdown(&grid, usize::MAX) {
                                     out.push_str(&piece);

@@ -23,7 +23,11 @@ pub fn parse_with_tables(
     if rows.is_empty() {
         return Ok((String::new(), Vec::new()));
     }
-    let header: Vec<String> = rows.remove(0).into_iter().map(|cell| cell.trim().to_string()).collect();
+    let header: Vec<String> = rows
+        .remove(0)
+        .into_iter()
+        .map(|cell| cell.trim().to_string())
+        .collect();
     if header.is_empty() {
         return Ok((String::new(), Vec::new()));
     }
@@ -62,7 +66,10 @@ pub fn parse_with_tables(
 
 /// Which candidate delimiter appears most often on the first non-empty line.
 fn sniff_delimiter(text: &str) -> char {
-    let first = text.lines().find(|line| !line.trim().is_empty()).unwrap_or("");
+    let first = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("");
     let mut best = (',', 0usize);
     for candidate in CANDIDATES {
         let count = first.matches(candidate).count();
@@ -142,8 +149,7 @@ mod tests {
 
     #[test]
     fn a_semicolon_csv_is_sniffed() {
-        let (_, grids) =
-            parse_with_tables(b"Region;Value\nA;1\nB;2\n", "data.csv", None).unwrap();
+        let (_, grids) = parse_with_tables(b"Region;Value\nA;1\nB;2\n", "data.csv", None).unwrap();
         assert_eq!(grids[0].header, vec!["Region", "Value"]);
         assert_eq!(grids[0].rows.len(), 2);
     }
@@ -165,6 +171,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(grids[0].rows[0][0], Cell::Text("A, B".to_string()));
-        assert_eq!(grids[0].rows[0][1], Cell::Text("line one\nline two".to_string()));
+        assert_eq!(
+            grids[0].rows[0][1],
+            Cell::Text("line one\nline two".to_string())
+        );
     }
 }

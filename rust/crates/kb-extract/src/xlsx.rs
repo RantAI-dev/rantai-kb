@@ -58,7 +58,8 @@ pub fn parse_with_tables(bytes: &[u8], file_name: &str) -> Result<Spreadsheet, E
 pub fn parse_xls_with_tables(bytes: &[u8], file_name: &str) -> Result<Spreadsheet, ExtractError> {
     let mut workbook: Xls<Cursor<&[u8]>> = Xls::new(Cursor::new(bytes)).map_err(|e| match e {
         XlsError::Password => ExtractError::Unsupported(
-            "the workbook is password-protected; remove the password and upload it again".to_string(),
+            "the workbook is password-protected; remove the password and upload it again"
+                .to_string(),
         ),
         other => ExtractError::Container(format!("not a readable Excel 97-2003 workbook: {other}")),
     })?;
@@ -100,8 +101,12 @@ fn render_auto(
         };
         let formulas = workbook.worksheet_formula(&sheet.name).unwrap_or_default();
         let merges = match workbook {
-            Sheets::Xlsx(book) => book.merge_cells_by_sheet_name(&sheet.name).unwrap_or_default(),
-            Sheets::Xls(book) => book.merge_cells_by_sheet_name(&sheet.name).unwrap_or_default(),
+            Sheets::Xlsx(book) => book
+                .merge_cells_by_sheet_name(&sheet.name)
+                .unwrap_or_default(),
+            Sheets::Xls(book) => book
+                .merge_cells_by_sheet_name(&sheet.name)
+                .unwrap_or_default(),
             Sheets::Xlsb(_) => Vec::new(),
             Sheets::Ods(_) => Vec::new(),
         };
@@ -184,10 +189,7 @@ fn assemble_with_notes(
     let content = if sections.is_empty() {
         format!("[Spreadsheet: {file_name}]\n\n(empty)")
     } else {
-        format!(
-            "[Spreadsheet: {file_name}]\n\n{}",
-            sections.join("\n\n")
-        )
+        format!("[Spreadsheet: {file_name}]\n\n{}", sections.join("\n\n"))
     };
     Spreadsheet { content, tables }
 }
@@ -453,10 +455,15 @@ fn header_and_rows(cells: &[Vec<Cell>]) -> (usize, Vec<String>) {
             .any(|pair| pair[0] != Cell::Empty && pair[0] == pair[1]);
         let first_gap_filled = (0..width).any(|column| {
             first.get(column).is_none_or(|cell| *cell == Cell::Empty)
-                && cells[1].get(column).is_some_and(|cell| *cell != Cell::Empty)
+                && cells[1]
+                    .get(column)
+                    .is_some_and(|cell| *cell != Cell::Empty)
         });
         let second_row_text = cells[1].iter().all(|cell| {
-            matches!(cell, Cell::Empty | Cell::Text(_) | Cell::Date(_) | Cell::Bool(_))
+            matches!(
+                cell,
+                Cell::Empty | Cell::Text(_) | Cell::Date(_) | Cell::Bool(_)
+            )
         });
         let third_row_data = cells[2].iter().any(|cell| matches!(cell, Cell::Number(_)));
         if (adjacent_duplicates || first_gap_filled) && second_row_text && third_row_data {
@@ -470,7 +477,10 @@ fn header_and_rows(cells: &[Vec<Cell>]) -> (usize, Vec<String>) {
             for row in cells.iter().take(header_rows) {
                 let text = row.get(column).map_or(String::new(), cell_text);
                 let text = text.trim();
-                if !text.is_empty() && parts.last().is_none_or(|previous| previous.as_str() != text)
+                if !text.is_empty()
+                    && parts
+                        .last()
+                        .is_none_or(|previous| previous.as_str() != text)
                 {
                     parts.push(text.to_string());
                 }
@@ -594,10 +604,7 @@ mod tests {
 
         let first = &sheet_data.tables[0];
         assert_eq!(first.title.as_deref(), Some("Pendapatan per Provinsi"));
-        assert_eq!(
-            first.header,
-            vec!["Provinsi", "2023", "2024", "Kode"]
-        );
+        assert_eq!(first.header, vec!["Provinsi", "2023", "2024", "Kode"]);
         assert_eq!(first.rows.len(), 3);
         assert_eq!(first.rows[2][0], Cell::Text("Jumlah".to_string()));
         assert_eq!(first.rows[2][1], Cell::Number(190.0));
@@ -665,10 +672,7 @@ mod tests {
         let bytes = workbook.save_to_buffer().unwrap();
         let sheet_data = parse_with_tables(&bytes, "book.xlsx").unwrap();
         let grid = &sheet_data.tables[0];
-        assert_eq!(
-            grid.rows[0][0],
-            Cell::Text("0123456789012345".to_string())
-        );
+        assert_eq!(grid.rows[0][0], Cell::Text("0123456789012345".to_string()));
         assert_eq!(grid.rows[0][1], Cell::Number(1234.5));
     }
 
@@ -678,5 +682,3 @@ mod tests {
         assert!(matches!(err, ExtractError::Container(_)), "{err}");
     }
 }
-
-

@@ -340,8 +340,9 @@ pub fn extract_from_buffer_full(
 ) -> Result<(String, Vec<TableGrid>), ExtractError> {
     match mime_type {
         MIME_DOCX => docx::parse_with_tables(bytes),
-        MIME_XLSX => xlsx::parse_with_tables(bytes, file_name)
-            .map(|sheet| (sheet.content, sheet.tables)),
+        MIME_XLSX => {
+            xlsx::parse_with_tables(bytes, file_name).map(|sheet| (sheet.content, sheet.tables))
+        }
         MIME_ODS => match xlsx::parse_with_tables(bytes, file_name) {
             Ok(sheet) => Ok((sheet.content, sheet.tables)),
             // A minimal package without the ODS manifest is still readable by
@@ -355,7 +356,9 @@ pub fn extract_from_buffer_full(
             Ok(sheet) => Ok((sheet.content, sheet.tables)),
             // An HTML report saved as `.xls` is not a workbook; the legacy
             // reader still turns its table into text.
-            Err(_) => legacy::parse(bytes, Claimed::Excel, file_name).map(|text| (text, Vec::new())),
+            Err(_) => {
+                legacy::parse(bytes, Claimed::Excel, file_name).map(|text| (text, Vec::new()))
+            }
         },
         MIME_CSV => csv::parse_with_tables(bytes, file_name, None),
         MIME_TSV => csv::parse_with_tables(bytes, file_name, Some('\t')),
@@ -471,7 +474,8 @@ mod tests {
                     )],
                     &["name"],
                 ),
-                expected: "[Spreadsheet: book.xlsx]\n\n[Sheet: Summary]\n| name |\n| --- |".to_string(),
+                expected: "[Spreadsheet: book.xlsx]\n\n[Sheet: Summary]\n| name |\n| --- |"
+                    .to_string(),
             },
             Case {
                 name: "pptx paragraphs become one line each",
@@ -521,7 +525,8 @@ mod tests {
                     r#"<?xml version="1.0" encoding="UTF-8"?>
 <office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:spreadsheet><table:table table:name="S1"><table:table-row><table:table-cell office:value-type="string"><text:p>A</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>B</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#,
                 ),
-                expected: "[Spreadsheet: sheet.ods]\n\n[Sheet: S1]\n| A | B |\n| --- | --- |".to_string(),
+                expected: "[Spreadsheet: sheet.ods]\n\n[Sheet: S1]\n| A | B |\n| --- | --- |"
+                    .to_string(),
             },
             Case {
                 name: "gltf becomes a model inventory",

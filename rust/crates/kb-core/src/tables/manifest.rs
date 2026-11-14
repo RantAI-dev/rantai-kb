@@ -257,7 +257,7 @@ fn header_looks_like_code(name: &str) -> bool {
     header_tokens(name).any(|token| {
         matches!(
             token.as_str(),
-            "kode" | "code" | "nik" | "npwp" | "telepon" | "telp" | "phone" | "hp" | "nomor"
+            "kode" | "code" | "nik" | "npwp" | "telepon" | "telp" | "phone" | "hp" | "nomor" | "no"
         )
     }) || name.to_lowercase().contains("no.")
 }
@@ -285,6 +285,13 @@ fn header_looks_like_period(name: &str) -> bool {
 }
 
 fn values_look_like_code(values: &[Cell]) -> bool {
+    // Only text cells can be a code by their shape: a numeric column of
+    // six-digit revenue values is a quantity, not a phone list. Codes arrive
+    // as text because of their leading zeros; a header that says "kode" or
+    // "telepon" is handled above even when the value is numeric.
+    if values.is_empty() || !values.iter().all(|cell| matches!(cell, Cell::Text(_))) {
+        return false;
+    }
     let texts: Vec<String> = values.iter().filter_map(cell_text).collect();
     if texts.is_empty() {
         return false;
@@ -300,16 +307,15 @@ fn values_look_like_code(values: &[Cell]) -> bool {
         .iter()
         .any(|text| text.len() >= 2 && text.starts_with('0'));
     let lengths: Vec<usize> = texts.iter().map(String::len).collect();
-    let fixed_length = lengths.iter().all(|len| *len >= 6) && lengths.windows(2).all(|w| w[0] == w[1]);
+    let fixed_length =
+        lengths.iter().all(|len| *len >= 6) && lengths.windows(2).all(|w| w[0] == w[1]);
     leading_zero || fixed_length
 }
 
 fn is_year_column(values: &[Cell]) -> bool {
     !values.is_empty()
         && values.iter().all(|cell| match cell {
-            Cell::Number(number) => {
-                number.fract() == 0.0 && (1900.0..=2100.0).contains(number)
-            }
+            Cell::Number(number) => number.fract() == 0.0 && (1900.0..=2100.0).contains(number),
             Cell::Date(_) => true,
             _ => false,
         })
@@ -359,7 +365,9 @@ fn unit_from_header(name: &str) -> Option<String> {
             if !unit.is_empty()
                 && (unit.contains('%')
                     || unit.chars().any(|c| c.is_alphabetic())
-                    || unit.chars().any(|c| matches!(c, '$' | '\u{20ac}' | '\u{00a3}' | '\u{00a5}')))
+                    || unit
+                        .chars()
+                        .any(|c| matches!(c, '$' | '\u{20ac}' | '\u{00a3}' | '\u{00a5}')))
             {
                 return Some(unit.to_string());
             }
@@ -539,7 +547,13 @@ mod tests {
     #[test]
     fn roles_tell_a_phone_number_from_a_quantity() {
         let manifest = build_manifest(&grid(
-            &["Provinsi", "Pendapatan (Rp juta)", "Tahun", "Telepon", "NIK"],
+            &[
+                "Provinsi",
+                "Pendapatan (Rp juta)",
+                "Tahun",
+                "Telepon",
+                "NIK",
+            ],
             vec![
                 vec![
                     text("Jawa Timur"),
@@ -571,7 +585,11 @@ mod tests {
         );
         assert_eq!(manifest.columns[1].unit.as_deref(), Some("Rp juta"));
         assert_eq!(manifest.columns[1].sample_values, Vec::<String>::new());
-        assert!(manifest.columns[3].sample_values.contains(&"0812345678".to_string()));
+        assert!(
+            manifest.columns[3]
+                .sample_values
+                .contains(&"0812345678".to_string())
+        );
         assert_eq!(manifest.columns[0].distinct_count, 2);
         assert_eq!(manifest.n_rows, 2);
         assert_eq!(manifest.n_cols, 5);
@@ -624,12 +642,22 @@ mod tests {
 
     #[test]
     fn a_markdown_table_is_guessed_structure() {
-        let mut guessed = grid(
-            &["Region", "Value"],
-            vec![vec![text("A"), number(1.0)]],
-        );
+        let mut guessed = grid(&["Region", "Value"], vec![vec![text("A"), number(1.0)]]);
         guessed.source = Some(TableSource::Markdown);
         assert_eq!(build_manifest(&guessed).confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn a_six_digit_numeric_column_is_a_quantity_unless_the_header_says_code() {
+        let manifest = build_manifest(&grid(
+            &["Pendapatan", "Kode"],
+            vec![
+                vec![number(100_000.0), text("123456")],
+                vec![number(200_000.0), text("654321")],
+            ],
+        ));
+        assert_eq!(manifest.columns[0].role, ColumnRole::Quantity);
+        assert_eq!(manifest.columns[1].role, ColumnRole::Code);
     }
 
     #[test]

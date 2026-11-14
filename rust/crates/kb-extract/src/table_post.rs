@@ -83,10 +83,7 @@ mod tests {
 
     #[test]
     fn a_parser_that_already_built_tables_is_not_double_read() {
-        let mut result = ExtractionResult::text(
-            "| A | B |\n| --- | --- |\n| 1 | 2 |",
-            "markdown",
-        );
+        let mut result = ExtractionResult::text("| A | B |\n| --- | --- |\n| 1 | 2 |", "markdown");
         result.tables.push(kb_core::tables::TableGrid {
             header: vec!["kept".to_string()],
             ..kb_core::tables::TableGrid::default()

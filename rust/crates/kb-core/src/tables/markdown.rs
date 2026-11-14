@@ -70,7 +70,13 @@ pub fn parse_markdown_tables(text: &str) -> Vec<TableGrid> {
 #[must_use]
 pub fn stitch_and_drop_furniture(grids: Vec<TableGrid>, page_count: u32) -> Vec<TableGrid> {
     let pages = page_count.max(1);
-    let threshold = pages.div_ceil(2).max(2) as usize;
+    // Furniture is a repetition *across pages*: one page cannot have a
+    // letterhead on half of itself.
+    let threshold = if pages < 2 {
+        usize::MAX
+    } else {
+        pages.div_ceil(2).max(2) as usize
+    };
 
     // Stitch first: a table that continues on the next page is one table, so it
     // counts once when furniture is measured. An identical repeat is not a
@@ -192,7 +198,11 @@ fn first_row_is_data(grid: &TableGrid) -> bool {
         .filter(|text| !text.trim().is_empty())
         .filter(|text| matches!(parse_cell(text), Cell::Number(_) | Cell::Date(_)))
         .count();
-    let non_empty = grid.header.iter().filter(|text| !text.trim().is_empty()).count();
+    let non_empty = grid
+        .header
+        .iter()
+        .filter(|text| !text.trim().is_empty())
+        .count();
     non_empty > 0 && data > 0 && data * 2 >= non_empty
 }
 
@@ -367,11 +377,7 @@ mod tests {
             "| A | 1 |",
             "| B | 2 |",
         ]);
-        let page_two = table(&[
-            "| Region | Value |",
-            "| --- | --- |",
-            "| C | 3 |",
-        ]);
+        let page_two = table(&["| Region | Value |", "| --- | --- |", "| C | 3 |"]);
         let mut grids = parse_markdown_tables(&page_one);
         let mut next = parse_markdown_tables(&page_two);
         grids[0].page_span = Some((4, 4));
@@ -392,11 +398,7 @@ mod tests {
 
     #[test]
     fn a_headerless_continuation_of_the_same_width_is_stitched_too() {
-        let page_one = table(&[
-            "| Region | Value |",
-            "| --- | --- |",
-            "| A | 1 |",
-        ]);
+        let page_one = table(&["| Region | Value |", "| --- | --- |", "| A | 1 |"]);
         let page_two = table(&["| B | 2 |", "| --- | --- |", "| C | 3 |"]);
         let mut grids = parse_markdown_tables(&page_one);
         grids.extend(parse_markdown_tables(&page_two));
@@ -418,11 +420,7 @@ mod tests {
             parsed[0].page_span = Some((pages, pages));
             grids.extend(parsed);
         }
-        let real = table(&[
-            "| Region | Value |",
-            "| --- | --- |",
-            "| A | 1 |",
-        ]);
+        let real = table(&["| Region | Value |", "| --- | --- |", "| A | 1 |"]);
         grids.extend(parse_markdown_tables(&real));
         let kept = stitch_and_drop_furniture(grids, 3);
         assert_eq!(kept.len(), 1);
@@ -437,8 +435,10 @@ mod tests {
             ..TableGrid::default()
         };
         for index in 0..6 {
-            grid.rows
-                .push(vec![Cell::Text(format!("row-{index}")), Cell::Number(index as f64)]);
+            grid.rows.push(vec![
+                Cell::Text(format!("row-{index}")),
+                Cell::Number(index as f64),
+            ]);
         }
         let groups = render_table_markdown(&grid, 60);
         assert!(groups.len() > 1);

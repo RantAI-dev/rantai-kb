@@ -192,10 +192,7 @@ pub fn epub_of(chapters: &[(&str, &str)]) -> Vec<u8> {
 #[must_use]
 pub fn ods_of(content_xml: &str) -> Vec<u8> {
     zip_of(&[
-        (
-            "mimetype",
-            "application/vnd.oasis.opendocument.spreadsheet",
-        ),
+        ("mimetype", "application/vnd.oasis.opendocument.spreadsheet"),
         ("content.xml", content_xml),
         (
             "META-INF/manifest.xml",

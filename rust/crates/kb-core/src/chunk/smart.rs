@@ -490,7 +490,8 @@ impl SmartChunker {
         cells > 0
     }
 
-    fn split_into_blocks(text: &str, preserve_code_blocks: bool) -> Vec<String> {        let mut blocks: Vec<String> = Vec::new();
+    fn split_into_blocks(text: &str, preserve_code_blocks: bool) -> Vec<String> {
+        let mut blocks: Vec<String> = Vec::new();
         let mut current = String::new();
         let mut in_code_block = false;
         let mut in_table = false;
