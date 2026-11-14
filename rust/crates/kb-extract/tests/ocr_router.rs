@@ -219,7 +219,7 @@ impl OcrPageProvider for FakeProvider {
     async fn read_pdf(
         &self,
         _pdf_bytes: &[u8],
-        _include_figures: bool,
+        include_figures: bool,
     ) -> Result<Vec<OcrPageRead>, OcrCallError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some(transient) = self.fail_all {
@@ -237,7 +237,18 @@ impl OcrPageProvider for FakeProvider {
             .map(|page| OcrPageRead {
                 page,
                 text: format!("DOC-page-{page}"),
-                figures: Vec::new(),
+                figures: if include_figures && page == 0 {
+                    vec![kb_ports::ExtractedFigure {
+                        kind: "image".to_string(),
+                        page,
+                        bbox: [0.0, 0.0, 1.0, 1.0],
+                        caption: Some("Gambar 1. Bagan".to_string()),
+                        image_bytes: vec![1, 2, 3],
+                        id: Some(format!("p{page}-img-0")),
+                    }]
+                } else {
+                    Vec::new()
+                },
             })
             .collect())
     }
@@ -340,6 +351,7 @@ async fn case_hybrid_sends_exactly_the_scanned_pages() {
     assert_eq!(report.provider.as_deref(), Some("chat"));
     assert_eq!(report.pages, 23);
     assert_eq!(report.ocr_pages, 3);
+    assert!(out.used_ocr, "three pages were read by OCR");
     assert!(report.cached_pages == 0);
     assert_eq!(report.local_pages, 20);
     assert!(report.failed_pages.is_empty());
@@ -381,6 +393,7 @@ async fn case_off_never_sends_a_page_and_still_reports() {
     let report = out.ocr.unwrap();
     assert_eq!(report.mode, "off");
     assert_eq!(report.ocr_pages, 0);
+    assert!(!out.used_ocr, "nothing was OCR'd");
     assert_eq!(
         out.page_map.map(|m| m.len()),
         Some(2),
@@ -474,6 +487,72 @@ async fn case_the_breaker_opens_after_three_consecutive_failures() {
     assert!(out.content.contains("Digital page 1"));
 }
 
+async fn case_figures_keep_the_document_page_and_survive_the_cache() {
+    let pdf = mixed_pdf(1, 0);
+    let provider = FakeProvider::document(8);
+    let cache = Arc::new(MemoryCache::default());
+    let router = router(OcrMode::Full, Some(Arc::clone(&provider)), Some(cache));
+    let options = ExtractionOptions {
+        figures: true,
+        ..ExtractionOptions::default()
+    };
+    let first = router.extract_pdf(&pdf, "one.pdf", &options).await.unwrap();
+    assert_eq!(first.figures.len(), 1);
+    assert_eq!(first.figures[0].page, 0);
+    assert_eq!(first.figures[0].id.as_deref(), Some("p0-img-0"));
+
+    // A page cache hit returns the crops too, so a re-upload does not lose a
+    // figure it already paid for.
+    let second = router
+        .extract_pdf(&pdf, "one.pdf", &options)
+        .await
+        .expect("cached");
+    assert_eq!(provider.calls(), 1);
+    assert_eq!(second.figures.len(), 1);
+    assert_eq!(second.figures[0].image_bytes, vec![1, 2, 3]);
+}
+
+async fn case_an_image_upload_uses_the_same_page_path() {
+    let provider = FakeProvider::chat();
+    let cache = Arc::new(MemoryCache::default());
+    let router = router(OcrMode::Hybrid, Some(Arc::clone(&provider)), Some(cache));
+    let image = b"\x89PNG\r\n\x1a\n".as_slice();
+    let first = router
+        .extract_image(image, "image/png", "scan.png")
+        .await
+        .unwrap();
+    assert_eq!(provider.calls(), 1);
+    let report = first.ocr.expect("a report");
+    assert_eq!(report.pages, 1);
+    assert_eq!(report.ocr_pages, 1);
+    assert!(first.content.starts_with("IMG-page-"), "{}", first.content);
+
+    let second = router
+        .extract_image(image, "image/png", "scan.png")
+        .await
+        .unwrap();
+    assert_eq!(provider.calls(), 1, "the image is read from the page cache");
+    assert_eq!(second.ocr.unwrap().cached_pages, 1);
+}
+
+async fn case_a_tiff_page_is_one_ocr_page() {
+    let provider = FakeProvider::chat();
+    let router = router(OcrMode::Hybrid, Some(Arc::clone(&provider)), None);
+    let mut tif = std::io::Cursor::new(Vec::new());
+    let mut encoder = tiff::encoder::TiffEncoder::new(&mut tif).unwrap();
+    for _ in 0..2 {
+        encoder
+            .write_image::<tiff::encoder::colortype::Gray8>(1, 1, &[128])
+            .unwrap();
+    }
+    let out = router
+        .extract_image(&tif.into_inner(), "image/tiff", "fax.tif")
+        .await
+        .unwrap();
+    assert_eq!(provider.calls(), 2, "one call per TIFF page");
+    assert_eq!(out.page_map.unwrap().len(), 2);
+}
+
 async fn case_the_page_cap() {
     let pdf = mixed_pdf(5, 0);
     let provider = FakeProvider::document(8);
@@ -522,6 +601,9 @@ async fn the_page_router_meets_its_contract() {
     case_every_page_failing_fails_the_document().await;
     case_the_breaker_opens_after_three_consecutive_failures().await;
     case_the_page_cap().await;
+    case_an_image_upload_uses_the_same_page_path().await;
+    case_a_tiff_page_is_one_ocr_page().await;
+    case_figures_keep_the_document_page_and_survive_the_cache().await;
     case_a_page_subset_holds_exactly_the_pages_it_was_given().await;
 }
 

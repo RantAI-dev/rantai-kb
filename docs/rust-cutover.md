@@ -178,6 +178,17 @@ for scanned pages and images, so a local tier never sends a page to a paid API. 
 and the served commands are in `docs/kb-tiers.md` ("Local OCR"). Unset, behaviour is identical
 to Bun's vision path.
 
+**`ING-6` adds a per-page router.** With an OCR provider configured (`KB_OCR_BASE_URL`, or
+`KB_MISTRAL_OCR_KEY` plus `mistral` in `KB_LAYOUT_EXTRACTOR_ORDER`), the default mode is now
+`hybrid`: a page is OCR'd when raster images cover most of it and it has almost no visible text,
+and a digital page keeps its text layer. Before, the decision was made once per document (an
+average of <100 characters per page sent the whole PDF to the chain). A PDF that used to be OCR'd
+whole because a few pages were scanned now keeps its digital pages; a sparse slide deck that was
+treated as digital may now send its slide pages to OCR. `KB_OCR_MODE=off` restores the old
+whole-document decision, and `KB_OCR_MODE=full` sends every page. The change is additive on the
+outside: `metadata.ocr` is a new JSONB key, and an installation with no OCR provider behaves
+exactly as before. Details and the new settings are in `docs/kb-tiers.md` ("OCR offload").
+
 ### 2. Legacy Binary Office Formats, TIFF and Unknown Extensions
 In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`) and throws `EXTENSION_UNSUPPORTED` on legacy binary `.doc`, `.xls`, and `.ppt` files. Rust v0.2.0 matched that.
 

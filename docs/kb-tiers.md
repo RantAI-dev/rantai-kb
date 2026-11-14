@@ -184,14 +184,16 @@ adapter wins when both are configured, so a local tier never sends a page to a p
 adapter the page's bytes are the rendered image; for a document adapter the page is identified by
 the **source document's SHA-256 and the page index**, because pdfium writes a random `/ID` into a
 saved sub-PDF and hashing that serialisation would miss on every run. Only successful, non-empty
-reads are stored. `KB_OCR_CONCURRENCY` is one semaphore shared by every document in the process.
+reads are stored, together with any figure crops the provider returned, so a re-upload does not
+lose a figure it already paid for. `KB_OCR_CONCURRENCY` is one semaphore shared by every document in the process.
 After `KB_OCR_BREAKER` consecutive *transient* failures (connection error, 429, 5xx after
 retries) the breaker stops sending for `KB_OCR_BREAKER_COOLDOWN_S`; pages in that window take
 their fallback. A 4xx does not open the breaker — it is a configuration mistake, not an outage.
 
 **What a lost page costs.** At most `KB_OCR_MAX_PAGES` pages per document go to OCR; the rest are
 listed in `skippedPages` and use the local text or a marker. A page that still fails after its
-retries becomes `[page N could not be read]` in the content and is listed in `failedPages`; the
+retries keeps any local text it has (a `full` page usually does; a scan usually does not) or
+becomes `[page N could not be read]` in the content, and is listed in `failedPages`; the
 document is `ready`. If **no** page produced any text at all, the extraction fails with the
 provider's error, because indexing an empty document is worse than retrying it.
 `metadata.ocr` records `{mode, provider, pages, ocrPages, cachedPages, localPages, failedPages,

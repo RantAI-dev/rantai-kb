@@ -44,6 +44,7 @@ use kb_ports::{
     ExtractedFigure, ExtractionOptions, ExtractionResult, OcrPageCache, OcrReport, PageBlock,
     PageBlockKind, PageText,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 
@@ -77,6 +78,16 @@ pub struct OcrPageRead {
     pub page: u32,
     pub text: String,
     pub figures: Vec<ExtractedFigure>,
+}
+
+/// What the page cache stores for one page: its text and, when a layout
+/// provider read it with figures, its crops. Plain text from an older entry
+/// is still accepted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedPage {
+    text: String,
+    #[serde(default)]
+    figures: Vec<ExtractedFigure>,
 }
 
 /// A provider call that failed, with whether retrying it is worthwhile.
@@ -374,6 +385,7 @@ impl OcrRouter {
 
         let candidates = self.candidates(&facts, provider.is_some());
         report.skipped_pages = candidates.skipped.iter().map(|p| p + 1).collect();
+        let mut last_error: Option<String> = None;
 
         if let Some(provider) = provider {
             let routed = match provider.transport() {
@@ -396,6 +408,7 @@ impl OcrRouter {
             report.ocr_pages = routed.sent;
             report.cached_pages = routed.cached;
             report.breaker_opened = routed.breaker_open;
+            last_error = routed.error;
             for (page, outcome) in routed.pages {
                 let index = page as usize;
                 if index >= outcomes.len() {
@@ -410,6 +423,7 @@ impl OcrRouter {
 
         let mut figures = Vec::new();
         let mut has_text = false;
+        let mut used_ocr = false;
         for (index, fact) in facts.iter().enumerate() {
             let outcome = &outcomes[index];
             if let Some(ocr) = outcome.text.as_deref().map(str::trim) {
@@ -417,6 +431,7 @@ impl OcrRouter {
                     text.set(index, ocr.to_string());
                     figures.extend(outcome.figures.iter().cloned());
                     has_text = true;
+                    used_ocr = true;
                     continue;
                 }
             }
@@ -439,11 +454,13 @@ impl OcrRouter {
         }
 
         if !has_text {
-            let reason = if candidates.send.is_empty() {
-                "the PDF has no readable text".to_string()
-            } else {
-                "the OCR provider returned no text for any page".to_string()
-            };
+            let reason = last_error.unwrap_or_else(|| {
+                if candidates.send.is_empty() {
+                    "the PDF has no readable text".to_string()
+                } else {
+                    "the OCR provider returned no text for any page".to_string()
+                }
+            });
             return Err(ExtractError::Container(format!(
                 "OCR failed for \"{filename}\": {reason}"
             )));
@@ -453,7 +470,14 @@ impl OcrRouter {
         report.failed_pages.dedup();
         report.skipped_pages.sort_unstable();
         report.skipped_pages.dedup();
-        Ok(text.into_result("pdf", report, Some(outline), true, figures, options.figures))
+        Ok(text.into_result(
+            "pdf",
+            report,
+            Some(outline),
+            used_ocr,
+            figures,
+            options.figures,
+        ))
     }
 
     /// Route a standalone image (or every TIFF page) through the same cache,
@@ -502,6 +526,7 @@ impl OcrRouter {
 
         let mut report = self.report(pages.len() as u32);
         let mut text = PageTexts::empty(pages.len());
+        let mut used_ocr = false;
 
         let provider = match (&self.provider, self.settings.mode) {
             (Some(provider), mode) if mode != OcrMode::Off => Some(Arc::clone(provider)),
@@ -528,7 +553,10 @@ impl OcrRouter {
                     report.failed_pages.push(page + 1);
                 }
                 match outcome.text.as_deref().map(str::trim) {
-                    Some(ocr) if !ocr.is_empty() => text.set(index, ocr.to_string()),
+                    Some(ocr) if !ocr.is_empty() => {
+                        text.set(index, ocr.to_string());
+                        used_ocr = true;
+                    }
                     _ if outcome.attempted => text.set(index, marker(page)),
                     _ => {}
                 }
@@ -548,7 +576,7 @@ impl OcrRouter {
 
         report.failed_pages.sort_unstable();
         report.failed_pages.dedup();
-        Ok(text.into_result("image", report, None, true, Vec::new(), false))
+        Ok(text.into_result("image", report, None, used_ocr, Vec::new(), false))
     }
 
     fn report(&self, pages: u32) -> OcrReport {
@@ -664,9 +692,10 @@ impl OcrRouter {
                 ..PageOutcome::default()
             };
             let key = page_cache_key(provider, &item.bytes);
-            if let Some(text) = self.cache_get(&key).await {
+            if let Some(hit) = self.cache_get(&key).await {
                 outcome.cached += 1;
-                page.text = Some(text);
+                page.text = Some(hit.text);
+                page.figures = hit.figures;
                 page.from_cache = true;
                 outcome.pages.push((item.page, page));
                 continue;
@@ -708,7 +737,7 @@ impl OcrRouter {
                 Ok(text) if !text.trim().is_empty() => {
                     self.breaker.record_success();
                     let text = text.trim().to_string();
-                    self.cache_put(&key, &text).await;
+                    self.cache_put(&key, &text, &[]).await;
                     page.text = Some(text);
                 }
                 Ok(_) => {
@@ -754,15 +783,15 @@ impl OcrRouter {
         for page in pages {
             let key = document_page_cache_key(provider, &digest, *page);
             match self.cache_get(&key).await {
-                Some(text) => {
+                Some(hit) => {
                     outcome.cached += 1;
                     outcome.pages.push((
                         *page,
                         PageOutcome {
-                            text: Some(text),
+                            text: Some(hit.text),
+                            figures: hit.figures,
                             from_cache: true,
                             attempted: true,
-                            ..PageOutcome::default()
                         },
                     ));
                 }
@@ -887,14 +916,15 @@ impl OcrRouter {
                     match read {
                         Some(read) if !read.text.trim().is_empty() => {
                             let text = read.text.trim().to_string();
+                            let figures = offset_figures(read.figures, read.page, *page);
                             if let Some(key) = keys.get(page) {
-                                self.cache_put(key, &text).await;
+                                self.cache_put(key, &text, &figures).await;
                             }
                             outcome.pages.push((
                                 *page,
                                 PageOutcome {
                                     text: Some(text),
-                                    figures: offset_figures(read.figures, *page),
+                                    figures,
                                     attempted: true,
                                     ..PageOutcome::default()
                                 },
@@ -916,16 +946,29 @@ impl OcrRouter {
         outcome
     }
 
-    async fn cache_get(&self, key: &str) -> Option<String> {
-        match &self.cache {
-            Some(cache) => cache.get(key).await,
-            None => None,
-        }
+    async fn cache_get(&self, key: &str) -> Option<CachedPage> {
+        let raw = match &self.cache {
+            Some(cache) => cache.get(key).await?,
+            None => return None,
+        };
+        serde_json::from_str::<CachedPage>(&raw)
+            .ok()
+            .or(Some(CachedPage {
+                text: raw,
+                figures: Vec::new(),
+            }))
     }
 
-    async fn cache_put(&self, key: &str, text: &str) {
+    async fn cache_put(&self, key: &str, text: &str, figures: &[ExtractedFigure]) {
         if let Some(cache) = &self.cache {
-            cache.put(key, text).await;
+            let entry = CachedPage {
+                text: text.to_string(),
+                figures: figures.to_vec(),
+            };
+            match serde_json::to_string(&entry) {
+                Ok(json) => cache.put(key, &json).await,
+                Err(e) => tracing::warn!(error = %e, "OCR page result could not be serialised"),
+            }
         }
     }
 }
@@ -1084,14 +1127,20 @@ async fn backoff(attempt: u32) {
     tokio::time::sleep(Duration::from_millis(millis.min(2_000))).await;
 }
 
-/// Move a figure's page index to the document page that carried it: a batch
-/// response numbers pages from 0 within the sub-PDF, and the reader needs the
-/// page the viewer shows.
-fn offset_figures(figures: Vec<ExtractedFigure>, page: u32) -> Vec<ExtractedFigure> {
+/// Move a figure's page index and id to the document page that carried it: a
+/// batch response numbers pages from 0 within the sub-PDF, and the reader
+/// needs the page the viewer shows.
+fn offset_figures(figures: Vec<ExtractedFigure>, relative: u32, page: u32) -> Vec<ExtractedFigure> {
+    let prefix = format!("p{relative}-");
     figures
         .into_iter()
         .map(|mut figure| {
             figure.page = page;
+            if let Some(id) = figure.id.as_deref() {
+                if let Some(rest) = id.strip_prefix(&prefix) {
+                    figure.id = Some(format!("p{page}-{rest}"));
+                }
+            }
             figure
         })
         .collect()
