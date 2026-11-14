@@ -37,14 +37,26 @@ Grids, into `ExtractionResult.tables`:
   - blank rows and columns split regions;
   - hidden sheets are skipped, with a note;
   - merged cells are spread across their span;
+  - leading title rows (a table number, a title merged across the width) are
+    collected into `title` and skipped; a title row alone between blank rows
+    titles the table below it;
   - multi-level headers are flattened with " / ";
+  - header names are normalised for every source: runs of whitespace (line
+    breaks, tabs, NBSP U+00A0, other Unicode spaces) collapse to one space, the
+    name is trimmed, and duplicates get " (2)"; an empty header is `Column N`;
   - cached formula values are used, and rows whose numeric cells are formulas go into
     `formula_rows`;
   - locale-aware numbers: `1.234,5` → 1234.5 when the sheet uses comma decimals;
-  - the title is a single merged title row above the header, else the sheet name.
-- **CSV / TSV.** Sniff the delimiter; the header is the first row.
+  - statistical placeholders (`-`, `–`, `—`, `...`, `…`, `x`, `X`, `NA`, `N/A`,
+    `n.a.`, `*`) are **empty** cells, so a year column of numbers stays numeric,
+    with a manifest note of how many were treated that way;
+  - the title is the title rows above the header, else the sheet name.
+- **CSV / TSV.** Sniff the delimiter; the header is the first row. A column that
+  is empty in the header and in every row is dropped (the World Bank trailing
+  comma); a column with data but no header is `Column N`.
 - **DOCX.** Tables in document order. Empty cells are **kept** (paragon drops them and shifts
-  columns), `gridSpan` and `vMerge` are spread, and the title is the paragraph just above.
+  columns), `gridSpan` and `vMerge` are spread, a title row inside the table is appended to
+  the title, and the title is the paragraph just above.
 - **Markdown pipe tables** in any extractor's content (Mistral, MinerU, OCR router):
   - parse them into grids, titled by the line above;
   - **stitch** a table that continues on the next page when its header matches, or when the
@@ -68,7 +80,14 @@ Grids, into `ExtractionResult.tables`:
   - `formula_rows` → `formulas_known=true`, confidence High;
   - else label rows matching `^(total|jumlah|sub ?total|grand total|rata-rata|average)\b`
     (case-insensitive, any text column) → confidence Medium;
-  - markdown or PDF tables, ragged rows, or stitching → Low.
+  - else arithmetic, language-independent: a row whose Quantity cells each
+    equal the sum of the contiguous rows above it (a group subtotal, ≥ 2 rows),
+    or of every other non-derived row (a grand total, checked on the last row
+    and the first) within abs ≤ 0.5 or rel ≤ 0.1% → confidence at least Medium,
+    note "derived rows proven by arithmetic". A row with fewer than two rows to
+    sum is never derived;
+  - markdown or PDF tables, ragged rows, or stitching → Low (Medium when a
+    row is proven by arithmetic).
 
 **Text rendering**, the 4th retrieval unit in §10, replacing CSV/flat text in normal chunks:
 
