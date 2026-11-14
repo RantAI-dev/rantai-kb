@@ -142,6 +142,53 @@ pub fn render_pdf_page_range(
     Ok(out)
 }
 
+/// Render the given page indices (0-based, in the order given) to JPEG.
+///
+/// Unlike [`render_pdf_page_range`], the pages need not be contiguous: the OCR
+/// router renders only the pages it will send, and a batch of them may skip a
+/// page already in the cache.
+///
+/// # Errors
+///
+/// When pdfium is missing or the PDF cannot be loaded. A page that fails to
+/// render comes back with empty `bytes`.
+pub fn render_pdf_page_indices(
+    pdf_bytes: &[u8],
+    indices: &[u32],
+    dpi: u32,
+    jpeg_quality: u8,
+) -> Result<Vec<PageImage>, ExtractError> {
+    let pdfium = get_pdfium()?;
+    let document = pdfium
+        .load_pdf_from_byte_slice(pdf_bytes, None)
+        .map_err(|e| ExtractError::Container(format!("failed to load PDF: {e}")))?;
+    #[allow(clippy::cast_precision_loss)]
+    let scale = dpi.clamp(36, 300) as f32 / 72.0;
+    let config = PdfRenderConfig::new().scale_page_by_factor(scale);
+    let pages = document.pages();
+    let mut out = Vec::with_capacity(indices.len());
+    for &index in indices {
+        // One bad page must not cost the document its other pages: it comes
+        // back with no bytes, and the router marks that page failed.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let rendered = pages
+            .get(index as _)
+            .map_err(|e| format!("load: {e}"))
+            .and_then(|page| render_one(&page, &config, jpeg_quality));
+        let bytes = rendered.unwrap_or_else(|e| {
+            tracing::warn!(page = index, error = %e, "page not rendered");
+            Vec::new()
+        });
+        out.push(PageImage {
+            page: index,
+            mime: "image/jpeg".to_string(),
+            bytes,
+            text: String::new(),
+        });
+    }
+    Ok(out)
+}
+
 fn render_one(
     page: &PdfPage<'_>,
     config: &PdfRenderConfig,

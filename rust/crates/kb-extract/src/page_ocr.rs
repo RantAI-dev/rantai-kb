@@ -44,6 +44,7 @@ use crate::ExtractError;
 use crate::chain::ScannedPageOcr;
 use crate::config::ExtractConfig;
 use crate::detect::{SupportedFileType, detect_file_type};
+use crate::ocr_router::{OcrCallError, OcrPageProvider, OcrPageRead, OcrTransport};
 use crate::page_render::render_pdf_page_range;
 use crate::pdfium::{get_pdf_page_count, get_pdfium};
 
@@ -280,71 +281,80 @@ impl PageOcrExtractor {
 
     /// One page: one chat request, retried on 429/5xx and connection errors.
     async fn ocr_one(&self, page: &PageImage, page_index: usize) -> Result<String, ExtractError> {
-        let body = serde_json::to_vec(&self.request_body(page))
-            .map_err(|e| ExtractError::Container(format!("local OCR request body: {e}")))?;
-        let mut last = String::new();
+        let mut last = "no attempt was made".to_string();
 
         for attempt in 1..=MAX_ATTEMPTS {
-            let mut request = self
-                .client
-                .post(&self.settings.base_url)
-                .header("content-type", "application/json")
-                .body(body.clone());
-            if let Some(key) = self.settings.api_key.as_deref() {
-                request = request.bearer_auth(key);
-            }
-
-            let response = match request.send().await {
-                Ok(response) => response,
-                Err(e) => {
-                    last = format!("request failed: {e}");
-                    if attempt < MAX_ATTEMPTS {
-                        backoff(attempt).await;
-                        continue;
-                    }
-                    break;
-                }
-            };
-
-            let status = response.status().as_u16();
-            let bytes = match response.bytes().await {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    last = format!("response body: {e}");
-                    if attempt < MAX_ATTEMPTS {
-                        backoff(attempt).await;
-                        continue;
-                    }
-                    break;
-                }
-            };
-
-            if !(200..300).contains(&status) {
-                let message: String = String::from_utf8_lossy(&bytes).chars().take(300).collect();
-                // 429 and 5xx are the server saying "later"; anything else is
-                // our request being wrong and a retry only wastes the page.
-                if (status == 429 || status >= 500) && attempt < MAX_ATTEMPTS {
+            match self.one_attempt(page, page_index).await {
+                Ok(text) => return Ok(text),
+                Err(err) if err.transient && attempt < MAX_ATTEMPTS => {
                     tracing::warn!(
                         page = page_index + 1,
                         attempt,
-                        status,
+                        error = %err.message,
                         "local OCR transient error; backing off"
                     );
-                    last = format!("http {status}: {message}");
+                    last = err.message;
                     backoff(attempt).await;
-                    continue;
                 }
-                return Err(ExtractError::Container(format!(
-                    "local OCR http {status}: {message}"
-                )));
+                Err(err) => return Err(ExtractError::Container(err.message)),
             }
-
-            return parse_content(&bytes);
         }
 
         Err(ExtractError::Container(format!(
             "local OCR failed after {MAX_ATTEMPTS} attempts: {last}"
         )))
+    }
+
+    /// A single chat request. The router retries (and shares one breaker and
+    /// one pool across documents), so its path calls this rather than the
+    /// retrying [`Self::ocr_one`].
+    async fn one_attempt(
+        &self,
+        page: &PageImage,
+        _page_index: usize,
+    ) -> Result<String, OcrCallError> {
+        let body = serde_json::to_vec(&self.request_body(page))
+            .map_err(|e| OcrCallError::permanent(format!("local OCR request body: {e}")))?;
+
+        let mut request = self
+            .client
+            .post(&self.settings.base_url)
+            .header("content-type", "application/json")
+            .body(body);
+        if let Some(key) = self.settings.api_key.as_deref() {
+            request = request.bearer_auth(key);
+        }
+
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(e) => {
+                return Err(OcrCallError::transient(format!("request failed: {e}")));
+            }
+        };
+
+        let status = response.status().as_u16();
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Err(OcrCallError::transient(format!("response body: {e}")));
+            }
+        };
+
+        if !(200..300).contains(&status) {
+            let message: String = String::from_utf8_lossy(&bytes).chars().take(300).collect();
+            // 429 and 5xx are the server saying "later"; anything else is
+            // our request being wrong and a retry only wastes the page.
+            if status == 429 || status >= 500 {
+                return Err(OcrCallError::transient(format!(
+                    "local OCR http {status}: {message}"
+                )));
+            }
+            return Err(OcrCallError::permanent(format!(
+                "local OCR http {status}: {message}"
+            )));
+        }
+
+        parse_content(&bytes).map_err(|e| OcrCallError::permanent(e.to_string()))
     }
 
     /// The OpenAI chat body: the image part first, then the task prefix.
@@ -495,6 +505,56 @@ impl ScannedPageOcr for PageOcrExtractor {
         filename: &str,
     ) -> Result<ExtractionResult, ExtractError> {
         self.extract_image(image_bytes, mime_type, filename).await
+    }
+}
+
+/// The page router's view of this adapter: one image, one attempt. Retries,
+/// the shared pool and the breaker live in the router, so the old whole-file
+/// path and the routed path share one request shape.
+#[async_trait::async_trait]
+impl OcrPageProvider for PageOcrExtractor {
+    fn id(&self) -> &str {
+        "chat"
+    }
+
+    fn model(&self) -> &str {
+        &self.settings.model
+    }
+
+    fn prompt(&self) -> &str {
+        &self.settings.prompt
+    }
+
+    fn dpi(&self) -> u32 {
+        self.settings.dpi
+    }
+
+    fn transport(&self) -> OcrTransport {
+        OcrTransport::Image
+    }
+
+    async fn read_pdf(
+        &self,
+        _pdf_bytes: &[u8],
+        _include_figures: bool,
+    ) -> Result<Vec<OcrPageRead>, OcrCallError> {
+        Err(OcrCallError::permanent(
+            "the chat OCR adapter reads one page image per request, not a PDF",
+        ))
+    }
+
+    async fn read_image(&self, image_bytes: &[u8], mime: &str) -> Result<String, OcrCallError> {
+        let page = PageImage {
+            page: 0,
+            mime: if mime.is_empty() {
+                "image/png".to_string()
+            } else {
+                mime.to_string()
+            },
+            bytes: image_bytes.to_vec(),
+            text: String::new(),
+        };
+        self.one_attempt(&page, 0).await
     }
 }
 

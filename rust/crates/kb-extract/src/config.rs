@@ -8,6 +8,65 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+/// How PDF pages reach OCR (`KB_OCR_MODE`, ING-6).
+///
+/// `Auto` is the default: the effective mode is `Hybrid` when an OCR provider
+/// is configured and `Off` otherwise, so an installation with no OCR endpoint
+/// behaves exactly as it did before the router existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OcrMode {
+    /// No page goes to OCR; the local text layer is used and reported.
+    Off,
+    /// `Auto` sentinel: `Hybrid` when a provider is configured, else `Off`.
+    #[default]
+    Auto,
+    /// Per page: a scan goes to OCR, a text page keeps its local text.
+    Hybrid,
+    /// Every PDF page goes to OCR; local text is that page's fallback.
+    Full,
+}
+
+impl OcrMode {
+    /// Parse the `KB_OCR_MODE` value. Unknown text is a configuration error,
+    /// not a silent fallback: an operator who typed `ful` should hear about it.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "hybrid" => Some(Self::Hybrid),
+            "full" => Some(Self::Full),
+            "auto" | "" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    /// The name written into `metadata.ocr.mode`.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Hybrid | Self::Auto => "hybrid",
+            Self::Full => "full",
+        }
+    }
+}
+
+/// Default for `KB_OCR_SCAN_AREA`: the share of a page raster images must
+/// cover before a page is a scan candidate.
+pub const DEFAULT_OCR_SCAN_AREA: f32 = 0.90;
+/// Default for `KB_OCR_SCAN_TEXT`: visible characters a page may carry and
+/// still count as a scan.
+pub const DEFAULT_OCR_SCAN_TEXT: u32 = 50;
+/// Default for `KB_OCR_BATCH`: pages per sub-PDF request to a PDF OCR provider.
+pub const DEFAULT_OCR_BATCH: u32 = 8;
+/// Default for `KB_OCR_MAX_PAGES`: pages per document that may go to OCR.
+pub const DEFAULT_OCR_MAX_PAGES: u32 = 300;
+/// Default for `KB_OCR_BREAKER`: consecutive provider failures that open it.
+pub const DEFAULT_OCR_BREAKER: u32 = 3;
+/// Default for `KB_OCR_BREAKER_COOLDOWN_S`: how long the breaker stays open.
+pub const DEFAULT_OCR_BREAKER_COOLDOWN_S: u64 = 60;
+
 /// Configuration for document text extraction, layout parsing, and vision OCR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractConfig {
@@ -64,6 +123,21 @@ pub struct ExtractConfig {
     pub ocr_timeout: Duration,
     /// `max_tokens` for one page response (default 4096).
     pub ocr_max_tokens: u32,
+    /// How PDF pages reach OCR (`KB_OCR_MODE`). `Auto` = hybrid when a provider
+    /// is configured, off otherwise (ING-6).
+    pub ocr_mode: OcrMode,
+    /// Share of a page raster images must cover for it to be a scan (0.90).
+    pub ocr_scan_area: f32,
+    /// Visible characters a page may carry and still count as a scan (50).
+    pub ocr_scan_text: u32,
+    /// Pages per sub-PDF request to a PDF OCR provider (8).
+    pub ocr_batch: u32,
+    /// Pages per document that may go to OCR (300).
+    pub ocr_max_pages: u32,
+    /// Consecutive provider failures that open the process-wide breaker (3).
+    pub ocr_breaker: u32,
+    /// How long the breaker stays open (60 s).
+    pub ocr_breaker_cooldown: Duration,
     /// Path to libpdfium.so dynamic library.
     pub pdfium_dynamic_lib_path: Option<String>,
 }
@@ -87,7 +161,7 @@ impl ExtractConfig {
         format!(
             "epoch={EXTRACT_CACHE_EPOCH}|ver={}|primary={}|fallback={}|smart={}|\
              mineru_url={}|mineru_api={}:{}:{}|mistral={}:{}|order={}|vision={}:{}:{}|ocr={}|\
-             local_ocr={}:{}:{}:{}:{}:{}:{}",
+             local_ocr={}:{}:{}:{}:{}:{}:{}|mode={}:{}:{}:{}:{}:{}",
             env!("CARGO_PKG_VERSION"),
             self.primary,
             self.fallback,
@@ -110,6 +184,12 @@ impl ExtractConfig {
             self.ocr_dpi,
             self.ocr_concurrency,
             self.ocr_max_tokens,
+            self.ocr_mode.as_str(),
+            self.ocr_scan_area,
+            self.ocr_scan_text,
+            self.ocr_batch,
+            self.ocr_max_pages,
+            self.ocr_breaker,
         )
     }
 }
@@ -146,6 +226,13 @@ impl Default for ExtractConfig {
             ocr_concurrency: 2,
             ocr_timeout: Duration::from_secs(120),
             ocr_max_tokens: 4096,
+            ocr_mode: OcrMode::Auto,
+            ocr_scan_area: DEFAULT_OCR_SCAN_AREA,
+            ocr_scan_text: DEFAULT_OCR_SCAN_TEXT,
+            ocr_batch: DEFAULT_OCR_BATCH,
+            ocr_max_pages: DEFAULT_OCR_MAX_PAGES,
+            ocr_breaker: DEFAULT_OCR_BREAKER,
+            ocr_breaker_cooldown: Duration::from_secs(DEFAULT_OCR_BREAKER_COOLDOWN_S),
             pdfium_dynamic_lib_path: None,
         }
     }
@@ -188,6 +275,19 @@ impl ExtractConfig {
 
         let ocr_base_url = lookup("KB_OCR_BASE_URL").unwrap_or(default.ocr_base_url);
         let ocr_api_key = lookup("KB_OCR_API_KEY").unwrap_or(default.ocr_api_key);
+
+        // An unknown mode is a mistake worth hearing about, but it must not
+        // stop the server from starting: `Auto` is the safe reading.
+        let ocr_mode = match lookup("KB_OCR_MODE") {
+            Some(raw) => OcrMode::parse(&raw).unwrap_or_else(|| {
+                tracing::warn!(
+                    value = %raw,
+                    "KB_OCR_MODE must be off, hybrid or full; using the default"
+                );
+                default.ocr_mode
+            }),
+            None => default.ocr_mode,
+        };
 
         // An empty value the operator wrote by hand means "use the default",
         // not "send an empty model name" — except for the two that switch the
@@ -233,6 +333,30 @@ impl ExtractConfig {
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|n| *n > 0)
                 .unwrap_or(default.ocr_max_tokens),
+            ocr_mode,
+            // A share below 1 % or above 100 % is an operator typo; clamp it
+            // rather than making every page a scan or none.
+            ocr_scan_area: lookup("KB_OCR_SCAN_AREA")
+                .and_then(|s| s.parse::<f32>().ok())
+                .filter(|a| a.is_finite())
+                .map_or(default.ocr_scan_area, |a| a.clamp(0.01, 1.0)),
+            ocr_scan_text: lookup("KB_OCR_SCAN_TEXT")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(default.ocr_scan_text),
+            ocr_batch: lookup("KB_OCR_BATCH")
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(default.ocr_batch),
+            ocr_max_pages: lookup("KB_OCR_MAX_PAGES")
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(default.ocr_max_pages),
+            ocr_breaker: lookup("KB_OCR_BREAKER")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(default.ocr_breaker),
+            ocr_breaker_cooldown: lookup("KB_OCR_BREAKER_COOLDOWN_S")
+                .and_then(|s| s.parse::<u64>().ok())
+                .map_or(default.ocr_breaker_cooldown, Duration::from_secs),
             pdfium_dynamic_lib_path: lookup("PDFIUM_DYNAMIC_LIB_PATH")
                 .or(default.pdfium_dynamic_lib_path),
         }
@@ -242,6 +366,25 @@ impl ExtractConfig {
     #[must_use]
     pub fn from_env() -> Self {
         Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    /// Whether any OCR provider is configured: the local chat adapter
+    /// (`KB_OCR_BASE_URL`) or Mistral (`KB_MISTRAL_OCR_KEY`).
+    #[must_use]
+    pub fn has_ocr_provider(&self) -> bool {
+        !self.ocr_base_url.trim().is_empty() || !self.mistral_ocr_key.trim().is_empty()
+    }
+
+    /// The mode that actually runs: `Auto` reads as `Hybrid` when a provider is
+    /// configured and `Off` otherwise, so the default changes nothing for an
+    /// installation that never set one up.
+    #[must_use]
+    pub fn resolved_ocr_mode(&self) -> OcrMode {
+        match self.ocr_mode {
+            OcrMode::Auto if self.has_ocr_provider() => OcrMode::Hybrid,
+            OcrMode::Auto => OcrMode::Off,
+            explicit => explicit,
+        }
     }
 
     /// Effective API key for vision calls (falls back to OpenRouter API key).
@@ -339,5 +482,85 @@ mod tests {
         let mut dpi = base.clone();
         dpi.ocr_dpi = 200;
         assert_ne!(base.cache_fingerprint(), dpi.cache_fingerprint());
+    }
+
+    #[test]
+    fn the_ocr_offload_settings_read_their_documented_names() {
+        let vars = [
+            ("KB_OCR_MODE", "full"),
+            ("KB_OCR_SCAN_AREA", "0.75"),
+            ("KB_OCR_SCAN_TEXT", "12"),
+            ("KB_OCR_BATCH", "4"),
+            ("KB_OCR_MAX_PAGES", "40"),
+            ("KB_OCR_BREAKER", "5"),
+            ("KB_OCR_BREAKER_COOLDOWN_S", "15"),
+        ];
+        let cfg = ExtractConfig::from_lookup(|name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        });
+        assert_eq!(cfg.ocr_mode, OcrMode::Full);
+        assert!((cfg.ocr_scan_area - 0.75).abs() < 1e-6);
+        assert_eq!(cfg.ocr_scan_text, 12);
+        assert_eq!(cfg.ocr_batch, 4);
+        assert_eq!(cfg.ocr_max_pages, 40);
+        assert_eq!(cfg.ocr_breaker, 5);
+        assert_eq!(cfg.ocr_breaker_cooldown, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn the_ocr_offload_defaults_are_the_documented_ones() {
+        let cfg = ExtractConfig::from_lookup(|_| None);
+        assert_eq!(cfg.ocr_mode, OcrMode::Auto);
+        assert!((cfg.ocr_scan_area - 0.90).abs() < 1e-6);
+        assert_eq!(cfg.ocr_scan_text, 50);
+        assert_eq!(cfg.ocr_batch, 8);
+        assert_eq!(cfg.ocr_max_pages, 300);
+        assert_eq!(cfg.ocr_breaker, 3);
+        assert_eq!(cfg.ocr_breaker_cooldown, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn auto_is_off_without_a_provider_and_hybrid_with_one() {
+        let mut cfg = ExtractConfig::default();
+        assert_eq!(cfg.resolved_ocr_mode(), OcrMode::Off);
+        cfg.ocr_base_url = "http://127.0.0.1:8000/v1/chat/completions".to_string();
+        assert_eq!(cfg.resolved_ocr_mode(), OcrMode::Hybrid);
+        cfg.ocr_base_url.clear();
+        cfg.mistral_ocr_key = "k".to_string();
+        assert_eq!(cfg.resolved_ocr_mode(), OcrMode::Hybrid);
+        // An explicit mode is never overridden by Auto's rule.
+        cfg.ocr_mode = OcrMode::Off;
+        assert_eq!(cfg.resolved_ocr_mode(), OcrMode::Off);
+    }
+
+    #[test]
+    fn an_unknown_mode_falls_back_to_auto_instead_of_stopping_the_server() {
+        let cfg = ExtractConfig::from_lookup(|name| match name {
+            "KB_OCR_MODE" => Some("ful".to_string()),
+            _ => None,
+        });
+        assert_eq!(cfg.ocr_mode, OcrMode::Auto);
+        assert_eq!(OcrMode::parse("FULL"), Some(OcrMode::Full));
+        assert_eq!(OcrMode::parse(" hybrid "), Some(OcrMode::Hybrid));
+        assert_eq!(OcrMode::parse("maybe"), None);
+    }
+
+    #[test]
+    fn the_offload_tunables_move_the_cache_fingerprint() {
+        let base = ExtractConfig::default();
+        for mutate in [
+            |c: &mut ExtractConfig| c.ocr_mode = OcrMode::Full,
+            |c: &mut ExtractConfig| c.ocr_scan_area = 0.5,
+            |c: &mut ExtractConfig| c.ocr_scan_text = 5,
+            |c: &mut ExtractConfig| c.ocr_batch = 2,
+            |c: &mut ExtractConfig| c.ocr_max_pages = 10,
+            |c: &mut ExtractConfig| c.ocr_breaker = 9,
+        ] {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert_ne!(base.cache_fingerprint(), changed.cache_fingerprint());
+        }
     }
 }

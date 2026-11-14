@@ -33,6 +33,7 @@ pub mod mineru_api;
 pub mod mistral;
 pub mod ods;
 pub mod odt;
+pub mod ocr_router;
 pub mod openrouter_vision;
 pub mod outline;
 pub mod page_ocr;
@@ -71,6 +72,10 @@ pub use mineru_api::MineruApiExtractor;
 pub use mistral::MistralOcrExtractor;
 pub use ods::parse_ods;
 pub use odt::parse_odt;
+pub use ocr_router::{
+    OcrBreaker, OcrCallError, OcrPageProvider, OcrPageRead, OcrRouter, OcrRouterSettings,
+    OcrTransport, process_breaker,
+};
 pub use openrouter_vision::OPENROUTER_VISION_URL;
 pub use openrouter_vision::OpenRouterVisionProvider;
 pub use outline::{bookmark_nodes, extract_outline, finish_nodes, heading_nodes};
@@ -80,7 +85,7 @@ pub use pdfium::{
     MINIMAL_BLANK_PDF, MINIMAL_PDF_HELLO_WORLD, extract_pdf_text_layer, get_pdf_page_count,
     get_pdfium, init_pdfium, render_pdf_page_to_png, split_pdf_by_page_count,
 };
-pub use scanned::is_pdf_scanned;
+pub use scanned::{is_pdf_scanned, page_is_scan, read_page_facts};
 pub use smart_router::SmartRouterExtractor;
 pub use vision_llm::VisionLlmExtractor;
 pub use visuals::{LocalVisualCollector, normalize_image};

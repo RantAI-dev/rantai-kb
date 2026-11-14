@@ -9,6 +9,7 @@
 mod embedder;
 mod extractor;
 mod image_describer;
+mod ocr_cache;
 mod page_describer;
 mod page_embedder;
 mod reranker;
@@ -19,6 +20,7 @@ mod vision_scorer;
 pub use embedder::CachedEmbedder;
 pub use extractor::CachedExtractor;
 pub use image_describer::CachedImageDescriber;
+pub use ocr_cache::{DiskOcrPageCache, OCR_PAGE_NAMESPACE};
 pub use page_describer::CachedPageDescriber;
 pub use page_embedder::CachedPageEmbedder;
 pub use reranker::CachedReranker;

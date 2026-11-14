@@ -191,6 +191,83 @@ pub fn get_pdf_page_count(pdfium: &Pdfium, pdf_bytes: &[u8]) -> Result<u32, Extr
     Ok(document.pages().len() as u32)
 }
 
+/// A new PDF holding exactly `pages` (0-based, in the order given), built by
+/// pdfium copying each page out of `pdf_bytes`.
+///
+/// This is what an OCR provider that takes a document is sent: one page for
+/// the cache key, `KB_OCR_BATCH` pages for one request. An index past the end
+/// is skipped; an empty list produces an empty document, which the caller must
+/// not send.
+pub fn pdf_page_subset(
+    pdfium: &Pdfium,
+    pdf_bytes: &[u8],
+    pages: &[u32],
+) -> Result<Vec<u8>, ExtractError> {
+    let document = pdfium
+        .load_pdf_from_byte_slice(pdf_bytes, None)
+        .map_err(|e| ExtractError::Container(format!("failed to load PDF: {e}")))?;
+    subset_of(pdfium, &document, pages)
+}
+
+/// Several subsets in one pass, `pages_per` pages each, so splitting a
+/// document into per-page cache keys and a per-batch request loads pdfium once
+/// per call rather than once per page.
+///
+/// `pages_per == 0` is read as "all pages in one document".
+pub fn pdf_page_subset_many(
+    pdfium: &Pdfium,
+    pdf_bytes: &[u8],
+    pages: &[u32],
+    pages_per: usize,
+) -> Result<Vec<Vec<u8>>, ExtractError> {
+    let document = pdfium
+        .load_pdf_from_byte_slice(pdf_bytes, None)
+        .map_err(|e| ExtractError::Container(format!("failed to load PDF: {e}")))?;
+    let per = if pages_per == 0 {
+        pages.len().max(1)
+    } else {
+        pages_per
+    };
+    let mut out = Vec::new();
+    for chunk in pages.chunks(per) {
+        out.push(subset_of(pdfium, &document, chunk)?);
+    }
+    Ok(out)
+}
+
+/// One new document holding `pages`, copied in order.
+fn subset_of(
+    pdfium: &Pdfium,
+    document: &PdfDocument<'_>,
+    pages: &[u32],
+) -> Result<Vec<u8>, ExtractError> {
+    let page_count = document.pages().len();
+    let mut subset = pdfium
+        .create_new_pdf()
+        .map_err(|e| ExtractError::Container(format!("failed to create a PDF subset: {e}")))?;
+
+    let mut written = 0u32;
+    for &page in pages {
+        if page as i32 >= page_count {
+            continue;
+        }
+        let index = page as i32;
+        subset
+            .pages_mut()
+            .copy_page_range_from_document(document, index..=index, written as i32)
+            .map_err(|e| {
+                ExtractError::Container(format!("failed to copy page {}: {e}", page + 1))
+            })?;
+        written += 1;
+    }
+
+    let mut cursor = Cursor::new(Vec::new());
+    subset
+        .save_to_writer(&mut cursor)
+        .map_err(|e| ExtractError::Container(format!("failed to save the PDF subset: {e}")))?;
+    Ok(cursor.into_inner())
+}
+
 /// Split a PDF document into multiple PDF byte segments by page count.
 pub fn split_pdf_by_page_count(
     pdfium: &Pdfium,

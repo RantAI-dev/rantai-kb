@@ -26,6 +26,7 @@ use crate::gltf;
 use crate::html;
 use crate::legacy::{self, Claimed};
 use crate::mime::ext_to_mime;
+use crate::ocr_router::OcrRouter;
 use crate::ods;
 use crate::odt;
 use crate::pdfium::{extract_pdf_text_layer, get_pdfium};
@@ -117,6 +118,7 @@ pub async fn extract_document(
     options: ExtractionOptions,
     chain: &LayoutExtractorChain,
     vision_ocr: Option<&dyn ScannedPageOcr>,
+    ocr_router: Option<&OcrRouter>,
 ) -> Result<ExtractionResult, ExtractError> {
     match detect_file_type(filename) {
         Some(SupportedFileType::Pdf) => {
@@ -133,6 +135,25 @@ pub async fn extract_document(
                 }
             };
             let is_scanned = options.force_layout || is_pdf_scanned(pdfium, bytes);
+            // The page router (ING-6) decides per page: `hybrid` keeps a
+            // digital page's text and sends only scans, `full` sends every
+            // page. An explicit layout request still takes the whole-document
+            // chain, which is the contract `/v1/extract?layout=1` established.
+            if let (Some(router), false) = (ocr_router, options.force_layout) {
+                return match router.extract_pdf(bytes, filename, &options).await {
+                    Ok(res) => Ok(res),
+                    Err(err) => {
+                        let reason = clip_reason(&err.to_string());
+                        let prefix = format!("OCR failed for \"{filename}\": ");
+                        let error_msg = if reason.starts_with(&prefix) {
+                            reason
+                        } else {
+                            format!("{prefix}{reason}")
+                        };
+                        Ok(ExtractionResult::failed("pdf", error_msg))
+                    }
+                };
+            }
             if is_scanned {
                 match chain.extract_scanned_pdf(filename, bytes, options).await {
                     Ok(res) => Ok(res),
@@ -163,6 +184,24 @@ pub async fn extract_document(
             }
         }
         Some(SupportedFileType::Image) => {
+            // The router carries the page cache, the shared pool and the
+            // breaker for pictures too (ING-6), when its provider reads
+            // images. A document-only provider (Mistral) keeps the old path.
+            if let Some(router) = ocr_router {
+                match router.extract_image(bytes, mime_type, filename).await {
+                    Ok(res) => return Ok(res),
+                    Err(ExtractError::Unsupported(_)) => {}
+                    Err(err) => {
+                        return Ok(ExtractionResult::failed(
+                            "image",
+                            format!(
+                                "Image OCR failed for \"{filename}\": {}",
+                                clip_reason(&err.to_string())
+                            ),
+                        ));
+                    }
+                }
+            }
             if let (Some(ocr), true) = (
                 vision_ocr,
                 tiff_pages::is_tiff_extension(&extension_of(filename)),
@@ -465,6 +504,7 @@ mod tests {
             b"MZ\x90\x00",
             ExtractionOptions::default(),
             &chain,
+            None,
             None,
         )
         .await
