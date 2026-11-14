@@ -411,8 +411,12 @@ fn filter_sql(info: &ColumnInfo, filter: &Filter) -> Result<(String, Vec<Param>)
                 // The outer match only reaches this arm for these four, and
                 // `Gt` is the default so an added future operator cannot
                 // silently become ">=".
-                FilterOp::Eq | FilterOp::Ne | FilterOp::Contains | FilterOp::In
-                | FilterOp::Between | FilterOp::Gt => ">",
+                FilterOp::Eq
+                | FilterOp::Ne
+                | FilterOp::Contains
+                | FilterOp::In
+                | FilterOp::Between
+                | FilterOp::Gt => ">",
             };
             Ok((format!("({quoted} {operator} ?)"), vec![param]))
         }
@@ -431,9 +435,10 @@ fn scalar(info: &ColumnInfo, value: &Value) -> Result<Param, QueryError> {
             _ => Ok(Param::Text(b.to_string())),
         },
         Value::Number(n) => match info.kind {
-            ColumnKind::Number => n.as_f64().map(Param::Number).ok_or_else(|| {
-                bad_value(&info.name, "number is not representable as a double")
-            }),
+            ColumnKind::Number => n
+                .as_f64()
+                .map(Param::Number)
+                .ok_or_else(|| bad_value(&info.name, "number is not representable as a double")),
             _ => Ok(Param::Text(n.to_string())),
         },
         Value::String(s) => {
@@ -740,9 +745,7 @@ mod tests {
         // stays one identifier; the statement still has exactly one FROM.
         assert_eq!(compiled.main.matches("FROM read_parquet").count(), 1);
         assert!(
-            compiled
-                .main
-                .contains("\"Region\"\" ; DROP TABLE x; --\""),
+            compiled.main.contains("\"Region\"\" ; DROP TABLE x; --\""),
             "{}",
             compiled.main
         );
@@ -825,7 +828,12 @@ mod tests {
             }],
             ..TableQuery::default()
         };
-        assert!(compile(&manifest(), &q, &open()).unwrap().main.contains("(FALSE)"));
+        assert!(
+            compile(&manifest(), &q, &open())
+                .unwrap()
+                .main
+                .contains("(FALSE)")
+        );
         assert!(matches!(
             compile(&manifest(), &TableQuery::default(), &open()),
             Err(QueryError::Empty { .. })
@@ -848,11 +856,14 @@ mod tests {
         ));
 
         let ok = TableQuery {
-            select: vec![sel("Region"), SelectItem::Aggregate {
-                agg: Agg::Sum,
-                column: Some("Revenue".to_string()),
-                alias: Some("total".to_string()),
-            }],
+            select: vec![
+                sel("Region"),
+                SelectItem::Aggregate {
+                    agg: Agg::Sum,
+                    column: Some("Revenue".to_string()),
+                    alias: Some("total".to_string()),
+                },
+            ],
             group_by: vec!["Region".to_string()],
             order_by: vec![OrderBy {
                 key: "total".to_string(),
@@ -861,7 +872,11 @@ mod tests {
             ..TableQuery::default()
         };
         let compiled = compile(&manifest(), &ok, &open()).unwrap();
-        assert!(compiled.main.ends_with("ORDER BY sum(\"Revenue\") DESC LIMIT 1001"));
+        assert!(
+            compiled
+                .main
+                .ends_with("ORDER BY sum(\"Revenue\") DESC LIMIT 1001")
+        );
     }
 
     #[test]

@@ -88,7 +88,10 @@ mod tests {
         let grid = TableGrid {
             header: vec!["Region".into(), "Revenue".into()],
             rows: vec![
-                vec![cell(Cell::Text("Jawa Timur".into())), cell(Cell::Number(1.5))],
+                vec![
+                    cell(Cell::Text("Jawa Timur".into())),
+                    cell(Cell::Number(1.5)),
+                ],
                 vec![cell(Cell::Text("Bali".into())), cell(Cell::Number(2.0))],
             ],
             ..TableGrid::default()

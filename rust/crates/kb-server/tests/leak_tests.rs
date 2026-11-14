@@ -152,6 +152,26 @@ fn seed_documents() -> Vec<SeedDocument> {
             }
         }
     }
+    // One table-bearing document per cell (`TBL-1`): the table row lists, gets
+    // and counts a document's tables, so every scope needs a document whose
+    // ingest stored one. Every other arm skips these documents, because a
+    // table-only document cannot answer their canary.
+    let normal = out.clone();
+    for (offset, document) in normal.into_iter().enumerate() {
+        let id = format!("{}-table", document.id);
+        out.push(SeedDocument {
+            id: id.clone(),
+            tenant: document.tenant,
+            knowledge_base_id: document.knowledge_base_id,
+            category_id: document.category_id,
+            external_ref: format!("ref-{id}"),
+            canaries: canaries_for(0xC0FFEE, 1000 + offset),
+            n_chunks: 1,
+            has_figures: false,
+            figure_asset_key: None,
+            table_ids: vec![format!("{id}_t0")],
+        });
+    }
     out
 }
 
@@ -474,7 +494,12 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
     {
         documents.insert_doc(
             TenantId(document.tenant.clone()),
-            doc(&document.id, &document.id, &document.knowledge_base_id, &document.category_id),
+            doc(
+                &document.id,
+                &document.id,
+                &document.knowledge_base_id,
+                &document.category_id,
+            ),
         );
         for table_id in &document.table_ids {
             tables.seed(TableRecord {
@@ -499,7 +524,10 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
                     truncated: false,
                     notes: Vec::new(),
                 },
-                grid_key: format!("tables/{}/{}/{table_id}/v1.parquet", document.tenant, document.id),
+                grid_key: format!(
+                    "tables/{}/{}/{table_id}/v1.parquet",
+                    document.tenant, document.id
+                ),
                 created_at: "2026-01-01T00:00:00.000Z".to_string(),
             });
         }

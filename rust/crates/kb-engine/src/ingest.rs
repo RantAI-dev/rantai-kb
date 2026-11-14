@@ -940,12 +940,7 @@ impl IngestWorker {
         }
         let prepared: Vec<(kb_core::tables::TableGrid, kb_core::tables::TableManifest)> = tables
             .iter()
-            .map(|grid| {
-                (
-                    grid.clone(),
-                    kb_core::tables::build_manifest(grid),
-                )
-            })
+            .map(|grid| (grid.clone(), kb_core::tables::build_manifest(grid)))
             .collect();
         let table_count = prepared.len();
         let records = {

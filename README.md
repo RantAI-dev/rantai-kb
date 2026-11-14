@@ -173,8 +173,8 @@ POST /v1/tables/doc123_t0/query
 The query is **typed, never SQL**: columns are checked against the manifest (a SUM
 over a phone-number column is refused), identifiers are quoted from the manifest's
 whitelist and values are bound parameters. Subtotal rows are excluded unless
-`includeDerived` is set. The answer is `{columns, rows, rowsMatched,
-excludedDerivedRows, suppressedGroups, truncated, warnings}` — the receipt says what
+`includeDerived` is set. The answer is `{columns, rows, rows_matched,
+excluded_derived_rows, suppressed_groups, truncated, warnings}` — the receipt says what
 was computed and from which table. A refused query answers `400` with the
 `QueryError` JSON (`unknown_column` with `available`, `not_summable`, `not_grouped`,
 `restricted`, `bad_value`, `empty`). `tablePrivacy: "aggregate-only"` on upload

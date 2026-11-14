@@ -74,14 +74,12 @@ fn cell_value(cell: &Cell, kind: ColumnKind) -> DuckValue {
             Cell::Text(s) if s.eq_ignore_ascii_case("false") => DuckValue::Boolean(false),
             _ => DuckValue::Null,
         },
-        ColumnKind::Text | ColumnKind::Date | ColumnKind::Mixed | ColumnKind::Empty => {
-            match cell {
-                Cell::Empty => DuckValue::Null,
-                Cell::Text(s) | Cell::Date(s) => DuckValue::Text(s.clone()),
-                Cell::Number(n) => DuckValue::Text(format_number(*n)),
-                Cell::Bool(b) => DuckValue::Text(b.to_string()),
-            }
-        }
+        ColumnKind::Text | ColumnKind::Date | ColumnKind::Mixed | ColumnKind::Empty => match cell {
+            Cell::Empty => DuckValue::Null,
+            Cell::Text(s) | Cell::Date(s) => DuckValue::Text(s.clone()),
+            Cell::Number(n) => DuckValue::Text(format_number(*n)),
+            Cell::Bool(b) => DuckValue::Text(b.to_string()),
+        },
     }
 }
 
@@ -120,9 +118,7 @@ pub fn write_grid(
     for (index, name) in grid.header.iter().enumerate() {
         definition.push_str(&format!("{} {}, ", quote(name), sql_type(kinds[index])));
     }
-    definition.push_str(&format!(
-        "{ROW_COLUMN} INTEGER, {DERIVED_COLUMN} BOOLEAN)"
-    ));
+    definition.push_str(&format!("{ROW_COLUMN} INTEGER, {DERIVED_COLUMN} BOOLEAN)"));
     conn.execute_batch(&definition)
         .map_err(|e| PortError::Unavailable(format!("duckdb create grid: {e}")))?;
 
@@ -194,8 +190,7 @@ pub fn run(
     path: &Path,
     timeout_ms: u64,
 ) -> Result<RunOutput, (bool, String)> {
-    let conn =
-        Connection::open_in_memory().map_err(|e| (false, format!("duckdb open: {e}")))?;
+    let conn = Connection::open_in_memory().map_err(|e| (false, format!("duckdb open: {e}")))?;
     let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (stop, stopped) = std::sync::mpsc::channel::<()>();
     let interrupt = conn.interrupt_handle();
@@ -214,9 +209,7 @@ pub fn run(
     let _ = stop.send(());
     let _ = watchdog.join();
     result.map_err(|(timed_out, message)| {
-        if timed_out
-            || interrupted.load(std::sync::atomic::Ordering::SeqCst)
-        {
+        if timed_out || interrupted.load(std::sync::atomic::Ordering::SeqCst) {
             (true, format!("query timed out after {timeout_ms} ms"))
         } else {
             (false, message)
@@ -252,19 +245,18 @@ fn run_inner(
     })
 }
 
-fn query_binds(
-    query: &crate::compiler::CompiledQuery,
-    path: &Path,
-) -> Vec<DuckValue> {
-    query.binds.iter().map(|param| match param {
-        crate::compiler::Param::Grid(_) => {
-            DuckValue::Text(path.to_string_lossy().to_string())
-        }
-        crate::compiler::Param::Text(s) => DuckValue::Text(s.clone()),
-        crate::compiler::Param::Number(n) => DuckValue::Double(*n),
-        crate::compiler::Param::Bool(b) => DuckValue::Boolean(*b),
-        crate::compiler::Param::Null => DuckValue::Null,
-    }).collect()
+fn query_binds(query: &crate::compiler::CompiledQuery, path: &Path) -> Vec<DuckValue> {
+    query
+        .binds
+        .iter()
+        .map(|param| match param {
+            crate::compiler::Param::Grid(_) => DuckValue::Text(path.to_string_lossy().to_string()),
+            crate::compiler::Param::Text(s) => DuckValue::Text(s.clone()),
+            crate::compiler::Param::Number(n) => DuckValue::Double(*n),
+            crate::compiler::Param::Bool(b) => DuckValue::Boolean(*b),
+            crate::compiler::Param::Null => DuckValue::Null,
+        })
+        .collect()
 }
 
 fn run_rows(
@@ -465,7 +457,10 @@ mod tests {
     #[test]
     fn a_grid_round_trips_through_parquet_with_types_and_flags() {
         let bytes = write_grid(&grid(), Some(&manifest())).unwrap();
-        assert!(bytes.starts_with(b"PAR1"), "a Parquet file starts with PAR1");
+        assert!(
+            bytes.starts_with(b"PAR1"),
+            "a Parquet file starts with PAR1"
+        );
         let path = std::env::temp_dir().join(format!("kb-test-{}.parquet", uuid::Uuid::new_v4()));
         std::fs::write(&path, &bytes).unwrap();
 
@@ -516,7 +511,10 @@ mod tests {
 
     #[test]
     fn cells_that_do_not_fit_become_null_rather_than_failing() {
-        assert_eq!(cell_value(&Cell::Text("n/a".into()), ColumnKind::Number), DuckValue::Null);
+        assert_eq!(
+            cell_value(&Cell::Text("n/a".into()), ColumnKind::Number),
+            DuckValue::Null
+        );
         assert_eq!(
             cell_value(&Cell::Text("true".into()), ColumnKind::Bool),
             DuckValue::Boolean(true)

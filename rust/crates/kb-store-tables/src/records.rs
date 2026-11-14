@@ -8,8 +8,8 @@
 
 use async_trait::async_trait;
 use kb_core::tables::{TableManifest, TableSource};
-use kb_ports::{DocumentId, PortError, TenantId};
 use kb_ports::tables::{TableId, TableRecord};
+use kb_ports::{DocumentId, PortError, TenantId};
 use sqlx::{PgPool, Row};
 
 /// Persistence for table records. Split from [`crate::TablesStore`] so the
@@ -218,15 +218,19 @@ impl TableRecords for PgTableRecords {
         document: Option<&DocumentId>,
     ) -> Result<Vec<TableRecord>, PortError> {
         let rows = match document {
-            Some(document) => sqlx::query(CURRENT_FOR_DOCUMENT)
-                .bind(tenant.as_str())
-                .bind(document.as_str())
-                .fetch_all(&self.pool)
-                .await,
-            None => sqlx::query(CURRENT_FOR_TENANT)
-                .bind(tenant.as_str())
-                .fetch_all(&self.pool)
-                .await,
+            Some(document) => {
+                sqlx::query(CURRENT_FOR_DOCUMENT)
+                    .bind(tenant.as_str())
+                    .bind(document.as_str())
+                    .fetch_all(&self.pool)
+                    .await
+            }
+            None => {
+                sqlx::query(CURRENT_FOR_TENANT)
+                    .bind(tenant.as_str())
+                    .fetch_all(&self.pool)
+                    .await
+            }
         }
         .map_err(|e| PortError::Unavailable(format!("pg select tables: {e}")))?;
         rows.iter().map(row_to_record).collect()
@@ -476,11 +480,17 @@ mod integration {
             .insert_rows(&[record(tenant.as_str(), document.as_str(), 2)])
             .await
             .unwrap();
-        let current = records.current_tables(&tenant, Some(&document)).await.unwrap();
+        let current = records
+            .current_tables(&tenant, Some(&document))
+            .await
+            .unwrap();
         assert_eq!(current.len(), 1);
         assert_eq!(current[0].version, 2);
         assert_eq!(current[0].page_span, Some((2, 3)));
-        assert_eq!(current[0].manifest.columns[0].unit.as_deref(), Some("Rp juta"));
+        assert_eq!(
+            current[0].manifest.columns[0].unit.as_deref(),
+            Some("Rp juta")
+        );
 
         assert!(
             records

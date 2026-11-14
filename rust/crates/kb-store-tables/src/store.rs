@@ -20,11 +20,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use kb_core::tables::{
-    QueryPolicy, QueryResult, TableGrid, TableManifest, TableQuery, QUERY_TIMEOUT_MS,
+    QUERY_TIMEOUT_MS, QueryPolicy, QueryResult, TableGrid, TableManifest, TableQuery,
 };
-use kb_ports::{DocumentId, TenantId};
 use kb_ports::tables::{TableId, TableQueryFailure, TableRecord, TableStore};
 use kb_ports::{BlobStore, PortError, table_grid_path};
+use kb_ports::{DocumentId, TenantId};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -81,11 +81,7 @@ impl TablesStore {
         blobs: Arc<dyn BlobStore>,
         settings: TableStoreSettings,
     ) -> Self {
-        Self::new(
-            Arc::new(PgTableRecords::from_pool(pool)),
-            blobs,
-            settings,
-        )
+        Self::new(Arc::new(PgTableRecords::from_pool(pool)), blobs, settings)
     }
 
     /// The local file for one grid, downloading it once.
@@ -159,7 +155,12 @@ impl TableStore for TablesStore {
             })
             .await
             .map_err(|e| PortError::Unavailable(format!("table grid task: {e}")))??;
-            let grid_key = table_grid_path(Some(tenant.as_str()), document.as_str(), id.as_str(), version);
+            let grid_key = table_grid_path(
+                Some(tenant.as_str()),
+                document.as_str(),
+                id.as_str(),
+                version,
+            );
             if let Err(err) = self
                 .blobs
                 .upload(&grid_key, bytes, "application/vnd.apache.parquet")
@@ -291,13 +292,8 @@ fn receipt(
     if truncated {
         rows.truncate(compiled.limit as usize);
     }
-    let (suppressed_groups, mut warnings) = suppress(
-        &mut rows,
-        compiled,
-        &group_counts,
-        rows_matched,
-        policy,
-    );
+    let (suppressed_groups, mut warnings) =
+        suppress(&mut rows, compiled, &group_counts, rows_matched, policy);
     let mut warnings_all = Vec::new();
     warnings_all.append(&mut warnings);
     warnings_all.push(format!(
@@ -450,10 +446,10 @@ pub fn cache_file(cache_dir: &Path, key: &str) -> PathBuf {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use kb_core::tables::{
-        Cell, ColumnInfo, ColumnKind, ColumnRole, Confidence, QueryError, DEFAULT_MIN_GROUP,
-    };
     use kb_core::tables::TableSource;
+    use kb_core::tables::{
+        Cell, ColumnInfo, ColumnKind, ColumnRole, Confidence, DEFAULT_MIN_GROUP, QueryError,
+    };
     use std::collections::HashMap as Map;
     use std::sync::Mutex;
 
@@ -520,9 +516,7 @@ mod tests {
                 .filter(|r| {
                     let latest = rows
                         .iter()
-                        .filter(|o| {
-                            o.tenant_id == r.tenant_id && o.document_id == r.document_id
-                        })
+                        .filter(|o| o.tenant_id == r.tenant_id && o.document_id == r.document_id)
                         .map(|o| o.version)
                         .max()
                         .unwrap_or(0);

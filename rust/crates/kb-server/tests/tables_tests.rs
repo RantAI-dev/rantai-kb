@@ -14,15 +14,14 @@
 mod harness;
 
 use axum::http::StatusCode;
-use kb_core::tables::{
-    ColumnInfo, ColumnKind, ColumnRole, Confidence, TableManifest,
-};
+use kb_core::tables::TableSource;
+use kb_core::tables::{ColumnInfo, ColumnKind, ColumnRole, Confidence, TableManifest};
 use kb_engine::fakes::make_fake_hit;
-use kb_ports::tables::{TableId, TableRecord, TableSource};
-use kb_ports::{Chunk, ChunkId, ChunkMetadata, ChunkType, DocumentId, TenantId};
 use kb_ports::SearchHit;
+use kb_ports::tables::{TableId, TableRecord};
+use kb_ports::{Chunk, ChunkId, ChunkMetadata, ChunkType, DocumentId, TenantId};
 
-use harness::{doc_meta, json_body, tenant_key, Harness};
+use harness::{Harness, doc_meta, json_body, tenant_key};
 
 fn manifest() -> TableManifest {
     TableManifest {
@@ -122,7 +121,7 @@ async fn a_tenant_lists_reads_and_queries_its_own_table() {
     assert_eq!(body.as_array().unwrap().len(), 1);
     assert_eq!(body[0]["id"], "doc-a_t0");
     assert_eq!(body[0]["manifest"]["confidence"], "high");
-    assert_eq!(body[0]["manifest"]["derivedRows"][0], 2);
+    assert_eq!(body[0]["manifest"]["derived_rows"][0], 2);
 
     let response = h.send("GET", "/v1/tables/doc-a_t0", &key).await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -142,9 +141,9 @@ async fn a_tenant_lists_reads_and_queries_its_own_table() {
     let body = json_body(response).await;
     assert_eq!(body["columns"][0], "count");
     assert_eq!(body["rows"][0][0], 3);
-    assert_eq!(body["excludedDerivedRows"], 1);
+    assert_eq!(body["excluded_derived_rows"], 1);
     // The policy the route passed was the open one: no suppression.
-    assert_eq!(body["suppressedGroups"], 0);
+    assert_eq!(body["suppressed_groups"], 0);
 }
 
 #[tokio::test]
@@ -158,9 +157,7 @@ async fn another_tenant_cannot_list_get_or_query_a_table() {
 
     // A document in another tenant is not even addressable: the list route
     // resolves it through the document route's rules and answers 404.
-    let response = h
-        .send("GET", "/v1/tables?documentId=doc-a", &other)
-        .await;
+    let response = h.send("GET", "/v1/tables?documentId=doc-a", &other).await;
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     let response = h.send("GET", "/v1/tables/doc-a_t0", &other).await;
@@ -224,11 +221,7 @@ async fn a_search_answer_names_the_table_and_lists_it() {
     h.with_tenant("tenant-b");
     seed_document(&h, "tenant-a", "doc-a", None);
     h.tables.seed(record("tenant-a", "doc-a"));
-    h.chunks
-        .vector_hits
-        .write()
-        .unwrap()
-        .push(table_hit());
+    h.chunks.vector_hits.write().unwrap().push(table_hit());
 
     let response = h
         .send_json(
@@ -273,11 +266,14 @@ async fn the_search_answer_is_unchanged_without_tables() {
     let h = Harness::new();
     h.with_tenant("tenant-a");
     seed_document(&h, "tenant-a", "doc-a", None);
-    h.chunks
-        .vector_hits
-        .write()
-        .unwrap()
-        .push(make_fake_hit("doc-a_0", "doc-a", "Revenue report", "text", 0, 0.9));
+    h.chunks.vector_hits.write().unwrap().push(make_fake_hit(
+        "doc-a_0",
+        "doc-a",
+        "Revenue report",
+        "text",
+        0,
+        0.9,
+    ));
     let response = h
         .send_json(
             "POST",

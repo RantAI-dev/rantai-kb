@@ -18,7 +18,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use kb_core::tables::{DEFAULT_MIN_GROUP, QueryPolicy, TableQuery};
-use kb_ports::ids::DocumentId;
+use kb_ports::DocumentId;
 use kb_ports::tables::{TableId, TableQueryFailure, TableRecord};
 use serde::{Deserialize, Serialize};
 
@@ -161,9 +161,7 @@ pub async fn query_table(
     let query: TableQuery = match serde_json::from_slice(&body) {
         Ok(query) => query,
         Err(err) => {
-            return Err(ApiError::BadRequest(format!(
-                "Invalid table query: {err}"
-            )));
+            return Err(ApiError::BadRequest(format!("Invalid table query: {err}")));
         }
     };
     match store
@@ -194,18 +192,13 @@ pub fn query_policy(metadata: Option<&serde_json::Value>) -> QueryPolicy {
         .is_some_and(|value| value.eq_ignore_ascii_case("aggregate-only"));
     QueryPolicy {
         aggregate_only,
-        min_group: if aggregate_only {
-            DEFAULT_MIN_GROUP
-        } else {
-            0
-        },
+        min_group: if aggregate_only { DEFAULT_MIN_GROUP } else { 0 },
     }
 }
 
 fn store(state: &AppState) -> Result<Option<Arc<dyn kb_ports::TableStore>>, ApiError> {
     Ok(state.tables.clone())
 }
-
 
 /// One table inside the caller's tenant and knowledge-base limit.
 async fn visible_table(

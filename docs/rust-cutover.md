@@ -721,7 +721,7 @@ Three routes are added, with the document routes' `kb:read` scope and tenant rul
 |---|---|---|
 | `GET` | `/v1/tables?documentId=…` | The document's current tables; no `documentId` lists the tenant's. |
 | `GET` | `/v1/tables/:id` | The record with its manifest (`columns` with kind/role/unit, `derivedRows`, `confidence`). |
-| `POST` | `/v1/tables/:id/query` | `{columns, rows, rowsMatched, excludedDerivedRows, suppressedGroups, truncated, warnings}`. |
+| `POST` | `/v1/tables/:id/query` | `{columns, rows, rows_matched, excluded_derived_rows, suppressed_groups, truncated, warnings}`. |
 
 The query body is a typed `TableQuery` (never SQL): `select` (plain columns or
 `{agg, column, as}`), `filter`, `groupBy`, `orderBy`, `limit`, `includeDerived`.

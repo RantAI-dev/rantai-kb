@@ -1530,7 +1530,11 @@ impl TableStore for FakeTableStore {
         tables: Vec<(kb_core::tables::TableGrid, kb_core::tables::TableManifest)>,
     ) -> Result<Vec<TableRecord>, PortError> {
         self.note("put", tenant);
-        let version = self.current(tenant, Some(document)).iter().map(|r| r.version).max();
+        let version = self
+            .current(tenant, Some(document))
+            .iter()
+            .map(|r| r.version)
+            .max();
         let version = version.unwrap_or(0) + 1;
         let mut written = Vec::new();
         for (index, (grid, manifest)) in tables.into_iter().enumerate() {
@@ -1548,7 +1552,10 @@ impl TableStore for FakeTableStore {
                 caption: grid.caption,
                 header: grid.header,
                 manifest,
-                grid_key: format!("tables/{}/{}_t{index}/v{version}.parquet", tenant.0, document.0),
+                grid_key: format!(
+                    "tables/{}/{}_t{index}/v{version}.parquet",
+                    tenant.0, document.0
+                ),
                 created_at: FAKE_TIMESTAMP.to_string(),
             };
             self.seed(record.clone());
@@ -1594,9 +1601,11 @@ impl TableStore for FakeTableStore {
                 .iter()
                 .any(|item| matches!(item, kb_core::tables::SelectItem::Column { .. }))
         {
-            return Err(TableQueryFailure::Invalid(kb_core::tables::QueryError::Restricted {
-                reason: "this table only answers aggregates".to_string(),
-            }));
+            return Err(TableQueryFailure::Invalid(
+                kb_core::tables::QueryError::Restricted {
+                    reason: "this table only answers aggregates".to_string(),
+                },
+            ));
         }
         Ok(kb_core::tables::QueryResult {
             columns: vec!["count".to_string()],

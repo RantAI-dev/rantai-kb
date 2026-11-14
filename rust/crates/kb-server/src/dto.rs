@@ -542,7 +542,11 @@ pub struct ChunkDto {
     #[serde(rename = "tableId", skip_serializing_if = "Option::is_none", default)]
     pub table_id: Option<String>,
     /// Additive (`TBL-1`): that table's title, when the answer could resolve it.
-    #[serde(rename = "tableTitle", skip_serializing_if = "Option::is_none", default)]
+    #[serde(
+        rename = "tableTitle",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
     pub table_title: Option<String>,
 }
 

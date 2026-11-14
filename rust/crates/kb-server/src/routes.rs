@@ -1355,7 +1355,9 @@ async fn delete_document(
     // grids. Best-effort like the other cascades, but it must be attempted:
     // a table left behind would stay queryable after the document is gone.
     if let Some(tables) = state.tables.as_ref()
-        && let Err(err) = tables.delete_document_tables(&auth.tenant_id, &doc_id).await
+        && let Err(err) = tables
+            .delete_document_tables(&auth.tenant_id, &doc_id)
+            .await
     {
         tracing::warn!(error = %err, "table delete failed during hard delete");
     }

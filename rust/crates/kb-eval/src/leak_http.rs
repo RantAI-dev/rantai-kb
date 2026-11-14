@@ -312,7 +312,7 @@ pub fn document_docx(index: usize, canaries: &Canaries, seed: u64) -> Vec<u8> {
 /// this document. Fields are quoted the RFC 4180 way, because the canaries
 /// contain commas.
 #[must_use]
-pub fn document_csv(index: usize, canaries: &Canaries) -> String {
+pub fn document_csv(_index: usize, canaries: &Canaries) -> String {
     fn field(value: &str) -> String {
         format!("\"{}\"", value.replace('"', "\"\""))
     }
@@ -591,15 +591,12 @@ async fn upload_and_wait(
     let (file_name, part) = match corpus {
         Corpus::Docx => {
             let file_name = format!("leak-{index:02}.docx");
-            let part = reqwest::multipart::Part::bytes(document_docx(
-                index,
-                canaries,
-                config.canary_seed,
-            ))
-            .file_name(file_name.clone())
-            .mime_str(
-                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            )?;
+            let part =
+                reqwest::multipart::Part::bytes(document_docx(index, canaries, config.canary_seed))
+                    .file_name(file_name.clone())
+                    .mime_str(
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )?;
             (file_name, part)
         }
         Corpus::Pdf => {
@@ -1177,21 +1174,17 @@ async fn tables_probe(
         if status >= 500 {
             return Answer::failed(status, "table get failed".to_string());
         }
-        if status < 400
-            && let Ok(body) = response.json::<Value>().await
-            && let Some(id) = body.get("documentId").and_then(Value::as_str)
-        {
-            push_document(&mut documents, id);
-        } else {
-            let _ = response.bytes().await;
+        if status < 400 {
+            if let Ok(body) = response.json::<Value>().await {
+                if let Some(id) = body.get("documentId").and_then(Value::as_str) {
+                    push_document(&mut documents, id);
+                }
+            }
         }
     }
 
     // Count the rows, as a caller checking what can be computed.
-    let query_url = endpoint(
-        &config.base_url,
-        &format!("/v1/tables/{table_id}/query"),
-    );
+    let query_url = endpoint(&config.base_url, &format!("/v1/tables/{table_id}/query"));
     if let Ok(response) = client
         .post(query_url)
         .header(reqwest::header::AUTHORIZATION, bearer(key))
@@ -1203,7 +1196,9 @@ async fn tables_probe(
         if status >= 500 {
             return Answer::failed(status, "table query failed".to_string());
         }
-        if status < 400 && let Ok(body) = response.json::<Value>().await {
+        if status < 400
+            && let Ok(body) = response.json::<Value>().await
+        {
             // A served result names the table's document in its receipt only
             // through the table record; the answer itself is the evidence.
             if body.get("rows").is_some() {
@@ -1281,9 +1276,7 @@ fn finish(
         // Search arms answer inside the search scope; a document-addressed
         // route answers for the whole tenant.
         ProbeKind::Search => &scope.allowed,
-        ProbeKind::SearchOrAsset | ProbeKind::DocumentIntelligence | ProbeKind::Tables => {
-            by_tenant
-        }
+        ProbeKind::SearchOrAsset | ProbeKind::DocumentIntelligence | ProbeKind::Tables => by_tenant,
     };
     let leaked = leaks_in(&answer, allowed);
     let hit = positive_hit(&answer, &probe.canary_owner);

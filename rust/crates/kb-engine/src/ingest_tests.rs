@@ -251,9 +251,12 @@ async fn a_documents_tables_are_stored_and_indexed_with_their_table_id() {
     assert_eq!(summaries[0].metadata["category"], "finance");
     assert!(summaries[0].content.contains("PDRB by region"));
     assert_eq!(rows[0].content, "Region: Jawa Timur; Revenue: 10");
-    let indexes: std::collections::HashSet<u32> =
-        units.iter().map(|c| c.chunk_index).collect();
-    assert_eq!(indexes.len(), units.len(), "every unit has its own chunk index");
+    let indexes: std::collections::HashSet<u32> = units.iter().map(|c| c.chunk_index).collect();
+    assert_eq!(
+        indexes.len(),
+        units.len(),
+        "every unit has its own chunk index"
+    );
 }
 
 #[tokio::test]
