@@ -4,7 +4,10 @@
 //! the file extension already says tab. The first row is the header; quoted
 //! fields may hold the delimiter or a newline, as RFC 4180 allows.
 
-use kb_core::tables::{Cell, TableGrid, TableSource, cell_from_text, render_table_markdown};
+use kb_core::tables::{
+    Cell, TableGrid, TableSource, cell_from_text, is_placeholder, placeholder_note,
+    render_table_markdown, unique_header_names,
+};
 
 use crate::ExtractError;
 use crate::text::to_utf8;
@@ -12,6 +15,11 @@ use crate::text::to_utf8;
 const CANDIDATES: [char; 4] = [',', ';', '\t', '|'];
 
 /// Text and grid of a delimited text file.
+///
+/// A column that is empty in the header *and* in every row is not a column: the
+/// World Bank CSVs end every line with a comma, and that trailing empty field
+/// must not reach the store as a zero-length identifier. A column that has data
+/// but no header is named `Column N`.
 pub fn parse_with_tables(
     bytes: &[u8],
     file_name: &str,
@@ -23,22 +31,44 @@ pub fn parse_with_tables(
     if rows.is_empty() {
         return Ok((String::new(), Vec::new()));
     }
-    let header: Vec<String> = rows
-        .remove(0)
-        .into_iter()
-        .map(|cell| cell.trim().to_string())
-        .collect();
-    if header.is_empty() {
-        return Ok((String::new(), Vec::new()));
-    }
-    let width = header.len();
-    let data: Vec<Vec<Cell>> = rows
+    let header_row = rows.remove(0);
+    let width = header_row.len();
+    let raw_rows: Vec<Vec<String>> = rows
         .into_iter()
         .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
         .map(|mut row| {
             row.resize(width, String::new());
             row.truncate(width);
-            row.iter().map(|cell| cell_from_text(cell)).collect()
+            row
+        })
+        .collect();
+    let keep: Vec<usize> = (0..width)
+        .filter(|column| {
+            !header_row[*column].trim().is_empty()
+                || raw_rows.iter().any(|row| !row[*column].trim().is_empty())
+        })
+        .collect();
+    if keep.is_empty() {
+        return Ok((String::new(), Vec::new()));
+    }
+    let names: Vec<String> = keep
+        .iter()
+        .map(|column| header_row[*column].clone())
+        .collect();
+    let header = unique_header_names(&names);
+    let mut placeholders = 0usize;
+    let data: Vec<Vec<Cell>> = raw_rows
+        .iter()
+        .map(|row| {
+            keep.iter()
+                .map(|column| {
+                    let text = row[*column].as_str();
+                    if is_placeholder(text) {
+                        placeholders += 1;
+                    }
+                    cell_from_text(text)
+                })
+                .collect()
         })
         .collect();
 
@@ -57,7 +87,7 @@ pub fn parse_with_tables(
         header_rows: 1,
         rows: data,
         formula_rows: Vec::new(),
-        notes: Vec::new(),
+        notes: placeholder_note(placeholders).into_iter().collect(),
         truncated: false,
     };
     let content = render_table_markdown(&grid, usize::MAX).join("\n\n");
@@ -174,6 +204,55 @@ mod tests {
         assert_eq!(
             grids[0].rows[0][1],
             Cell::Text("line one\nline two".to_string())
+        );
+    }
+
+    #[test]
+    fn a_world_bank_trailing_comma_column_is_dropped() {
+        // Each line ends with a comma, so the last header and every last cell
+        // are empty. That column must not become a zero-length identifier.
+        let (content, grids) = parse_with_tables(
+            b"Country Name,Country Code,Indicator Name,1960,1961,\n\
+              Indonesia,IDN,Population,88,90,\n\
+              Malaysia,MYS,Population,30,31,\n",
+            "wb.csv",
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            grids[0].header,
+            vec![
+                "Country Name",
+                "Country Code",
+                "Indicator Name",
+                "1960",
+                "1961"
+            ]
+        );
+        assert_eq!(grids[0].rows[0].len(), 5);
+        assert_eq!(grids[0].rows[1][4], Cell::Number(31.0));
+        assert!(!content.contains("|  |"), "{content}");
+    }
+
+    #[test]
+    fn a_column_with_data_but_no_header_is_named_by_its_position() {
+        let (_, grids) =
+            parse_with_tables(b"Region,,Value\nA,x,1\nB,y,2\n", "data.csv", None).unwrap();
+        assert_eq!(grids[0].header, vec!["Region", "Column 2", "Value"]);
+    }
+
+    #[test]
+    fn a_csv_placeholder_is_empty_and_noted() {
+        let (_, grids) =
+            parse_with_tables(b"Region,2018,2019\nA,-,2\nB,3,4\n", "data.csv", None).unwrap();
+        assert_eq!(grids[0].rows[0][1], Cell::Empty);
+        assert!(
+            grids[0]
+                .notes
+                .iter()
+                .any(|note| note == "1 placeholder cells treated as empty"),
+            "{:?}",
+            grids[0].notes
         );
     }
 }

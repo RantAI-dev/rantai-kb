@@ -94,6 +94,30 @@ pub fn format_number(n: f64) -> String {
     }
 }
 
+/// Refuse a header the store cannot address.
+///
+/// DuckDB rejects a zero-length delimited identifier (`Parser Error:
+/// zero-length delimited identifier`) and a caller cannot name a column that
+/// has no name. Extraction names an empty header `Column N` and drops a column
+/// that is empty altogether; this is the last line of defence, and it fails
+/// loudly rather than writing a table nothing can query.
+///
+/// # Errors
+///
+/// [`PortError::InvalidArgument`] naming the offending column.
+fn validate_identifiers(names: &[String]) -> Result<(), PortError> {
+    for (index, name) in names.iter().enumerate() {
+        if name.trim().is_empty() {
+            return Err(PortError::InvalidArgument(format!(
+                "table column {} has an empty name; extraction must name it Column {}",
+                index + 1,
+                index + 1
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Write one grid to Parquet and return the file's bytes.
 ///
 /// The staging table is built in an in-memory DuckDB, filled with bound
@@ -102,11 +126,13 @@ pub fn format_number(n: f64) -> String {
 ///
 /// # Errors
 ///
-/// A DuckDB or filesystem failure. The caller treats that as a store failure.
+/// A column with an empty name, or a DuckDB or filesystem failure. The caller
+/// treats that as a store failure.
 pub fn write_grid(
     grid: &TableGrid,
     manifest: Option<&TableManifest>,
 ) -> Result<Vec<u8>, PortError> {
+    validate_identifiers(&grid.header)?;
     let kinds = column_kinds(grid, manifest);
     let derived: std::collections::HashSet<u32> = manifest
         .map(|m| m.derived_rows.iter().copied().collect())
@@ -507,6 +533,26 @@ mod tests {
         assert_eq!(format_number(2.5), "2.5");
         assert_eq!(format_number(-3.0), "-3");
         assert_eq!(format_number(1e20), "100000000000000000000");
+    }
+
+    #[test]
+    fn an_empty_column_name_is_refused_before_duckdb_writes_it() {
+        // A World Bank CSV's trailing comma used to reach DuckDB as an empty
+        // identifier: `Parser Error: zero-length delimited identifier`.
+        let grid = TableGrid {
+            header: vec!["Region".into(), "  ".into()],
+            rows: vec![vec![Cell::Text("Bali".into()), Cell::Number(1.0)]],
+            ..TableGrid::default()
+        };
+        let error = write_grid(&grid, None).unwrap_err();
+        assert!(matches!(error, PortError::InvalidArgument(_)), "{error:?}");
+        assert!(error.to_string().contains("column 2"), "{error}");
+
+        let named = TableGrid {
+            header: vec!["Region".into(), "Column 2".into()],
+            ..grid
+        };
+        assert!(write_grid(&named, None).is_ok());
     }
 
     #[test]
