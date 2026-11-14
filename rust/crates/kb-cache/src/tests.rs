@@ -206,11 +206,13 @@ impl Extractor for FakeExtractor {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if self.fail {
             return Ok(ExtractionResult {
+                ocr: None,
                 error: Some("sidecar down".into()),
                 ..Default::default()
             });
         }
         Ok(ExtractionResult {
+            ocr: None,
             content: format!("{} bytes, figures={}", bytes.len(), options.figures),
             file_type: "pdf".into(),
             used_ocr: true,

@@ -13,6 +13,7 @@ pub mod graph;
 #[cfg(feature = "contract")]
 pub mod graph_contract;
 mod ids;
+pub mod ocr;
 mod pages;
 mod retrieval;
 mod scope;
@@ -30,6 +31,7 @@ pub mod contract;
 pub use error::{EngineError, PortError, RetrievalDegrade};
 pub use graph::{EntityMentions, EntityUpsert, GraphStore, RelationUpsert, TenantGraph};
 pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
+pub use ocr::{OcrPageCache, OcrReport};
 pub use pages::{PageDescriber, PageEmbedder, PageImage, PageRenderer, PageVisionScorer};
 pub use retrieval::{
     ArmRanks, ArmScores, Candidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit,

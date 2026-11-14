@@ -612,6 +612,7 @@ async fn a_pdf_outline_is_stored_in_document_metadata() {
     };
     let h = harness(Arc::new(FakeExtractor::returning_result(
         ExtractionResult {
+            ocr: None,
             content: long_text(),
             file_type: "pdf".to_string(),
             outline: Some(outline),
@@ -683,6 +684,7 @@ impl kb_ports::Extractor for OutlineOnlyOnRequest {
 async fn an_extraction_without_an_outline_gets_one_from_the_outline_read() {
     let extractor = Arc::new(OutlineOnlyOnRequest {
         inner: FakeExtractor::returning_result(ExtractionResult {
+            ocr: None,
             content: long_text(),
             file_type: "pdf".to_string(),
             outline: None,
@@ -746,6 +748,7 @@ async fn a_paged_pdf_is_chunked_page_by_page() {
         .join("\n\n");
     let h = harness(Arc::new(FakeExtractor::returning_result(
         ExtractionResult {
+            ocr: None,
             content,
             file_type: "pdf".to_string(),
             used_ocr: false,
@@ -811,6 +814,7 @@ async fn page_furniture_is_stripped_from_chunks_but_not_from_the_document() {
             chunks.clone(),
             blobs.clone(),
             Arc::new(FakeExtractor::returning_result(ExtractionResult {
+                ocr: None,
                 content,
                 file_type: "pdf".to_string(),
                 used_ocr: false,
@@ -897,6 +901,7 @@ async fn test_ingest_worker_end_to_end_full_pipeline() {
     }];
 
     let extract_result = ExtractionResult {
+        ocr: None,
         content: "Section one explains the quarter in detail with all financial figures.
 
 Section two follows with the breakdown by region and by product line.

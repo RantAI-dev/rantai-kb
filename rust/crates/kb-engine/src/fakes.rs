@@ -1719,6 +1719,7 @@ impl Extractor for FakeExtractor {
             return Ok(res.clone());
         }
         Ok(ExtractionResult {
+            ocr: None,
             content: self.content.read().unwrap().clone(),
             file_type: self.file_type.read().unwrap().clone(),
             ..ExtractionResult::default()
