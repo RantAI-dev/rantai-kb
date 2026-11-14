@@ -362,6 +362,7 @@ async fn a_hit_from_an_adapter_that_reports_no_arm_omits_the_field() {
             embedder: Arc::new(h.embedder.clone()),
             jobs: Arc::new(h.jobs.clone()),
             events: EventBus::new(),
+            tables: None,
             version: "test".to_string(),
         },
         Arc::new(FakeReranker::default()),

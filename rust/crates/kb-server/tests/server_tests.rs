@@ -73,6 +73,7 @@ impl Harness {
                 embedder: Arc::new(embedder),
                 jobs: Arc::new(jobs.clone()),
                 events: Arc::clone(&events),
+                tables: None,
                 version: "test".to_string(),
             },
             Arc::new(FakeReranker::default()),

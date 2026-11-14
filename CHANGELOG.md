@@ -4,6 +4,43 @@
 
 ### Added
 
+- **Tables you can ask questions of (`TBL-1`, work package B: store, query, ingest, API).**
+  A document's spreadsheets, CSVs, DOCX tables and OCR/markdown tables are now stored
+  as typed grids and answered by a query instead of being summed by a language model
+  from flattened text.
+  - **Storage:** each grid is Parquet in the blob store at
+    `tables/{tenant}/{document}/{tableId}/v{n}.parquet` — one typed column per header
+    plus `_row` and `_derived` — and its record is a row in the new **additive**
+    Postgres table `KbTable` (`prisma/migrations/20261114120000_kb_tables`, primary
+    key `(id, version)`, `ON DELETE CASCADE` from `Document`). A re-ingest writes a
+    new version for the document and keeps the previous one; older versions and their
+    Parquet objects are deleted. `id` is `{documentId}_t{index}`.
+  - **Query:** the new adapter crate `kb-store-tables` implements
+    `kb_ports::TableStore` with DuckDB over the one cached Parquet file. A typed
+    `TableQuery` is validated against the manifest (unknown columns list the available
+    ones; SUM/AVG demand a `Quantity` column; an ungrouped plain column, a privacy
+    violation and a bad value each get their `QueryError`), compiled with identifiers
+    quoted from the manifest whitelist and **values bound as parameters**, and run
+    with `QUERY_TIMEOUT_MS` (interrupt handle) and `MAX_ROWS_RETURNED`. The result
+    carries the receipt (`rowsMatched`, `excludedDerivedRows`, `suppressedGroups`,
+    `truncated`, `warnings`), and `min_group` suppression hides small groups with
+    complementary suppression when exactly one would be hidden.
+  - **Ingest:** `kb_core::tables::build_manifest` → `put_tables`, then two retrieval
+    units per table: `chunk_type=table_summary` and `chunk_type=table_row` (tables of
+    at most 60 rows), both carrying `tableId` and the normal tenant/document payload.
+    A document with no tables is unchanged, and the whole table stage is off when
+    `KB_TABLES=false` or no table store is configured.
+  - **API (additive):** `GET /v1/tables?documentId=`, `GET /v1/tables/{id}` and
+    `POST /v1/tables/{id}/query` with the document routes' scopes and tenant rules
+    (400 carries the `QueryError` JSON; another tenant's table is a 404). Search hits
+    of a table chunk type carry `tableId` and `tableTitle`, and a search answer lists
+    `tables` for the documents it hit. A hard delete removes the tables and their
+    Parquet. The upload accepts `tablePrivacy: "aggregate-only"`, stored in the
+    document's metadata, which becomes a `QueryPolicy` at query time.
+  - **Isolation:** the leak matrix (`kb-server eval leak`) gains a `table` row that
+    lists, gets and counts one document's tables, seeded from a CSV document per
+    scope.
+
 - **Ingest runs several documents at once, through per-stage seats (`ING-6`, part A).**
   The worker used to claim a job and run it to completion before claiming the next
   one, so a 300-page scan held every small file behind it. Now up to `KB_JOB_WORKERS`

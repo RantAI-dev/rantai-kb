@@ -34,6 +34,7 @@ pub const ADAPTER_CRATES: &[&str] = &[
     "kb-store-pg",
     "kb-store-blob",
     "kb-store-qdrant",
+    "kb-store-tables",
     "kb-cache",
     "kb-eval",
     "kb-server",
@@ -59,6 +60,7 @@ pub const BLACK_BOX_FORBIDDEN: &[&str] = &[
     "kb-store-pg",
     "kb-store-blob",
     "kb-store-qdrant",
+    "kb-store-tables",
     "kb-cache",
 ];
 

@@ -9,15 +9,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use kb_ports::{
-    BlobStore, DocumentId, DocumentMeta, Embedder, Entity, ExtractedFigure, ExtractionResult,
-    Extractor, JobRecord, OcrReport, PageBlock, PageBlockKind, PageText, PortError, Relation,
-    TenantId, document_path,
+    BlobStore, ChunkToStore, DocumentId, DocumentMeta, Embedder, Entity, ExtractedFigure,
+    ExtractionResult, Extractor, JobRecord, OcrReport, PageBlock, PageBlockKind, PageText,
+    PortError, Relation, TenantId, document_path,
 };
 
 use super::*;
 use crate::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityExtractor,
-    FakeExtractor, FakeJobStore,
+    FakeExtractor, FakeJobStore, FakeTableStore,
 };
 use crate::in_memory_graph_store::InMemoryGraphStore;
 use crate::ingest::HEARTBEAT_INTERVAL;
@@ -154,6 +154,24 @@ async fn harness(extractor: Arc<FakeExtractor>) -> Harness {
     }
 }
 
+/// One grid as an extractor would hand it over: a header and three rows, the
+/// last a subtotal.
+fn table_grid() -> kb_core::tables::TableGrid {
+    use kb_core::tables::{Cell, TableGrid, TableSource};
+    TableGrid {
+        source: Some(TableSource::Xlsx),
+        sheet: Some("PDRB".to_string()),
+        title: Some("PDRB by region".to_string()),
+        header: vec!["Region".to_string(), "Revenue".to_string()],
+        rows: vec![
+            vec![Cell::Text("Jawa Timur".to_string()), Cell::Number(10.0)],
+            vec![Cell::Text("Bali".to_string()), Cell::Number(5.0)],
+            vec![Cell::Text("Jumlah".to_string()), Cell::Number(15.0)],
+        ],
+        ..TableGrid::default()
+    }
+}
+
 fn stored_chunks(h: &Harness) -> usize {
     h.chunks
         .stored_chunks
@@ -167,6 +185,92 @@ fn document_status(h: &Harness) -> String {
     h.documents.docs.read().unwrap()[&tenant()][0]
         .status
         .clone()
+}
+
+#[tokio::test]
+async fn a_documents_tables_are_stored_and_indexed_with_their_table_id() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"ID,Region,Revenue".to_vec(), "text/csv")
+        .await
+        .unwrap();
+    let result = ExtractionResult {
+        content: long_text(),
+        file_type: "csv".to_string(),
+        tables: vec![table_grid()],
+        ..ExtractionResult::default()
+    };
+    let tables = Arc::new(FakeTableStore::default());
+    let worker = worker_with(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        Arc::new(FakeExtractor::returning_result(result)),
+        Arc::new(FakeEmbedder::default()),
+    )
+    .with_table_store(Arc::clone(&tables) as Arc<dyn kb_ports::TableStore>);
+    jobs.push(job());
+
+    assert!(worker.run_once().await.unwrap());
+    let finished = jobs.finished.read().unwrap();
+    assert!(finished[0].success, "{}", finished[0].detail);
+    drop(finished);
+
+    // The store was asked to keep the grid, under the job's tenant and
+    // document.
+    assert!(
+        tables
+            .calls()
+            .iter()
+            .any(|(op, tenant)| op == "put" && tenant == TENANT),
+        "{:?}",
+        tables.calls()
+    );
+    let records = tables.records.read().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id.0, format!("{DOC}_t0"));
+    drop(records);
+
+    // One summary and one row unit per row, all carrying the table id and the
+    // document payload every chunk has.
+    let stored = chunks.stored_chunks.read().unwrap();
+    let units = stored.get(&DocumentId::new_unchecked(DOC)).unwrap();
+    let summaries: Vec<&ChunkToStore> = units
+        .iter()
+        .filter(|c| c.metadata.get("chunkType").and_then(|v| v.as_str()) == Some("table_summary"))
+        .collect();
+    let rows: Vec<&ChunkToStore> = units
+        .iter()
+        .filter(|c| c.metadata.get("chunkType").and_then(|v| v.as_str()) == Some("table_row"))
+        .collect();
+    assert_eq!(summaries.len(), 1, "one summary per table");
+    assert_eq!(rows.len(), 3, "one row unit per row for a small table");
+    assert_eq!(summaries[0].metadata["tableId"], format!("{DOC}_t0"));
+    assert_eq!(summaries[0].metadata["category"], "finance");
+    assert!(summaries[0].content.contains("PDRB by region"));
+    assert_eq!(rows[0].content, "Region: Jawa Timur; Revenue: 10");
+    let indexes: std::collections::HashSet<u32> =
+        units.iter().map(|c| c.chunk_index).collect();
+    assert_eq!(indexes.len(), units.len(), "every unit has its own chunk index");
+}
+
+#[tokio::test]
+async fn a_document_with_no_tables_does_not_touch_the_table_store() {
+    let h = harness(extractor()).await;
+    let tables = Arc::new(FakeTableStore::default());
+    let worker = h
+        .worker
+        .clone()
+        .with_table_store(Arc::clone(&tables) as Arc<dyn kb_ports::TableStore>);
+    h.jobs.push(job());
+    assert!(worker.run_once().await.unwrap());
+    assert!(
+        tables.calls().is_empty(),
+        "an extractor with no tables must not call the table store: {:?}",
+        tables.calls()
+    );
 }
 
 #[tokio::test]

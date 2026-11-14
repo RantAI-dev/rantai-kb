@@ -135,6 +135,9 @@ tenant; **there is no route that reads across tenants.**
 | `GET` | `/v1/documents/:id/structure` | Pages, figures and the chunk → page map. |
 | `GET` | `/v1/documents/:id/intelligence` | Extracted entities and relations. |
 | `POST` | `/v1/search` | Retrieve chunks for a query. The reason this service exists. |
+| `GET` | `/v1/tables` | A document's stored tables (`?documentId=…`), or the tenant's. |
+| `GET` | `/v1/tables/:id` | One table with its manifest: columns, roles, units, subtotal rows. |
+| `POST` | `/v1/tables/:id/query` | Run a typed table query and get rows plus a receipt. |
 | `GET` | `/v1/jobs/:id` | Ingest progress: step, percentage, ETA, error. |
 | `POST` | `/v1/jobs/:id/retry` | Retry a failed ingest job. |
 | `GET` `POST` | `/v1/knowledge-bases` | List or create knowledge bases. |
@@ -146,10 +149,39 @@ tenant; **there is no route that reads across tenants.**
 | `GET` | `/health` · `/v1/health` | Liveness, dependency checks, build version, tier and egress hosts. No auth. |
 
 **Ingest options** (multipart fields): `title`, `categories`, `subcategory`,
-`knowledgeBaseIds`, `externalRef`, and `figures` — `auto` (default), `force` or `skip`.
+`knowledgeBaseIds`, `externalRef`, `figures` — `auto` (default), `force` or `skip` — and
+`tablePrivacy` — `open` (default) or `aggregate-only`.
 
 **Search options** (JSON): `query` (required), `maxChunks`, `knowledgeBaseIds`,
 `documentIds`, `category`, `hybrid`, `format`, `minScore`.
+
+**Tables.** An xlsx, CSV, DOCX or OCR/markdown table is stored as a typed grid
+(Parquet in the blob store, one record per version in `KbTable`) and indexed as two
+retrieval units, `table_summary` (title, caption, sheet or page, every header with
+its kind, role and unit, sample values) and `table_row` (`Header: value; …`, for
+tables of at most 60 rows). A search hit from either carries `tableId` and
+`tableTitle`, and the answer lists `tables: [{tableId, title, documentId}]` for its
+documents, so a caller can go straight to a number instead of adding up text:
+
+```json
+POST /v1/tables/doc123_t0/query
+{"select": [{"column": "Region"}, {"agg": "sum", "column": "Revenue", "as": "total"}],
+ "filter": [{"column": "Tahun", "op": "=", "value": 2023}],
+ "group_by": ["Region"], "order_by": [{"key": "total", "dir": "desc"}], "limit": 10}
+```
+
+The query is **typed, never SQL**: columns are checked against the manifest (a SUM
+over a phone-number column is refused), identifiers are quoted from the manifest's
+whitelist and values are bound parameters. Subtotal rows are excluded unless
+`includeDerived` is set. The answer is `{columns, rows, rowsMatched,
+excludedDerivedRows, suppressedGroups, truncated, warnings}` — the receipt says what
+was computed and from which table. A refused query answers `400` with the
+`QueryError` JSON (`unknown_column` with `available`, `not_summable`, `not_grouped`,
+`restricted`, `bad_value`, `empty`). `tablePrivacy: "aggregate-only"` on upload
+restricts the document's tables to whole-group aggregates and suppresses groups
+smaller than five rows (with complementary suppression), and forbids plain rows and
+MIN/MAX. Tables are tenant-scoped and document-authorised like every other by-ID
+read; a hard delete removes them and their Parquet.
 
 **Document structure.** `GET /v1/documents/:id/structure` returns the document's
 `pages` (`number`, 0-based like every other `page` in the API), `figures` (`key`,

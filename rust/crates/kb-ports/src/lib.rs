@@ -22,7 +22,9 @@ mod traits;
 mod types;
 pub mod visuals;
 
-pub use blob::{BlobStore, asset_path, document_path, page_image_path, sanitize_filename};
+pub use blob::{
+    BlobStore, asset_path, document_path, page_image_path, sanitize_filename, table_grid_path,
+};
 pub use community::{CommunityRecord, CommunityStore, NewCommunity};
 /// The section outline a document's extraction carries (`DEC-4`), re-exported so
 /// adapters that implement [`Extractor::outline`] need not depend on kb-core.

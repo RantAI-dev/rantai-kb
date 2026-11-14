@@ -15,7 +15,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use kb_engine::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityStore, FakeJobStore,
-    FakeReranker,
+    FakeReranker, FakeTableStore,
 };
 use kb_engine::{EngineSettings, PageArm, PageArmConfig};
 use kb_ports::{DocumentMeta, PageEmbedder, PageImage, PortError};
@@ -36,6 +36,9 @@ pub struct Harness {
     pub events: Arc<EventBus>,
     /// The page-image arm's index, when [`Harness::with_page_index`] built one.
     pub page_index: Option<FakeChunkStore>,
+    /// The table store (`TBL-1`) behind every harness. Empty unless a test
+    /// seeds it, so an unseeded harness answers `/v1/tables` with `[]`.
+    pub tables: FakeTableStore,
 }
 
 impl Default for Harness {
@@ -53,6 +56,7 @@ impl Harness {
         let entities = FakeEntityStore::default();
         let embedder = FakeEmbedder::default();
         let events = EventBus::new();
+        let tables = FakeTableStore::default();
 
         let state = AppState::from_parts(
             StateParts {
@@ -65,6 +69,7 @@ impl Harness {
                 embedder: Arc::new(embedder.clone()),
                 jobs: Arc::new(jobs.clone()),
                 events: Arc::clone(&events),
+                tables: Some(Arc::new(tables.clone())),
                 version: "test".to_string(),
             },
             Arc::new(FakeReranker::default()),
@@ -81,6 +86,7 @@ impl Harness {
             embedder,
             events,
             page_index: None,
+            tables,
         }
     }
 
@@ -96,6 +102,7 @@ impl Harness {
         let embedder = FakeEmbedder::default();
         let events = EventBus::new();
         let page_index = FakeChunkStore::default();
+        let tables = FakeTableStore::default();
 
         let mut state = AppState::from_parts(
             StateParts {
@@ -108,6 +115,7 @@ impl Harness {
                 embedder: Arc::new(embedder.clone()),
                 jobs: Arc::new(jobs.clone()),
                 events: Arc::clone(&events),
+                tables: Some(Arc::new(tables.clone())),
                 version: "test".to_string(),
             },
             Arc::new(FakeReranker::default()),
@@ -130,6 +138,7 @@ impl Harness {
             embedder,
             events,
             page_index: Some(page_index),
+            tables,
         }
     }
 

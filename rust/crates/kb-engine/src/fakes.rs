@@ -38,7 +38,8 @@ use kb_ports::{
     KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor, NewDocument, PatchCategory,
     PatchDocument, PatchKnowledgeBase, PortError, ProgressSink, QueryEmbedding, ReapableJob,
     Relation, RerankCandidate, RerankResult, Reranker, RetrievalIndex, RetryJobOutcome,
-    ScopeRequest, SearchHit, StoredChunk, TenantId, adapter::ScopeToken, sort_candidates,
+    ScopeRequest, SearchHit, StoredChunk, TableId, TableQueryFailure, TableRecord, TableStore,
+    TenantId, adapter::ScopeToken, sort_candidates,
 };
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -1044,6 +1045,7 @@ impl RetrievalIndex for FakeChunkStore {
                         "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
                         "chunkIndex": h.chunk.metadata.chunk_index,
                         "page": h.chunk.metadata.page,
+                        "tableId": h.chunk.metadata.table_id,
                     }),
                     scores: ArmScores {
                         dense: Some(h.similarity),
@@ -1080,6 +1082,7 @@ impl RetrievalIndex for FakeChunkStore {
                         "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
                         "chunkIndex": h.chunk.metadata.chunk_index,
                         "page": h.chunk.metadata.page,
+                        "tableId": h.chunk.metadata.table_id,
                     }),
                     scores: ArmScores {
                         dense: None,
@@ -1177,6 +1180,7 @@ impl RetrievalIndex for FakeChunkStore {
                         "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
                         "chunkIndex": h.chunk.metadata.chunk_index,
                         "page": h.chunk.metadata.page,
+                        "tableId": h.chunk.metadata.table_id,
                     }),
                     scores: ArmScores::default(),
                     ranks: ArmRanks::default(),
@@ -1215,6 +1219,7 @@ impl RetrievalIndex for FakeChunkStore {
                         "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
                         "chunkIndex": h.chunk.metadata.chunk_index,
                         "page": h.chunk.metadata.page,
+                        "tableId": h.chunk.metadata.table_id,
                     }),
                     scores: ArmScores::default(),
                     ranks: ArmRanks::default(),
@@ -1451,6 +1456,169 @@ impl BlobStore for FakeBlobStore {
 
     async fn delete(&self, key: &str) -> Result<(), PortError> {
         self.objects.write().unwrap().remove(key);
+        Ok(())
+    }
+}
+
+/// In-memory table store (`TBL-1`) for the HTTP and engine tests.
+///
+/// It implements the same tenant rule as the real adapter — no record is ever
+/// returned under another tenant — and records `(operation, tenant)` for every
+/// call, so a route test can prove the handler passed the caller's tenant
+/// rather than the table's.
+#[derive(Clone, Default)]
+pub struct FakeTableStore {
+    pub records: Arc<RwLock<Vec<TableRecord>>>,
+    pub calls: Arc<RwLock<Vec<(String, String)>>>,
+}
+
+impl FakeTableStore {
+    fn note(&self, operation: &str, tenant: &TenantId) {
+        self.calls
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((operation.to_string(), tenant.0.clone()));
+    }
+
+    /// Seed one stored table.
+    pub fn seed(&self, record: TableRecord) {
+        self.records
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(record);
+    }
+
+    /// The operations recorded, in order.
+    pub fn calls(&self) -> Vec<(String, String)> {
+        self.calls
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The current records of a tenant, latest version per document.
+    fn current(&self, tenant: &TenantId, document: Option<&DocumentId>) -> Vec<TableRecord> {
+        let records = self
+            .records
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut out: Vec<TableRecord> = records
+            .iter()
+            .filter(|r| &r.tenant_id == tenant)
+            .filter(|r| document.is_none_or(|d| &r.document_id == d))
+            .filter(|r| {
+                records
+                    .iter()
+                    .filter(|o| o.tenant_id == r.tenant_id && o.document_id == r.document_id)
+                    .map(|o| o.version)
+                    .max()
+                    .is_none_or(|latest| r.version == latest)
+            })
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| (&a.document_id.0, a.index).cmp(&(&b.document_id.0, b.index)));
+        out
+    }
+}
+
+#[async_trait]
+impl TableStore for FakeTableStore {
+    async fn put_tables(
+        &self,
+        tenant: &TenantId,
+        document: &DocumentId,
+        tables: Vec<(kb_core::tables::TableGrid, kb_core::tables::TableManifest)>,
+    ) -> Result<Vec<TableRecord>, PortError> {
+        self.note("put", tenant);
+        let version = self.current(tenant, Some(document)).iter().map(|r| r.version).max();
+        let version = version.unwrap_or(0) + 1;
+        let mut written = Vec::new();
+        for (index, (grid, manifest)) in tables.into_iter().enumerate() {
+            let index = index as u32;
+            let record = TableRecord {
+                id: TableId::of(document, index),
+                tenant_id: tenant.clone(),
+                document_id: document.clone(),
+                index,
+                version,
+                source: grid.source.unwrap_or(kb_core::tables::TableSource::Csv),
+                sheet: grid.sheet,
+                page_span: grid.page_span,
+                title: grid.title,
+                caption: grid.caption,
+                header: grid.header,
+                manifest,
+                grid_key: format!("tables/{}/{}_t{index}/v{version}.parquet", tenant.0, document.0),
+                created_at: FAKE_TIMESTAMP.to_string(),
+            };
+            self.seed(record.clone());
+            written.push(record);
+        }
+        Ok(written)
+    }
+
+    async fn list_tables(
+        &self,
+        tenant: &TenantId,
+        document: Option<&DocumentId>,
+    ) -> Result<Vec<TableRecord>, PortError> {
+        self.note("list", tenant);
+        Ok(self.current(tenant, document))
+    }
+
+    async fn get_table(
+        &self,
+        tenant: &TenantId,
+        id: &TableId,
+    ) -> Result<Option<TableRecord>, PortError> {
+        self.note("get", tenant);
+        Ok(self.current(tenant, None).into_iter().find(|r| &r.id == id))
+    }
+
+    async fn query(
+        &self,
+        tenant: &TenantId,
+        id: &TableId,
+        query: &kb_core::tables::TableQuery,
+        policy: &kb_core::tables::QueryPolicy,
+    ) -> Result<kb_core::tables::QueryResult, TableQueryFailure> {
+        self.note("query", tenant);
+        let Some(record) = self.current(tenant, None).into_iter().find(|r| &r.id == id) else {
+            return Err(TableQueryFailure::Store(PortError::Invalid(format!(
+                "table {id} does not exist in this tenant"
+            ))));
+        };
+        if policy.aggregate_only
+            && query
+                .select
+                .iter()
+                .any(|item| matches!(item, kb_core::tables::SelectItem::Column { .. }))
+        {
+            return Err(TableQueryFailure::Invalid(kb_core::tables::QueryError::Restricted {
+                reason: "this table only answers aggregates".to_string(),
+            }));
+        }
+        Ok(kb_core::tables::QueryResult {
+            columns: vec!["count".to_string()],
+            rows: vec![vec![serde_json::json!(record.manifest.n_rows)]],
+            rows_matched: u64::from(record.manifest.n_rows),
+            excluded_derived_rows: record.manifest.derived_rows.len() as u32,
+            suppressed_groups: 0,
+            truncated: false,
+            warnings: vec![format!("fake table {}", record.id)],
+        })
+    }
+
+    async fn delete_document_tables(
+        &self,
+        tenant: &TenantId,
+        document: &DocumentId,
+    ) -> Result<(), PortError> {
+        self.note("delete", tenant);
+        self.records
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|r| !(&r.tenant_id == tenant && &r.document_id == document));
         Ok(())
     }
 }

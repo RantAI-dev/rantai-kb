@@ -36,13 +36,14 @@ use async_trait::async_trait;
 use kb_engine::EngineSettings;
 use kb_engine::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityStore, FakeJobStore,
-    FakeReranker,
+    FakeReranker, FakeTableStore,
 };
 use kb_engine::{
     GlobalArm, GlobalArmConfig, InMemoryIndex, PageArm, PageArmConfig, TreeArm, TreeArmConfig,
 };
 use kb_eval::leak::{Arm, LeakMatrix, ScopeKind, SeedDocument, Status, plan};
 use kb_eval::leak_http::{LeakConfig, canaries_for, probe};
+use kb_ports::tables::{TableId, TableRecord};
 use kb_ports::{
     ArmRanks, ArmScores, Candidate, Chunk, ChunkId, ChunkMetadata, ChunkToStore, ChunkType,
     CommunityRecord, CommunityStore, DocumentId, DocumentMeta, DocumentScope, HybridQuery,
@@ -145,6 +146,7 @@ fn seed_documents() -> Vec<SeedDocument> {
                     n_chunks: 2,
                     has_figures: true,
                     figure_asset_key: Some(format!("documents/{tenant}/{id}/assets/1.png")),
+                    table_ids: Vec::new(),
                 });
                 index += 1;
             }
@@ -462,6 +464,47 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
         Mode::LeakingTreeOutlines => Some(Arc::new(pages)),
     };
 
+    // The table store (`TBL-1`): one record per seeded table document, in the
+    // tenant that owns it. The routes look the document up before answering, so
+    // each table document is a document row too.
+    let tables = FakeTableStore::default();
+    for document in seed_documents()
+        .into_iter()
+        .filter(|d| !d.table_ids.is_empty())
+    {
+        documents.insert_doc(
+            TenantId(document.tenant.clone()),
+            doc(&document.id, &document.id, &document.knowledge_base_id, &document.category_id),
+        );
+        for table_id in &document.table_ids {
+            tables.seed(TableRecord {
+                id: TableId(table_id.clone()),
+                tenant_id: TenantId(document.tenant.clone()),
+                document_id: DocumentId(document.id.clone()),
+                index: 0,
+                version: 1,
+                source: kb_core::tables::TableSource::Csv,
+                sheet: None,
+                page_span: None,
+                title: Some(format!("Table of {}", document.id)),
+                caption: None,
+                header: vec!["Region".to_string(), "Revenue".to_string()],
+                manifest: kb_core::tables::TableManifest {
+                    columns: Vec::new(),
+                    derived_rows: Vec::new(),
+                    formulas_known: false,
+                    confidence: kb_core::tables::Confidence::Low,
+                    n_rows: 4,
+                    n_cols: 2,
+                    truncated: false,
+                    notes: Vec::new(),
+                },
+                grid_key: format!("tables/{}/{}/{table_id}/v1.parquet", document.tenant, document.id),
+                created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            });
+        }
+    }
+
     let mut state = AppState::from_parts(
         StateParts {
             documents: Arc::new(documents),
@@ -473,6 +516,7 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
             embedder: Arc::new(embedder),
             jobs: Arc::new(jobs),
             events: Arc::clone(&events),
+            tables: Some(Arc::new(tables)),
             version: "leak-test".to_string(),
         },
         Arc::new(FakeReranker::default()),

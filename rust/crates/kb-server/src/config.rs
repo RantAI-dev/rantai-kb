@@ -134,9 +134,35 @@ pub struct Config {
     pub pages: Option<PageArmSettings>,
     /// The visual stage of ingest (`KB_IMAGES`, `KB_IMAGE_*`, `ING-5`).
     pub visuals: VisualConfig,
+    /// The table store (`TBL-1`): grids as Parquet, typed queries in DuckDB.
+    pub tables: TablesConfig,
     /// The deployment tier preset that shaped this config (`KB_TIER`), with
     /// the variables it filled. `None` when no tier is set.
     pub tier: Option<crate::tier::TierPlan>,
+}
+
+/// The table store (`TBL-1`). On by default: a document with no tables is
+/// unchanged, and a document with one becomes answerable rather than just
+/// searchable.
+#[derive(Clone, Debug)]
+pub struct TablesConfig {
+    /// `KB_TABLES=false` turns grid storage and the table routes off. Ingest
+    /// then stores no grids and indexes no table units; `/v1/tables` 404s.
+    pub enabled: bool,
+    /// Where downloaded Parquet grids are cached, one file per grid version.
+    pub cache_dir: std::path::PathBuf,
+    /// `KB_TABLE_QUERY_TIMEOUT_MS` (`QUERY_TIMEOUT_MS` by default).
+    pub query_timeout_ms: u64,
+}
+
+impl Default for TablesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cache_dir: std::env::temp_dir().join("rantai-kb-tables"),
+            query_timeout_ms: kb_core::tables::QUERY_TIMEOUT_MS,
+        }
+    }
 }
 
 /// The visual stage (`ING-5`): every picture in a document read by what it
@@ -1094,9 +1120,23 @@ impl Config {
         };
 
         let visuals = visual_config(&lookup)?;
+        let tables = TablesConfig {
+            enabled: bool_flag(&lookup, "KB_TABLES", true),
+            cache_dir: lookup("KB_CACHE_DIR")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .map(|dir| std::path::PathBuf::from(dir).join("tables"))
+                .unwrap_or_else(|| std::env::temp_dir().join("rantai-kb-tables")),
+            query_timeout_ms: int_var(
+                &lookup,
+                "KB_TABLE_QUERY_TIMEOUT_MS",
+                kb_core::tables::QUERY_TIMEOUT_MS,
+            )?,
+        };
         Ok(Config {
             pages,
             visuals,
+            tables,
             cache,
             qdrant,
             qdrant_collection_override,
