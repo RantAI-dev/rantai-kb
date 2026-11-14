@@ -126,25 +126,6 @@ fn shared_strings(strings: &[&str]) -> String {
     )
 }
 
-/// A worksheet whose first row has values in columns A and C, so the gap in
-/// between shows how a missing cell is written.
-#[must_use]
-pub fn worksheet_with_gap() -> &'static str {
-    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>
-  <row r="1"><c r="A1" t="s"><v>0</v></c><c r="C1" t="s"><v>1</v></c></row>
-  <row r="2"><c r="A2" t="s"><v>2</v></c><c r="C2"><v>42</v></c></row>
-</sheetData></worksheet>"#
-}
-
-/// A worksheet with no cells at all, which SheetJS renders as an empty sheet
-/// and the parser then skips.
-#[must_use]
-pub fn empty_worksheet() -> &'static str {
-    r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>"#
-}
-
 /// A slide with two shapes, each with one paragraph.
 #[must_use]
 pub fn slide_with(paragraphs: &[&str]) -> String {
@@ -204,6 +185,23 @@ pub fn epub_of(chapters: &[(&str, &str)]) -> Vec<u8> {
         .map(|(name, content)| (name.as_str(), content.as_str()))
         .collect();
     zip_of(&borrowed)
+}
+
+/// A minimal but valid `.ods` package: calamine checks the `mimetype` entry
+/// before it reads `content.xml`.
+#[must_use]
+pub fn ods_of(content_xml: &str) -> Vec<u8> {
+    zip_of(&[
+        ("mimetype", "application/vnd.oasis.opendocument.spreadsheet"),
+        ("content.xml", content_xml),
+        (
+            "META-INF/manifest.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0">
+  <manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/>
+</manifest:manifest>"#,
+        ),
+    ])
 }
 
 /// One XHTML chapter as the parser will see it after markup is stripped.

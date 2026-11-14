@@ -15,6 +15,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod manifest;
+mod markdown;
+
+pub use manifest::{build_manifest, cell_from_text, is_derived_label, locale_number};
+pub use markdown::{parse_markdown_tables, render_table_markdown, stitch_and_drop_furniture};
+
 /// Rows a query may return, whatever `limit` asks for.
 pub const MAX_ROWS_RETURNED: u32 = 1000;
 /// Wall-clock budget for one query, in milliseconds.

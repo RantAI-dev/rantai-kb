@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 kb-ports = { path = "../kb-ports" }
 kb-core = { path = "../kb-core" }
+chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -39,3 +40,4 @@ hex = { workspace = true }
 kb-ports = { path = "../kb-ports" }
 axum = { workspace = true }
 tower = { workspace = true }
+rust_xlsxwriter = "0.102"

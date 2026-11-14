@@ -4,6 +4,19 @@
 
 ### Added
 
+- **Tables are read as data (`TBL-1`, work package A).** Spreadsheets (`.xlsx`, `.xls`,
+  `.ods`), CSV/TSV, DOCX tables and markdown pipe tables from OCR now become structured
+  grids (`ExtractionResult.tables`) with a manifest: column kind and role (a phone number
+  and a year are not quantities), the unit from the header, sample values, and the derived
+  subtotal rows — proven by spreadsheet formulas where available, guessed from a
+  `Jumlah`/`Total` label otherwise. Spreadsheet regions are split by blank rows and columns,
+  merged cells are spread, multi-level headers are flattened, hidden sheets are skipped with
+  a note, and locale numbers (`1.234,5`, `(1.234)`, `Rp`, `%`) are read correctly. Markdown
+  tables that continue on the next page are stitched, and a letterhead repeated on half the
+  pages is dropped. Spreadsheets and DOCX tables now render as markdown tables, and a big
+  table is chunked at row boundaries with the header repeated in every piece instead of
+  becoming one unbounded chunk.
+
 - **Ingest runs several documents at once, through per-stage seats (`ING-6`, part A).**
   The worker used to claim a job and run it to completion before claiming the next
   one, so a 300-page scan held every small file behind it. Now up to `KB_JOB_WORKERS`
