@@ -1075,7 +1075,7 @@ def report(results: dict, per: dict, questions: list[dict]) -> str:
         "|---|---|",
         f"| questions | {len(questions)} |",
         f"| files ingested, ready | {results['ingest']['ready']} / {results['ingest']['files']} |",
-        f"| files mapped to a table | {results['tables']['matched']} grids |",
+        f"| grids mapped to a tableId | {results['tables']['matched']} |",
         f"| max retrieval candidates | {results['config']['max_chunks']} |",
         "",
         "## Targets",
@@ -1196,6 +1196,13 @@ def main() -> int:
         return import_tables.self_check(args.dataset)
     if not args.key:
         print("error: --key or KB_API_KEY is required", file=sys.stderr)
+        return 2
+    if args.agent and not args.llm_model:
+        print(
+            "error: --agent needs --llm-model (a local OpenAI-compatible model, e.g. "
+            "qwen2.5-7b-instruct on llama.cpp). No paid model without --allow-paid.",
+            file=sys.stderr,
+        )
         return 2
     return run(args)
 

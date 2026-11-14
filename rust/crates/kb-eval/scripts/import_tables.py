@@ -1735,7 +1735,7 @@ def collect_sources(out: Path, download: bool = True) -> list[dict]:
                 "lang": "en",
                 "generated": False,
                 "needs_ocr": False,
-                "doc_title": f"{en_label.capitalize()} — Indonesia (World Bank, {code})",
+                "doc_title": f"World Bank: {en_label} ({code})",
                 "indicator_id": id_label,
                 "indicator_en": en_label,
                 "topic": topic,
