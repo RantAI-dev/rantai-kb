@@ -15,10 +15,18 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod header;
 mod manifest;
 mod markdown;
 
-pub use manifest::{build_manifest, cell_from_text, is_derived_label, locale_number};
+pub use header::{
+    collapse_whitespace, normalize_header_name, single_distinct_value, take_title_rows,
+    unique_header_names,
+};
+pub use manifest::{
+    build_manifest, cell_from_text, is_derived_label, is_placeholder, locale_number,
+    placeholder_note,
+};
 pub use markdown::{parse_markdown_tables, render_table_markdown, stitch_and_drop_furniture};
 
 /// Rows a query may return, whatever `limit` asks for.

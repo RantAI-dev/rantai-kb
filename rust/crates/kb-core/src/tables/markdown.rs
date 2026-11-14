@@ -3,7 +3,8 @@
 
 use std::collections::HashMap;
 
-use super::manifest::cell_from_text;
+use super::header::unique_header_names;
+use super::manifest::{cell_from_text, is_placeholder, placeholder_note};
 use super::{Cell, TableGrid, TableSource};
 
 /// Parse every GitHub-style pipe table in `text`.
@@ -31,25 +32,31 @@ pub fn parse_markdown_tables(text: &str) -> Vec<TableGrid> {
             .checked_sub(1)
             .and_then(|previous| clean_title(lines[previous]));
         let mut rows: Vec<Vec<Cell>> = Vec::new();
+        let mut placeholders = 0usize;
         index += 2;
         while index < lines.len() {
             let line = lines[index];
             if line.trim().is_empty() || !line.contains('|') {
                 break;
             }
-            let mut cells = split_row(line);
+            let mut cells = split_row_counting(line, &mut placeholders);
             cells.resize(header.len(), Cell::Empty);
             cells.truncate(header.len());
             rows.push(cells);
             index += 1;
         }
-        grids.push(TableGrid {
+        let names: Vec<String> = header.iter().map(text_of).collect();
+        let mut grid = TableGrid {
             source: Some(TableSource::Markdown),
-            header: header.iter().map(text_of).collect(),
+            header: unique_header_names(&names),
             header_rows: 1,
             rows,
             ..TableGrid::default()
-        });
+        };
+        if let Some(note) = placeholder_note(placeholders) {
+            grid.notes.push(note);
+        }
+        grids.push(grid);
         if let Some(title) = title {
             if let Some(grid) = grids.last_mut() {
                 grid.title = Some(title);
@@ -242,6 +249,13 @@ fn clean_title(line: &str) -> Option<String> {
 
 /// Split a pipe row into typed cells, honouring `\|`.
 fn split_row(line: &str) -> Vec<Cell> {
+    let mut placeholders = 0usize;
+    split_row_counting(line, &mut placeholders)
+}
+
+/// Split a pipe row into typed cells and count the statistical placeholders
+/// (`-`, `...`, `NA`) that were read as empty.
+fn split_row_counting(line: &str, placeholders: &mut usize) -> Vec<Cell> {
     let mut text = line.trim();
     if let Some(stripped) = text.strip_prefix('|') {
         text = stripped;
@@ -259,14 +273,22 @@ fn split_row(line: &str) -> Vec<Cell> {
         } else if ch == '\\' {
             escaped = true;
         } else if ch == '|' {
-            cells.push(parse_cell(current.trim()));
+            cells.push(parse_cell_counting(current.trim(), placeholders));
             current.clear();
         } else {
             current.push(ch);
         }
     }
-    cells.push(parse_cell(current.trim()));
+    cells.push(parse_cell_counting(current.trim(), placeholders));
     cells
+}
+
+fn parse_cell_counting(text: &str, placeholders: &mut usize) -> Cell {
+    if is_placeholder(text) {
+        *placeholders += 1;
+        return Cell::Empty;
+    }
+    cell_from_text(text)
 }
 
 fn parse_cell(text: &str) -> Cell {
@@ -458,5 +480,27 @@ mod tests {
         let rendered = render_table_markdown(&grid, 0);
         assert_eq!(rendered.len(), 1);
         assert!(rendered[0].contains("a \\| b"));
+    }
+
+    #[test]
+    fn header_names_are_normalised_and_placeholder_cells_are_counted() {
+        let text = table(&[
+            "Tabel 25.8",
+            "| Bus\tBus | Bus\tBus | Kode\tCode |",
+            "| --- | --- | --- |",
+            "| - | 1.234 | 331001 |",
+            "| x | ... | 331002 |",
+        ]);
+        let grids = parse_markdown_tables(&text);
+        let grid = &grids[0];
+        assert_eq!(grid.header, vec!["Bus Bus", "Bus Bus (2)", "Kode Code"]);
+        assert_eq!(grid.rows[0][0], Cell::Empty);
+        assert!(
+            grid.notes
+                .iter()
+                .any(|note| note == "3 placeholder cells treated as empty"),
+            "{:?}",
+            grid.notes
+        );
     }
 }
