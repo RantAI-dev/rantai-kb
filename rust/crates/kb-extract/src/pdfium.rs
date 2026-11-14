@@ -209,32 +209,6 @@ pub fn pdf_page_subset(
     subset_of(pdfium, &document, pages)
 }
 
-/// Several subsets in one pass, `pages_per` pages each, so splitting a
-/// document into per-page cache keys and a per-batch request loads pdfium once
-/// per call rather than once per page.
-///
-/// `pages_per == 0` is read as "all pages in one document".
-pub fn pdf_page_subset_many(
-    pdfium: &Pdfium,
-    pdf_bytes: &[u8],
-    pages: &[u32],
-    pages_per: usize,
-) -> Result<Vec<Vec<u8>>, ExtractError> {
-    let document = pdfium
-        .load_pdf_from_byte_slice(pdf_bytes, None)
-        .map_err(|e| ExtractError::Container(format!("failed to load PDF: {e}")))?;
-    let per = if pages_per == 0 {
-        pages.len().max(1)
-    } else {
-        pages_per
-    };
-    let mut out = Vec::new();
-    for chunk in pages.chunks(per) {
-        out.push(subset_of(pdfium, &document, chunk)?);
-    }
-    Ok(out)
-}
-
 /// One new document holding `pages`, copied in order.
 fn subset_of(
     pdfium: &Pdfium,

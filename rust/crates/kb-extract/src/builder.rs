@@ -19,9 +19,7 @@ use crate::hybrid::HybridExtractor;
 use crate::mineru::MineruExtractor;
 use crate::mineru_api::MineruApiExtractor;
 use crate::mistral::MistralOcrExtractor;
-use crate::ocr_router::{
-    OcrRouter, OcrRouterSettings, OcrTransport, process_breaker,
-};
+use crate::ocr_router::{OcrRouter, OcrRouterSettings, OcrTransport, process_breaker};
 use crate::openrouter_vision::OpenRouterVisionProvider;
 use crate::page_ocr::{PageOcrExtractor, PageOcrSettings};
 use crate::pdfium::{extract_pdf_text_layer, get_pdfium};
@@ -195,7 +193,10 @@ fn build_ocr_provider(cfg: &ExtractConfig) -> Option<Arc<dyn crate::ocr_router::
         }
     }
     if !cfg.mistral_ocr_key.trim().is_empty()
-        && cfg.layout_extractor_order.iter().any(|name| name == "mistral")
+        && cfg
+            .layout_extractor_order
+            .iter()
+            .any(|name| name == "mistral")
     {
         if let Ok(mistral) = MistralOcrExtractor::new(
             &cfg.mistral_ocr_key,
@@ -244,7 +245,10 @@ fn build_ocr_router(
 
     let breaker = process_breaker(settings.breaker_threshold, settings.breaker_cooldown);
     Some(Arc::new(OcrRouter::new(
-        settings, provider, page_cache, Some(breaker),
+        settings,
+        provider,
+        page_cache,
+        Some(breaker),
     )))
 }
 

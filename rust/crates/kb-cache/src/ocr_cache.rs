@@ -70,10 +70,8 @@ mod tests {
     use super::*;
 
     fn temp_store(name: &str) -> DiskCache {
-        let dir = std::env::temp_dir().join(format!(
-            "kb-ocr-page-cache-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("kb-ocr-page-cache-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         DiskCache::new(dir)
     }

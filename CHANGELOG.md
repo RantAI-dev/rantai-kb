@@ -4,6 +4,30 @@
 
 ### Added
 
+- **PDF page work can be offloaded to an OCR service (`ING-6`, Part B).**
+  `KB_OCR_MODE=off|hybrid|full` routes each PDF page on its own: `hybrid` sends a
+  page only when raster images cover ≥ `KB_OCR_SCAN_AREA` (0.90) of it and it
+  carries ≤ `KB_OCR_SCAN_TEXT` (50) visible characters — invisible text from an
+  existing OCR layer does not count — while `full` sends every page and keeps the
+  local text as that page's fallback. Unset means `hybrid` when an OCR provider is
+  configured and `off` otherwise, so an installation with no provider behaves as
+  before.
+  - **Providers:** the local chat adapter reads one rendered page image per
+    request; Mistral OCR reads sub-PDFs of `KB_OCR_BATCH` (8) pages built by
+    pdfium, and its figures are kept on their document page.
+  - **Cache:** one entry per page in kb-cache namespace `ocr-page-v1`, keyed by
+    provider, model, prompt, DPI and the page (document SHA-256 + page index for
+    a document provider), so a re-upload pays only for pages not yet read.
+  - **Limits:** `KB_OCR_CONCURRENCY` is one process-wide pool; a breaker stops
+    sending for `KB_OCR_BREAKER_COOLDOWN_S` (60) after `KB_OCR_BREAKER` (3)
+    consecutive transient failures; at most `KB_OCR_MAX_PAGES` (300) pages per
+    document go to OCR and the rest are listed as skipped.
+  - **Outcomes:** a lost page becomes `[page N could not be read]` and is named
+    in `metadata.ocr.failedPages`; the document is still `ready`. A document
+    where every page failed fails the job instead of indexing as empty.
+    `metadata.ocr` records mode, provider, pages, OCR/cached/local/skipped pages,
+    failed pages and whether the breaker opened.
+
 - **Pictures are searchable by what they show (`ING-5`).** Before, an image was
   found only by the text OCR read off it: a photo or diagram without text became a
   `ready` document with zero chunks, pictures inside Office and EPUB files were

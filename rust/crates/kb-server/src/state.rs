@@ -293,9 +293,16 @@ impl AppState {
         config: &crate::Config,
         settings: kb_engine::IngestSettings,
     ) -> anyhow::Result<kb_engine::IngestWorker> {
-        let mut extractor = kb_extract::build_production_extractor(&config.extract)
-            .map_err(|e| anyhow::anyhow!("extractor: {e}"))?
-            .shared();
+        let mut extractor = kb_extract::build_production_extractor_with_cache(
+            &config.extract,
+            config.cache.as_ref().map(|cache| {
+                Arc::new(kb_cache::DiskOcrPageCache::new(kb_cache::DiskCache::new(
+                    &cache.dir,
+                ))) as Arc<dyn kb_ports::OcrPageCache>
+            }),
+        )
+        .map_err(|e| anyhow::anyhow!("extractor: {e}"))?
+        .shared();
         if let Some(cache) = config.cache.as_ref() {
             let fingerprint = config.extract.cache_fingerprint();
             tracing::info!(dir = %cache.dir.display(), "extraction disk cache on");

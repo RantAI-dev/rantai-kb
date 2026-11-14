@@ -1465,6 +1465,13 @@ mod tests {
         map.insert("KB_EXTRACT_MINERU_BASE_URL", "http://mineru.local:8100");
         map.insert("KB_MINERU_API_KEY", "mineru-key");
         map.insert("KB_MISTRAL_OCR_KEY", "mistral-key");
+        map.insert("KB_OCR_MODE", "full");
+        map.insert("KB_OCR_SCAN_AREA", "0.8");
+        map.insert("KB_OCR_SCAN_TEXT", "20");
+        map.insert("KB_OCR_BATCH", "6");
+        map.insert("KB_OCR_MAX_PAGES", "120");
+        map.insert("KB_OCR_BREAKER", "4");
+        map.insert("KB_OCR_BREAKER_COOLDOWN_S", "30");
         map.insert("KB_LAYOUT_EXTRACTOR_ORDER", "mistral,sidecar");
         map.insert("OCR_FALLBACK_MODEL", "custom-ocr-model");
         map.insert("KB_WORKER_ENABLED", "false");
@@ -1514,6 +1521,17 @@ mod tests {
         assert_eq!(cfg.extract.mineru_base_url, "http://mineru.local:8100");
         assert_eq!(cfg.extract.mineru_api_key, "mineru-key");
         assert_eq!(cfg.extract.mistral_ocr_key, "mistral-key");
+        assert_eq!(
+            cfg.extract.ocr_mode,
+            kb_extract::config::OcrMode::Full,
+            "KB_OCR_MODE is read in kb-server's config, like every other OCR var"
+        );
+        assert!((cfg.extract.ocr_scan_area - 0.8).abs() < 1e-6);
+        assert_eq!(cfg.extract.ocr_scan_text, 20);
+        assert_eq!(cfg.extract.ocr_batch, 6);
+        assert_eq!(cfg.extract.ocr_max_pages, 120);
+        assert_eq!(cfg.extract.ocr_breaker, 4);
+        assert_eq!(cfg.extract.ocr_breaker_cooldown.as_secs(), 30);
         assert_eq!(
             cfg.extract.layout_extractor_order,
             vec!["mistral", "sidecar"]

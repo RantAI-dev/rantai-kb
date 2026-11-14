@@ -51,7 +51,7 @@ use crate::ExtractError;
 use crate::config::{ExtractConfig, OcrMode};
 use crate::mistral::blocks_from_markdown;
 use crate::page_render::{render_image_pages, render_pdf_page_indices};
-use crate::pdfium::{get_pdfium, pdf_page_subset_many};
+use crate::pdfium::{get_pdfium, pdf_page_subset};
 use crate::scanned::{PageFacts, page_is_scan, read_page_facts};
 
 /// One initial attempt plus three retries on a transient provider error.
@@ -217,6 +217,9 @@ pub struct OcrRouterSettings {
     pub breaker_threshold: u32,
     pub breaker_cooldown: Duration,
     pub dpi: u32,
+    /// Attempts per provider call (one initial plus retries). Tests set 1 to
+    /// exercise the breaker without waiting through backoff.
+    pub attempts: u32,
 }
 
 impl OcrRouterSettings {
@@ -233,6 +236,7 @@ impl OcrRouterSettings {
             breaker_threshold: cfg.ocr_breaker,
             breaker_cooldown: cfg.ocr_breaker_cooldown,
             dpi: cfg.ocr_dpi,
+            attempts: MAX_ATTEMPTS,
         }
     }
 }
@@ -405,12 +409,14 @@ impl OcrRouter {
         }
 
         let mut figures = Vec::new();
+        let mut has_text = false;
         for (index, fact) in facts.iter().enumerate() {
             let outcome = &outcomes[index];
             if let Some(ocr) = outcome.text.as_deref().map(str::trim) {
                 if !ocr.is_empty() {
                     text.set(index, ocr.to_string());
                     figures.extend(outcome.figures.iter().cloned());
+                    has_text = true;
                     continue;
                 }
             }
@@ -420,15 +426,19 @@ impl OcrRouter {
             if !local.is_empty() && (self.settings.mode == OcrMode::Full || was_candidate) {
                 text.set(index, local.to_string());
                 report.local_pages += 1;
+                has_text = true;
             } else if was_candidate {
+                // A marker keeps a lost page visible in the document, but it
+                // is not text: a document made only of markers must fail.
                 text.set(index, marker(fact.page));
             } else {
                 report.local_pages += u32::from(!local.is_empty());
                 text.set(index, local.to_string());
+                has_text |= !local.is_empty();
             }
         }
 
-        if text.all_empty() {
+        if !has_text {
             let reason = if candidates.send.is_empty() {
                 "the PDF has no readable text".to_string()
             } else {
@@ -686,7 +696,11 @@ impl OcrRouter {
                     continue;
                 }
             };
-            let answer = retry(|| provider.read_image(&item.bytes, &item.mime)).await;
+            let answer = retry(
+                || provider.read_image(&item.bytes, &item.mime),
+                self.settings.attempts,
+            )
+            .await;
             drop(permit);
             outcome.sent += 1;
 
@@ -727,22 +741,18 @@ impl OcrRouter {
             return Ok(RouteOutcome::default());
         }
 
-        // The cache key is the page's own bytes: one one-page PDF per candidate
-        // page, built with a single document load.
-        let bytes = pdf_bytes.to_vec();
-        let indices = pages.to_vec();
-        let one_page = tokio::task::spawn_blocking(move || {
-            let pdfium = get_pdfium()?;
-            pdf_page_subset_many(pdfium, &bytes, &indices, 1)
-        })
-        .await
-        .map_err(|e| ExtractError::Container(format!("OCR page split task: {e}")))??;
+        // The page's identity: the source document's SHA-256 and the page
+        // index. Hashing a one-page PDF saved by pdfium would be unstable — it
+        // embeds a random `/ID` on every save, discussed in `docs/kb-tiers.md`
+        // — so a page is addressed by what it is, not by a fresh serialisation
+        // of it. Provider, model, prompt and resolution are in the key too.
+        let digest: [u8; 32] = Sha256::digest(pdf_bytes).into();
 
         let mut outcome = RouteOutcome::default();
         let mut keys: BTreeMap<u32, String> = BTreeMap::new();
         let mut to_send: Vec<u32> = Vec::new();
-        for (page, artifact) in pages.iter().zip(&one_page) {
-            let key = page_cache_key(provider, artifact);
+        for page in pages {
+            let key = document_page_cache_key(provider, &digest, *page);
             match self.cache_get(&key).await {
                 Some(text) => {
                     outcome.cached += 1;
@@ -767,17 +777,41 @@ impl OcrRouter {
             .chunks(batch.max(1) as usize)
             .map(<[u32]>::to_vec)
             .collect();
+        if batches.is_empty() {
+            return Ok(outcome);
+        }
+
+        // Build every sub-PDF on one thread, one after another: pdfium's
+        // document creation is the one call this crate does not run in
+        // parallel (the requests that follow are). A build failure fails only
+        // its own batch.
+        let bytes = pdf_bytes.to_vec();
+        let specs = batches.clone();
+        let splits = tokio::task::spawn_blocking(move || {
+            let pdfium = match get_pdfium() {
+                Ok(pdfium) => pdfium,
+                Err(err) => {
+                    return specs
+                        .iter()
+                        .map(|pages| (pages.clone(), Err(err.to_string())))
+                        .collect();
+                }
+            };
+            specs
+                .iter()
+                .map(|pages| match pdf_page_subset(pdfium, &bytes, pages) {
+                    Ok(pdf) => (pages.clone(), Ok(pdf)),
+                    Err(err) => (pages.clone(), Err(err.to_string())),
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .map_err(|e| ExtractError::Container(format!("OCR page split task: {e}")))?;
+
         let concurrency = self.settings.concurrency.max(1) as usize;
         let keys_ref = &keys;
-        let results: Vec<RouteOutcome> = stream::iter(batches)
-            .map(|batch_pages| async move {
-                let bytes = pdf_bytes.to_vec();
-                let pages = batch_pages.clone();
-                let split = tokio::task::spawn_blocking(move || {
-                    let pdfium = get_pdfium()?;
-                    pdf_page_subset_many(pdfium, &bytes, &pages, pages.len().max(1))
-                })
-                .await;
+        let results: Vec<RouteOutcome> = stream::iter(splits)
+            .map(|(batch_pages, split)| async move {
                 self.read_pdf_batch(batch_pages, split, provider, include_figures, keys_ref)
                     .await
             })
@@ -794,7 +828,7 @@ impl OcrRouter {
     async fn read_pdf_batch(
         &self,
         pages: Vec<u32>,
-        split: Result<Result<Vec<Vec<u8>>, ExtractError>, tokio::task::JoinError>,
+        split: Result<Vec<u8>, String>,
         provider: &dyn OcrPageProvider,
         include_figures: bool,
         keys: &BTreeMap<u32, String>,
@@ -817,14 +851,9 @@ impl OcrRouter {
         }
 
         let sub_pdf = match split {
-            Ok(Ok(mut parts)) => parts.pop().unwrap_or_default(),
-            Ok(Err(err)) => {
-                outcome.error = Some(format!("could not build an OCR page batch: {err}"));
-                outcome.pages.extend(pages.iter().map(|p| failed_page(*p)));
-                return outcome;
-            }
+            Ok(pdf) => pdf,
             Err(err) => {
-                outcome.error = Some(format!("OCR page split task: {err}"));
+                outcome.error = Some(format!("could not build an OCR page batch: {err}"));
                 outcome.pages.extend(pages.iter().map(|p| failed_page(*p)));
                 return outcome;
             }
@@ -838,7 +867,11 @@ impl OcrRouter {
                 return outcome;
             }
         };
-        let answer = retry(|| provider.read_pdf(&sub_pdf, include_figures)).await;
+        let answer = retry(
+            || provider.read_pdf(&sub_pdf, include_figures),
+            self.settings.attempts,
+        )
+        .await;
         drop(permit);
         outcome.sent = pages.len() as u32;
 
@@ -913,8 +946,12 @@ impl PageTexts {
         self.0.len()
     }
 
+    /// True when no page carries real text: a marker is not text.
     fn all_empty(&self) -> bool {
-        self.0.iter().all(|t| t.trim().is_empty())
+        self.0.iter().all(|t| {
+            let t = t.trim();
+            t.is_empty() || (t.starts_with("[page ") && t.ends_with(" could not be read]"))
+        })
     }
 
     fn set(&mut self, index: usize, text: String) {
@@ -966,11 +1003,7 @@ impl PageTexts {
             content: content_pages.join("\n\n"),
             file_type: file_type.to_string(),
             used_ocr,
-            figures: if want_figures {
-                figures
-            } else {
-                Vec::new()
-            },
+            figures: if want_figures { figures } else { Vec::new() },
             pages_blocks: Some(blocks),
             page_map: if page_map.is_empty() {
                 None
@@ -989,8 +1022,24 @@ fn marker(page: u32) -> String {
     format!("[page {} could not be read]", page + 1)
 }
 
-/// Cache key over the provider's identity and the page's own bytes.
+/// Cache key over the provider's identity and the page's own bytes (an image
+/// upload, or a rendered page).
 fn page_cache_key(provider: &dyn OcrPageProvider, artifact: &[u8]) -> String {
+    page_cache_key_of(provider, &[artifact])
+}
+
+/// Cache key for one page of a document provider: the source document's
+/// SHA-256 and the page index identify the page, because pdfium's saved
+/// one-page PDF carries a random `/ID` and would never hit twice.
+fn document_page_cache_key(
+    provider: &dyn OcrPageProvider,
+    document_digest: &[u8; 32],
+    page: u32,
+) -> String {
+    page_cache_key_of(provider, &[document_digest.as_slice(), &page.to_le_bytes()])
+}
+
+fn page_cache_key_of(provider: &dyn OcrPageProvider, identity: &[&[u8]]) -> String {
     let mut hasher = Sha256::new();
     let dpi = provider.dpi().to_le_bytes();
     for part in [
@@ -998,8 +1047,10 @@ fn page_cache_key(provider: &dyn OcrPageProvider, artifact: &[u8]) -> String {
         provider.model().as_bytes(),
         provider.prompt().as_bytes(),
         dpi.as_slice(),
-        artifact,
-    ] {
+    ]
+    .into_iter()
+    .chain(identity.iter().copied())
+    {
         hasher.update((part.len() as u64).to_le_bytes());
         hasher.update(part);
     }
@@ -1007,16 +1058,17 @@ fn page_cache_key(provider: &dyn OcrPageProvider, artifact: &[u8]) -> String {
 }
 
 /// Retry a provider call on transient errors, with exponential backoff.
-async fn retry<F, Fut, T>(mut call: F) -> Result<T, OcrCallError>
+async fn retry<F, Fut, T>(mut call: F, attempts: u32) -> Result<T, OcrCallError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, OcrCallError>>,
 {
+    let attempts = attempts.max(1);
     let mut last = OcrCallError::permanent("no attempt was made");
-    for attempt in 1..=MAX_ATTEMPTS {
+    for attempt in 1..=attempts {
         match call().await {
             Ok(value) => return Ok(value),
-            Err(err) if err.transient && attempt < MAX_ATTEMPTS => {
+            Err(err) if err.transient && attempt < attempts => {
                 tracing::warn!(attempt, error = %err.message, "OCR transient error; backing off");
                 last = err;
                 backoff(attempt).await;
@@ -1127,9 +1179,21 @@ mod tests {
         let key = page_cache_key(&base, b"page");
         assert_eq!(key, page_cache_key(&base, b"page"));
         assert_ne!(key, page_cache_key(&base, b"other page"));
-        assert_ne!(key, page_cache_key(&Fake("mistral", "m", "OCR:", 150), b"page"));
-        assert_ne!(key, page_cache_key(&Fake("chat", "m2", "OCR:", 150), b"page"));
-        assert_ne!(key, page_cache_key(&Fake("chat", "m", "Table:", 150), b"page"));
-        assert_ne!(key, page_cache_key(&Fake("chat", "m", "OCR:", 200), b"page"));
+        assert_ne!(
+            key,
+            page_cache_key(&Fake("mistral", "m", "OCR:", 150), b"page")
+        );
+        assert_ne!(
+            key,
+            page_cache_key(&Fake("chat", "m2", "OCR:", 150), b"page")
+        );
+        assert_ne!(
+            key,
+            page_cache_key(&Fake("chat", "m", "Table:", 150), b"page")
+        );
+        assert_ne!(
+            key,
+            page_cache_key(&Fake("chat", "m", "OCR:", 200), b"page")
+        );
     }
 }

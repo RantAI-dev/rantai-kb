@@ -31,9 +31,9 @@ mod mime;
 pub mod mineru;
 pub mod mineru_api;
 pub mod mistral;
+pub mod ocr_router;
 pub mod ods;
 pub mod odt;
-pub mod ocr_router;
 pub mod openrouter_vision;
 pub mod outline;
 pub mod page_ocr;
@@ -56,12 +56,12 @@ mod zip_read;
 
 pub use builder::{
     PdfiumTextExtractor, ProductionExtractor, build_extractor, build_layout_chain,
-    build_production_extractor,
+    build_production_extractor, build_production_extractor_with_cache,
 };
 pub use chain::LayoutExtractorChain;
 pub use chain::ScannedPageOcr;
 pub use code::CODE_EXT_LANGUAGE;
-pub use config::ExtractConfig;
+pub use config::{ExtractConfig, OcrMode};
 pub use detect::{SupportedFileType, detect_file_type, extension_of};
 pub use dispatch::{extract, extract_document, extract_from_buffer};
 pub use hybrid::HybridExtractor;
@@ -70,12 +70,12 @@ pub use mime::{DOCUMENT_MIME_TYPES, ext_to_mime, is_document_mime, mime_to_ext};
 pub use mineru::MineruExtractor;
 pub use mineru_api::MineruApiExtractor;
 pub use mistral::MistralOcrExtractor;
-pub use ods::parse_ods;
-pub use odt::parse_odt;
 pub use ocr_router::{
     OcrBreaker, OcrCallError, OcrPageProvider, OcrPageRead, OcrRouter, OcrRouterSettings,
     OcrTransport, process_breaker,
 };
+pub use ods::parse_ods;
+pub use odt::parse_odt;
 pub use openrouter_vision::OPENROUTER_VISION_URL;
 pub use openrouter_vision::OpenRouterVisionProvider;
 pub use outline::{bookmark_nodes, extract_outline, finish_nodes, heading_nodes};
