@@ -373,6 +373,12 @@ fn candidate_to_hit_with(c: Candidate, retrieval: Option<RetrievalProvenance>) -
                 asset_key,
                 anchor_chunk_index,
                 contextual_prefix: c.contextual_prefix,
+                table_id: c
+                    .metadata
+                    .get("tableId")
+                    .or_else(|| c.metadata.get("table_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
             },
             categories: Vec::new(),
             subcategory: None,

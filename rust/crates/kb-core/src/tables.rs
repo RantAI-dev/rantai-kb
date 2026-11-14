@@ -15,6 +15,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+// TBL-1 A replaces this re-export with the real `build_manifest` in this
+// module. Kept here so ingest (work package B) can already call
+// `kb_core::tables::build_manifest` and the merge is a one-line change.
+pub use crate::tables_manifest_stub::build_manifest;
+
 /// Rows a query may return, whatever `limit` asks for.
 pub const MAX_ROWS_RETURNED: u32 = 1000;
 /// Wall-clock budget for one query, in milliseconds.

@@ -1127,6 +1127,7 @@ impl IngestWorker {
                     asset_key: None,
                     anchor_chunk_index: None,
                     contextual_prefix: None,
+                    table_id: None,
                 };
                 IndexUnit {
                     id: ChunkId(format!("{}_{}", document_id.0, chunk_index)),
@@ -1494,6 +1495,7 @@ impl IngestWorker {
                     asset_key: Some(key),
                     anchor_chunk_index,
                     contextual_prefix: None,
+                    table_id: None,
                 },
             });
         }
@@ -2022,6 +2024,7 @@ mod tests {
             page: None,
             asset_key: None,
             anchor_chunk_index: None,
+            table_id: None,
         }
     }
 

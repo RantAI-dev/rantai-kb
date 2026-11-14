@@ -67,6 +67,10 @@ fn stored_chunk_metadata(value: &serde_json::Value) -> ChunkMetadata {
             .get("contextualPrefix")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        table_id: value
+            .get("tableId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     }
 }
 
