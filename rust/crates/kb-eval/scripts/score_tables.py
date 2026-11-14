@@ -1187,7 +1187,8 @@ def main() -> int:
     parser.add_argument("--allow-paid", action="store_true",
                         help="permit a non-loopback LLM endpoint (needs the owner's go-ahead)")
     parser.add_argument("--self-check", action="store_true",
-                        help="run import_tables.py --self-check on the dataset and exit")
+                        help="run import_tables.py --self-check on the dataset and exit (needs "
+                             "openpyxl and python-docx: uv run --with openpyxl --with python-docx)")
     args = parser.parse_args()
     if args.self_check:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
