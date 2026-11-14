@@ -193,8 +193,14 @@ impl TableRecords for PgTableRecords {
                 .bind(row.id.as_str())
                 .bind(row.tenant_id.as_str())
                 .bind(row.document_id.as_str())
-                .bind(i64::from(row.index))
-                .bind(i64::from(row.version))
+                .bind(
+                    i32::try_from(row.index)
+                        .map_err(|_| PortError::Storage("table index out of range".into()))?,
+                )
+                .bind(
+                    i32::try_from(row.version)
+                        .map_err(|_| PortError::Storage("table version out of range".into()))?,
+                )
                 .bind(source_str(row.source))
                 .bind(row.sheet.as_deref())
                 .bind(page_span)
@@ -261,7 +267,9 @@ impl TableRecords for PgTableRecords {
             .fetch_one(&self.pool)
             .await
             .map_err(|e| PortError::Unavailable(format!("pg latest version: {e}")))?;
-        let version: i64 = row
+        // "version" is INTEGER (INT4) in the migration; decoding it as i64
+        // failed every ingest against a live Postgres.
+        let version: i32 = row
             .try_get("version")
             .map_err(|e| PortError::Unavailable(format!("pg version: {e}")))?;
         Ok(u32::try_from(version).unwrap_or(0))
@@ -276,7 +284,10 @@ impl TableRecords for PgTableRecords {
         let rows = sqlx::query(DELETE_OLDER)
             .bind(tenant.as_str())
             .bind(document.as_str())
-            .bind(i64::from(keep_from))
+            .bind(
+                i32::try_from(keep_from)
+                    .map_err(|_| PortError::Storage("table version out of range".into()))?,
+            )
             .fetch_all(&self.pool)
             .await
             .map_err(|e| PortError::Unavailable(format!("pg delete old tables: {e}")))?;
@@ -314,14 +325,25 @@ fn row_to_record(row: &sqlx::postgres::PgRow) -> Result<TableRecord, PortError> 
     let document_id: String = row
         .try_get("document_id")
         .map_err(|e| PortError::Unavailable(format!("pg table document: {e}")))?;
-    let index: i64 = row.try_get("idx").unwrap_or(0);
-    let version: i64 = row.try_get("version").unwrap_or(1);
-    let source: String = row.try_get("source").unwrap_or_default();
+    // Required columns fail loudly: a defaulted decode turned a type mismatch
+    // into every table being index 0, version 1.
+    let index: i32 = row
+        .try_get("idx")
+        .map_err(|e| PortError::Unavailable(format!("pg table idx: {e}")))?;
+    let version: i32 = row
+        .try_get("version")
+        .map_err(|e| PortError::Unavailable(format!("pg table version: {e}")))?;
+    let source: String = row
+        .try_get("source")
+        .map_err(|e| PortError::Unavailable(format!("pg table source: {e}")))?;
     let sheet: Option<String> = row.try_get("sheet").ok().flatten();
     let page_span: Option<serde_json::Value> = row.try_get("page_span").ok().flatten();
     let title: Option<String> = row.try_get("title").ok().flatten();
     let caption: Option<String> = row.try_get("caption").ok().flatten();
-    let header: Vec<String> = row.try_get("header").unwrap_or_default();
+    let header: Vec<String> = row
+        .try_get::<Option<Vec<String>>, _>("header")
+        .map_err(|e| PortError::Unavailable(format!("pg table header: {e}")))?
+        .unwrap_or_default();
     let manifest: serde_json::Value = row.try_get("manifest").unwrap_or(serde_json::Value::Null);
     let manifest: TableManifest = serde_json::from_value(manifest)
         .map_err(|e| PortError::Malformed(format!("table manifest: {e}")))?;
@@ -467,10 +489,21 @@ mod integration {
             return;
         };
         let pool = sqlx::PgPool::connect(&url).await.expect("test database");
-        let records = PgTableRecords::from_pool(pool);
         let tenant = TenantId::new_unchecked(format!("tbl-test-{}", uuid::Uuid::new_v4()));
         let other = TenantId::new_unchecked(format!("tbl-test-other-{}", uuid::Uuid::new_v4()));
         let document = DocumentId::new_unchecked(format!("doc-{}", uuid::Uuid::new_v4()));
+        // The table rows reference their document (ON DELETE CASCADE), so the
+        // document has to exist first, as it does in ingest.
+        sqlx::query(
+            r#"INSERT INTO "Document" (id, "tenantId", title, content, "updatedAt")
+               VALUES ($1, $2, 'tbl test', '', CURRENT_TIMESTAMP)"#,
+        )
+        .bind(document.as_str())
+        .bind(tenant.as_str())
+        .execute(&pool)
+        .await
+        .expect("test document");
+        let records = PgTableRecords::from_pool(pool.clone());
 
         records
             .insert_rows(&[record(tenant.as_str(), document.as_str(), 1)])
@@ -494,7 +527,7 @@ mod integration {
 
         assert!(
             records
-                .get_table(&other, &current[0].id)
+                .current_table(&other, &current[0].id)
                 .await
                 .unwrap()
                 .is_none(),
