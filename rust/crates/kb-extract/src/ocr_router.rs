@@ -388,6 +388,13 @@ impl OcrRouter {
         let mut last_error: Option<String> = None;
 
         if let Some(provider) = provider {
+            // The pages that need OCR are about to wait on the remote service:
+            // give the worker's extract seat back first (ING-6). The local
+            // page facts are already read; what is left here is network wait
+            // and a cheap merge.
+            if !candidates.send.is_empty() {
+                options.seat.release();
+            }
             let routed = match provider.transport() {
                 OcrTransport::Image => {
                     self.route_images_in_pdf(&bytes, &candidates.send, provider.as_ref())

@@ -84,6 +84,9 @@ impl LayoutExtractorChain {
         pdf_bytes: &[u8],
         options: ExtractionOptions,
     ) -> Result<ExtractionResult, ExtractError> {
+        // Every layout extractor and the OCR fallback is a remote service:
+        // the worker's extract seat goes back before the wait (ING-6).
+        options.seat.release();
         for (name, extractor) in &self.extractors {
             match extractor
                 .extract_with_options(filename, "application/pdf", pdf_bytes, options.clone())

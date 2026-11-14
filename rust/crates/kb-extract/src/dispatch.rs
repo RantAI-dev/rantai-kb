@@ -184,6 +184,10 @@ pub async fn extract_document(
             }
         }
         Some(SupportedFileType::Image) => {
+            // A picture is read by a remote model (OCR or vision), or not at
+            // all: nothing local is left to do, so the worker's extract seat
+            // goes back before the wait (ING-6).
+            options.seat.release();
             // The router carries the page cache, the shared pool and the
             // breaker for pictures too (ING-6), when its provider reads
             // images. A document-only provider (Mistral) keeps the old path.

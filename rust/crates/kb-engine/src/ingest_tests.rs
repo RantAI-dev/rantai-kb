@@ -2141,3 +2141,133 @@ async fn one_job_slot_is_the_old_serial_worker_and_holds_the_small_job() {
         "with one job slot the small upload must wait for the big one"
     );
 }
+
+/// An extractor that, like the OCR router, gives the worker's extract seat
+/// back (or not) and then waits on a "remote service" until the test opens
+/// the gate. It counts how many documents are inside at once.
+struct RemoteWaitExtractor {
+    releases_seat: bool,
+    gate: Arc<tokio::sync::Notify>,
+    inside: Arc<AtomicUsize>,
+    most_inside: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Extractor for RemoteWaitExtractor {
+    async fn extract(
+        &self,
+        filename: &str,
+        mime_type: &str,
+        file_bytes: &[u8],
+    ) -> Result<ExtractionResult, PortError> {
+        self.extract_with_options(
+            filename,
+            mime_type,
+            file_bytes,
+            kb_ports::ExtractionOptions::default(),
+        )
+        .await
+    }
+
+    async fn extract_with_options(
+        &self,
+        _filename: &str,
+        _mime_type: &str,
+        _file_bytes: &[u8],
+        options: kb_ports::ExtractionOptions,
+    ) -> Result<ExtractionResult, PortError> {
+        if self.releases_seat {
+            options.seat.release();
+        }
+        let now = self.inside.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most_inside.fetch_max(now, Ordering::SeqCst);
+        self.gate.notified().await;
+        self.inside.fetch_sub(1, Ordering::SeqCst);
+        Ok(ExtractionResult::text(long_text(), "markdown"))
+    }
+}
+
+/// Two documents waiting at "OCR" with ONE extract seat: how many were inside
+/// the extractor at the same time?
+async fn documents_waiting_at_ocr_together(releases_seat: bool) -> usize {
+    let (jobs, documents, chunks, blobs) = parts();
+    for (doc, file) in [("doc_a", "a.pdf"), ("doc_b", "b.pdf")] {
+        documents.insert_doc(tenant(), named_document(doc));
+        blobs
+            .upload(
+                &format!("documents/{TENANT}/{doc}/{file}"),
+                b"%PDF-1.7 fake".to_vec(),
+                "application/pdf",
+            )
+            .await
+            .unwrap();
+    }
+    jobs.push(named_job("job_a", "doc_a", "a.pdf", 1));
+    jobs.push(named_job("job_b", "doc_b", "b.pdf", 2));
+
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let most_inside = Arc::new(AtomicUsize::new(0));
+    let worker = IngestWorker::new(
+        jobs,
+        documents.clone(),
+        chunks,
+        blobs,
+        Arc::new(RemoteWaitExtractor {
+            releases_seat,
+            gate: gate.clone(),
+            inside: Arc::new(AtomicUsize::new(0)),
+            most_inside: most_inside.clone(),
+        }),
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings {
+            embedding_model: Some("bge-m3".to_string()),
+            job_workers: 2,
+            seats: crate::seats::SeatCapacity {
+                extract: 1,
+                ..crate::seats::SeatCapacity::default()
+            },
+            poll_interval: Duration::from_millis(10),
+            ..IngestSettings::default()
+        },
+    );
+    let cancel = CancelToken::new();
+    let running = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move { worker.run(cancel).await })
+    };
+    // Let both jobs get as far as they can while the "OCR" is held.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let together = most_inside.load(Ordering::SeqCst);
+    // Open the gate for everyone, and both documents finish.
+    for _ in 0..50 {
+        gate.notify_waiters();
+        if status_of(&documents, "doc_a") == "ready" && status_of(&documents, "doc_b") == "ready" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(status_of(&documents, "doc_a"), "ready");
+    assert_eq!(status_of(&documents, "doc_b"), "ready");
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the worker stops when cancelled")
+        .unwrap();
+    together
+}
+
+#[tokio::test]
+async fn a_document_waiting_at_ocr_holds_no_extract_seat() {
+    assert_eq!(
+        documents_waiting_at_ocr_together(true).await,
+        2,
+        "with the seat given back, a second document starts while the first waits at OCR"
+    );
+}
+
+#[tokio::test]
+async fn an_extractor_that_keeps_the_seat_holds_the_next_document_out() {
+    // The control: without the release, one extract seat admits one document,
+    // so the test above can fail.
+    assert_eq!(documents_waiting_at_ocr_together(false).await, 1);
+}

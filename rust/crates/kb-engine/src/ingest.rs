@@ -476,23 +476,26 @@ impl IngestWorker {
         )
         .await;
 
+        // The extract seat covers the local reading. It is lent to the
+        // extractor through the options: an extractor about to wait on a
+        // remote service (the OCR router, a layout server) gives it back
+        // first, so a document waiting at OCR holds no seat and the local work
+        // of the documents behind it goes on (ING-6, as paragon's kb-bridge
+        // does). Whatever is still held is released when the call returns.
+        let seat =
+            kb_ports::SeatRelease::holding(self.seats.extract.acquire(priority.clone()).await);
         let options = ExtractionOptions {
             figures: policy.figures,
             force_layout: policy.force_layout,
             document_type: doc_type,
+            seat: seat.clone(),
         };
-        // The extract seat covers the whole extractor call, OCR included: the
-        // local parsers do their page reads inside the extraction, so there is
-        // nothing narrower to hold yet. When the OCR offload (ING-6 part B)
-        // moves the page reads out of the extractor, this seat shrinks to the
-        // local parsing and a document waiting on OCR holds no seat at all.
-        let extraction = {
-            let _seat = self.seats.extract.acquire(priority.clone()).await;
-            self.extractor
-                .extract_with_options(&job.filename, mime, &bytes, options)
-                .await
-                .map_err(|e| e.to_string())?
-        };
+        let extraction = self
+            .extractor
+            .extract_with_options(&job.filename, mime, &bytes, options)
+            .await;
+        seat.release();
+        let extraction = extraction.map_err(|e| e.to_string())?;
 
         // A parser that could not read the file reports the reason and leaves
         // `content` empty (`extract.ts:192`). Indexing that would put an empty

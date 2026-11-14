@@ -52,7 +52,8 @@ pub use types::{
     FigureGateCandidate, JobRecord, JobView, KnowledgeBaseRecord, KnowledgeBaseSummary,
     NewDocument, PageBlock, PageBlockKind, PageText, PatchCategory, PatchDocument,
     PatchKnowledgeBase, ProvenanceArm, ReapableJob, Relation, RelationView, RerankCandidate,
-    RerankResult, RerankScore, RetrievalProvenance, RetryJobOutcome, SearchHit, StoredChunk,
+    RerankResult, RerankScore, RetrievalProvenance, RetryJobOutcome, SearchHit, SeatRelease,
+    StoredChunk,
 };
 pub use visuals::{
     ImageDescriber, ImageReading, NormalizedImage, Visual, VisualCollector, VisualKind,

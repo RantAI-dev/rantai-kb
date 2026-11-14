@@ -133,6 +133,72 @@ pub struct JobRecord {
     pub created_at: Option<i64>,
 }
 
+/// A stage seat the ingest worker lends to an extractor (`ING-6`).
+///
+/// The worker holds its `extract` seat while a document is read locally. An
+/// extractor that is about to wait on a remote service (OCR, a layout
+/// server) calls [`SeatRelease::release`] first, so a document waiting at OCR
+/// holds no seat and the local work of other documents goes on. The seat is
+/// type-erased: this crate does not know the worker's seat type, only that it
+/// is given back when dropped. Clones share the seat, so releasing through any
+/// clone releases it once.
+#[derive(Clone, Default)]
+pub struct SeatRelease(Option<std::sync::Arc<HeldSeat>>);
+
+/// The slot a lent seat sits in until it is given back.
+type HeldSeat = std::sync::Mutex<Option<Box<dyn Send>>>;
+
+impl SeatRelease {
+    /// A handle holding `seat` until [`release`](Self::release) or the last
+    /// clone is dropped.
+    #[must_use]
+    pub fn holding(seat: impl Send + 'static) -> Self {
+        Self(Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
+            Box::new(seat),
+        )))))
+    }
+
+    /// Give the seat back now. Idempotent; a no-op when nothing is held.
+    pub fn release(&self) {
+        if let Some(slot) = &self.0 {
+            let seat = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            drop(seat);
+        }
+    }
+
+    /// Whether a seat is still held through this handle.
+    #[must_use]
+    pub fn is_held(&self) -> bool {
+        self.0.as_ref().is_some_and(|slot| {
+            slot.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+        })
+    }
+}
+
+impl std::fmt::Debug for SeatRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeatRelease")
+            .field("held", &self.is_held())
+            .finish()
+    }
+}
+
+/// A seat is not part of what the options *mean*: two option sets that differ
+/// only in the seat they carry ask for the same extraction (and the same cache
+/// entry).
+impl PartialEq for SeatRelease {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for SeatRelease {}
+
 /// Options passed to [`Extractor::extract_with_options`](crate::Extractor::extract_with_options).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExtractionOptions {
@@ -143,6 +209,11 @@ pub struct ExtractionOptions {
     /// Specific document type hint (e.g. "handwritten", "table", "form", "printed_text").
     #[serde(default)]
     pub document_type: Option<String>,
+    /// The worker's `extract` seat, released by an extractor before it waits
+    /// on a remote service (`ING-6`). Never serialised: it is not part of the
+    /// cache key.
+    #[serde(skip)]
+    pub seat: SeatRelease,
 }
 
 /// Result of running an [`Extractor`](crate::Extractor) over a stored file.
