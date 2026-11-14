@@ -2069,13 +2069,14 @@ async fn small_job_finishes_behind_a_stuck_big_one(job_workers: usize) -> bool {
             .await
             .unwrap();
     }
-    // The big upload is older: it is claimed first, as a real queue would.
+    // The big upload comes first, and the small one only once the worker is
+    // already busy with it: the live case. Queuing both before the worker
+    // starts hid a run loop that never claimed while a job was in flight.
     jobs.push(named_job("job_big", "doc_big", "big.pdf", 1));
-    jobs.push(named_job("job_small", "doc_small", "small.pdf", 2));
 
     let gate = Arc::new(tokio::sync::Notify::new());
     let worker = IngestWorker::new(
-        jobs,
+        jobs.clone(),
         documents.clone(),
         chunks,
         blobs,
@@ -2093,6 +2094,15 @@ async fn small_job_finishes_behind_a_stuck_big_one(job_workers: usize) -> bool {
         let cancel = cancel.clone();
         tokio::spawn(async move { worker.run(cancel).await })
     };
+    for _ in 0..200 {
+        if jobs.pending_len() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(jobs.pending_len(), 0, "the worker claimed the big job");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    jobs.push(named_job("job_small", "doc_small", "small.pdf", 2));
 
     // Give the small job ample time to finish while the big one is held.
     let mut small_ready_while_big_stuck = false;

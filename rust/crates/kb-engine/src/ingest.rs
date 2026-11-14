@@ -294,14 +294,18 @@ impl IngestWorker {
                     _ = cancelled.changed() => {}
                 }
             } else {
-                // Work is in flight: wait for a job to finish, so a freed
-                // slot is refilled at once instead of after a poll interval.
+                // Work is in flight: wake when a job finishes (its slot is
+                // refilled at once), and on the poll interval too, so a file
+                // uploaded while a long document runs is claimed into a free
+                // slot instead of waiting for that document to finish, and the
+                // stale reclaim keeps its schedule.
                 tokio::select! {
                     joined = inflight.join_next() => {
                         if let Some(Err(err)) = joined {
                             tracing::error!(error = %err, "ingest job task failed");
                         }
                     }
+                    () = tokio::time::sleep(self.settings.poll_interval) => {}
                     _ = cancelled.changed() => {}
                 }
             }
