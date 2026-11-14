@@ -152,6 +152,7 @@ async fn serve() -> String {
             embedder: Arc::new(embedder),
             jobs: Arc::new(jobs),
             events: Arc::clone(&events),
+            tables: None,
             version: "test".to_string(),
         },
         Arc::new(FakeReranker::default()),

@@ -13,6 +13,7 @@
 mod jobs;
 mod media;
 mod structure;
+mod tables;
 mod taxonomy;
 mod upload;
 
@@ -127,6 +128,9 @@ pub fn router() -> Router<Arc<AppState>> {
             patch(taxonomy::patch_category).delete(taxonomy::delete_category),
         )
         .route("/v1/events", get(crate::events::events_stream))
+        .route("/v1/tables", get(tables::list_tables))
+        .route("/v1/tables/:id", get(tables::get_table))
+        .route("/v1/tables/:id/query", post(tables::query_table))
         .layer(DefaultBodyLimit::max(upload_body_limit()))
 }
 
@@ -424,7 +428,7 @@ async fn search(
             },
             ..StageTimingsDto::default()
         };
-        let response = SearchResponseDto {
+        let mut response = SearchResponseDto {
             chunks: Some(chunk_dtos),
             sources: None,
             context,
@@ -439,7 +443,9 @@ async fn search(
             )),
             note: floor_note,
             degrades: Vec::new(),
+            tables: Vec::new(),
         };
+        tables::attach_tables(&state, &auth.tenant_id, &mut response).await;
         return Ok(finish_search(response, route_sw));
     }
 
@@ -471,6 +477,7 @@ async fn search(
                 // hybrid retrieval (one did: the MOCO-KF adapter) must be told,
                 // so the stub degrades visibly instead of answering silently.
                 degrades: vec![HYBRID_STUB_DEGRADE.to_string()],
+                tables: Vec::new(),
             },
             route_sw,
         ));
@@ -506,6 +513,7 @@ async fn search(
         // and everything above it in the handler.
         stats.stage_timings_ms.scope_build = scope_build_ms;
     }
+    tables::attach_tables(&state, &auth.tenant_id, &mut response).await;
     Ok(finish_search(response, route_sw))
 }
 
@@ -1342,6 +1350,16 @@ async fn delete_document(
         && let Err(err) = graph.delete_document(&auth.tenant_id, &doc_id).await
     {
         tracing::warn!(error = %err, "graph delete failed during hard delete");
+    }
+    // The document's tables (`TBL-1`): every version's rows and their Parquet
+    // grids. Best-effort like the other cascades, but it must be attempted:
+    // a table left behind would stay queryable after the document is gone.
+    if let Some(tables) = state.tables.as_ref()
+        && let Err(err) = tables
+            .delete_document_tables(&auth.tenant_id, &doc_id)
+            .await
+    {
+        tracing::warn!(error = %err, "table delete failed during hard delete");
     }
     if let Some(s3_key) = doc.s3_key.as_deref() {
         if let Err(err) = state.blob.delete(s3_key).await {

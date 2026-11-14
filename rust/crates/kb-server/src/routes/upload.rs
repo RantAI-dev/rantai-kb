@@ -134,7 +134,26 @@ pub async fn ingest_document(
     // Additive: an optional JSON object for the document's JSONB metadata, the
     // same store `RET-3` filters and `RET-4` boosts read. Absent keeps exactly
     // the metadata an upload had before this field existed.
-    let metadata = parse_upload_metadata(upload.field("metadata"))?;
+    let mut metadata = parse_upload_metadata(upload.field("metadata"))?;
+    // Additive (`TBL-1`): `tablePrivacy: "aggregate-only"` asks the table
+    // routes to answer only whole-group aggregates for this document's tables.
+    // It lives in the document's JSONB metadata, so no column and no migration
+    // are added to the shared `Document` table.
+    if let Some(privacy) = upload
+        .field("tablePrivacy")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if privacy != "aggregate-only" && privacy != "open" {
+            return Err(ApiError::BadRequest(
+                "'tablePrivacy' must be 'aggregate-only' or 'open'".to_string(),
+            ));
+        }
+        let object = metadata.get_or_insert_with(|| json!({}));
+        if let Some(object) = object.as_object_mut() {
+            object.insert("tablePrivacy".to_string(), json!(privacy));
+        }
+    }
     let document_type = upload
         .field("documentType")
         .filter(|v| !v.is_empty())

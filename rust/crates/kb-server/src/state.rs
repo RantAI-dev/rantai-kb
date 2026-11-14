@@ -8,7 +8,9 @@ use std::sync::Arc;
 use kb_engine::{Engine, EngineInputs, EngineSettings, NoopExpander, QueryExpander};
 use kb_inference::EmbedderSettings;
 use kb_inference::ExpansionSettings;
-use kb_ports::{BlobStore, DocumentStore, Embedder, EntityStore, GraphStore, JobStore, PortError};
+use kb_ports::{
+    BlobStore, DocumentStore, Embedder, EntityStore, GraphStore, JobStore, PortError, TableStore,
+};
 
 use crate::config::{EmbedderConfig, RerankerConfig};
 use crate::events::EventBus;
@@ -32,6 +34,10 @@ pub struct AppState {
     /// Object storage: the upload route writes, the raw/asset routes read, the
     /// hard-delete and reaper paths remove.
     pub blob: Arc<dyn BlobStore>,
+    /// Stored tables (`TBL-1`), or `None` when `KB_TABLES=false`. With no store
+    /// the `/v1/tables` routes 404, ingest stores nothing, and search is
+    /// exactly what it was.
+    pub tables: Option<Arc<dyn TableStore>>,
     pub embedder: Arc<dyn Embedder>,
     /// Ingest queue, written by the upload route and read by the job routes.
     pub jobs: Arc<dyn JobStore>,
@@ -60,6 +66,9 @@ pub struct StateParts {
     pub embedder: Arc<dyn Embedder>,
     pub jobs: Arc<dyn JobStore>,
     pub events: Arc<EventBus>,
+    /// The table store, when the caller wants one. `None` in a test state that
+    /// does not exercise tables.
+    pub tables: Option<Arc<dyn TableStore>>,
     pub version: String,
 }
 
@@ -131,6 +140,20 @@ impl AppState {
         let blob: Arc<dyn BlobStore> = Arc::new(
             kb_store_blob::S3BlobStore::new(config.s3).map_err(|e| anyhow::anyhow!("s3: {e}"))?,
         );
+        // The table store shares the pool and the bucket: it is Postgres rows,
+        // Parquet blobs and an in-memory DuckDB over one cached file.
+        let tables: Option<Arc<dyn TableStore>> = if config.tables.enabled {
+            Some(Arc::new(kb_store_tables::TablesStore::from_pool(
+                pool.clone(),
+                Arc::clone(&blob),
+                kb_store_tables::TableStoreSettings {
+                    cache_dir: config.tables.cache_dir.clone(),
+                    query_timeout_ms: config.tables.query_timeout_ms,
+                },
+            )))
+        } else {
+            None
+        };
         let page_arm = match config.pages.as_ref() {
             None => None,
             Some(pages) => Some(Arc::new(
@@ -229,6 +252,7 @@ impl AppState {
             graph,
             graph_arm,
             blob,
+            tables,
             embedder,
             jobs,
             events: EventBus::new(),
@@ -269,6 +293,7 @@ impl AppState {
             graph: parts.graph,
             graph_arm: parts.graph_arm,
             blob: parts.blob,
+            tables: parts.tables,
             embedder: parts.embedder,
             jobs: parts.jobs,
             events: parts.events,
@@ -344,6 +369,9 @@ impl AppState {
                 &config.visuals,
                 config.cache.as_ref(),
             )?));
+        }
+        if let Some(tables) = self.tables.as_ref() {
+            worker = worker.with_table_store(Arc::clone(tables));
         }
         if let (Some(arm), Some(pages)) =
             (self.engine.inputs.page_arm.as_ref(), config.pages.as_ref())

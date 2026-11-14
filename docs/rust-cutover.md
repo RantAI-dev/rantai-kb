@@ -705,6 +705,47 @@ community store ignores the scope and is contained by the arm.
 The new table is additive: `prisma/migrations/20261104120000_community_tables`
 creates `KbCommunity` and two indexes, touching nothing that exists.
 
+### 22. Additive: stored tables and `POST /v1/tables/:id/query` (`TBL-1`, 2026-11-14)
+
+A document's tables are now data, not text. On ingest each grid is stored as Parquet
+in the blob store (`tables/{tenant}/{document}/{tableId}/v{n}.parquet`, one typed
+column per header plus `_row` and `_derived`) with a record in the new **additive**
+Postgres table `KbTable` (`prisma/migrations/20261114120000_kb_tables`; primary key
+`(id, version)`, `documentId` cascading from `Document`). Nothing existing changes:
+Bun ignores the table, the columns it reads are untouched, and an unset `KB_TABLES`
+(or no table store) leaves ingest and search byte-identical.
+
+Three routes are added, with the document routes' `kb:read` scope and tenant rules:
+
+| Method | Path | Answer |
+|---|---|---|
+| `GET` | `/v1/tables?documentId=…` | The document's current tables; no `documentId` lists the tenant's. |
+| `GET` | `/v1/tables/:id` | The record with its manifest (`columns` with kind/role/unit, `derivedRows`, `confidence`). |
+| `POST` | `/v1/tables/:id/query` | `{columns, rows, rows_matched, excluded_derived_rows, suppressed_groups, truncated, warnings}`. |
+
+The query body is a typed `TableQuery` (never SQL): `select` (plain columns or
+`{agg, column, as}`), `filter`, `groupBy`, `orderBy`, `limit`, `includeDerived`.
+A refused query is a `400` whose body *is* the `QueryError` JSON — `unknown_column`
+(with `available`), `not_summable` (with `role`), `not_grouped`, `restricted`,
+`bad_value`, `empty` — so a client can act on the tag rather than a message. A table
+id that is not in the caller's tenant is a `404`, exactly like a missing one.
+
+Search is additive in two places: a `table_summary`/`table_row` hit carries
+`tableId` and `tableTitle`, and the answer gains `tables: [{tableId, title,
+documentId}]` for the documents it hit. Both keys are omitted when there is nothing
+to say, so an older client sees the response it always saw.
+
+The upload accepts an optional `tablePrivacy` field: `"aggregate-only"` stores
+`metadata.tablePrivacy` on the document and makes every query on its tables
+aggregate-only (no plain rows, no grouping, no MIN/MAX, groups smaller than five
+rows suppressed, with complementary suppression when exactly one group would be
+hidden). An old deployment's documents have no such key and answer as before.
+
+Operational notes: `KB_TABLES=false` disables the store and the routes (404);
+`KB_TABLE_QUERY_TIMEOUT_MS` overrides `QUERY_TIMEOUT_MS` (5000); downloaded grids
+are cached under `KB_CACHE_DIR/tables/` (or the system temporary directory), one
+file per grid version; a hard delete removes the document's table rows and Parquet.
+
 ---
 
 ## 6. Shared Known Issues

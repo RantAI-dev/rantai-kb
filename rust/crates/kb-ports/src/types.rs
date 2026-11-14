@@ -21,6 +21,13 @@ pub enum ChunkType {
     /// A whole page, as an image vector in the page-image index
     /// (`crate::pages`). Never stored in the text index.
     Page,
+    /// A table's schema and sample values (`TBL-1`): title, caption, sheet or
+    /// page, and every header with its kind, role and unit. Retrieval finds the
+    /// table through this unit; `metadata.tableId` names the table to query.
+    TableSummary,
+    /// One table row as `Header: value; …` (`TBL-1`), indexed for tables of at
+    /// most 60 rows so a key/value lookup lands on the row itself.
+    TableRow,
 }
 
 impl ChunkType {
@@ -35,6 +42,8 @@ impl ChunkType {
             Some("heading") => Self::Heading,
             Some("figure") => Self::Figure,
             Some("page") => Self::Page,
+            Some("table_summary") => Self::TableSummary,
+            Some("table_row") => Self::TableRow,
             _ => Self::Text,
         }
     }
@@ -50,6 +59,8 @@ impl ChunkType {
             Self::Heading => "heading",
             Self::Figure => "figure",
             Self::Page => "page",
+            Self::TableSummary => "table_summary",
+            Self::TableRow => "table_row",
         }
     }
 
@@ -70,6 +81,10 @@ pub struct ChunkMetadata {
     pub asset_key: Option<String>,
     pub anchor_chunk_index: Option<u32>,
     pub contextual_prefix: Option<String>,
+    /// The table this chunk describes or is a row of (`TBL-1`).
+    /// Additive: absent for every chunk that is not a table unit.
+    #[serde(default, rename = "tableId")]
+    pub table_id: Option<String>,
 }
 
 /// A chunk returned by the chunk store. The store is responsible for filling

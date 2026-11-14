@@ -24,7 +24,7 @@ use kb_core::{
 use kb_ports::{
     BlobStore, ChunkId, ChunkType, DocumentId, DocumentStore, Embedder, EntityExtractor,
     EntityUpsert, ExtractedFigure, ExtractionOptions, Extractor, GraphStore, IndexUnit, JobRecord,
-    JobStore, PortError, ProgressSink, RelationUpsert, RetrievalIndex, asset_path,
+    JobStore, PortError, ProgressSink, RelationUpsert, RetrievalIndex, TableStore, asset_path,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
@@ -186,6 +186,10 @@ pub struct IngestWorker {
     /// The visual stage (`ING-5`), when configured. Without it, layout crops
     /// are indexed by caption and page text exactly as before.
     visuals: Option<Arc<crate::visuals::VisualPipeline>>,
+    /// The table store (`TBL-1`), when configured. Without it a document's
+    /// grids are not stored and its table units are not indexed; everything
+    /// else the ingest does is unchanged.
+    tables: Option<Arc<dyn TableStore>>,
     progress_sink: Option<Arc<dyn ProgressSink>>,
     /// Per-job throttle state for progress emits, mirroring `lastEmit` in
     /// `src/lib/ingest/job.ts`: always emit on a step change, otherwise at most
@@ -221,6 +225,7 @@ impl IngestWorker {
             graph: None,
             page_ingest: None,
             visuals: None,
+            tables: None,
             progress_sink: None,
             emit_state: Arc::new(Mutex::new(HashMap::new())),
             seats: settings.seats.seats(),
@@ -258,6 +263,13 @@ impl IngestWorker {
     #[must_use]
     pub fn with_visuals(mut self, visuals: Arc<crate::visuals::VisualPipeline>) -> Self {
         self.visuals = Some(visuals);
+        self
+    }
+
+    /// Store the document's tables and index them as retrieval units (`TBL-1`).
+    #[must_use]
+    pub fn with_table_store(mut self, tables: Arc<dyn TableStore>) -> Self {
+        self.tables = Some(tables);
         self
     }
 
@@ -647,6 +659,22 @@ impl IngestWorker {
             )
         });
 
+        // The tables (`TBL-1`): store each grid with its manifest and index the
+        // two retrieval units. A document with no tables is untouched, and a
+        // store failure fails the job like any other store failure; a grid that
+        // could not be parsed never reaches here (the extractor notes it).
+        self.index_tables(
+            job,
+            document_id,
+            &title,
+            category_of(&params),
+            subcategory_of(&params).as_deref(),
+            &extraction.tables,
+            &mut chunks,
+            priority,
+        )
+        .await?;
+
         // Entity / relation extraction (non-fatal, mirrors index-document.ts:58-185)
         if policy.entities {
             if !entity_extraction_enabled {
@@ -879,6 +907,127 @@ impl IngestWorker {
             .await
     }
 
+    /// Store a document's tables and index their two retrieval units (`TBL-1`).
+    ///
+    /// The grid and its manifest go to the table store in one call (which
+    /// holds the store seat: the Parquet write and the Postgres rows are
+    /// writes like any other). Then each table contributes:
+    ///
+    /// * one `table_summary` unit — title, caption, sheet or page, the headers
+    ///   with kind/role/unit and the sample values — so retrieval can find the
+    ///   table and a caller can see what it can ask;
+    /// * one `table_row` unit per row for tables of at most
+    ///   [`TABLE_ROW_UNIT_MAX_ROWS`] rows, as `Header: value; …`.
+    ///
+    /// Both carry `tableId` in their metadata. No tables: nothing happens.
+    #[allow(clippy::too_many_arguments)]
+    async fn index_tables(
+        &self,
+        job: &JobRecord,
+        document_id: &DocumentId,
+        title: &str,
+        category: &str,
+        subcategory: Option<&str>,
+        tables: &[kb_core::tables::TableGrid],
+        chunks: &mut Vec<Chunk>,
+        priority: &crate::seats::SeatPriority,
+    ) -> Result<(), String> {
+        let Some(store) = self.tables.clone() else {
+            return Ok(());
+        };
+        if tables.is_empty() {
+            return Ok(());
+        }
+        let prepared: Vec<(kb_core::tables::TableGrid, kb_core::tables::TableManifest)> = tables
+            .iter()
+            .map(|grid| (grid.clone(), kb_core::tables::build_manifest(grid)))
+            .collect();
+        let table_count = prepared.len();
+        let records = {
+            // The store seat: the grid blobs and the table rows are writes.
+            let _seat = self.seats.store.acquire(priority.clone()).await;
+            store
+                .put_tables(&job.tenant_id, document_id, prepared)
+                .await
+                .map_err(|e| format!("storing tables failed: {e}"))?
+        };
+        if records.len() != table_count {
+            return Err(format!(
+                "table store returned {} records for {table_count} tables",
+                records.len()
+            ));
+        }
+        let mut next_index = chunks
+            .iter()
+            .map(|c| c.metadata.chunk_index)
+            .max()
+            .map_or(0, |last| last.saturating_add(1));
+        let mut summary_chunks = 0usize;
+        let mut row_chunks = 0usize;
+        for (grid, record) in tables.iter().zip(records.iter()) {
+            let manifest = kb_core::tables::build_manifest(grid);
+            let section = grid
+                .title
+                .clone()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| format!("Table {}", record.index + 1));
+            chunks.push(Chunk {
+                content: table_summary_content(grid, &manifest),
+                metadata: ChunkMetadata {
+                    document_title: title.to_string(),
+                    category: category.to_string(),
+                    subcategory: subcategory.map(str::to_string),
+                    section: Some(section.clone()),
+                    heading_path: None,
+                    chunk_index: next_index,
+                    contextual_prefix: None,
+                    chunk_type: Some("table_summary".to_string()),
+                    page: grid.page_span.map(|(first, _)| first),
+                    asset_key: None,
+                    anchor_chunk_index: None,
+                    table_id: Some(record.id.to_string()),
+                },
+            });
+            next_index = next_index.saturating_add(1);
+            summary_chunks += 1;
+            if grid.rows.len() > TABLE_ROW_UNIT_MAX_ROWS {
+                continue;
+            }
+            for (row_index, row) in grid.rows.iter().enumerate() {
+                let content = table_row_content(&grid.header, row);
+                if content.is_empty() {
+                    continue;
+                }
+                chunks.push(Chunk {
+                    content,
+                    metadata: ChunkMetadata {
+                        document_title: title.to_string(),
+                        category: category.to_string(),
+                        subcategory: subcategory.map(str::to_string),
+                        section: Some(format!("{section} — row {}", row_index + 1)),
+                        heading_path: None,
+                        chunk_index: next_index,
+                        contextual_prefix: None,
+                        chunk_type: Some("table_row".to_string()),
+                        page: grid.page_span.map(|(first, _)| first),
+                        asset_key: None,
+                        anchor_chunk_index: None,
+                        table_id: Some(record.id.to_string()),
+                    },
+                });
+                next_index = next_index.saturating_add(1);
+                row_chunks += 1;
+            }
+        }
+        tracing::info!(
+            tables = records.len(),
+            summaries = summary_chunks,
+            rows = row_chunks,
+            "[kb-ingest] tables stored and indexed"
+        );
+        Ok(())
+    }
+
     /// Embed and store a document's text chunks; returns how many were stored.
     /// No chunks: nothing is touched, as in the Bun worker (`storeChunks`
     /// returns early on an empty batch and the document is still ready).
@@ -970,6 +1119,8 @@ impl IngestWorker {
                 let chunk_type = match chunk.metadata.chunk_type.as_deref() {
                     Some("figure") => ChunkType::Figure,
                     Some("table") => ChunkType::Table,
+                    Some("table_summary") => ChunkType::TableSummary,
+                    Some("table_row") => ChunkType::TableRow,
                     _ => ChunkType::Text,
                 };
                 let sparse = kb_core::sparse::encode_document(&chunk.content);
@@ -1127,6 +1278,7 @@ impl IngestWorker {
                     asset_key: None,
                     anchor_chunk_index: None,
                     contextual_prefix: None,
+                    table_id: None,
                 };
                 IndexUnit {
                     id: ChunkId(format!("{}_{}", document_id.0, chunk_index)),
@@ -1494,6 +1646,7 @@ impl IngestWorker {
                     asset_key: Some(key),
                     anchor_chunk_index,
                     contextual_prefix: None,
+                    table_id: None,
                 },
             });
         }
@@ -1972,6 +2125,126 @@ fn subcategory_of(params: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Tables at most this many rows long are indexed row by row as well as by
+/// their summary. Above it the row units would outnumber the document's own
+/// text and every query would rank table noise; the summary still finds it.
+pub const TABLE_ROW_UNIT_MAX_ROWS: usize = 60;
+
+/// The `table_summary` unit's text: what the table is and what can be asked of
+/// it. Pure, so the wording is testable without a store.
+#[must_use]
+pub fn table_summary_content(
+    grid: &kb_core::tables::TableGrid,
+    manifest: &kb_core::tables::TableManifest,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    out.push_str("Table");
+    if let Some(title) = grid.title.as_deref().filter(|t| !t.is_empty()) {
+        let _ = write!(out, ": {title}");
+    }
+    out.push('\n');
+    if let Some(caption) = grid.caption.as_deref().filter(|c| !c.is_empty()) {
+        let _ = writeln!(out, "Caption: {caption}");
+    }
+    if let Some(sheet) = grid.sheet.as_deref().filter(|s| !s.is_empty()) {
+        let _ = writeln!(out, "Sheet: {sheet}");
+    }
+    if let Some((first, last)) = grid.page_span {
+        if first == last {
+            let _ = writeln!(out, "Page: {first}");
+        } else {
+            let _ = writeln!(out, "Pages: {first}-{last}");
+        }
+    }
+    let _ = write!(
+        out,
+        "Rows: {}; columns: {}",
+        manifest.n_rows, manifest.n_cols
+    );
+    if !manifest.derived_rows.is_empty() {
+        let _ = write!(
+            out,
+            "; {} subtotal/total row(s), excluded from totals by default",
+            manifest.derived_rows.len()
+        );
+    }
+    out.push('\n');
+    for column in &manifest.columns {
+        let _ = write!(
+            out,
+            "- {}: {} {}",
+            column.name,
+            kind_word(column.kind),
+            role_word(column.role)
+        );
+        if let Some(unit) = column.unit.as_deref().filter(|u| !u.is_empty()) {
+            let _ = write!(out, ", unit {unit}");
+        }
+        out.push('\n');
+        if !column.sample_values.is_empty() {
+            let _ = writeln!(out, "  sample values: {}", column.sample_values.join(", "));
+        }
+    }
+    out
+}
+
+/// One row as `Header: value; …`, with empty cells left out. Pure.
+#[must_use]
+pub fn table_row_content(header: &[String], row: &[kb_core::tables::Cell]) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(header.len());
+    for (index, name) in header.iter().enumerate() {
+        let value = row.get(index).map(cell_word).unwrap_or_default();
+        if value.is_empty() {
+            continue;
+        }
+        parts.push(format!("{name}: {value}"));
+    }
+    parts.join("; ")
+}
+
+fn cell_word(cell: &kb_core::tables::Cell) -> String {
+    use kb_core::tables::Cell;
+    let text = match cell {
+        Cell::Empty => String::new(),
+        Cell::Text(s) | Cell::Date(s) => s.clone(),
+        Cell::Number(n) if n.is_finite() && n.fract() == 0.0 && n.abs() < 1e15 => {
+            format!("{}", *n as i64)
+        }
+        Cell::Number(n) => n.to_string(),
+        Cell::Bool(b) => b.to_string(),
+    };
+    const MAX_CELL_CHARS: usize = 200;
+    if text.chars().count() > MAX_CELL_CHARS {
+        text.chars().take(MAX_CELL_CHARS).collect()
+    } else {
+        text
+    }
+}
+
+fn kind_word(kind: kb_core::tables::ColumnKind) -> &'static str {
+    use kb_core::tables::ColumnKind;
+    match kind {
+        ColumnKind::Number => "number",
+        ColumnKind::Text => "text",
+        ColumnKind::Date => "date",
+        ColumnKind::Bool => "boolean",
+        ColumnKind::Mixed => "mixed",
+        ColumnKind::Empty => "empty",
+    }
+}
+
+fn role_word(role: kb_core::tables::ColumnRole) -> &'static str {
+    use kb_core::tables::ColumnRole;
+    match role {
+        ColumnRole::Quantity => "quantity",
+        ColumnRole::Code => "code",
+        ColumnRole::Identifier => "identifier",
+        ColumnRole::Label => "label",
+        ColumnRole::Date => "date",
+    }
+}
+
 /// The metadata object stored on each chunk, with the field names the Bun
 /// chunker writes. An absent value is left out rather than written as null,
 /// matching how an `undefined` property drops out of the TS object.
@@ -2001,6 +2274,10 @@ fn storage_metadata(meta: &ChunkMetadata) -> Value {
     if let Some(anchor) = meta.anchor_chunk_index {
         map.insert("anchorChunkIndex".to_string(), json!(anchor));
     }
+    if let Some(table_id) = &meta.table_id {
+        // `TBL-1`: the table a search hit can be queried through.
+        map.insert("tableId".to_string(), json!(table_id));
+    }
     Value::Object(map)
 }
 
@@ -2022,7 +2299,88 @@ mod tests {
             page: None,
             asset_key: None,
             anchor_chunk_index: None,
+            table_id: None,
         }
+    }
+
+    #[test]
+    fn a_table_summary_says_what_can_be_asked() {
+        use kb_core::tables::{Cell, ColumnInfo, ColumnKind, ColumnRole, TableGrid};
+        let grid = TableGrid {
+            source: Some(kb_core::tables::TableSource::Xlsx),
+            sheet: Some("PDRB".to_string()),
+            title: Some("Tabel 3.1 PDRB".to_string()),
+            caption: Some("Harga berlaku".to_string()),
+            header: vec!["Region".to_string(), "Revenue".to_string()],
+            rows: vec![
+                vec![Cell::Text("Jawa Timur".to_string()), Cell::Number(10.0)],
+                vec![Cell::Text("Bali".to_string()), Cell::Number(5.0)],
+                vec![Cell::Text("Jumlah".to_string()), Cell::Number(15.0)],
+            ],
+            ..TableGrid::default()
+        };
+        let manifest = kb_core::tables::TableManifest {
+            columns: vec![
+                ColumnInfo {
+                    name: "Region".to_string(),
+                    kind: ColumnKind::Text,
+                    role: ColumnRole::Identifier,
+                    unit: None,
+                    sample_values: vec!["Jawa Timur".to_string(), "Bali".to_string()],
+                    distinct_count: 3,
+                },
+                ColumnInfo {
+                    name: "Revenue".to_string(),
+                    kind: ColumnKind::Number,
+                    role: ColumnRole::Quantity,
+                    unit: Some("Rp juta".to_string()),
+                    sample_values: Vec::new(),
+                    distinct_count: 3,
+                },
+            ],
+            derived_rows: vec![2],
+            formulas_known: true,
+            confidence: kb_core::tables::Confidence::High,
+            n_rows: 3,
+            n_cols: 2,
+            truncated: false,
+            notes: Vec::new(),
+        };
+        let text = table_summary_content(&grid, &manifest);
+        assert!(text.contains("Table: Tabel 3.1 PDRB"), "{text}");
+        assert!(text.contains("Caption: Harga berlaku"), "{text}");
+        assert!(text.contains("Sheet: PDRB"), "{text}");
+        assert!(text.contains("Rows: 3; columns: 2"), "{text}");
+        assert!(text.contains("1 subtotal/total row(s)"), "{text}");
+        assert!(
+            text.contains("- Revenue: number quantity, unit Rp juta"),
+            "{text}"
+        );
+        assert!(text.contains("sample values: Jawa Timur, Bali"), "{text}");
+    }
+
+    #[test]
+    fn a_table_row_is_header_colon_value_with_empty_cells_left_out() {
+        use kb_core::tables::{Cell, TableGrid};
+        let row = vec![
+            Cell::Text("Bali".to_string()),
+            Cell::Number(10.0),
+            Cell::Empty,
+            Cell::Date("2023-01-01".to_string()),
+        ];
+        let header = vec![
+            "Region".to_string(),
+            "Revenue".to_string(),
+            "Catatan".to_string(),
+            "Tahun".to_string(),
+        ];
+        assert_eq!(
+            table_row_content(&header, &row),
+            "Region: Bali; Revenue: 10; Tahun: 2023-01-01"
+        );
+        let empty = TableGrid::default();
+        assert_eq!(table_row_content(&[], &[]), "");
+        assert_eq!(empty.header.len(), 0);
     }
 
     #[test]

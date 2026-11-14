@@ -80,11 +80,20 @@ pub enum Arm {
     /// the caller cannot see — which is exactly what this row watches for. The
     /// summary text itself must never appear in an answer.
     Global,
+    /// Stored tables (`TBL-1`): `GET /v1/tables`, `GET /v1/tables/{id}` and
+    /// `POST /v1/tables/{id}/query`.
+    ///
+    /// A table is addressed by its document, so this row probes the
+    /// document-authorised routes the same way the entity row does: a table of
+    /// a document in this tenant may be read (the key's knowledge-base limit
+    /// still applies), and a table of another tenant's document must answer
+    /// 404 — never the table, its manifest or a number computed from it.
+    Table,
 }
 
 impl Arm {
     /// Every arm, in the order the report lists them.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Vector,
         Self::Bm25,
         Self::Neighbour,
@@ -93,6 +102,7 @@ impl Arm {
         Self::Page,
         Self::Tree,
         Self::Global,
+        Self::Table,
         Self::Entity,
     ];
 
@@ -107,6 +117,7 @@ impl Arm {
             Self::Page => "page",
             Self::Tree => "tree",
             Self::Global => "global",
+            Self::Table => "table",
             Self::Entity => "entity",
         }
     }
@@ -125,6 +136,7 @@ impl Arm {
             Self::Page => Some("page"),
             Self::Tree => Some("tree"),
             Self::Global => Some("global"),
+            Self::Table => None,
             Self::Entity => None,
         }
     }
@@ -154,6 +166,7 @@ impl Arm {
     pub fn probe_kind(self) -> ProbeKind {
         match self {
             Self::Entity => ProbeKind::DocumentIntelligence,
+            Self::Table => ProbeKind::Tables,
             Self::Figure => ProbeKind::SearchOrAsset,
             Self::Vector
             | Self::Bm25
@@ -192,6 +205,9 @@ pub enum ProbeKind {
     /// `GET /v1/documents/:id/intelligence` — the entity graph of one document,
     /// addressed by id, which is the entity arm's only surface in this API.
     DocumentIntelligence,
+    /// `GET /v1/tables?documentId=`, `GET /v1/tables/{id}` and
+    /// `POST /v1/tables/{id}/query` for one document's tables (`TBL-1`).
+    Tables,
 }
 
 /// A way a caller narrows what a search may see.
@@ -304,6 +320,10 @@ pub struct SeedDocument {
     pub has_figures: bool,
     /// First figure asset key, when there is one.
     pub figure_asset_key: Option<String>,
+    /// Ids of the tables the ingest stored for this document (`TBL-1`). Empty
+    /// when the document had none or the server has no table store.
+    #[serde(default)]
+    pub table_ids: Vec<String>,
 }
 
 /// A scope: the documents a caller may see, and the request that selects them.
@@ -480,12 +500,17 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
             scopes: scopes.clone(),
             probes: Vec::new(),
         };
-        for outside in holder
-            .outside(scope)
-            .into_iter()
-            .take(MAX_OUTSIDE_PER_SCOPE)
-        {
-            for arm in Arm::ALL {
+        for arm in Arm::ALL {
+            // The table row probes documents that have tables; every other arm
+            // probes documents that do not, so adding table-bearing seed
+            // documents cannot dilute another arm's canary with a document it
+            // cannot find.
+            for outside in holder
+                .outside(scope)
+                .into_iter()
+                .filter(|document| has_the_right_corpus(document, arm))
+                .take(MAX_OUTSIDE_PER_SCOPE)
+            {
                 probes.push(PlannedProbe {
                     arm,
                     kind: arm.probe_kind(),
@@ -495,11 +520,12 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
                     positive: false,
                 });
             }
-        }
-        // One positive control per arm per scope, from the first document that
-        // this scope can see. If this cannot be found, the scope proves nothing.
-        if let Some(inside) = documents.iter().find(|d| scope.allowed.contains(&d.id)) {
-            for arm in Arm::ALL {
+            // One positive control per arm per scope, from a document that this
+            // scope can see. If there is none, the scope proves nothing.
+            if let Some(inside) = documents
+                .iter()
+                .find(|d| scope.allowed.contains(&d.id) && has_the_right_corpus(d, arm))
+            {
                 probes.push(PlannedProbe {
                     arm,
                     kind: arm.probe_kind(),
@@ -560,7 +586,24 @@ pub fn canary_query(document: &SeedDocument, arm: Arm) -> String {
         // with. Written as a literal because this crate is a black-box client
         // and may not link `kb-core`.
         Arm::Global => format!("list all {}", document.canaries.community),
+        // The table routes are addressed by document, like the entity graph.
+        Arm::Table => document.id.clone(),
         Arm::Entity => document.id.clone(),
+    }
+}
+
+/// Whether `document` is the right kind of probe for `arm`.
+///
+/// A table row needs a document whose ingest stored tables; every other arm
+/// must not use one, because a table-only document's prose canary is not what
+/// those arms were calibrated on and its presence would be a silent change to
+/// their coverage.
+#[must_use]
+pub fn has_the_right_corpus(document: &SeedDocument, arm: Arm) -> bool {
+    if arm == Arm::Table {
+        !document.table_ids.is_empty()
+    } else {
+        document.table_ids.is_empty()
     }
 }
 
@@ -1114,6 +1157,10 @@ pub fn coverage_note(arm: Arm) -> &'static str {
              chunks of the communities the summary matched inside the caller's scope, fetched \
              by id. The summary text itself is never returned, so it cannot be a canary"
         }
+        Arm::Table => {
+            "GET /v1/tables?documentId=, GET /v1/tables/{id} and POST /v1/tables/{id}/query \
+             for a document id: the table record, its manifest and a count computed from it"
+        }
         Arm::Entity => "GET /v1/documents/:id/intelligence for a document id",
     }
 }
@@ -1376,7 +1423,15 @@ mod tests {
             n_chunks: 2,
             has_figures: false,
             figure_asset_key: None,
+            table_ids: Vec::new(),
         }
+    }
+
+    /// A document whose ingest stored one table (`TBL-1`).
+    fn table_doc(id: &str, tenant: &str, kb: &str, category: &str, n: usize) -> SeedDocument {
+        let mut document = doc(id, tenant, kb, category, n);
+        document.table_ids = vec![format!("{id}_t0")];
+        document
     }
 
     fn corpus() -> Vec<SeedDocument> {
@@ -1386,6 +1441,8 @@ mod tests {
             doc("a-kb0-c1", "A", "kb0", "cat1", 3),
             doc("a-kb1-c1", "A", "kb1", "cat1", 4),
             doc("b-kb0-c0", "B", "kb0", "cat0", 5),
+            table_doc("a-kb0-c0-table", "A", "kb0", "cat0", 6),
+            table_doc("b-kb1-c0-table", "B", "kb1", "cat0", 7),
         ]
     }
 
@@ -1460,10 +1517,20 @@ mod tests {
                 .iter()
                 .filter(|p| p.scope == scope_index && !p.positive)
                 .count();
-            let outside = one.outside(one.scope(scope_index).unwrap()).len();
-            assert!(
-                per_scope == outside.min(MAX_OUTSIDE_PER_SCOPE) * Arm::ALL.len(),
-                "scope {scope_index}: {per_scope} probes for {outside} outside documents"
+            let outside = one.outside(one.scope(scope_index).unwrap());
+            let expected: usize = Arm::ALL
+                .iter()
+                .map(|arm| {
+                    outside
+                        .iter()
+                        .filter(|d| has_the_right_corpus(d, *arm))
+                        .count()
+                        .min(MAX_OUTSIDE_PER_SCOPE)
+                })
+                .sum();
+            assert_eq!(
+                per_scope, expected,
+                "scope {scope_index}: {per_scope} probes, expected {expected}"
             );
         }
     }

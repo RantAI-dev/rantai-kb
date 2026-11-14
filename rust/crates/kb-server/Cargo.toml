@@ -14,6 +14,7 @@ kb-ports = { path = "../kb-ports" }
 kb-core = { path = "../kb-core" }
 kb-inference = { path = "../kb-inference" }
 kb-store-pg = { path = "../kb-store-pg" }
+kb-store-tables = { path = "../kb-store-tables" }
 kb-store-qdrant = { path = "../kb-store-qdrant" }
 kb-store-blob = { path = "../kb-store-blob" }
 kb-extract = { path = "../kb-extract" }

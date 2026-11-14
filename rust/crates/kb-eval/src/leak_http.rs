@@ -305,6 +305,39 @@ pub fn document_docx(index: usize, canaries: &Canaries, seed: u64) -> Vec<u8> {
     out.into_inner()
 }
 
+/// The seeded table document, as CSV (`TBL-1`).
+///
+/// One row per section, with the document's canaries in the `Text` column, so
+/// both the table units and the table routes have something that names exactly
+/// this document. Fields are quoted the RFC 4180 way, because the canaries
+/// contain commas.
+#[must_use]
+pub fn document_csv(_index: usize, canaries: &Canaries) -> String {
+    fn field(value: &str) -> String {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    }
+    format!(
+        "Section,Text,Amount\n\
+         Scope,{},1234\n\
+         Figures,{},2345\n\
+         Annex,{},3456\n\
+         Reference,{},4567\n",
+        field(&canaries.vector),
+        field(&canaries.figure),
+        field(&canaries.neighbour),
+        field(&canaries.bm25),
+    )
+}
+
+/// Which body a seed upload carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Corpus {
+    Markdown,
+    Pdf,
+    Docx,
+    Csv,
+}
+
 /// A 256 × 256 picture, different per document, large enough that the visual
 /// stage's size filter keeps it.
 fn canary_png(index: usize) -> Vec<u8> {
@@ -399,21 +432,26 @@ async fn server_version(client: &reqwest::Client, base_url: &str) -> Option<Stri
 // ─── seeding ─────────────────────────────────────────────────────────────────
 
 /// Create the matrix corpus: knowledge bases, categories, and one document per
-/// (knowledge base, category) cell, each carrying its own canaries.
+/// (knowledge base, category) cell, each carrying its own canaries, plus one
+/// small CSV document per cell so every scope has a table (`TBL-1`).
 ///
-/// Returns the seeded documents; the tenant ids are discovered from the server
-/// (the knowledge-base row carries `tenantId`) rather than assumed from the
-/// key, because nothing in the API tells a caller which tenant it belongs to.
+/// Returns the seeded documents, the keys, and notes about anything that could
+/// not be seeded (a CSV table document is best-effort, so a server whose
+/// extractor cannot read CSV still gets the rest of the matrix); the tenant ids
+/// are discovered from the server (the knowledge-base row carries `tenantId`)
+/// rather than assumed from the key, because nothing in the API tells a caller
+/// which tenant it belongs to.
 pub async fn seed(
     client: &reqwest::Client,
     config: &LeakConfig,
-) -> Result<(Vec<SeedDocument>, BTreeMap<String, String>), LeakError> {
+) -> Result<(Vec<SeedDocument>, BTreeMap<String, String>, Vec<String>), LeakError> {
     let mut tenants: Vec<(&str, &str)> = vec![("A", config.api_key.as_str())];
     if let Some(peer) = config.peer_key.as_deref() {
         tenants.push(("B", peer));
     }
 
     let mut documents = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
     // tenant id -> the key that authenticates it.
     let mut keys: BTreeMap<String, String> = BTreeMap::new();
     let mut index = 0usize;
@@ -474,21 +512,66 @@ pub async fn seed(
             categories.push(created.category.id);
         }
 
+        let main_corpus = if config.docx_corpus {
+            Corpus::Docx
+        } else if config.pdf_corpus {
+            Corpus::Pdf
+        } else {
+            Corpus::Markdown
+        };
         for kb in &knowledge_bases {
             for category in &categories {
                 let canaries = canaries_for(config.canary_seed, index);
                 let body = document_body(index, &canaries, config.canary_seed);
                 let document = upload_and_wait(
-                    client, config, key, &tenant_id, kb, category, index, &canaries, &body,
+                    client,
+                    config,
+                    key,
+                    &tenant_id,
+                    kb,
+                    category,
+                    index,
+                    &canaries,
+                    &body,
+                    main_corpus,
                 )
                 .await?;
                 documents.push(document);
+
+                // The table document (`TBL-1`): a CSV with one row per section
+                // and this document's own canaries in its cells. Best-effort:
+                // a deployment whose extractor cannot read CSV still runs the
+                // rest of the matrix, with the table row reported UNTESTED.
+                let table_index = index + 10_000;
+                let table_canaries = canaries_for(config.canary_seed, table_index);
+                let table_body = document_csv(table_index, &table_canaries);
+                match upload_and_wait(
+                    client,
+                    config,
+                    key,
+                    &tenant_id,
+                    kb,
+                    category,
+                    table_index,
+                    &table_canaries,
+                    &table_body,
+                    Corpus::Csv,
+                )
+                .await
+                {
+                    Ok(table_document) => documents.push(table_document),
+                    Err(err) => notes.push(format!(
+                        "the CSV table document of tenant {label}, knowledge base {kb}, \
+                         category {category} could not be seeded ({err}): the table row has \
+                         no probe for that scope"
+                    )),
+                }
                 index += 1;
             }
         }
     }
 
-    Ok((documents, keys))
+    Ok((documents, keys, notes))
 }
 
 /// Upload one seeded document and wait for its ingest job.
@@ -503,27 +586,40 @@ async fn upload_and_wait(
     index: usize,
     canaries: &Canaries,
     body: &str,
+    corpus: Corpus,
 ) -> Result<SeedDocument, LeakError> {
-    let (file_name, part) = if config.docx_corpus {
-        let file_name = format!("leak-{index:02}.docx");
-        let part =
-            reqwest::multipart::Part::bytes(document_docx(index, canaries, config.canary_seed))
+    let (file_name, part) = match corpus {
+        Corpus::Docx => {
+            let file_name = format!("leak-{index:02}.docx");
+            let part =
+                reqwest::multipart::Part::bytes(document_docx(index, canaries, config.canary_seed))
+                    .file_name(file_name.clone())
+                    .mime_str(
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )?;
+            (file_name, part)
+        }
+        Corpus::Pdf => {
+            let file_name = format!("leak-{index:02}.pdf");
+            let part =
+                reqwest::multipart::Part::bytes(document_pdf(index, canaries, config.canary_seed))
+                    .file_name(file_name.clone())
+                    .mime_str("application/pdf")?;
+            (file_name, part)
+        }
+        Corpus::Csv => {
+            let file_name = format!("leak-table-{index:02}.csv");
+            let part = reqwest::multipart::Part::text(body.to_string())
                 .file_name(file_name.clone())
-                .mime_str(
-                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                )?;
-        (file_name, part)
-    } else if config.pdf_corpus {
-        let file_name = format!("leak-{index:02}.pdf");
-        let part =
-            reqwest::multipart::Part::bytes(document_pdf(index, canaries, config.canary_seed))
-                .file_name(file_name.clone())
-                .mime_str("application/pdf")?;
-        (file_name, part)
-    } else {
-        let file_name = format!("leak-{index:02}.md");
-        let part = reqwest::multipart::Part::text(body.to_string()).file_name(file_name.clone());
-        (file_name, part)
+                .mime_str("text/csv")?;
+            (file_name, part)
+        }
+        Corpus::Markdown => {
+            let file_name = format!("leak-{index:02}.md");
+            let part =
+                reqwest::multipart::Part::text(body.to_string()).file_name(file_name.clone());
+            (file_name, part)
+        }
     };
     let form = reqwest::multipart::Form::new()
         .part("file", part)
@@ -563,6 +659,7 @@ async fn upload_and_wait(
         .and_then(|f| f.get("assetKey"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let table_ids = document_table_ids(client, config, key, &uploaded.id).await;
 
     Ok(SeedDocument {
         id: uploaded.id,
@@ -578,7 +675,45 @@ async fn upload_and_wait(
             .unwrap_or(0) as usize,
         has_figures: !figures.is_empty(),
         figure_asset_key,
+        table_ids,
     })
+}
+
+/// The ids of a document's stored tables. Empty when it has none or the
+/// server has no table store (`/v1/tables` answers 404).
+async fn document_table_ids(
+    client: &reqwest::Client,
+    config: &LeakConfig,
+    key: &str,
+    document_id: &str,
+) -> Vec<String> {
+    let url = endpoint(
+        &config.base_url,
+        &format!("/v1/tables?documentId={document_id}"),
+    );
+    let Ok(response) = client
+        .get(url)
+        .header(reqwest::header::AUTHORIZATION, bearer(key))
+        .send()
+        .await
+    else {
+        return Vec::new();
+    };
+    if !response.status().is_success() {
+        return Vec::new();
+    }
+    response
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|body| body.as_array().cloned())
+        .map(|tables| {
+            tables
+                .iter()
+                .filter_map(|table| table.get("id").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn poll_job(
@@ -872,6 +1007,10 @@ async fn run_probe(
             }
             outcome
         }
+        ProbeKind::Tables => {
+            let outcome = tables_probe(client, config, key, probe).await;
+            finish(probe, scope, outcome, max_chunks, &by_tenant)
+        }
         ProbeKind::DocumentIntelligence => {
             let path = format!("/v1/documents/{}/intelligence", probe.query);
             let response = client
@@ -968,6 +1107,119 @@ async fn search_probe(
     }
 }
 
+/// Probe one document's tables through all three table routes (`TBL-1`).
+///
+/// List, then get the first table, then run a `count` query over it. Any of the
+/// three answering for a document this caller may not see is a leak; a 404 is
+/// the refusal this row wants. A document with no tables is not a hit, so the
+/// positive control is honest about needing a seeded table.
+async fn tables_probe(
+    client: &reqwest::Client,
+    config: &LeakConfig,
+    key: &str,
+    probe: &crate::leak::PlannedProbe,
+) -> Answer {
+    let document_id = &probe.query;
+    let list_url = endpoint(
+        &config.base_url,
+        &format!("/v1/tables?documentId={document_id}"),
+    );
+    let response = client
+        .get(list_url)
+        .header(reqwest::header::AUTHORIZATION, bearer(key))
+        .send()
+        .await;
+    let Ok(response) = response else {
+        return Answer::failed(0, "tables list request failed".to_string());
+    };
+    let list_status = response.status().as_u16();
+    let list: Value = response.json().await.unwrap_or(Value::Null);
+    if list_status >= 500 {
+        return Answer::failed(list_status, list.to_string());
+    }
+    if (400..500).contains(&list_status) {
+        return Answer::refused(list_status);
+    }
+    let tables = list.as_array().cloned().unwrap_or_default();
+    if tables.is_empty() {
+        return Answer {
+            documents: Vec::new(),
+            http_status: list_status,
+            ..Answer::default()
+        };
+    }
+    let mut documents = vec![document_id.clone()];
+    let Some(table_id) = tables
+        .first()
+        .and_then(|table| table.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return Answer {
+            documents,
+            http_status: list_status,
+            ..Answer::default()
+        };
+    };
+
+    // GET one table by id, as a caller guessing an id would.
+    let get_url = endpoint(&config.base_url, &format!("/v1/tables/{table_id}"));
+    if let Ok(response) = client
+        .get(get_url)
+        .header(reqwest::header::AUTHORIZATION, bearer(key))
+        .send()
+        .await
+    {
+        let status = response.status().as_u16();
+        if status >= 500 {
+            return Answer::failed(status, "table get failed".to_string());
+        }
+        if status < 400 {
+            if let Ok(body) = response.json::<Value>().await {
+                if let Some(id) = body.get("documentId").and_then(Value::as_str) {
+                    push_document(&mut documents, id);
+                }
+            }
+        }
+    }
+
+    // Count the rows, as a caller checking what can be computed.
+    let query_url = endpoint(&config.base_url, &format!("/v1/tables/{table_id}/query"));
+    if let Ok(response) = client
+        .post(query_url)
+        .header(reqwest::header::AUTHORIZATION, bearer(key))
+        .json(&json!({"select": [{"agg": "count"}]}))
+        .send()
+        .await
+    {
+        let status = response.status().as_u16();
+        if status >= 500 {
+            return Answer::failed(status, "table query failed".to_string());
+        }
+        if status < 400
+            && let Ok(body) = response.json::<Value>().await
+        {
+            // A served result names the table's document in its receipt only
+            // through the table record; the answer itself is the evidence.
+            if body.get("rows").is_some() {
+                push_document(&mut documents, document_id);
+            }
+        }
+    }
+
+    Answer {
+        documents,
+        http_status: list_status,
+        ..Answer::default()
+    }
+}
+
+fn push_document(documents: &mut Vec<String>, id: &str) {
+    if !documents.iter().any(|existing| existing == id) {
+        documents.push(id.to_string());
+    }
+}
+
 struct AssetOutcome {
     answer: Answer,
     path: String,
@@ -1024,7 +1276,7 @@ fn finish(
         // Search arms answer inside the search scope; a document-addressed
         // route answers for the whole tenant.
         ProbeKind::Search => &scope.allowed,
-        ProbeKind::SearchOrAsset | ProbeKind::DocumentIntelligence => by_tenant,
+        ProbeKind::SearchOrAsset | ProbeKind::DocumentIntelligence | ProbeKind::Tables => by_tenant,
     };
     let leaked = leaks_in(&answer, allowed);
     let hit = positive_hit(&answer, &probe.canary_owner);
@@ -1040,6 +1292,11 @@ fn finish(
                 ProbeKind::DocumentIntelligence => {
                     json!({"method": "GET", "path": format!("/v1/documents/{}/intelligence", probe.query)})
                 }
+                ProbeKind::Tables => json!({
+                    "method": "GET",
+                    "path": format!("/v1/tables?documentId={}", probe.query),
+                    "then": ["GET /v1/tables/{id}", "POST /v1/tables/{id}/query"],
+                }),
                 _ => search_body(scope, &probe.query, max_chunks),
             },
             foreign_document_ids: leaked.clone(),
@@ -1075,7 +1332,8 @@ pub async fn run(config: LeakConfig) -> Result<LeakRun, LeakError> {
     }
 
     eprintln!("leak: seeding the matrix corpus…");
-    let (documents, keys) = seed(&client, &config).await?;
+    let (documents, keys, seed_notes) = seed(&client, &config).await?;
+    matrix.notes.extend(seed_notes);
     let plan = plan(documents);
     if plan.documents.is_empty() {
         return Err(LeakError::Seed("nothing was seeded".to_string()));
@@ -1102,6 +1360,14 @@ pub async fn run(config: LeakConfig) -> Result<LeakRun, LeakError> {
             "the corpus was seeded as markdown, and the page-image arm renders only PDFs: \
              its row has no page to find and is UNTESTED whether or not the server runs the \
              arm. Pass --pdf to seed PDFs."
+                .to_string(),
+        );
+    }
+    if !plan.documents.iter().any(|d| !d.table_ids.is_empty()) {
+        matrix.notes.push(
+            "no seeded document produced a table. The table row needs a server whose \
+             extractor reads CSV tables and whose table store is on (KB_TABLES): without one \
+             it has nothing to find and is reported UNTESTED rather than passing."
                 .to_string(),
         );
     }

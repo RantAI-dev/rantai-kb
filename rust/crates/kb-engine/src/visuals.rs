@@ -343,6 +343,7 @@ pub async fn index_visuals(
                     .as_deref()
                     .and_then(|id| input.anchors.get(id).copied()),
                 contextual_prefix: None,
+                table_id: None,
             },
         });
     }

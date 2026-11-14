@@ -60,6 +60,29 @@ pub fn page_image_path(tenant_id: Option<&str>, document_id: &str, page: u32) ->
     format!("documents/{org}/{document_id}/pages/p-{page:05}.jpg")
 }
 
+/// Storage key for one stored table's grid (Parquet), `TBL-1`.
+///
+/// One key per version, so a re-ingest never overwrites the grid a running
+/// query is reading:
+/// `tables/{tenant}/{document}/{tableId}/v{n}.parquet`. The tenant fallback is
+/// the same `global` as every other document-scoped key; `table_id` is
+/// `{documentId}_t{index}` and is sanitised like a filename, so it cannot
+/// introduce a path segment.
+#[must_use]
+pub fn table_grid_path(
+    tenant_id: Option<&str>,
+    document_id: &str,
+    table_id: &str,
+    version: u32,
+) -> String {
+    let org = tenant_id.filter(|t| !t.is_empty()).unwrap_or("global");
+    format!(
+        "tables/{org}/{}/{}/v{version}.parquet",
+        sanitize_filename(document_id),
+        sanitize_filename(table_id),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,6 +132,23 @@ mod tests {
         assert_eq!(
             page_image_path(None, "doc123", 2),
             "documents/global/doc123/pages/p-00002.jpg"
+        );
+    }
+
+    #[test]
+    fn table_grids_are_versioned_per_document_and_table() {
+        assert_eq!(
+            table_grid_path(Some("tenant1"), "doc123", "doc123_t0", 1),
+            "tables/tenant1/doc123/doc123_t0/v1.parquet"
+        );
+        assert_eq!(
+            table_grid_path(None, "doc123", "doc123_t7", 3),
+            "tables/global/doc123/doc123_t7/v3.parquet"
+        );
+        // A table id or document id cannot introduce a path segment.
+        assert_eq!(
+            table_grid_path(Some("t"), "../../etc", "../x", 1),
+            "tables/t/.._.._etc/.._x/v1.parquet"
         );
     }
 }

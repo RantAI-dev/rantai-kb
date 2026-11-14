@@ -136,6 +136,20 @@ pub struct SearchResponseDto {
     pub note: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub degrades: Vec<String>,
+    /// Additive (`TBL-1`): the tables belonging to the documents this answer
+    /// named, so a caller can go straight to `POST /v1/tables/{id}/query`
+    /// without a second lookup. Omitted when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tables: Vec<TableRefDto>,
+}
+
+/// One table named by a search answer (`TBL-1`). Additive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableRefDto {
+    pub table_id: String,
+    pub title: Option<String>,
+    pub document_id: String,
 }
 
 /// The `stats` object of a search response.
@@ -523,6 +537,17 @@ pub struct ChunkDto {
     /// rather than null, so a caller can tell "no arms" from "old server".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retrieval: Option<RetrievalDto>,
+    /// Additive (`TBL-1`): the table a `table_summary`/`table_row` hit belongs
+    /// to. Absent for every other chunk type.
+    #[serde(rename = "tableId", skip_serializing_if = "Option::is_none", default)]
+    pub table_id: Option<String>,
+    /// Additive (`TBL-1`): that table's title, when the answer could resolve it.
+    #[serde(
+        rename = "tableTitle",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub table_title: Option<String>,
 }
 
 impl SearchResponseDto {
@@ -538,6 +563,7 @@ impl SearchResponseDto {
             stats: None,
             note: None,
             degrades: Vec::new(),
+            tables: Vec::new(),
         }
     }
 }
@@ -637,6 +663,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             stats: Some(stats),
             note: outcome_note,
             degrades,
+            tables: Vec::new(),
         }
     }
 }
@@ -691,6 +718,8 @@ impl From<SearchHit> for ChunkDto {
                 dto.rerank_score = rerank_score;
                 dto
             }),
+            table_id: hit.chunk.metadata.table_id,
+            table_title: None,
         }
     }
 }
