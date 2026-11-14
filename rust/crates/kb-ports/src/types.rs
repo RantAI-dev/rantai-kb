@@ -176,6 +176,11 @@ pub struct ExtractionResult {
     /// examined and had neither. ADDITIVE (DEC-4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outline: Option<kb_core::tree::Outline>,
+    /// What the OCR offload did for this document (ING-6): how many pages went
+    /// to the provider, how many came from the cache, and which pages could not
+    /// be read. `None` for a format that never goes to OCR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr: Option<crate::ocr::OcrReport>,
     /// Set when extraction failed; the caller must abort rather than index the
     /// empty content.
     pub error: Option<String>,

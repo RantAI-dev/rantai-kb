@@ -177,6 +177,7 @@ impl MineruExtractor {
         });
 
         Ok(ExtractionResult {
+            ocr: None,
             content: text,
             file_type: "pdf".to_string(),
             used_ocr: true,

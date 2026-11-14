@@ -316,6 +316,7 @@ impl MineruApiExtractor {
         }
 
         Ok(ExtractionResult {
+            ocr: None,
             content: md_text,
             file_type: "pdf".to_string(),
             used_ocr: true,

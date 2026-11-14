@@ -78,6 +78,7 @@ impl OpenRouterVisionProvider {
         let content = format!("[Image: {filename}]\n\n{clean_text}");
 
         Ok(ExtractionResult {
+            ocr: None,
             content,
             file_type: "image".to_string(),
             used_ocr: true,
@@ -127,6 +128,7 @@ impl OpenRouterVisionProvider {
         let combined = page_texts.join("\n\n---\n\n");
 
         Ok(ExtractionResult {
+            ocr: None,
             content: combined,
             file_type: "pdf".to_string(),
             used_ocr: true,

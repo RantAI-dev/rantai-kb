@@ -31,6 +31,7 @@ mod mime;
 pub mod mineru;
 pub mod mineru_api;
 pub mod mistral;
+pub mod ocr_router;
 pub mod ods;
 pub mod odt;
 pub mod openrouter_vision;
@@ -55,12 +56,12 @@ mod zip_read;
 
 pub use builder::{
     PdfiumTextExtractor, ProductionExtractor, build_extractor, build_layout_chain,
-    build_production_extractor,
+    build_production_extractor, build_production_extractor_with_cache,
 };
 pub use chain::LayoutExtractorChain;
 pub use chain::ScannedPageOcr;
 pub use code::CODE_EXT_LANGUAGE;
-pub use config::ExtractConfig;
+pub use config::{ExtractConfig, OcrMode};
 pub use detect::{SupportedFileType, detect_file_type, extension_of};
 pub use dispatch::{extract, extract_document, extract_from_buffer};
 pub use hybrid::HybridExtractor;
@@ -69,6 +70,10 @@ pub use mime::{DOCUMENT_MIME_TYPES, ext_to_mime, is_document_mime, mime_to_ext};
 pub use mineru::MineruExtractor;
 pub use mineru_api::MineruApiExtractor;
 pub use mistral::MistralOcrExtractor;
+pub use ocr_router::{
+    OcrBreaker, OcrCallError, OcrPageProvider, OcrPageRead, OcrRouter, OcrRouterSettings,
+    OcrTransport, process_breaker,
+};
 pub use ods::parse_ods;
 pub use odt::parse_odt;
 pub use openrouter_vision::OPENROUTER_VISION_URL;
@@ -80,7 +85,7 @@ pub use pdfium::{
     MINIMAL_BLANK_PDF, MINIMAL_PDF_HELLO_WORLD, extract_pdf_text_layer, get_pdf_page_count,
     get_pdfium, init_pdfium, render_pdf_page_to_png, split_pdf_by_page_count,
 };
-pub use scanned::is_pdf_scanned;
+pub use scanned::{is_pdf_scanned, page_is_scan, read_page_facts};
 pub use smart_router::SmartRouterExtractor;
 pub use vision_llm::VisionLlmExtractor;
 pub use visuals::{LocalVisualCollector, normalize_image};

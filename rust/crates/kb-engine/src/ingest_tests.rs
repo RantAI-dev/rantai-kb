@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use kb_ports::{
     BlobStore, DocumentId, DocumentMeta, Embedder, Entity, ExtractedFigure, ExtractionResult,
-    Extractor, JobRecord, PageBlock, PageBlockKind, PageText, PortError, Relation, TenantId,
-    document_path,
+    Extractor, JobRecord, OcrReport, PageBlock, PageBlockKind, PageText, PortError, Relation,
+    TenantId, document_path,
 };
 
 use super::*;
@@ -613,6 +613,7 @@ async fn a_pdf_outline_is_stored_in_document_metadata() {
     };
     let h = harness(Arc::new(FakeExtractor::returning_result(
         ExtractionResult {
+            ocr: None,
             content: long_text(),
             file_type: "pdf".to_string(),
             outline: Some(outline),
@@ -638,6 +639,53 @@ async fn a_pdf_outline_is_stored_in_document_metadata() {
     // The title stored with the outline is the document's, so the tree arm can
     // vote for a document by name without a second Postgres read.
     assert_eq!(stored["document_title"], "Quarterly report");
+}
+
+#[tokio::test]
+async fn the_ocr_report_is_stored_in_document_metadata_in_the_documented_shape() {
+    let report = OcrReport {
+        mode: "hybrid".into(),
+        provider: Some("chat".into()),
+        pages: 23,
+        ocr_pages: 3,
+        cached_pages: 0,
+        local_pages: 20,
+        failed_pages: vec![7],
+        skipped_pages: vec![],
+        breaker_opened: false,
+    };
+    let h = harness(Arc::new(FakeExtractor::returning_result(
+        ExtractionResult {
+            content: long_text(),
+            file_type: "pdf".to_string(),
+            ocr: Some(report),
+            ..ExtractionResult::default()
+        },
+    )))
+    .await;
+    h.jobs.push(job());
+    assert!(h.worker.run_once().await.unwrap());
+
+    let docs = h.documents.docs.read().unwrap();
+    let meta = docs[&tenant()]
+        .iter()
+        .find(|d| d.id.as_str() == DOC)
+        .expect("the document");
+    let stored = meta
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("ocr"))
+        .expect("metadata.ocr");
+    // The calling apps read these camelCase names, so they are the contract.
+    assert_eq!(stored["mode"], "hybrid");
+    assert_eq!(stored["provider"], "chat");
+    assert_eq!(stored["pages"], 23);
+    assert_eq!(stored["ocrPages"], 3);
+    assert_eq!(stored["cachedPages"], 0);
+    assert_eq!(stored["localPages"], 20);
+    assert_eq!(stored["failedPages"][0], 7);
+    assert_eq!(stored["skippedPages"], serde_json::json!([]));
+    assert_eq!(stored["breakerOpened"], false);
 }
 
 /// An extractor whose extraction carries no outline (a pre-DEC-4 cache entry,
@@ -684,6 +732,7 @@ impl kb_ports::Extractor for OutlineOnlyOnRequest {
 async fn an_extraction_without_an_outline_gets_one_from_the_outline_read() {
     let extractor = Arc::new(OutlineOnlyOnRequest {
         inner: FakeExtractor::returning_result(ExtractionResult {
+            ocr: None,
             content: long_text(),
             file_type: "pdf".to_string(),
             outline: None,
@@ -747,6 +796,7 @@ async fn a_paged_pdf_is_chunked_page_by_page() {
         .join("\n\n");
     let h = harness(Arc::new(FakeExtractor::returning_result(
         ExtractionResult {
+            ocr: None,
             content,
             file_type: "pdf".to_string(),
             used_ocr: false,
@@ -812,6 +862,7 @@ async fn page_furniture_is_stripped_from_chunks_but_not_from_the_document() {
             chunks.clone(),
             blobs.clone(),
             Arc::new(FakeExtractor::returning_result(ExtractionResult {
+                ocr: None,
                 content,
                 file_type: "pdf".to_string(),
                 used_ocr: false,
@@ -898,6 +949,7 @@ async fn test_ingest_worker_end_to_end_full_pipeline() {
     }];
 
     let extract_result = ExtractionResult {
+        ocr: None,
         content: "Section one explains the quarter in detail with all financial figures.
 
 Section two follows with the breakdown by region and by product line.

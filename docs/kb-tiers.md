@@ -156,6 +156,71 @@ layer: `docs/tier-readiness-plan.md`). PP-OCRv6 on Lite runs in `rust/deploy/ocr
 (RapidOCR 3.10, ONNX Runtime, CPU), a sidecar that answers the same chat shape; it is
 **built but not yet run** (the image has not been built on this machine).
 
+## OCR offload (`ING-6`)
+
+The document-level "is this PDF scanned?" test is replaced, when a provider is configured, by a
+page router (`kb_extract::OcrRouter`). Each PDF page is decided on its own:
+
+| `KB_OCR_MODE` | What happens |
+|---|---|
+| `off` | Nothing is sent. Each page keeps its local text layer; the report says so. |
+| `hybrid` (default when a provider is configured) | A page is a scan when raster images cover ≥ `KB_OCR_SCAN_AREA` of it **and** it carries ≤ `KB_OCR_SCAN_TEXT` visible characters. Scan pages go to OCR; text pages keep their layer. |
+| `full` | Every page goes to OCR; the page's local text is its fallback. |
+
+`KB_OCR_MODE` unset means `Auto`: `hybrid` when an OCR provider is configured, `off` otherwise,
+which is byte-for-byte the behaviour before this feature (the layout chain and its whole-document
+fallback still handle the no-provider case). The scan test is per page and excludes text in the
+`invisible` render mode — an existing OCR layer does not make a scan look digital — because
+pdfium-render exposes `PdfPageTextObject::render_mode()`/`is_visible()`.
+
+**Providers.** The local chat adapter (`KB_OCR_BASE_URL`, `PageOcrExtractor`) reads **one
+rendered page image per request**. Mistral OCR (`KB_MISTRAL_OCR_KEY`, listed as `mistral` in
+`KB_LAYOUT_EXTRACTOR_ORDER`) reads **sub-PDFs of `KB_OCR_BATCH` pages**, built by pdfium copying
+pages into a new document; its figures are kept and re-homed to the document page. The local
+adapter wins when both are configured, so a local tier never sends a page to a paid service.
+
+**One page cache, one pool, one breaker.** Page results are cached in kb-cache namespace
+`ocr-page-v1`, keyed by SHA-256 over provider id, model, prompt, DPI and the page. For the image
+adapter the page's bytes are the rendered image; for a document adapter the page is identified by
+the **source document's SHA-256 and the page index**, because pdfium writes a random `/ID` into a
+saved sub-PDF and hashing that serialisation would miss on every run. Only successful, non-empty
+reads are stored, together with any figure crops the provider returned, so a re-upload does not
+lose a figure it already paid for. `KB_OCR_CONCURRENCY` is one semaphore shared by every document in the process.
+After `KB_OCR_BREAKER` consecutive *transient* failures (connection error, 429, 5xx after
+retries) the breaker stops sending for `KB_OCR_BREAKER_COOLDOWN_S`; pages in that window take
+their fallback. A 4xx does not open the breaker — it is a configuration mistake, not an outage.
+
+**What a lost page costs.** At most `KB_OCR_MAX_PAGES` pages per document go to OCR; the rest are
+listed in `skippedPages` and use the local text or a marker. A page that still fails after its
+retries keeps any local text it has (a `full` page usually does; a scan usually does not) or
+becomes `[page N could not be read]` in the content, and is listed in `failedPages`; the
+document is `ready`. If **no** page produced any text at all, the extraction fails with the
+provider's error, because indexing an empty document is worse than retrying it.
+`metadata.ocr` records `{mode, provider, pages, ocrPages, cachedPages, localPages, failedPages,
+skippedPages, breakerOpened}`.
+
+**Images and TIFF** take the same cache, pool and breaker when the provider is the image adapter
+(a TIFF is one page per image). With Mistral configured, image uploads keep the pre-existing
+vision path, because that client takes documents, not pictures.
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `KB_OCR_MODE` | `off`, `hybrid` or `full`; unset = auto | auto |
+| `KB_OCR_SCAN_AREA` | share of a page raster images must cover to be a scan | `0.90` |
+| `KB_OCR_SCAN_TEXT` | visible characters a scan page may carry | `50` |
+| `KB_OCR_BATCH` | pages per sub-PDF request to a document provider | `8` |
+| `KB_OCR_MAX_PAGES` | pages per document that may go to OCR | `300` |
+| `KB_OCR_BREAKER` | consecutive transient failures that open the breaker | `3` |
+| `KB_OCR_BREAKER_COOLDOWN_S` | how long the breaker stays open | `60` |
+
+**Status: mock-tested.** Routing counts (3 scanned pages among 23, 20 pages in 3 Mistral
+batches, a second run at 0 requests), the breaker, the page cap, markers and the all-failed
+error are covered by `rust/crates/kb-extract/tests/ocr_router.rs` against generated PDFs and a
+fake provider. No real OCR call was made and no live throughput target from the `ING-6` spec has
+been measured. PDF pages are created by pdfium **one at a time** in the router (only the HTTP
+requests run concurrently): parallel document creation in this libpdfium build produced empty or
+unreadable documents in tests.
+
 ## Picture reading (`ING-5`)
 
 Every picture a reader of a document can see (a standalone upload, a picture in a

@@ -572,6 +572,18 @@ impl IngestWorker {
             }
         }
 
+        // What the OCR offload did (ING-6): pages sent, pages served from the
+        // cache, pages read locally and the pages that could not be read. An
+        // operator sees a lost page without opening the logs. Additive in
+        // `metadata.ocr`, no schema migration; formats that never go to OCR
+        // carry no report.
+        if let Some(ocr) = extraction.ocr.as_ref() {
+            let patch = json!({ "ocr": ocr });
+            if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
+                tracing::warn!(error = %e, "could not store the OCR report");
+            }
+        }
+
         self.progress(job, StepProgress::of(IngestStep::Chunking), started, &flags)
             .await;
         // A paged document whose content is exactly its pages (the PDF text

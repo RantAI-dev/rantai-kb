@@ -340,6 +340,7 @@ async fn test_scanned_pdf_chain_failure_single_error_prefix() {
         },
         &chain,
         None,
+        None,
     )
     .await
     .unwrap();

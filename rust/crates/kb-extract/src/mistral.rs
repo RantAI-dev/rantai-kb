@@ -18,6 +18,7 @@ use kb_ports::{
 use serde::{Deserialize, Serialize};
 
 use crate::ExtractError;
+use crate::ocr_router::{OcrCallError, OcrPageProvider, OcrPageRead, OcrTransport};
 
 static CAPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(gambar|tabel|foto|diagram|grafik|bagan|ilustrasi|sumber)\b")
@@ -77,6 +78,69 @@ impl MistralOcrExtractor {
         pdf_bytes: &[u8],
         options: ExtractionOptions,
     ) -> Result<ExtractionResult, ExtractError> {
+        let reads = self
+            .read_sub_pdf(pdf_bytes, options.figures)
+            .await
+            .map_err(|e| ExtractError::Container(e.message))?;
+
+        let text = reads
+            .iter()
+            .map(|p| p.text.as_str())
+            .filter(|m| !m.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let figures = reads
+            .iter()
+            .flat_map(|p| p.figures.iter().cloned())
+            .collect::<Vec<_>>();
+        let mut pages_blocks = Vec::new();
+        let mut page_map = Vec::new();
+        for read in &reads {
+            if !read.text.trim().is_empty() {
+                page_map.push(PageText {
+                    page: read.page,
+                    text: read.text.clone(),
+                });
+            }
+            if options.figures {
+                pages_blocks.push(blocks_from_markdown(&read.text, read.page));
+            }
+        }
+
+        Ok(ExtractionResult {
+            ocr: None,
+            content: text,
+            file_type: "pdf".to_string(),
+            used_ocr: true,
+            figures,
+            pages_blocks: if options.figures {
+                Some(pages_blocks)
+            } else {
+                None
+            },
+            page_map: if page_map.is_empty() {
+                None
+            } else {
+                Some(page_map)
+            },
+            outline: None,
+            error: None,
+        })
+    }
+
+    /// One `/v1/ocr` request over a sub-PDF: one attempt, no retry. The page
+    /// router owns retries, the shared pool and the breaker (`ING-6`).
+    ///
+    /// # Errors
+    ///
+    /// A connection error, timeout, 429 or 5xx is transient and worth retrying;
+    /// any other status, or a body that is not the documented JSON, is not.
+    pub async fn read_sub_pdf(
+        &self,
+        pdf_bytes: &[u8],
+        include_figures: bool,
+    ) -> Result<Vec<OcrPageRead>, OcrCallError> {
         let b64_pdf = BASE64_STANDARD.encode(pdf_bytes);
         let data_url = format!("data:application/pdf;base64,{b64_pdf}");
 
@@ -86,7 +150,7 @@ impl MistralOcrExtractor {
                 doc_type: "document_url".to_string(),
                 document_url: data_url,
             },
-            include_image_base64: options.figures,
+            include_image_base64: include_figures,
         };
 
         let res = self
@@ -96,51 +160,36 @@ impl MistralOcrExtractor {
             .json(&req)
             .send()
             .await
-            .map_err(|e| ExtractError::Container(format!("mistral ocr request failed: {e}")))?;
+            .map_err(|e| OcrCallError::transient(format!("mistral ocr request failed: {e}")))?;
 
+        let status = res.status().as_u16();
         if !res.status().is_success() {
             let body = res.text().await.unwrap_or_default();
-            let preview = if body.len() > 300 {
-                &body[..300]
-            } else {
-                &body
-            };
-            return Err(ExtractError::Container(format!(
-                "mistral ocr error: {preview}"
+            let preview: String = body.chars().take(300).collect();
+            if status == 429 || status >= 500 {
+                return Err(OcrCallError::transient(format!(
+                    "mistral ocr http {status}: {preview}"
+                )));
+            }
+            return Err(OcrCallError::permanent(format!(
+                "mistral ocr http {status}: {preview}"
             )));
         }
 
         let resp_json: MistralOcrResponse = res
             .json()
             .await
-            .map_err(|e| ExtractError::Container(format!("mistral ocr invalid JSON: {e}")))?;
+            .map_err(|e| OcrCallError::permanent(format!("mistral ocr invalid JSON: {e}")))?;
 
-        let pages = resp_json.pages.unwrap_or_default();
+        let mut out = Vec::new();
+        for p in resp_json.pages.unwrap_or_default() {
+            let md = p.markdown.unwrap_or_default();
+            let mut figures = Vec::new();
 
-        let text = pages
-            .iter()
-            .filter_map(|p| p.markdown.as_deref())
-            .filter(|m| !m.trim().is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
+            let w = p.dimensions.as_ref().and_then(|d| d.width).unwrap_or(0.0);
+            let h = p.dimensions.as_ref().and_then(|d| d.height).unwrap_or(0.0);
 
-        let mut figures = Vec::new();
-        let mut pages_blocks = Vec::new();
-        let mut page_map = Vec::new();
-
-        for p in &pages {
-            let md = p.markdown.as_deref().unwrap_or_default();
-            if !md.trim().is_empty() {
-                page_map.push(PageText {
-                    page: p.index,
-                    text: md.to_string(),
-                });
-            }
-
-            if options.figures {
-                let w = p.dimensions.as_ref().and_then(|d| d.width).unwrap_or(0.0);
-                let h = p.dimensions.as_ref().and_then(|d| d.height).unwrap_or(0.0);
-
+            if include_figures {
                 if let Some(imgs) = &p.images {
                     for img in imgs {
                         let b64_raw = match &img.image_base64 {
@@ -169,7 +218,7 @@ impl MistralOcrExtractor {
                             [0.0, 0.0, 1.0, 1.0]
                         };
 
-                        let caption = caption_for_image(md, &img.id);
+                        let caption = caption_for_image(&md, &img.id);
                         let kind = figure_type_from_caption(caption.as_deref());
 
                         figures.push(ExtractedFigure {
@@ -182,29 +231,58 @@ impl MistralOcrExtractor {
                         });
                     }
                 }
-
-                pages_blocks.push(blocks_from_markdown(md, p.index));
             }
-        }
 
-        Ok(ExtractionResult {
-            content: text,
-            file_type: "pdf".to_string(),
-            used_ocr: true,
-            figures,
-            pages_blocks: if options.figures {
-                Some(pages_blocks)
-            } else {
-                None
-            },
-            page_map: if page_map.is_empty() {
-                None
-            } else {
-                Some(page_map)
-            },
-            outline: None,
-            error: None,
-        })
+            out.push(OcrPageRead {
+                page: p.index,
+                text: md,
+                figures,
+            });
+        }
+        Ok(out)
+    }
+
+    /// The model this client asks for.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+}
+
+#[async_trait::async_trait]
+impl OcrPageProvider for MistralOcrExtractor {
+    fn id(&self) -> &str {
+        "mistral"
+    }
+
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn prompt(&self) -> &str {
+        "mistral-ocr"
+    }
+
+    fn dpi(&self) -> u32 {
+        0
+    }
+
+    fn transport(&self) -> OcrTransport {
+        OcrTransport::Pdf { batch: 8 }
+    }
+
+    async fn read_pdf(
+        &self,
+        pdf_bytes: &[u8],
+        include_figures: bool,
+    ) -> Result<Vec<OcrPageRead>, OcrCallError> {
+        self.read_sub_pdf(pdf_bytes, include_figures).await
+    }
+
+    async fn read_image(&self, _image_bytes: &[u8], _mime: &str) -> Result<String, OcrCallError> {
+        Err(OcrCallError::permanent(
+            "the Mistral OCR client takes documents, not image uploads",
+        ))
     }
 }
 
