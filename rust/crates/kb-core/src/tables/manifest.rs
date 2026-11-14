@@ -371,6 +371,44 @@ fn unit_from_header(name: &str) -> Option<String> {
     None
 }
 
+/// Read a text cell into the typed contract: booleans, ISO dates, numbers and
+/// the rest as text. A zero-padded digit string (`00123`, a NIK) stays text so
+/// its leading zeros survive.
+#[must_use]
+pub fn cell_from_text(text: &str) -> Cell {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Cell::Empty;
+    }
+    if trimmed.eq_ignore_ascii_case("true") {
+        return Cell::Bool(true);
+    }
+    if trimmed.eq_ignore_ascii_case("false") {
+        return Cell::Bool(false);
+    }
+    if is_zero_padded_digits(trimmed) {
+        return Cell::Text(trimmed.to_string());
+    }
+    if looks_like_iso_date(trimmed) {
+        return Cell::Date(trimmed.to_string());
+    }
+    match locale_number(trimmed) {
+        Some(number) => Cell::Number(number),
+        None => Cell::Text(trimmed.to_string()),
+    }
+}
+
+fn is_zero_padded_digits(text: &str) -> bool {
+    text.len() > 1 && text.starts_with('0') && text.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn looks_like_iso_date(text: &str) -> bool {
+    match text.get(..10) {
+        Some(head) => chrono::NaiveDate::parse_from_str(head, "%Y-%m-%d").is_ok(),
+        None => false,
+    }
+}
+
 /// True for a label that names a derived row: "Jumlah", "Total", "Sub total",
 /// "Grand total", "Rata-rata", "Average". The match is on a word boundary, so
 /// "Total revenue" counts and "Totally unrelated" does not.

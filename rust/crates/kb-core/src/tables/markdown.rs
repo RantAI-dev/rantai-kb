@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use super::manifest::locale_number;
+use super::manifest::cell_from_text;
 use super::{Cell, TableGrid, TableSource};
 
 /// Parse every GitHub-style pipe table in `text`.
@@ -72,8 +72,29 @@ pub fn stitch_and_drop_furniture(grids: Vec<TableGrid>, page_count: u32) -> Vec<
     let pages = page_count.max(1);
     let threshold = pages.div_ceil(2).max(2) as usize;
 
+    // Stitch first: a table that continues on the next page is one table, so it
+    // counts once when furniture is measured. An identical repeat is not a
+    // continuation (a letterhead is the same table on every page).
+    let mut kept: Vec<TableGrid> = Vec::new();
+    for grid in grids {
+        if let Some(previous) = kept.last_mut() {
+            if same_header(previous, &grid) && !identical(previous, &grid) {
+                absorb(previous, grid, false);
+                continue;
+            }
+            if previous.header.len() == grid.header.len()
+                && !identical(previous, &grid)
+                && first_row_is_data(&grid)
+            {
+                absorb(previous, grid, true);
+                continue;
+            }
+        }
+        kept.push(grid);
+    }
+
     let mut counts: HashMap<String, usize> = HashMap::new();
-    for grid in &grids {
+    for grid in &kept {
         *counts.entry(fingerprint(grid)).or_insert(0) += 1;
     }
     let furniture: Vec<String> = counts
@@ -81,25 +102,12 @@ pub fn stitch_and_drop_furniture(grids: Vec<TableGrid>, page_count: u32) -> Vec<
         .filter(|(_, seen)| *seen >= threshold)
         .map(|(key, _)| key)
         .collect();
-
-    let mut kept: Vec<TableGrid> = Vec::new();
-    for grid in grids {
-        if furniture.contains(&fingerprint(&grid)) {
-            continue;
-        }
-        if let Some(previous) = kept.last_mut() {
-            if same_header(previous, &grid) {
-                absorb(previous, grid, false);
-                continue;
-            }
-            if previous.header.len() == grid.header.len() && first_row_is_data(&grid) {
-                absorb(previous, grid, true);
-                continue;
-            }
-        }
-        kept.push(grid);
-    }
+    kept.retain(|grid| !furniture.contains(&fingerprint(grid)));
     kept
+}
+
+fn identical(left: &TableGrid, right: &TableGrid) -> bool {
+    left.header == right.header && left.rows == right.rows
 }
 
 /// Render a grid as one or more markdown tables, repeating the header in every
@@ -252,30 +260,7 @@ fn split_row(line: &str) -> Vec<Cell> {
 }
 
 fn parse_cell(text: &str) -> Cell {
-    let text = text.trim();
-    if text.is_empty() {
-        return Cell::Empty;
-    }
-    if text.eq_ignore_ascii_case("true") {
-        return Cell::Bool(true);
-    }
-    if text.eq_ignore_ascii_case("false") {
-        return Cell::Bool(false);
-    }
-    if looks_like_iso_date(text) {
-        return Cell::Date(text.to_string());
-    }
-    if let Some(number) = locale_number(text) {
-        return Cell::Number(number);
-    }
-    Cell::Text(text.to_string())
-}
-
-fn looks_like_iso_date(text: &str) -> bool {
-    match text.get(..10) {
-        Some(head) => chrono::NaiveDate::parse_from_str(head, "%Y-%m-%d").is_ok(),
-        None => false,
-    }
+    cell_from_text(text)
 }
 
 fn is_separator(line: &str) -> bool {

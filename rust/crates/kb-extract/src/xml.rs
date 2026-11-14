@@ -48,6 +48,19 @@ pub fn attribute(element: &quick_xml::events::BytesStart<'_>, name: &str) -> Opt
     }
 }
 
+/// The value of an attribute by its **local** name, so `w:val` and `val` both
+/// resolve for an element whose prefix the caller does not know.
+pub fn local_attribute(element: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {
+    let found = element
+        .attributes()
+        .flatten()
+        .find(|attribute| attribute.key.local_name().as_ref() == name.as_bytes())?;
+    match found.normalized_value(quick_xml::XmlVersion::Explicit1_0) {
+        Ok(value) => Some(value.into_owned()),
+        Err(_) => None,
+    }
+}
+
 /// The next event, or `None` at the end of the document.
 ///
 /// Malformed XML is an error rather than a truncated document: the TypeScript
