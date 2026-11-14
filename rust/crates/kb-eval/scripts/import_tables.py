@@ -543,6 +543,15 @@ def build_grids(path: Path, sheet: str | None = None, hints: dict | None = None)
     `header_rows`, `data_start` or `title` when a file defeats the heuristics.
     """
     hints = hints or {}
+    if sheet is None and path.suffix.lower() in (".xlsx", ".xlsm", ".xltx"):
+        # Record the sheet a question names: the record's `sheet` is part of the
+        # file-to-tableId map, and "Sheet1" is a better key than a null.
+        import openpyxl
+
+        workbook = openpyxl.load_workbook(str(path), read_only=True)
+        visible = [ws.title for ws in workbook.worksheets if ws.sheet_state == "visible"]
+        sheet = visible[0] if visible else None
+        workbook.close()
     rows, formula_rows = read_rows(path, sheet)
     if not rows:
         return []
