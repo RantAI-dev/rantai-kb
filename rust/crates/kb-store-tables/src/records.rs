@@ -436,7 +436,7 @@ mod tests {
 /// Live-Postgres checks. Off by default (`cargo test --workspace` needs no
 /// database), and skipped — not passed — unless `KB_TABLES_TEST_DATABASE_URL`
 /// names a database with the Prisma migrations applied.
-#[cfg(feature = "integration")]
+#[cfg(all(test, feature = "integration"))]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod integration {
     use super::*;
