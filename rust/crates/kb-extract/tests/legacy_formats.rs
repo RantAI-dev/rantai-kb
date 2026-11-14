@@ -46,10 +46,16 @@ fn a_powerpoint_97_deck_reads_slides_in_order_then_notes() {
 }
 
 #[test]
-fn an_excel_97_workbook_reads_as_csv_blocks() {
+fn an_excel_97_workbook_reads_as_a_markdown_table() {
     let text = extract_ok("table.xls");
     assert!(
-        text.ends_with("[Sheet: table]\nRegion,Samples,Compliant\nNorth,128,yes\nSouth,96,no"),
+        text.ends_with(
+            "[Sheet: table]\n\
+             | Region | Samples | Compliant |\n\
+             | --- | --- | --- |\n\
+             | North | 128 | yes |\n\
+             | South | 96 | no |"
+        ),
         "{text}"
     );
 }

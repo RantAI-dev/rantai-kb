@@ -247,6 +247,43 @@ Qwen3-VL-2B-Instruct (Apache-2.0) under llama.cpp's server, the `vlm-cpu` or
 
 Measured quality, speed and cost: `docs/eval-ab/images/README.md`.
 
+## Tables
+
+Tables are read as data, not flattened text (`TBL-1`, `docs/core/specs/tbl-1.md`). Extraction
+runs locally and needs no model:
+
+- **Spreadsheets** (`.xlsx`, `.xls`, `.ods`, through calamine): one grid per table region.
+  Blank rows and columns split regions, merged cells are spread across their span, hidden
+  sheets are skipped and named in a note, and a multi-level header is flattened with ` / `
+  (`2023 / Q1`). The title is a merged title row above the header, else the sheet name.
+  Cached formula values are used; a data row whose numeric cells are formulas goes into
+  `formula_rows`, the strongest evidence that it is a subtotal. Calamine exposes merges for
+  xlsx/xls but not ods; a package calamine cannot open (a minimal ODS without its manifest)
+  falls back to the ODF XML reader.
+- **CSV / TSV**: the delimiter is sniffed from the first line (`,` `;` tab `|`) and the first
+  row is the header.
+- **DOCX**: tables in document order, rendered in place as markdown. Empty cells are kept, so
+  a column stays aligned (`gridSpan` repeats a cell, a `vMerge` continue takes the cell
+  above), and the paragraph above the table is its title.
+- **Markdown pipe tables** from any text extractor (Mistral, MinerU, the OCR router, the PDF
+  text layer) are parsed in one post-pass. The line above is the title. A table that
+  continues on the next page is stitched when its header matches (or the continuation has
+  the same width), and a fingerprint (header plus first-row shape) repeated on at least half
+  the pages is dropped as furniture (a letterhead or signature block).
+- **Numbers** are read locale-aware: `1.234,5` and `1,234.5` are both 1234.5, `(1.234)` is
+  negative, `%` and `Rp` are units. A zero-padded digit string stays text, so a NIK or phone
+  number keeps its leading zeros. A cell that is `true`/`false` becomes a boolean and an ISO
+  date stays a date.
+- **Text**: a spreadsheet is no longer rendered as CSV. Spreadsheets, DOCX tables and markdown
+  tables all render as markdown, and a table larger than the chunk budget is split at row
+  boundaries with the header repeated in each piece. A retrieved chunk is therefore readable
+  without its neighbour.
+- **Manifest** (`kb_core::tables::build_manifest`): column kind and role (Quantity, Code,
+  Date, Identifier, Label), the unit from the header (never applied to values), up to ten
+  sample values for non-quantity columns, and derived rows. Formula-proven rows are `High`
+  confidence, a row labelled `Jumlah`/`Total`/`Rata-rata` is `Medium`, and a markdown/PDF
+  table, a ragged row or a stitched page is `Low`.
+
 ## Ingest seats (`ING-6`)
 
 The ingest worker runs several documents at once, and each stage of the pipeline has a

@@ -22,8 +22,6 @@ pub mod query_class;
 pub mod signals;
 pub mod sparse;
 pub mod tables;
-// TBL-1 A replaces this: a placeholder `build_manifest` for work package B.
-pub mod tables_manifest_stub;
 pub mod title;
 pub mod tree;
 pub mod visuals;

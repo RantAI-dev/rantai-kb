@@ -22,7 +22,7 @@
     violation and a bad value each get their `QueryError`), compiled with identifiers
     quoted from the manifest whitelist and **values bound as parameters**, and run
     with `QUERY_TIMEOUT_MS` (interrupt handle) and `MAX_ROWS_RETURNED`. The result
-    carries the receipt (`rowsMatched`, `excludedDerivedRows`, `suppressedGroups`,
+    carries the receipt (`rows_matched`, `excluded_derived_rows`, `suppressed_groups`,
     `truncated`, `warnings`), and `min_group` suppression hides small groups with
     complementary suppression when exactly one would be hidden.
   - **Ingest:** `kb_core::tables::build_manifest` → `put_tables`, then two retrieval
@@ -40,6 +40,18 @@
   - **Isolation:** the leak matrix (`kb-server eval leak`) gains a `table` row that
     lists, gets and counts one document's tables, seeded from a CSV document per
     scope.
+- **Tables are read as data (`TBL-1`, work package A).** Spreadsheets (`.xlsx`, `.xls`,
+  `.ods`), CSV/TSV, DOCX tables and markdown pipe tables from OCR now become structured
+  grids (`ExtractionResult.tables`) with a manifest: column kind and role (a phone number
+  and a year are not quantities), the unit from the header, sample values, and the derived
+  subtotal rows — proven by spreadsheet formulas where available, guessed from a
+  `Jumlah`/`Total` label otherwise. Spreadsheet regions are split by blank rows and columns,
+  merged cells are spread, multi-level headers are flattened, hidden sheets are skipped with
+  a note, and locale numbers (`1.234,5`, `(1.234)`, `Rp`, `%`) are read correctly. Markdown
+  tables that continue on the next page are stitched, and a letterhead repeated on half the
+  pages is dropped. Spreadsheets and DOCX tables now render as markdown tables, and a big
+  table is chunked at row boundaries with the header repeated in every piece instead of
+  becoming one unbounded chunk.
 
 - **Ingest runs several documents at once, through per-stage seats (`ING-6`, part A).**
   The worker used to claim a job and run it to completion before claiming the next

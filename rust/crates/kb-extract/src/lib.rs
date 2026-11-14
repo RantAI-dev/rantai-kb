@@ -17,6 +17,7 @@ pub mod builder;
 pub mod chain;
 mod code;
 pub mod config;
+mod csv;
 mod detect;
 mod dispatch;
 mod doc;
@@ -44,6 +45,7 @@ mod pptx;
 mod rtf;
 pub mod scanned;
 pub mod smart_router;
+mod table_post;
 #[cfg(test)]
 mod testkit;
 mod text;

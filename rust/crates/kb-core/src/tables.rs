@@ -15,10 +15,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// TBL-1 A replaces this re-export with the real `build_manifest` in this
-// module. Kept here so ingest (work package B) can already call
-// `kb_core::tables::build_manifest` and the merge is a one-line change.
-pub use crate::tables_manifest_stub::build_manifest;
+mod manifest;
+mod markdown;
+
+pub use manifest::{build_manifest, cell_from_text, is_derived_label, locale_number};
+pub use markdown::{parse_markdown_tables, render_table_markdown, stitch_and_drop_furniture};
 
 /// Rows a query may return, whatever `limit` asks for.
 pub const MAX_ROWS_RETURNED: u32 = 1000;
