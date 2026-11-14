@@ -863,6 +863,7 @@ impl IngestWorker {
     /// Embed and store a document's text chunks; returns how many were stored.
     /// No chunks: nothing is touched, as in the Bun worker (`storeChunks`
     /// returns early on an empty batch and the document is still ready).
+    #[allow(clippy::too_many_arguments)]
     async fn embed_and_store(
         &self,
         job: &JobRecord,

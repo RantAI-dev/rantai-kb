@@ -182,6 +182,32 @@ Qwen3-VL-2B-Instruct (Apache-2.0) under llama.cpp's server, the `vlm-cpu` or
 
 Measured quality, speed and cost: `docs/eval-ab/images/README.md`.
 
+## Ingest seats (`ING-6`)
+
+The ingest worker runs several documents at once, and each stage of the pipeline has a
+small pool of **seats**. A document holds a seat only while it is in that stage and
+gives it back on every exit path — success, failure or a panic. When a seat frees, the
+waiter whose job was **uploaded first** gets it, not the waiter that asked first: a
+one-page memo queued behind a 300-page scan is served as soon as a seat is free, not
+after the scan.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `KB_JOB_WORKERS` | documents in flight at once | `6` (Lite and Lite-en: `2`) |
+| `KB_INGEST_CONCURRENCY` | the old name for `KB_JOB_WORKERS`; still accepted, and it loses to `KB_JOB_WORKERS` when both are set | unset |
+| `KB_SEATS` | the stage widths: `extract=2,embed=4,store=2` | `extract=2,embed=4,store=2` |
+| `KB_WORKER_ENABLED` | run the worker in this process | `true` |
+
+The three stages are **extract** (local parsing, PDF splitting and rendering), **embed**
+(one document's embedding requests) and **store** (the vector upsert, the document row
+and the graph writes). `KB_SEATS` refuses a count of `0` and an unknown stage name at
+startup rather than running with a limit the operator did not ask for.
+
+The OCR and picture-description calls are **not** seats: they are process-wide pools of
+their own (`KB_OCR_CONCURRENCY`, `KB_IMAGE_DESCRIBE_CONCURRENCY`), and a document waiting
+on a model holds no stage seat. The extract seat still covers the whole extractor call
+while the parsers do their OCR inside the extraction; the OCR offload narrows it.
+
 ## The one-model-per-role rule
 
 One multimodal embedder puts text chunks, page images and the query in **one vector space**:
@@ -224,6 +250,8 @@ numbers and how to override a setting.
 | `KB_CAPTION_*` | endpoint of the chat LLM used as the captioner | — |
 | `KB_OCR_*` | local OCR endpoint, model, prompt, DPI, concurrency and limits | off (`KB_OCR_BASE_URL` unset) |
 | `KB_CACHE_DIR` | directory for content-addressed caches | unset: no cache |
+| `KB_JOB_WORKERS` | documents ingested at once (`ING-6`); `KB_INGEST_CONCURRENCY` is the old name | `6` (Lite: `2`) |
+| `KB_SEATS` | the ingest stage widths (`ING-6`): `extract=2,embed=4,store=2` | `extract=2,embed=4,store=2` |
 | `KB_MIN_SCORE` | relevance floor: reranker score, else dense cosine (a request's `minScore` overrides it) | unset: no floor |
 | `KB_ADAPTIVE_ARMS` | skip the arms a query's class cannot use (RET-5; a request's `adaptiveArms` overrides it); skipped arms are named in `stats.skippedArms` | `false` (every arm runs) |
 | `KB_TREE_ARM` | navigate a document's section outline for `structural` questions (DEC-4); chunks carry the `tree` arm and `stats.treeArm` | `false` |
@@ -273,7 +301,8 @@ measurement (build order 5); the Desk / Studio / Station rerank widths are estim
 | `KB_EMBEDDING_INPUT_TYPE` | — | — | — | — | `true` |
 | `KB_EMBED_CONCURRENCY` | 1 | 2 | 4 | 8 | — |
 | `KB_EMBEDDING_BATCH_SIZE` | 16 | — | — | — | — |
-| `KB_INGEST_CONCURRENCY` | 1 | — | — | — | — |
+| `KB_INGEST_CONCURRENCY` | 2 | — (6) | — (6) | — (6) | — (6) |
+| `KB_SEATS` | — | — | — | — | — (the default `extract=2,embed=4,store=2`) |
 | `KB_ENTITY_EXTRACTION_ENABLED` | `false` | `false` | `false` | `false` | `false` (a paid LLM call per document; only written to the Postgres graph when `KB_GRAPH_STORE=pg`) |
 | `KB_RERANK_ENABLED` | `false` | `true` | `true` | `true` | `true` |
 | `KB_RERANK_PROVIDER` | — | `tei` | `vllm` | `vllm` | `cohere` |

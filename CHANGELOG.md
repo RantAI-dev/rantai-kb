@@ -4,6 +4,18 @@
 
 ### Added
 
+- **Ingest runs several documents at once, through per-stage seats (`ING-6`, part A).**
+  The worker used to claim a job and run it to completion before claiming the next
+  one, so a 300-page scan held every small file behind it. Now up to `KB_JOB_WORKERS`
+  documents (default 6, Lite and Lite-en 2) are in flight, each in its own task with
+  its own heartbeat, progress events and terminal events, and each stage of the
+  pipeline has a small pool of **seats** (`KB_SEATS="extract=2,embed=4,store=2"`) that
+  a document holds only while it is in that stage. When a seat frees, the document
+  uploaded first gets it — not the one that happened to ask first — so a one-page memo
+  is ready while a big scan is still running. A seat is given back on every exit path,
+  including a panic and a cancelled wait. `KB_INGEST_CONCURRENCY` stays accepted as an
+  alias for `KB_JOB_WORKERS` and loses to it when both are set.
+
 - **Pictures are searchable by what they show (`ING-5`).** Before, an image was
   found only by the text OCR read off it: a photo or diagram without text became a
   `ready` document with zero chunks, pictures inside Office and EPUB files were
@@ -60,6 +72,11 @@
   two-dimensional Group 3 pages are refused with a reason.
 
 ### Changed
+
+- **The ingest worker is concurrent by default (`ING-6`).** With no
+  `KB_JOB_WORKERS` and no tier, a deployment now runs 6 documents at a time instead
+  of one at a time. Set `KB_JOB_WORKERS=1` for the old serial behaviour; the Lite and
+  Lite-en tiers run 2 documents at a time.
 
 - **An image upload with nothing searchable fails visibly (`ING-5`).** When OCR
   finds no text and no picture reading is possible (no describer configured, or

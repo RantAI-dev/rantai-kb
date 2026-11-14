@@ -210,7 +210,7 @@ async fn the_stage_seats_are_three_gates() {
 
 #[test]
 fn the_priority_order_is_by_age_then_by_id() {
-    let mut ages = vec![
+    let mut ages = [
         SeatPriority::new(Some(3), "b"),
         SeatPriority::new(Some(1), "z"),
         SeatPriority::new(Some(2), "a"),

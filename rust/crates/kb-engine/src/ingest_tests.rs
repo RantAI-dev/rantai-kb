@@ -1934,3 +1934,158 @@ async fn embedding_max_chars_caps_the_embedder_input_but_not_the_stored_chunk() 
         .unwrap();
     assert!(longest > 40, "stored chunks keep their full text");
 }
+
+// ---------------------------------------------------------------- ING-6 seats
+
+/// An extractor that holds `big.pdf` until the test opens the gate, and
+/// answers every other file at once: a 300-page scan stuck at OCR, and a
+/// one-page memo uploaded right after it.
+struct GatedExtractor {
+    gate: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl Extractor for GatedExtractor {
+    async fn extract(
+        &self,
+        filename: &str,
+        mime_type: &str,
+        file_bytes: &[u8],
+    ) -> Result<ExtractionResult, PortError> {
+        self.extract_with_options(
+            filename,
+            mime_type,
+            file_bytes,
+            kb_ports::ExtractionOptions::default(),
+        )
+        .await
+    }
+
+    async fn extract_with_options(
+        &self,
+        filename: &str,
+        _mime_type: &str,
+        _file_bytes: &[u8],
+        _options: kb_ports::ExtractionOptions,
+    ) -> Result<ExtractionResult, PortError> {
+        if filename == "big.pdf" {
+            self.gate.notified().await;
+        }
+        Ok(ExtractionResult::text(long_text(), "markdown"))
+    }
+}
+
+fn named_job(id: &str, doc: &str, filename: &str, created_at: i64) -> JobRecord {
+    JobRecord {
+        id: id.to_string(),
+        document_id: Some(DocumentId::new_unchecked(doc)),
+        s3_key: Some(format!("documents/{TENANT}/{doc}/{filename}")),
+        filename: filename.to_string(),
+        created_at: Some(created_at),
+        ..job()
+    }
+}
+
+fn named_document(doc: &str) -> DocumentMeta {
+    DocumentMeta {
+        id: DocumentId::new_unchecked(doc),
+        ..document()
+    }
+}
+
+fn status_of(documents: &FakeDocumentStore, doc: &str) -> String {
+    documents.docs.read().unwrap()[&tenant()]
+        .iter()
+        .find(|d| d.id.0 == doc)
+        .map(|d| d.status.clone())
+        .unwrap_or_default()
+}
+
+/// Run a worker over a big job (stuck in extraction) and a small one queued
+/// after it, and report whether the small one became ready while the big one
+/// was still stuck.
+async fn small_job_finishes_behind_a_stuck_big_one(job_workers: usize) -> bool {
+    let (jobs, documents, chunks, blobs) = parts();
+    for (doc, file) in [("doc_big", "big.pdf"), ("doc_small", "small.pdf")] {
+        documents.insert_doc(tenant(), named_document(doc));
+        blobs
+            .upload(
+                &format!("documents/{TENANT}/{doc}/{file}"),
+                b"%PDF-1.7 fake".to_vec(),
+                "application/pdf",
+            )
+            .await
+            .unwrap();
+    }
+    // The big upload is older: it is claimed first, as a real queue would.
+    jobs.push(named_job("job_big", "doc_big", "big.pdf", 1));
+    jobs.push(named_job("job_small", "doc_small", "small.pdf", 2));
+
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let worker = IngestWorker::new(
+        jobs,
+        documents.clone(),
+        chunks,
+        blobs,
+        Arc::new(GatedExtractor { gate: gate.clone() }),
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings {
+            embedding_model: Some("bge-m3".to_string()),
+            job_workers,
+            poll_interval: Duration::from_millis(10),
+            ..IngestSettings::default()
+        },
+    );
+    let cancel = CancelToken::new();
+    let running = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move { worker.run(cancel).await })
+    };
+
+    // Give the small job ample time to finish while the big one is held.
+    let mut small_ready_while_big_stuck = false;
+    for _ in 0..200 {
+        if status_of(&documents, "doc_small") == "ready" {
+            small_ready_while_big_stuck = status_of(&documents, "doc_big") != "ready";
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Release the big job, and both finish: nothing was lost or stuck.
+    gate.notify_one();
+    for _ in 0..200 {
+        if status_of(&documents, "doc_big") == "ready"
+            && status_of(&documents, "doc_small") == "ready"
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(status_of(&documents, "doc_big"), "ready");
+    assert_eq!(status_of(&documents, "doc_small"), "ready");
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the worker stops when cancelled")
+        .unwrap();
+    small_ready_while_big_stuck
+}
+
+#[tokio::test]
+async fn a_small_job_is_not_held_behind_a_big_one_that_is_stuck() {
+    assert!(
+        small_job_finishes_behind_a_stuck_big_one(2).await,
+        "with two job slots the small upload must finish while the big one is stuck"
+    );
+}
+
+#[tokio::test]
+async fn one_job_slot_is_the_old_serial_worker_and_holds_the_small_job() {
+    // The control: one slot reproduces the pre-ING-6 worker, where the small
+    // upload waited for the big one. It proves the test above can fail.
+    assert!(
+        !small_job_finishes_behind_a_stuck_big_one(1).await,
+        "with one job slot the small upload must wait for the big one"
+    );
+}
