@@ -162,9 +162,9 @@ impl SmartChunker {
                 }
             }
 
-            // Atomic tables and code: each becomes its own chunk; never merged
-            // with surrounding prose. Retrieval then treats these specially.
-            if structure.chunk_type == "table" || structure.chunk_type == "code" {
+            // Atomic code: each becomes its own chunk; never merged with
+            // surrounding prose. Retrieval then treats these specially.
+            if structure.chunk_type == "code" {
                 if utf16_len(current_chunk.trim()) > 0 {
                     chunks.push(SmartChunk {
                         chunk_index,
@@ -187,6 +187,37 @@ impl SmartChunker {
                     text: block.trim().to_string(),
                 });
                 chunk_index += 1;
+                continue;
+            }
+
+            // A table is its own chunk too, but a table larger than the chunk
+            // budget is split at row boundaries. Every piece repeats the header
+            // row, so a retrieved piece is readable on its own (`TBL-1`).
+            if structure.chunk_type == "table" {
+                if utf16_len(current_chunk.trim()) > 0 {
+                    chunks.push(SmartChunk {
+                        chunk_index,
+                        metadata: current_metadata.clone(),
+                        text: current_chunk.trim().to_string(),
+                    });
+                    chunk_index += 1;
+                    current_chunk.clear();
+                }
+                let meta = SmartChunkMetadata {
+                    hierarchy_path: structure
+                        .hierarchy_path
+                        .clone()
+                        .or_else(|| Some(current_hierarchy.clone())),
+                    ..structure.clone()
+                };
+                for piece in Self::split_table(block, self.opts.max_chunk_size) {
+                    chunks.push(SmartChunk {
+                        chunk_index,
+                        metadata: meta.clone(),
+                        text: piece,
+                    });
+                    chunk_index += 1;
+                }
                 continue;
             }
 
@@ -407,8 +438,59 @@ impl SmartChunker {
         blocks
     }
 
-    fn split_into_blocks(text: &str, preserve_code_blocks: bool) -> Vec<String> {
-        let mut blocks: Vec<String> = Vec::new();
+    /// Split a markdown table at row boundaries, repeating the header (and its
+    /// separator) in every piece. A table that fits the budget stays one piece.
+    fn split_table(block: &str, max_size: u32) -> Vec<String> {
+        let trimmed = block.trim();
+        if utf16_len(trimmed) <= max_size as usize {
+            return vec![trimmed.to_string()];
+        }
+        let lines: Vec<&str> = trimmed.lines().collect();
+        let separator = lines
+            .iter()
+            .position(|line| Self::is_table_separator(line))
+            .unwrap_or(0);
+        let header_block = lines[..=separator].join("\n");
+        let rows = &lines[separator + 1..];
+        if rows.is_empty() {
+            return vec![header_block];
+        }
+
+        let mut pieces: Vec<String> = Vec::new();
+        let mut current = header_block.clone();
+        let mut rows_in_piece = 0usize;
+        for row in rows {
+            let candidate = utf16_len(&current) + 1 + utf16_len(row);
+            if rows_in_piece > 0 && candidate > max_size as usize {
+                pieces.push(current);
+                current = header_block.clone();
+                rows_in_piece = 0;
+            }
+            current.push('\n');
+            current.push_str(row);
+            rows_in_piece += 1;
+        }
+        pieces.push(current);
+        pieces
+    }
+
+    /// True for the `| --- | --- |` line under a markdown table header.
+    fn is_table_separator(line: &str) -> bool {
+        let mut cells = 0usize;
+        for cell in line.trim().trim_matches('|').split('|') {
+            let cell = cell.trim();
+            if cell.is_empty() {
+                continue;
+            }
+            if !cell.chars().all(|ch| ch == '-' || ch == ':') || !cell.contains('-') {
+                return false;
+            }
+            cells += 1;
+        }
+        cells > 0
+    }
+
+    fn split_into_blocks(text: &str, preserve_code_blocks: bool) -> Vec<String> {        let mut blocks: Vec<String> = Vec::new();
         let mut current = String::new();
         let mut in_code_block = false;
         let mut in_table = false;
