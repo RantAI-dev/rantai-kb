@@ -79,6 +79,7 @@ change; MinerU's did.
 |---|---|---|---|
 | PaddlePaddle/PP-OCRv6 (tiny/small/medium, ONNX) | 1.5–34.5M | Apache-2.0 | 🟢 |
 | PaddlePaddle/PaddleOCR-VL-1.6 (+ official GGUF) | 0.9B | Apache-2.0 | 🟢 |
+| PaddlePaddle/PP-DocLayoutV3 (the layout sidecar's detector) | — | Apache-2.0 | 🟢 |
 | zai-org/GLM-OCR | 0.9B | MIT | 🟢 |
 | opendatalab/MinerU2.5-Pro (weights) | 1.2B | Apache-2.0 | 🟢 (the MinerU *pipeline code* is 🟡, see below) |
 | ibm-granite/granite-docling-258M | 258M | Apache-2.0 | 🟢 |

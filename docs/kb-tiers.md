@@ -156,6 +156,80 @@ layer: `docs/tier-readiness-plan.md`). PP-OCRv6 on Lite runs in `rust/deploy/ocr
 (RapidOCR 3.10, ONNX Runtime, CPU), a sidecar that answers the same chat shape; it is
 **built but not yet run** (the image has not been built on this machine).
 
+## OCR recipes (`KB_OCR_RECIPE`)
+
+The local chat endpoint is served with one of two **recipes**, and they are not the same thing
+with a different prompt.
+
+| Recipe | Model | What it answers | Postprocessing |
+|---|---|---|---|
+| `paddle` (default) | PaddleOCR-VL-1.6, PP-OCRv6 | one page, with the task prefix (`OCR:`, `Table Recognition:`, …) | none — the answer is the text |
+| `xiaomi` | Xiaomi-OCR-0 (0.8B, Apache-2.0) | one page, as markdown with OTSL tables | the vendor's: repetition retry, truncated-tail cut, math delimiters, OTSL → table |
+
+`KB_OCR_RECIPE` picks one. An unknown value is a configuration error, exactly like
+`KB_OCR_MODE`: the value is logged and the default is used, never a silent guess. The recipe,
+the table format and the layout path are all part of the OCR page cache key and of the
+extraction fingerprint, so a cache entry written under one recipe is never served under
+another.
+
+**The Xiaomi recipe** (`kb_extract::XiaomiOcrProvider`) is the vendor's
+`evaluation_pipeline/e2e_img2md.py`, step for step:
+
+1. the page is rendered at `KB_OCR_DPI` (150) as a **PNG**, scaled so its longest edge is at
+   most 2048 px — the model's input bound;
+2. the **prompt comes before the image** (the other order makes the model answer in prose):
+   the document prompt, at `temperature 0`, `top_p 0.8`, `repetition_penalty 1.0`,
+   `max_tokens 12288`, thinking off;
+3. if the answer looks like a loop, the page is asked again with `presence_penalty 1.5`, and
+   the second answer is adopted only when it is not a loop either;
+4. the answer is cut (a truncated repeated tail), the math delimiters are normalised, and the
+   tables are rendered.
+
+The postprocessing is ported to `kb-core` (`kb_core::xiaomi_ocr`) and is **byte-for-byte** the
+vendor's: over the 1,403 pages of the olmOCR benchmark, with the vendor's own output as the
+fixture, 1,403/1,403 pages come out byte-identical. The region path (below) is 71/71.
+
+**Tables.** `KB_OCR_TABLE_FORMAT` picks how a table is written: `markdown` (the default, a pipe
+table) or `html` (a `<table>` with row and column spans — the vendor's own rendering). Both are
+read by the table parser, and the format is part of the cache key.
+
+**Layout fallback.** A whole-page answer sometimes misses a table the page clearly has. With
+`KB_OCR_LAYOUT_URL` set, the provider asks a layout detector where the page's regions are and
+re-reads the page region by region **only when the two disagree**: the detector says the page
+has a table and the whole-page answer has none. That is the reference pipeline's rule, and it
+fires on 71 of the 1,403 benchmark pages.
+
+The detector is a sidecar (`rust/deploy/ocr-layout`): PP-DocLayoutV3 at a 0.3 threshold,
+`POST /v1/layout` with a base64 PNG, `GET /health`. The sidecar's own postprocessing —
+non-maximum suppression, unclipping, containment merge, reading order — is the vendor's
+`apply_layout_postprocess`, ported there. The **application logic is Rust**: the rule above,
+the region prompts (text, table, formula), the crops and the merge into one page of markdown.
+
+A layout detector that is down does not fail the page: the whole-page answer is kept and the
+page is reported as degraded — `metadata.ocr.layoutFailed` — and it is **not cached**, so the
+next run, with the detector back, reads it properly.
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `KB_OCR_RECIPE` | `paddle` or `xiaomi`; anything else is a configuration error | `paddle` |
+| `KB_OCR_TABLE_FORMAT` | `markdown` or `html` — how a table is written | `markdown` |
+| `KB_OCR_LAYOUT_URL` | base URL of the layout sidecar; empty turns the layout path off | empty (off) |
+
+**Measured (2026-11-15, NVIDIA GB10, Xiaomi-OCR-0 under vLLM).** 40 benchmark pages of the
+olmOCR table set, read through the router with `kb-server eval ocr` (the first page of each
+document, 16 concurrent requests), scored with the benchmark's own tests (214 tests over those
+40 pages):
+
+| Run | This service | The vendor's own pipeline |
+|---|---|---|
+| whole page | **100/214 (46.7%)** | 92/214 (43.0%) |
+| with the layout fallback | **165/214 (77.1%)** | 166/214 (77.6%) |
+
+The two are one test apart on the fallback (the vendor's page and ours differ where the model
+answered differently — the model is not deterministic across runs, and the pages are rasterised
+by different engines: `pdftoppm` there, `pdfium` here). Speed: 0.38 pages/s for a whole page,
+0.27 pages/s with the fallback, which reads the page again region by region.
+
 ## OCR offload (`ING-6`)
 
 The document-level "is this PDF scanned?" test is replaced, when a provider is configured, by a
@@ -197,7 +271,9 @@ becomes `[page N could not be read]` in the content, and is listed in `failedPag
 document is `ready`. If **no** page produced any text at all, the extraction fails with the
 provider's error, because indexing an empty document is worse than retrying it.
 `metadata.ocr` records `{mode, provider, pages, ocrPages, cachedPages, localPages, failedPages,
-skippedPages, breakerOpened}`.
+skippedPages, breakerOpened}`, plus `layoutPages` and `layoutFailed` when the layout fallback is
+configured: the pages the detector answered for, and the pages it failed on. A degraded page is
+never cached.
 
 **Images and TIFF** take the same cache, pool and breaker when the provider is the image adapter
 (a TIFF is one page per image). With Mistral configured, image uploads keep the pre-existing

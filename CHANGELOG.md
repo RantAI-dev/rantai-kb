@@ -88,6 +88,39 @@
     `metadata.ocr` records mode, provider, pages, OCR/cached/local/skipped pages,
     failed pages and whether the breaker opened.
 
+- **Xiaomi-OCR-0 is an OCR recipe (`ING-6`).** The local chat endpoint can now be served with
+  the vendor's own Xiaomi-OCR-0 recipe instead of PaddleOCR-VL's task prefix.
+  - **Recipe:** `KB_OCR_RECIPE=paddle|xiaomi` (default `paddle`; an unknown value is a
+    configuration error, like `KB_OCR_MODE`). The Xiaomi recipe renders the page as a PNG at
+    150 dpi scaled to 2048 px, sends the **document prompt before the image** at temperature 0
+    with thinking off, retries a repetitive answer with `presence_penalty 1.5` (keeping the
+    second answer only if it is not repetitive either), and then cuts a truncated repeated tail,
+    normalises the math delimiters and renders the tables.
+  - **Parity:** the postprocessing is ported to `kb-core` (`kb_core::xiaomi_ocr`) and is
+    byte-for-byte the vendor's — over the 1,403 pages of the olmOCR benchmark, 1,403/1,403
+    pages come out byte-identical to the vendor pipeline's own output (71/71 for the region
+    path), with the vendor's raw answers as the fixture.
+  - **Tables:** `KB_OCR_TABLE_FORMAT=markdown|html` (default `markdown`) — a pipe table or the
+    vendor's `<table>` with row and column spans.
+  - **Layout fallback:** with `KB_OCR_LAYOUT_URL` set, the provider asks a layout detector where
+    the page's regions are and re-reads the page region by region **only when the detector says
+    the page has a table and the whole-page answer has none** — the reference pipeline's rule,
+    which fires on 71 of the 1,403 benchmark pages. The detector is the sidecar in
+    `rust/deploy/ocr-layout` (PP-DocLayoutV3, `POST /v1/layout`, `GET /health`); the rule, the
+    region prompts, the crops and the merge are Rust. A detector that is down keeps the
+    whole-page answer, reports the page in `metadata.ocr.layoutFailed` and does not cache it.
+    `metadata.ocr` gains `layoutPages` and `layoutFailed`.
+  - **Caching:** the recipe, the table format and the layout path are part of the OCR page
+    cache key and of the extraction fingerprint.
+  - **Measurement:** `kb-server eval ocr --pdfs <list> --root <dir> --out <dir>` reads the first
+    page of every listed PDF through the same router the pipeline uses and writes
+    `<out>/<name minus .pdf>.md`, with the wall time and pages/s.
+  - **Measured (2026-11-15, NVIDIA GB10, Xiaomi-OCR-0 under vLLM):** 40 benchmark pages of the
+    olmOCR table set (214 tests), read through the router: whole page **100/214 (46.7%)** against
+    the vendor pipeline's own 92/214 (43.0%); with the layout fallback **165/214 (77.1%)**
+    against the vendor's 166/214 (77.6%) — one test apart. 0.38 pages/s whole page, 0.27 pages/s
+    with the fallback.
+
 - **Pictures are searchable by what they show (`ING-5`).** Before, an image was
   found only by the text OCR read off it: a photo or diagram without text became a
   `ready` document with zero chunks, pictures inside Office and EPUB files were
