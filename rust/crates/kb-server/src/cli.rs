@@ -107,6 +107,9 @@ USAGE
     kb-server eval compare --baseline F --current F  Compare two runs against a baseline
     kb-server eval classify --queries FILE [--per-query]  Print the query-class distribution of a
                                                  queries.tsv / queries.jsonl file (RET-5)
+    kb-server eval ocr --pdfs F --root D --out D  Read the first page of every listed PDF through
+                                                 the OCR router and write <out>/<name>.md
+                                                 [--html] [--concurrency N]
     kb-server bench search --base-url URL --queries F  Closed-loop load test for /v1/search
     kb-server check-boundary                   Fail if an inner crate depends on an adapter
 
@@ -319,6 +322,11 @@ async fn eval(args: &[String]) -> Result<(), CliError> {
     // reported distribution drift from what the pipeline actually does.
     if args.first().map(String::as_str) == Some("classify") {
         return classify_queries(&args[1..]);
+    }
+    // `eval ocr` reads pages through the pipeline's own OCR router, so it
+    // needs `kb-extract` — a crate the black-box `kb-eval` may not link.
+    if args.first().map(String::as_str) == Some("ocr") {
+        return crate::eval_ocr::run(&args[1..]).await;
     }
     kb_eval::run(args).await.map_err(|err| match err {
         kb_eval::EvalError::Usage(message) => CliError::Usage(message),

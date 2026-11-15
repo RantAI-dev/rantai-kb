@@ -10,6 +10,7 @@ pub mod config;
 pub mod dto;
 pub mod egress;
 pub mod error;
+pub mod eval_ocr;
 pub mod events;
 pub mod routes;
 pub mod runtime;
