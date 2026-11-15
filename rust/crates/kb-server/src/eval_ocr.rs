@@ -258,6 +258,11 @@ async fn read_one(router: &OcrRouter, root: &Path, out: &Path, relative: &str) -
             return outcome;
         }
     };
+    if let Some(reason) = not_read_by_the_model(result.ocr.as_ref()) {
+        eprintln!("eval ocr: {relative}: {reason}");
+        outcome.failed = true;
+        return outcome;
+    }
     if let Some(report) = result.ocr.as_ref() {
         outcome.layout = report.layout_pages;
         outcome.layout_failed = report.layout_failed;
@@ -286,6 +291,38 @@ async fn read_one(router: &OcrRouter, root: &Path, out: &Path, relative: &str) -
     outcome
 }
 
+/// Why a document's text must not be scored as the model's, or `None` when the
+/// provider read it.
+///
+/// The router degrades on purpose: when the provider fails or its outage
+/// breaker is open it falls back to the PDF's own text layer, which is right
+/// for ingest and wrong for a benchmark. A run that wrote the text layer
+/// for 90% of the pages while the server was down reported them as "read"
+/// and timed the fallback as model throughput.
+fn not_read_by_the_model(report: Option<&kb_ports::ocr::OcrReport>) -> Option<String> {
+    let Some(report) = report else {
+        return Some("no OCR report: the provider was not asked".to_string());
+    };
+    if !report.failed_pages.is_empty() {
+        return Some(format!(
+            "OCR failed on page(s) {:?}; the text is the fallback, not the model's",
+            report.failed_pages
+        ));
+    }
+    if report.ocr_pages + report.cached_pages == 0 {
+        return Some(format!(
+            "no page was read by the provider ({} from the text layer{})",
+            report.local_pages,
+            if report.breaker_opened {
+                ", breaker open"
+            } else {
+                ""
+            }
+        ));
+    }
+    None
+}
+
 /// `<out>/<relative without .pdf>.md`. Not `with_extension`: that replaces
 /// everything after the last dot, so `2503.05218_pg5.pdf` became `2503.md`
 /// and the pages of one arXiv month overwrote each other.
@@ -297,6 +334,39 @@ fn markdown_path(out: &std::path::Path, relative: &str) -> std::path::PathBuf {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    #[test]
+    fn only_a_page_the_model_read_is_scored() {
+        use kb_ports::ocr::OcrReport;
+        let read = OcrReport {
+            ocr_pages: 1,
+            ..OcrReport::default()
+        };
+        assert_eq!(not_read_by_the_model(Some(&read)), None);
+        let cached = OcrReport {
+            cached_pages: 1,
+            ..OcrReport::default()
+        };
+        assert_eq!(not_read_by_the_model(Some(&cached)), None);
+        let fell_back = OcrReport {
+            ocr_pages: 1,
+            failed_pages: vec![1],
+            local_pages: 1,
+            ..OcrReport::default()
+        };
+        assert!(not_read_by_the_model(Some(&fell_back)).is_some());
+        let breaker = OcrReport {
+            local_pages: 1,
+            breaker_opened: true,
+            ..OcrReport::default()
+        };
+        assert!(
+            not_read_by_the_model(Some(&breaker))
+                .unwrap()
+                .contains("breaker open")
+        );
+        assert!(not_read_by_the_model(None).is_some());
+    }
+
     #[test]
     fn a_dotted_file_name_keeps_its_whole_stem() {
         let out = std::path::Path::new("/o");
