@@ -218,8 +218,12 @@ fn chapter_parts(candidate: &str) -> Option<String> {
         if roman.is_empty() || roman.len() > 4 {
             return None;
         }
+        // The roman numeral is ASCII, so this cut is on a char boundary. The
+        // old `candidate[rest.len()..]` sliced the original line at the
+        // remainder's length, which lands inside a multi-byte character on
+        // lines like "Part II – Análisis" and panicked the ingest task.
         return Some(
-            candidate[rest.len()..]
+            rest[roman.len()..]
                 .trim_start_matches(['.', ':', ' '])
                 .to_string(),
         );
@@ -393,6 +397,21 @@ pub fn extract_outline(pdfium: &Pdfium, pdf_bytes: &[u8], pages: &[String]) -> O
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_roman_part_heading_with_accents_does_not_panic() {
+        for line in [
+            "Part II – Análisis económico",
+            "Part CIÓN de la población",
+            "Part IV: Información",
+        ] {
+            assert!(chapter_parts(line).is_some(), "{line}");
+        }
+        assert_eq!(
+            chapter_parts("Part II – Análisis").as_deref(),
+            Some("– análisis")
+        );
+    }
     use crate::pdfium::get_pdfium;
 
     /// Build a minimal, valid PDF from object bodies. Offsets are computed, so
