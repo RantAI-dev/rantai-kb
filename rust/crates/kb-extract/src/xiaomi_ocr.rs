@@ -338,7 +338,7 @@ impl XiaomiOcrProvider {
 
         // The layout detector is only asked when the whole-page answer has no
         // table: a page that already has one needs nothing from it.
-        if page.to_lowercase().contains("<table") {
+        if answer_has_table(&raw) {
             return Ok(OcrPageAnswer::text(page));
         }
 
@@ -683,6 +683,18 @@ impl crate::chain::ScannedPageOcr for XiaomiOcrProvider {
     }
 }
 
+/// Whether a whole-page answer carries a table, decided the way the measured
+/// pipeline decided it: on the HTML rendering of the answer, whatever
+/// `KB_OCR_TABLE_FORMAT` the page is finally written in. Testing the final
+/// text for `<table` missed every markdown table, so with the default format
+/// each table page went to the layout detector and lost its whole-page table
+/// to a region re-read.
+fn answer_has_table(raw: &str) -> bool {
+    finalize_document_format(raw, TableFormat::Html)
+        .to_lowercase()
+        .contains("<table")
+}
+
 /// One answer from the chat endpoint.
 #[derive(Debug, Deserialize)]
 struct Answer {
@@ -792,6 +804,17 @@ mod tests {
             provider.cache_tag(),
             "recipe=xiaomi;tables=markdown;layout=on"
         );
+    }
+
+    #[test]
+    fn a_table_is_seen_whichever_format_the_page_is_written_in() {
+        let raw = "Intro\n\n<fcel>Milestone<fcel>Date<nl><fcel>Start<fcel>2001<nl>\n\nAfter";
+        assert!(answer_has_table(raw));
+        assert!(
+            !finalize_document_format(raw, TableFormat::Markdown).contains("<table"),
+            "the markdown page carries no <table> tag, so the test cannot look for one"
+        );
+        assert!(!answer_has_table("Just a paragraph of text."));
     }
 
     #[test]
