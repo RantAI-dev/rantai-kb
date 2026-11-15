@@ -453,7 +453,13 @@ impl ExtractConfig {
             ocr_max_tokens: lookup("KB_OCR_MAX_TOKENS")
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|n| *n > 0)
-                .unwrap_or(default.ocr_max_tokens),
+                // Xiaomi-OCR-0 writes a dense page as one answer; at 4096 tokens
+                // a long table page is cut off. Its own default applies unless
+                // the operator set one.
+                .unwrap_or(match ocr_recipe {
+                    OcrRecipe::Xiaomi => crate::xiaomi_ocr::DEFAULT_XIAOMI_MAX_TOKENS,
+                    _ => default.ocr_max_tokens,
+                }),
             ocr_mode,
             // A share below 1 % or above 100 % is an operator typo; clamp it
             // rather than making every page a scan or none.
@@ -572,6 +578,24 @@ mod tests {
         assert_eq!(cfg.ocr_concurrency, 4);
         assert_eq!(cfg.ocr_timeout, Duration::from_millis(30_000));
         assert_eq!(cfg.ocr_max_tokens, 2048);
+    }
+
+    #[test]
+    fn the_xiaomi_recipe_has_its_own_token_budget_unless_one_is_set() {
+        let unset = ExtractConfig::from_lookup(|name| match name {
+            "KB_OCR_RECIPE" => Some("xiaomi".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            unset.ocr_max_tokens,
+            crate::xiaomi_ocr::DEFAULT_XIAOMI_MAX_TOKENS
+        );
+        let set = ExtractConfig::from_lookup(|name| match name {
+            "KB_OCR_RECIPE" => Some("xiaomi".to_string()),
+            "KB_OCR_MAX_TOKENS" => Some("2048".to_string()),
+            _ => None,
+        });
+        assert_eq!(set.ocr_max_tokens, 2048);
     }
 
     #[test]
