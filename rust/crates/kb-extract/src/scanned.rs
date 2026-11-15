@@ -47,10 +47,14 @@ pub fn read_page_facts(pdfium: &Pdfium, pdf_bytes: &[u8]) -> Result<Vec<PageFact
 
     let mut out = Vec::new();
     for (index, page) in document.pages().iter().enumerate() {
-        let text = page
+        // One text page per page. `PdfPageTextObject::text()` would load a
+        // fresh text page for every object, which is quadratic: a dense A4
+        // page of the olmOCR table set took 29 s, holding pdfium's global
+        // lock, so every other document's render waited behind it.
+        let text_page = page
             .text()
-            .map_err(|e| ExtractError::Container(format!("failed to read page text: {e}")))?
-            .all();
+            .map_err(|e| ExtractError::Container(format!("failed to read page text: {e}")))?;
+        let text = text_page.all();
 
         let mut rects: Vec<(f32, f32, f32, f32)> = Vec::new();
         let mut visible_chars = 0usize;
@@ -71,8 +75,8 @@ pub fn read_page_facts(pdfium: &Pdfium, pdf_bytes: &[u8]) -> Result<Vec<PageFact
                 // (`PdfPageTextObject::render_mode`), so an invisible OCR layer
                 // is excluded as the spec asks.
                 if text_object.is_visible() {
-                    visible_chars += text_object
-                        .text()
+                    visible_chars += text_page
+                        .for_object(text_object)
                         .chars()
                         .filter(|c| !c.is_whitespace())
                         .count();
