@@ -268,9 +268,7 @@ async fn read_one(router: &OcrRouter, root: &Path, out: &Path, relative: &str) -
         outcome.failed = true;
         return outcome;
     }
-    let target = out
-        .join(relative.trim_end_matches(".pdf"))
-        .with_extension("md");
+    let target = markdown_path(out, relative);
     if let Some(parent) = target.parent() {
         if let Err(err) = std::fs::create_dir_all(parent) {
             eprintln!("eval ocr: {}: {err}", relative);
@@ -288,9 +286,30 @@ async fn read_one(router: &OcrRouter, root: &Path, out: &Path, relative: &str) -
     outcome
 }
 
+/// `<out>/<relative without .pdf>.md`. Not `with_extension`: that replaces
+/// everything after the last dot, so `2503.05218_pg5.pdf` became `2503.md`
+/// and the pages of one arXiv month overwrote each other.
+fn markdown_path(out: &std::path::Path, relative: &str) -> std::path::PathBuf {
+    let stem = relative.strip_suffix(".pdf").unwrap_or(relative);
+    out.join(format!("{stem}.md"))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+    #[test]
+    fn a_dotted_file_name_keeps_its_whole_stem() {
+        let out = std::path::Path::new("/o");
+        assert_eq!(
+            markdown_path(out, "arxiv_math/2503.05218_pg5.pdf"),
+            std::path::PathBuf::from("/o/arxiv_math/2503.05218_pg5.md")
+        );
+        assert_eq!(
+            markdown_path(out, "tables/a.pdf"),
+            std::path::PathBuf::from("/o/tables/a.md")
+        );
+    }
+
     use super::*;
 
     fn args(list: &[&str]) -> Vec<String> {

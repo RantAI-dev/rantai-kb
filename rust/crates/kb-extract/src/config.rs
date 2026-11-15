@@ -361,10 +361,6 @@ impl ExtractConfig {
             })
             .unwrap_or(default.layout_extractor_order);
 
-        let ocr_timeout = lookup("KB_OCR_TIMEOUT_MS")
-            .and_then(|s| s.parse::<u64>().ok())
-            .map_or(default.ocr_timeout, Duration::from_millis);
-
         let ocr_base_url = lookup("KB_OCR_BASE_URL").unwrap_or(default.ocr_base_url);
         let ocr_api_key = lookup("KB_OCR_API_KEY").unwrap_or(default.ocr_api_key);
 
@@ -449,7 +445,18 @@ impl ExtractConfig {
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|n| *n > 0)
                 .unwrap_or(default.ocr_concurrency),
-            ocr_timeout,
+            // A dense page under a full batch takes minutes on Xiaomi-OCR-0;
+            // the vendor waits 600 s. Timing out earlier turns a slow page into
+            // retries, an open breaker and lost pages.
+            ocr_timeout: lookup("KB_OCR_TIMEOUT_MS")
+                .and_then(|s| s.parse::<u64>().ok())
+                .map_or(
+                    match ocr_recipe {
+                        OcrRecipe::Xiaomi => Duration::from_secs(600),
+                        _ => default.ocr_timeout,
+                    },
+                    Duration::from_millis,
+                ),
             ocr_max_tokens: lookup("KB_OCR_MAX_TOKENS")
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|n| *n > 0)
@@ -596,6 +603,7 @@ mod tests {
             _ => None,
         });
         assert_eq!(set.ocr_max_tokens, 2048);
+        assert_eq!(unset.ocr_timeout, Duration::from_secs(600));
     }
 
     #[test]
