@@ -760,6 +760,8 @@ async fn the_ocr_report_is_stored_in_document_metadata_in_the_documented_shape()
         failed_pages: vec![7],
         skipped_pages: vec![],
         breaker_opened: false,
+        layout_pages: 0,
+        layout_failed: 0,
     };
     let h = harness(Arc::new(FakeExtractor::returning_result(
         ExtractionResult {

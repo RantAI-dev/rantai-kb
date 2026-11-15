@@ -25,6 +25,19 @@
 //! The corpus directory holds `raw/<category>/<page>.md` (the model's answer)
 //! and `final/<category>/<page>.md` (what the vendor made of it).
 //!
+//! The markdown table format has no vendor to check against: it is this
+//! repository's own addition. It is checked against the reference generator
+//! (`rust/scripts/xiaomi-ocr-markdown-ref.py`) instead, over the same corpus:
+//!
+//! ```sh
+//! KB_XIAOMI_MARKDOWN_PARITY=/path/to/corpus \
+//!   cargo test --release --manifest-path rust/Cargo.toml \
+//!   -p kb-core --test xiaomi_ocr_parity -- --nocapture
+//! ```
+//!
+//! The corpus directory holds `raw/` (the model's answers) and `mdref/` (what
+//! the reference generator made of them).
+//!
 //! The vendor's region merge asks `wordfreq` whether a word split across two
 //! blocks is a real word. That package is not installed in the deployment, so
 //! the path that runs — and the one the fixtures were made with — is the
@@ -36,7 +49,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use kb_core::xiaomi_ocr::document::finalize_document;
+use kb_core::xiaomi_ocr::document::{TableFormat, finalize_document, finalize_document_format};
 use kb_core::xiaomi_ocr::region::{LayoutRegion, merge_page_to_markdown};
 use serde::Deserialize;
 
@@ -206,14 +219,35 @@ fn first_difference(got: &str, expected: &str) -> String {
         }
         offset += 1;
     }
-    let start = offset.saturating_sub(60);
-    let got_end = (offset + 60).min(got.len());
-    let expected_end = (offset + 60).min(expected.len());
+    // The offset is a byte offset; the excerpt has to start and end on a
+    // character boundary, or the text cannot be sliced out of it.
+    let start = floor_boundary(got, offset.saturating_sub(60));
+    let got_end = ceil_boundary(got, (offset + 60).min(got.len()));
+    let expected_start = floor_boundary(expected, offset.saturating_sub(60));
+    let expected_end = ceil_boundary(expected, (offset + 60).min(expected.len()));
     format!(
         "at byte {offset}:\n  got      {:?}\n  expected {:?}",
         &got[start..got_end],
-        &expected[start..expected_end]
+        &expected[expected_start..expected_end]
     )
+}
+
+/// The largest boundary at or below `offset`.
+fn floor_boundary(text: &str, offset: usize) -> usize {
+    let mut at = offset.min(text.len());
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
+/// The smallest boundary at or above `offset`.
+fn ceil_boundary(text: &str, offset: usize) -> usize {
+    let mut at = offset.min(text.len());
+    while at < text.len() && !text.is_char_boundary(at) {
+        at += 1;
+    }
+    at
 }
 
 /// One line of the region corpus: the regions and the merged markdown.
@@ -250,6 +284,47 @@ fn the_whole_corpus_matches_the_vendor() {
     }
     eprintln!(
         "xiaomi-ocr e2e parity: {identical}/{} pages byte-identical",
+        pages.len()
+    );
+    assert!(
+        mismatches.is_empty(),
+        "{} of {} pages differ:\n{}",
+        mismatches.len(),
+        pages.len(),
+        mismatches.join("\n")
+    );
+}
+
+#[test]
+fn the_whole_corpus_matches_the_markdown_reference() {
+    let Ok(root) = std::env::var("KB_XIAOMI_MARKDOWN_PARITY") else {
+        eprintln!("KB_XIAOMI_MARKDOWN_PARITY is not set; skipping the markdown check");
+        return;
+    };
+    let root = PathBuf::from(root);
+    let raw_dir = root.join("raw");
+    let ref_dir = root.join("mdref");
+    let pages = markdown_files(&raw_dir, &raw_dir);
+    assert!(!pages.is_empty(), "no pages under {}", raw_dir.display());
+
+    let mut identical = 0usize;
+    let mut mismatches: Vec<String> = Vec::new();
+    for page in &pages {
+        let raw = fs::read_to_string(raw_dir.join(page)).expect("raw page");
+        let expected = fs::read_to_string(ref_dir.join(page)).expect("reference page");
+        let got = finalize_document_format(&raw, TableFormat::Markdown);
+        if got == expected {
+            identical += 1;
+        } else {
+            mismatches.push(format!(
+                "{}: {}",
+                page.display(),
+                first_difference(&got, &expected)
+            ));
+        }
+    }
+    eprintln!(
+        "xiaomi-ocr markdown parity: {identical}/{} pages byte-identical",
         pages.len()
     );
     assert!(

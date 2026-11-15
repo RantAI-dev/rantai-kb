@@ -108,6 +108,18 @@ fn map_label(label: &str) -> &str {
     label
 }
 
+/// Whether the merge keeps a region's text.
+///
+/// `false` for images and for the furniture of a page — headers, footers,
+/// page numbers, footnotes: they are not the page's content, and the merge
+/// drops them whatever they hold. A caller that reads a page region by region
+/// uses this to know which regions are worth asking the model about.
+#[must_use]
+pub fn region_is_kept(label: &str) -> bool {
+    let mapped = map_label(label);
+    mapped != "image" && mapped != "abandon"
+}
+
 /// One region of the page, once it has been formatted.
 #[derive(Debug, Clone, PartialEq)]
 struct Block {

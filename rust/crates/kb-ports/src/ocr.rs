@@ -14,6 +14,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::error::PortError;
+
 /// What one document's OCR offload did.
 ///
 /// Field names are camelCase because they land in the document's `metadata`
@@ -40,6 +42,19 @@ pub struct OcrReport {
     pub skipped_pages: Vec<u32>,
     /// Whether the outage breaker was open while this document ran.
     pub breaker_opened: bool,
+    /// How many pages a layout detector answered for.
+    ///
+    /// Zero when no layout detector is configured: the page was read whole,
+    /// without regions.
+    #[serde(default)]
+    pub layout_pages: u32,
+    /// How many pages a layout detector failed on.
+    ///
+    /// A page in this count kept the whole-page answer: the layout path could
+    /// not be applied, and the report says so rather than pretending the page
+    /// had no regions.
+    #[serde(default)]
+    pub layout_failed: u32,
 }
 
 impl OcrReport {
@@ -68,4 +83,42 @@ pub trait OcrPageCache: Send + Sync {
 
     /// Remember a page's text. Only successful reads are stored.
     async fn put(&self, key: &str, text: &str);
+}
+
+/// One region of a page, as a layout detector found it.
+///
+/// The box is normalised to 0–1000 so it travels with the page's own
+/// resolution: a detector that sees a 150 dpi page and one that sees a 300
+/// dpi page describe the same region with the same numbers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayoutBox {
+    /// The label the detector gave the region (`"text"`, `"table"`, …).
+    pub label: String,
+    /// The detector's confidence, 0–1.
+    #[serde(default)]
+    pub score: f32,
+    /// The region's box, normalised to 0–1000: `[x1, y1, x2, y2]`.
+    pub bbox_2d: [f64; 4],
+    /// What to do with the region: `text`, `table`, `formula` or `skip`.
+    #[serde(default)]
+    pub task_type: String,
+}
+
+/// A page's layout: the regions to read, in reading order.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PageLayout {
+    /// The regions, in the order the detector says to read them.
+    #[serde(default)]
+    pub regions: Vec<LayoutBox>,
+}
+
+/// A layout detector: where a page's text, tables and formulas are.
+///
+/// The detector is a model, so it is a service like an OCR provider: it can be
+/// down, and the caller must degrade visibly rather than pretend the page had
+/// no regions.
+#[async_trait]
+pub trait LayoutDetector: Send + Sync {
+    /// Detect the layout of one page image.
+    async fn detect(&self, image_bytes: &[u8], mime: &str) -> Result<PageLayout, PortError>;
 }

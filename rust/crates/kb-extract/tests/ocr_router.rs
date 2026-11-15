@@ -14,8 +14,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use image::{DynamicImage, Rgb, RgbImage};
 use kb_extract::ocr_router::{
-    OcrBreaker, OcrCallError, OcrPageProvider, OcrPageRead, OcrRouter, OcrRouterSettings,
-    OcrTransport,
+    OcrBreaker, OcrCallError, OcrPageAnswer, OcrPageProvider, OcrPageRead, OcrRouter,
+    OcrRouterSettings, OcrTransport,
 };
 use kb_extract::{ExtractConfig, OcrMode};
 use kb_ports::{ExtractionOptions, OcrPageCache};
@@ -253,7 +253,7 @@ impl OcrPageProvider for FakeProvider {
             .collect())
     }
 
-    async fn read_image(&self, _image: &[u8], _mime: &str) -> Result<String, OcrCallError> {
+    async fn read_image(&self, _image: &[u8], _mime: &str) -> Result<OcrPageAnswer, OcrCallError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some(transient) = self.fail_all {
             return Err(if transient {
@@ -263,7 +263,7 @@ impl OcrPageProvider for FakeProvider {
             });
         }
         let page = self.images.fetch_add(1, Ordering::SeqCst);
-        Ok(format!("IMG-page-{page}"))
+        Ok(OcrPageAnswer::text(format!("IMG-page-{page}")))
     }
 }
 

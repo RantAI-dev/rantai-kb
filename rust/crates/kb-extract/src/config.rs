@@ -52,6 +52,85 @@ impl OcrMode {
     }
 }
 
+/// Which OCR recipe the local chat endpoint is served with.
+///
+/// The two recipes are different shapes, not different prompts: PaddleOCR-VL
+/// answers one page with the task prefix (`OCR:`) and no postprocessing,
+/// while Xiaomi-OCR-0 answers with markdown plus OTSL table markup that has to
+/// be turned into text before it is worth indexing. Which one is in use is a
+/// property of the model behind `KB_OCR_BASE_URL`, so it is configuration, not
+/// a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OcrRecipe {
+    /// PaddleOCR-VL (and PP-OCRv6): one page, one prompt, the answer is the
+    /// text.
+    #[default]
+    Paddle,
+    /// Xiaomi-OCR-0: one page, the document prompt, and an answer that needs
+    /// the vendor's postprocessing.
+    Xiaomi,
+}
+
+impl OcrRecipe {
+    /// Parse the `KB_OCR_RECIPE` value. Unknown text is a configuration error
+    /// rather than a silent fallback: an operator who typed `xiaomi-o` should
+    /// hear about it.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "paddle" | "paddleocr" | "paddleocr-vl" => Some(Self::Paddle),
+            "xiaomi" | "xiaomi-ocr" | "xiaomi-ocr-0" => Some(Self::Xiaomi),
+            _ => None,
+        }
+    }
+
+    /// The name written into the cache fingerprint and the startup log.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Paddle => "paddle",
+            Self::Xiaomi => "xiaomi",
+        }
+    }
+}
+
+/// How a table is written into the page's markdown.
+///
+/// `Markdown` is a pipe table, which the table parser reads; `Html` is the
+/// vendor's own rendering, which keeps a cell's row and column spans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OcrTableFormat {
+    /// A markdown pipe table; a spanning cell is repeated in each position.
+    #[default]
+    Markdown,
+    /// An HTML `<table>`, with `rowspan` and `colspan`.
+    Html,
+}
+
+impl OcrTableFormat {
+    /// Parse the `KB_OCR_TABLE_FORMAT` value. Unknown text is a configuration
+    /// error rather than a silent fallback.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "markdown" | "md" => Some(Self::Markdown),
+            "html" => Some(Self::Html),
+            _ => None,
+        }
+    }
+
+    /// The name written into the cache fingerprint and the startup log.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::Html => "html",
+        }
+    }
+}
+
 /// Default for `KB_OCR_SCAN_AREA`: the share of a page raster images must
 /// cover before a page is a scan candidate.
 pub const DEFAULT_OCR_SCAN_AREA: f32 = 0.90;
@@ -115,6 +194,13 @@ pub struct ExtractConfig {
     pub ocr_api_key: String,
     /// Task prefix sent as the text part (default "OCR:", PaddleOCR-VL's task selector).
     pub ocr_prompt: String,
+    /// Which recipe the endpoint behind `KB_OCR_BASE_URL` speaks (`KB_OCR_RECIPE`).
+    pub ocr_recipe: OcrRecipe,
+    /// How a table is written into the page's markdown (`KB_OCR_TABLE_FORMAT`).
+    pub ocr_table_format: OcrTableFormat,
+    /// Full URL of the layout sidecar (`KB_OCR_LAYOUT_URL`). Empty turns the
+    /// layout path off, which is the default: a page is read whole.
+    pub ocr_layout_url: String,
     /// Rendering resolution for OCR page images (default 150).
     pub ocr_dpi: u32,
     /// Page requests in flight (default 2).
@@ -161,7 +247,7 @@ impl ExtractConfig {
         format!(
             "epoch={EXTRACT_CACHE_EPOCH}|ver={}|primary={}|fallback={}|smart={}|\
              mineru_url={}|mineru_api={}:{}:{}|mistral={}:{}|order={}|vision={}:{}:{}|ocr={}|\
-             local_ocr={}:{}:{}:{}:{}:{}:{}|mode={}:{}:{}:{}:{}:{}",
+             local_ocr={}:{}:{}:{}:{}:{}:{}|mode={}:{}:{}:{}:{}:{}|recipe={}:{}|layout={}",
             env!("CARGO_PKG_VERSION"),
             self.primary,
             self.fallback,
@@ -190,6 +276,9 @@ impl ExtractConfig {
             self.ocr_batch,
             self.ocr_max_pages,
             self.ocr_breaker,
+            self.ocr_recipe.as_str(),
+            self.ocr_table_format.as_str(),
+            self.ocr_layout_url.trim(),
         )
     }
 }
@@ -222,6 +311,9 @@ impl Default for ExtractConfig {
             ocr_model: "PaddlePaddle/PaddleOCR-VL-1.6".to_string(),
             ocr_api_key: String::new(),
             ocr_prompt: "OCR:".to_string(),
+            ocr_recipe: OcrRecipe::Paddle,
+            ocr_table_format: OcrTableFormat::Markdown,
+            ocr_layout_url: String::new(),
             ocr_dpi: 150,
             ocr_concurrency: 2,
             ocr_timeout: Duration::from_secs(120),
@@ -289,6 +381,29 @@ impl ExtractConfig {
             None => default.ocr_mode,
         };
 
+        // The recipe and the table format are the same kind of mistake: a
+        // value nobody serves must not silently become the default.
+        let ocr_recipe = match lookup("KB_OCR_RECIPE") {
+            Some(raw) => OcrRecipe::parse(&raw).unwrap_or_else(|| {
+                tracing::warn!(
+                    value = %raw,
+                    "KB_OCR_RECIPE must be paddle or xiaomi; using the default"
+                );
+                default.ocr_recipe
+            }),
+            None => default.ocr_recipe,
+        };
+        let ocr_table_format = match lookup("KB_OCR_TABLE_FORMAT") {
+            Some(raw) => OcrTableFormat::parse(&raw).unwrap_or_else(|| {
+                tracing::warn!(
+                    value = %raw,
+                    "KB_OCR_TABLE_FORMAT must be markdown or html; using the default"
+                );
+                default.ocr_table_format
+            }),
+            None => default.ocr_table_format,
+        };
+
         // An empty value the operator wrote by hand means "use the default",
         // not "send an empty model name" — except for the two that switch the
         // adapter: the URL (off when empty) and the key (no header when empty).
@@ -320,6 +435,12 @@ impl ExtractConfig {
             ocr_model: non_empty_or(lookup("KB_OCR_MODEL"), default.ocr_model),
             ocr_api_key: ocr_api_key.trim().to_string(),
             ocr_prompt: non_empty_or(lookup("KB_OCR_PROMPT"), default.ocr_prompt),
+            ocr_recipe,
+            ocr_table_format,
+            ocr_layout_url: lookup("KB_OCR_LAYOUT_URL")
+                .unwrap_or(default.ocr_layout_url)
+                .trim()
+                .to_string(),
             ocr_dpi: lookup("KB_OCR_DPI")
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|dpi| *dpi > 0)

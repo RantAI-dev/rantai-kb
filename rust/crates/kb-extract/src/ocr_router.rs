@@ -51,7 +51,7 @@ use tokio::sync::Semaphore;
 use crate::ExtractError;
 use crate::config::{ExtractConfig, OcrMode};
 use crate::mistral::blocks_from_markdown;
-use crate::page_render::{render_image_pages, render_pdf_page_indices};
+use crate::page_render::{PageRenderSpec, render_image_pages, render_pdf_page_indices_spec};
 use crate::pdfium::{get_pdfium, pdf_page_subset};
 use crate::scanned::{PageFacts, page_is_scan, read_page_facts};
 
@@ -78,6 +78,36 @@ pub struct OcrPageRead {
     pub page: u32,
     pub text: String,
     pub figures: Vec<ExtractedFigure>,
+}
+
+/// What one page read produced.
+///
+/// A provider that reads a page whole returns the text and nothing else. A
+/// provider that also asks a layout detector where the page's regions are
+/// says so here, so the report can tell an operator that the layout path ran
+/// — and that it failed on some pages, rather than leaving a page silently
+/// read the wrong way.
+#[derive(Debug, Clone, Default)]
+pub struct OcrPageAnswer {
+    /// The page's text, as the provider read it.
+    pub text: String,
+    /// A layout detector answered for this page.
+    pub layout: bool,
+    /// The layout detector failed for this page, so the page kept the
+    /// whole-page answer.
+    pub layout_failed: bool,
+}
+
+impl OcrPageAnswer {
+    /// A page read whole, with no layout detector involved.
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            layout: false,
+            layout_failed: false,
+        }
+    }
 }
 
 /// What the page cache stores for one page: its text and, when a layout
@@ -137,6 +167,22 @@ pub trait OcrPageProvider: Send + Sync {
     fn prompt(&self) -> &str;
     /// Resolution used for page images, part of the cache key.
     fn dpi(&self) -> u32;
+    /// How the page image is rendered for this provider.
+    ///
+    /// The default is the JPEG the chat adapter has always sent; a provider
+    /// that wants lossless PNG (Xiaomi-OCR-0 reads a table better from a PNG)
+    /// or a bounded page (the model's input is 2048 px) says so here.
+    fn image_spec(&self) -> PageRenderSpec {
+        PageRenderSpec::jpeg(self.dpi(), OCR_JPEG_QUALITY)
+    }
+    /// What else changes the page's answer, and so belongs in the cache key.
+    ///
+    /// The recipe and the table format change what comes out of the same
+    /// model for the same page, so a cache entry written under one recipe must
+    /// not be served under the other.
+    fn cache_tag(&self) -> &str {
+        ""
+    }
     fn transport(&self) -> OcrTransport;
     /// One request over a sub-PDF. The output indices are relative to it.
     async fn read_pdf(
@@ -146,7 +192,11 @@ pub trait OcrPageProvider: Send + Sync {
     ) -> Result<Vec<OcrPageRead>, OcrCallError>;
     /// One request over an image upload. Providers that only take documents
     /// return a permanent error, and the caller keeps its old image path.
-    async fn read_image(&self, image_bytes: &[u8], mime: &str) -> Result<String, OcrCallError>;
+    async fn read_image(
+        &self,
+        image_bytes: &[u8],
+        mime: &str,
+    ) -> Result<OcrPageAnswer, OcrCallError>;
 }
 
 /// The process-wide outage breaker. Cheap to clone behind an `Arc`.
@@ -260,6 +310,10 @@ struct PageOutcome {
     from_cache: bool,
     /// The page was sent, or was meant to be and the breaker refused.
     attempted: bool,
+    /// A layout detector answered for this page.
+    layout: bool,
+    /// The layout detector failed for this page.
+    layout_failed: bool,
 }
 
 /// What one group of pages did.
@@ -269,6 +323,8 @@ struct RouteOutcome {
     sent: u32,
     cached: u32,
     breaker_open: bool,
+    layout_pages: u32,
+    layout_failed: u32,
     error: Option<String>,
 }
 
@@ -278,6 +334,8 @@ impl RouteOutcome {
         self.sent += other.sent;
         self.cached += other.cached;
         self.breaker_open |= other.breaker_open;
+        self.layout_pages += other.layout_pages;
+        self.layout_failed += other.layout_failed;
         if self.error.is_none() {
             self.error = other.error;
         }
@@ -415,6 +473,8 @@ impl OcrRouter {
             report.ocr_pages = routed.sent;
             report.cached_pages = routed.cached;
             report.breaker_opened = routed.breaker_open;
+            report.layout_pages = routed.layout_pages;
+            report.layout_failed = routed.layout_failed;
             last_error = routed.error;
             for (page, outcome) in routed.pages {
                 let index = page as usize;
@@ -551,6 +611,8 @@ impl OcrRouter {
             report.ocr_pages = routed.sent;
             report.cached_pages = routed.cached;
             report.breaker_opened = routed.breaker_open;
+            report.layout_pages = routed.layout_pages;
+            report.layout_failed = routed.layout_failed;
             for (page, outcome) in routed.pages {
                 let index = page as usize;
                 if index >= text.len() {
@@ -640,9 +702,9 @@ impl OcrRouter {
         }
         let bytes = pdf_bytes.to_vec();
         let indices = pages.to_vec();
-        let dpi = provider.dpi().max(1);
+        let spec = provider.image_spec();
         let images = tokio::task::spawn_blocking(move || {
-            render_pdf_page_indices(&bytes, &indices, dpi, OCR_JPEG_QUALITY)
+            render_pdf_page_indices_spec(&bytes, &indices, spec)
         })
         .await
         .map_err(|e| ExtractError::Container(format!("OCR render task: {e}")))??;
@@ -741,15 +803,36 @@ impl OcrRouter {
             outcome.sent += 1;
 
             match answer {
-                Ok(text) if !text.trim().is_empty() => {
+                Ok(answer) if !answer.text.trim().is_empty() => {
                     self.breaker.record_success();
-                    let text = text.trim().to_string();
-                    self.cache_put(&key, &text, &[]).await;
+                    let text = answer.text.trim().to_string();
+                    // A page whose layout path failed keeps the whole-page
+                    // answer, but it is not cached: the next run, with the
+                    // detector back, must be free to read it properly.
+                    if !answer.layout_failed {
+                        self.cache_put(&key, &text, &[]).await;
+                    }
                     page.text = Some(text);
+                    page.layout = answer.layout;
+                    page.layout_failed = answer.layout_failed;
+                    if answer.layout {
+                        outcome.layout_pages += 1;
+                    }
+                    if answer.layout_failed {
+                        outcome.layout_failed += 1;
+                    }
                 }
-                Ok(_) => {
+                Ok(answer) => {
                     // A 200 with no text is a page that was not read.
                     self.breaker.record_success();
+                    page.layout = answer.layout;
+                    page.layout_failed = answer.layout_failed;
+                    if answer.layout {
+                        outcome.layout_pages += 1;
+                    }
+                    if answer.layout_failed {
+                        outcome.layout_failed += 1;
+                    }
                 }
                 Err(err) => {
                     if err.transient && self.breaker.record_failure() {
@@ -799,6 +882,7 @@ impl OcrRouter {
                             figures: hit.figures,
                             from_cache: true,
                             attempted: true,
+                            ..PageOutcome::default()
                         },
                     ));
                 }
@@ -1097,6 +1181,7 @@ fn page_cache_key_of(provider: &dyn OcrPageProvider, identity: &[&[u8]]) -> Stri
         provider.id().as_bytes(),
         provider.model().as_bytes(),
         provider.prompt().as_bytes(),
+        provider.cache_tag().as_bytes(),
         dpi.as_slice(),
     ]
     .into_iter()
@@ -1228,8 +1313,12 @@ mod tests {
             ) -> Result<Vec<OcrPageRead>, OcrCallError> {
                 Ok(Vec::new())
             }
-            async fn read_image(&self, _image: &[u8], _mime: &str) -> Result<String, OcrCallError> {
-                Ok(String::new())
+            async fn read_image(
+                &self,
+                _image: &[u8],
+                _mime: &str,
+            ) -> Result<OcrPageAnswer, OcrCallError> {
+                Ok(OcrPageAnswer::default())
             }
         }
         let base = Fake("chat", "m", "OCR:", 150);

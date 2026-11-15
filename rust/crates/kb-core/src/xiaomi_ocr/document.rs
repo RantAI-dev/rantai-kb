@@ -127,6 +127,28 @@ fn split_markdown_blocks(markdown: &str) -> Vec<(String, String)> {
 /// sample, not a table the page is showing.
 #[must_use]
 pub fn postprocess_otsl_tables(markdown: &str) -> String {
+    postprocess_otsl_tables_format(markdown, TableFormat::Html)
+}
+
+/// How a table is written into the page's markdown.
+///
+/// A markdown table has no spans, so a cell that covers several positions is
+/// repeated in each of them; an HTML table keeps the spans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TableFormat {
+    /// A markdown pipe table.
+    #[default]
+    Markdown,
+    /// An HTML `<table>` with `rowspan` and `colspan`.
+    Html,
+}
+
+/// Convert OTSL-looking markdown blocks to tables in the wanted format.
+///
+/// The block rules are the HTML ones: a block inside a fenced code block is
+/// left alone, and a block the converter cannot read keeps its original text.
+#[must_use]
+pub fn postprocess_otsl_tables_format(markdown: &str, format: TableFormat) -> String {
     if markdown.is_empty() || !RE_OTSL_TAG.is_match(markdown).unwrap_or(false) {
         return markdown.to_string();
     }
@@ -145,9 +167,12 @@ pub fn postprocess_otsl_tables(markdown: &str) -> String {
 
         let mut text = text;
         if !should_skip && RE_OTSL_TAG.is_match(&stripped).unwrap_or(false) {
-            let html = otsl::otsl_to_html(&stripped);
-            if !html.is_empty() {
-                text = html;
+            let table = match format {
+                TableFormat::Html => otsl::otsl_to_html(&stripped),
+                TableFormat::Markdown => otsl::otsl_to_markdown(&stripped),
+            };
+            if !table.is_empty() {
+                text = table;
             }
         }
         converted.push_str(&text);
@@ -169,6 +194,16 @@ pub fn postprocess_e2e_markdown(result: &str, convert_otsl: bool) -> String {
     } else {
         text
     }
+}
+
+/// Postprocess a whole-page answer, writing the tables in the wanted format.
+///
+/// The math delimiters are the same either way; only the tables differ: an
+/// HTML table keeps a cell's spans, a markdown pipe table repeats a spanning
+/// cell in each position it covers.
+#[must_use]
+pub fn postprocess_e2e_markdown_format(result: &str, format: TableFormat) -> String {
+    postprocess_otsl_tables_format(&postprocess_math_delimiters(result), format)
 }
 
 /// The defaults the vendor's recipe uses.
@@ -254,6 +289,15 @@ pub fn finalize_document(text: &str) -> String {
     postprocess_e2e_markdown(&clean_truncated_repeats_default(text), true)
 }
 
+/// The vendor's final step, with the tables written in the wanted format.
+///
+/// Same order as [`finalize_document`]: the repeated tail is cut first, then
+/// the math delimiters are normalised, then the OTSL tables are rendered.
+#[must_use]
+pub fn finalize_document_format(text: &str, format: TableFormat) -> String {
+    postprocess_e2e_markdown_format(&clean_truncated_repeats_default(text), format)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -295,6 +339,28 @@ mod tests {
     fn an_otsl_block_inside_a_fence_is_left_alone() {
         let markdown = "```\n\n<fcel>A<fcel>B<nl>\n\n```";
         assert_eq!(postprocess_otsl_tables(markdown), markdown);
+    }
+
+    #[test]
+    fn an_otsl_block_becomes_a_markdown_table() {
+        let markdown = "intro\n\n<fcel>A<fcel>B<nl>\n\ntail";
+        assert_eq!(
+            postprocess_otsl_tables_format(markdown, TableFormat::Markdown),
+            "intro\n\n| A | B |\n| --- | --- |\n\ntail"
+        );
+    }
+
+    #[test]
+    fn the_final_step_writes_the_tables_in_the_wanted_format() {
+        let raw = "intro\n\n<fcel>A<fcel>B<nl>";
+        assert_eq!(
+            finalize_document_format(raw, TableFormat::Markdown),
+            "intro\n\n| A | B |\n| --- | --- |"
+        );
+        assert_eq!(
+            finalize_document_format(raw, TableFormat::Html),
+            "intro\n\n<table><tr><td>A</td><td>B</td></tr></table>"
+        );
     }
 
     #[test]

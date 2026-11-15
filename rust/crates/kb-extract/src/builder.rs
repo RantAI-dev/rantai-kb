@@ -9,13 +9,15 @@
 //!   other    → VisionLlmExtractor with that model id
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use kb_ports::{ExtractionOptions, ExtractionResult, Extractor, PortError};
 
 use crate::ExtractError;
 use crate::chain::{LayoutExtractorChain, ScannedPageOcr};
-use crate::config::{ExtractConfig, OcrMode};
+use crate::config::{ExtractConfig, OcrMode, OcrRecipe};
 use crate::hybrid::HybridExtractor;
+use crate::layout_client::HttpLayoutDetector;
 use crate::mineru::MineruExtractor;
 use crate::mineru_api::MineruApiExtractor;
 use crate::mistral::MistralOcrExtractor;
@@ -25,6 +27,10 @@ use crate::page_ocr::{PageOcrExtractor, PageOcrSettings};
 use crate::pdfium::{extract_pdf_text_layer, get_pdfium};
 use crate::smart_router::SmartRouterExtractor;
 use crate::vision_llm::VisionLlmExtractor;
+use crate::xiaomi_ocr::{XiaomiOcrProvider, XiaomiOcrSettings};
+
+/// How long the layout detector may take before the page is read without it.
+const LAYOUT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Text-layer extractor using Pdfium. Replaces `UnpdfExtractor` from the TS codebase.
 #[derive(Debug, Clone, Copy, Default)]
@@ -186,10 +192,32 @@ pub fn build_production_extractor_with_cache(
 /// The OCR provider the page router uses: the local chat adapter first (a
 /// local tier never sends a page to a paid provider), then Mistral when its key
 /// and its place in `KB_LAYOUT_EXTRACTOR_ORDER` both say to use it.
-fn build_ocr_provider(cfg: &ExtractConfig) -> Option<Arc<dyn crate::ocr_router::OcrPageProvider>> {
+///
+/// Which local adapter depends on the recipe (`KB_OCR_RECIPE`): PaddleOCR-VL
+/// answers one page with the task prefix and no postprocessing, Xiaomi-OCR-0
+/// answers with markdown plus OTSL table markup that has to be turned into
+/// text before it is worth indexing.
+///
+/// The composition root asks for it directly when it needs a provider without
+/// a whole router — the evaluation CLI, which reads a page through the same
+/// recipe the pipeline uses but does not run the ingest path.
+pub fn build_ocr_provider(
+    cfg: &ExtractConfig,
+) -> Option<Arc<dyn crate::ocr_router::OcrPageProvider>> {
     if !cfg.ocr_base_url.trim().is_empty() {
-        if let Ok(ocr) = PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg)) {
-            return Some(Arc::new(ocr));
+        match cfg.ocr_recipe {
+            OcrRecipe::Xiaomi => {
+                let mut settings = XiaomiOcrSettings::from_extract_config(cfg);
+                settings.layout = build_layout_detector(cfg);
+                if let Ok(provider) = XiaomiOcrProvider::new(settings) {
+                    return Some(Arc::new(provider));
+                }
+            }
+            OcrRecipe::Paddle => {
+                if let Ok(ocr) = PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg)) {
+                    return Some(Arc::new(ocr));
+                }
+            }
         }
     }
     if !cfg.mistral_ocr_key.trim().is_empty()
@@ -208,6 +236,24 @@ fn build_ocr_provider(cfg: &ExtractConfig) -> Option<Arc<dyn crate::ocr_router::
         }
     }
     None
+}
+
+/// The layout detector, when `KB_OCR_LAYOUT_URL` names one.
+///
+/// An empty URL turns the layout path off: a page is then read whole, which is
+/// what the pipeline did before the layout sidecar existed.
+fn build_layout_detector(cfg: &ExtractConfig) -> Option<Arc<dyn kb_ports::LayoutDetector>> {
+    let url = cfg.ocr_layout_url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    match HttpLayoutDetector::new(url, LAYOUT_TIMEOUT) {
+        Ok(detector) => Some(Arc::new(detector) as Arc<dyn kb_ports::LayoutDetector>),
+        Err(err) => {
+            tracing::warn!(error = %err, "layout detector not built");
+            None
+        }
+    }
 }
 
 /// Build the page router when the mode asks for one.
@@ -257,12 +303,26 @@ fn local_page_ocr(cfg: &ExtractConfig) -> Option<Arc<dyn ScannedPageOcr>> {
     if cfg.ocr_base_url.trim().is_empty() {
         return None;
     }
-    match PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg)) {
-        Ok(ocr) => Some(Arc::new(ocr)),
-        Err(e) => {
-            tracing::warn!(error = %e, "local page OCR not built");
-            None
+    match cfg.ocr_recipe {
+        OcrRecipe::Xiaomi => {
+            let mut settings = XiaomiOcrSettings::from_extract_config(cfg);
+            settings.layout = build_layout_detector(cfg);
+            match XiaomiOcrProvider::new(settings) {
+                Ok(provider) => Some(Arc::new(provider) as Arc<dyn ScannedPageOcr>),
+                Err(e) => {
+                    tracing::warn!(error = %e, "xiaomi page OCR not built");
+                    None
+                }
+            }
         }
+        OcrRecipe::Paddle => match PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg))
+        {
+            Ok(ocr) => Some(Arc::new(ocr)),
+            Err(e) => {
+                tracing::warn!(error = %e, "local page OCR not built");
+                None
+            }
+        },
     }
 }
 
@@ -374,11 +434,22 @@ pub fn build_layout_chain(cfg: &ExtractConfig) -> Result<LayoutExtractorChain, E
             // when no endpoint is configured — the same rule `mistral` follows
             // for its key. When it is not listed it still serves as the chain's
             // final fallback (see `build_page_ocr`).
-            "ocr" if !cfg.ocr_base_url.trim().is_empty() => {
-                if let Ok(ocr) = PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg)) {
-                    extractors.push(("ocr".to_string(), Arc::new(ocr)));
+            "ocr" if !cfg.ocr_base_url.trim().is_empty() => match cfg.ocr_recipe {
+                OcrRecipe::Xiaomi => {
+                    let mut settings = XiaomiOcrSettings::from_extract_config(cfg);
+                    settings.layout = build_layout_detector(cfg);
+                    if let Ok(provider) = XiaomiOcrProvider::new(settings) {
+                        extractors.push(("ocr".to_string(), Arc::new(provider)));
+                    }
                 }
-            }
+                OcrRecipe::Paddle => {
+                    if let Ok(ocr) =
+                        PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg))
+                    {
+                        extractors.push(("ocr".to_string(), Arc::new(ocr)));
+                    }
+                }
+            },
             _ => {}
         }
     }

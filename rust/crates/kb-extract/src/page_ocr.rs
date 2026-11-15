@@ -44,7 +44,7 @@ use crate::ExtractError;
 use crate::chain::ScannedPageOcr;
 use crate::config::ExtractConfig;
 use crate::detect::{SupportedFileType, detect_file_type};
-use crate::ocr_router::{OcrCallError, OcrPageProvider, OcrPageRead, OcrTransport};
+use crate::ocr_router::{OcrCallError, OcrPageAnswer, OcrPageProvider, OcrPageRead, OcrTransport};
 use crate::page_render::render_pdf_page_range;
 use crate::pdfium::{get_pdf_page_count, get_pdfium};
 
@@ -544,7 +544,11 @@ impl OcrPageProvider for PageOcrExtractor {
         ))
     }
 
-    async fn read_image(&self, image_bytes: &[u8], mime: &str) -> Result<String, OcrCallError> {
+    async fn read_image(
+        &self,
+        image_bytes: &[u8],
+        mime: &str,
+    ) -> Result<OcrPageAnswer, OcrCallError> {
         let page = PageImage {
             page: 0,
             mime: if mime.is_empty() {
@@ -555,7 +559,7 @@ impl OcrPageProvider for PageOcrExtractor {
             bytes: image_bytes.to_vec(),
             text: String::new(),
         };
-        self.one_attempt(&page, 0).await
+        self.one_attempt(&page, 0).await.map(OcrPageAnswer::text)
     }
 }
 

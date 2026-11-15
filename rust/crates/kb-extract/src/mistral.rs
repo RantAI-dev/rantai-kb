@@ -18,7 +18,7 @@ use kb_ports::{
 use serde::{Deserialize, Serialize};
 
 use crate::ExtractError;
-use crate::ocr_router::{OcrCallError, OcrPageProvider, OcrPageRead, OcrTransport};
+use crate::ocr_router::{OcrCallError, OcrPageAnswer, OcrPageProvider, OcrPageRead, OcrTransport};
 
 static CAPTION_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(gambar|tabel|foto|diagram|grafik|bagan|ilustrasi|sumber)\b")
@@ -280,7 +280,11 @@ impl OcrPageProvider for MistralOcrExtractor {
         self.read_sub_pdf(pdf_bytes, include_figures).await
     }
 
-    async fn read_image(&self, _image_bytes: &[u8], _mime: &str) -> Result<String, OcrCallError> {
+    async fn read_image(
+        &self,
+        _image_bytes: &[u8],
+        _mime: &str,
+    ) -> Result<OcrPageAnswer, OcrCallError> {
         Err(OcrCallError::permanent(
             "the Mistral OCR client takes documents, not image uploads",
         ))

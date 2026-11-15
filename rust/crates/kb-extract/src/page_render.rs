@@ -14,11 +14,111 @@ use std::io::Cursor;
 
 use async_trait::async_trait;
 use image::codecs::jpeg::JpegEncoder;
+use image::imageops::FilterType;
 use kb_ports::{PageImage, PageRenderer, PortError};
 use pdfium_render::prelude::*;
 
 use crate::ExtractError;
 use crate::pdfium::get_pdfium;
+
+/// How a page image is encoded for a provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageImageFormat {
+    /// JPEG at the given quality.
+    Jpeg { quality: u8 },
+    /// PNG, lossless.
+    Png,
+}
+
+impl PageImageFormat {
+    /// The mime the encoded bytes carry.
+    #[must_use]
+    pub fn mime(self) -> &'static str {
+        match self {
+            Self::Jpeg { .. } => "image/jpeg",
+            Self::Png => "image/png",
+        }
+    }
+}
+
+/// How a provider wants a page rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageRenderSpec {
+    /// Resolution.
+    pub dpi: u32,
+    /// The encoding.
+    pub format: PageImageFormat,
+    /// The longest edge the provider accepts; `0` means no limit.
+    ///
+    /// A page longer than this is scaled down, keeping its aspect ratio.
+    pub max_edge: u32,
+}
+
+impl PageRenderSpec {
+    /// The spec the page router used before the xiaomi recipe: a JPEG of the
+    /// whole page, at the given resolution.
+    #[must_use]
+    pub fn jpeg(dpi: u32, quality: u8) -> Self {
+        Self {
+            dpi,
+            format: PageImageFormat::Jpeg { quality },
+            max_edge: 0,
+        }
+    }
+}
+
+/// The longest edge of an image, in pixels.
+fn longest_edge(width: u32, height: u32) -> u32 {
+    width.max(height)
+}
+
+/// The size an image is scaled to when it must fit a square of `max_edge`.
+///
+/// This is Pillow's `thumbnail`: the aspect ratio is kept, and the size that
+/// is not rounded to a whole number of pixels is rounded the way Python rounds
+/// (half to even). One pixel of difference changes nothing for a model that
+/// reads a page, but the same rule keeps the two renderers comparable.
+fn fit_within(width: u32, height: u32, max_edge: u32) -> (u32, u32) {
+    if max_edge == 0 || longest_edge(width, height) <= max_edge {
+        return (width, height);
+    }
+    let width_f = f64::from(width);
+    let height_f = f64::from(height);
+    let edge_f = f64::from(max_edge);
+    let (new_width, new_height) = if edge_f * height_f <= edge_f * width_f {
+        (edge_f, round_aspect(edge_f * height_f / width_f))
+    } else {
+        (round_aspect(edge_f * width_f / height_f), edge_f)
+    };
+    ((new_width.max(1.0)) as u32, (new_height.max(1.0)) as u32)
+}
+
+/// Round like Python's `round()`: halfway cases go to the even neighbour.
+fn python_round(value: f64) -> f64 {
+    let fraction = value - value.trunc();
+    if fraction.abs() == 0.5 {
+        let floor = value.floor();
+        if (floor as i64) % 2 == 0 {
+            floor
+        } else {
+            floor + 1.0
+        }
+    } else {
+        value.round()
+    }
+}
+
+/// The pixel count Pillow's `thumbnail` would pick for one side.
+fn round_aspect(value: f64) -> f64 {
+    let floor = value.floor();
+    let ceil = value.ceil();
+    let picked = if python_round(floor) <= python_round(ceil) {
+        floor
+    } else {
+        ceil
+    };
+    picked.max(1.0)
+}
 
 /// Renders PDF pages with the process-wide pdfium.
 #[derive(Debug, Clone, Copy)]
@@ -127,7 +227,7 @@ pub fn render_pdf_page_range(
         let rendered = pages
             .get(index as _)
             .map_err(|e| format!("load: {e}"))
-            .and_then(|page| render_one(&page, &config, jpeg_quality));
+            .and_then(|page| render_one(&page, &config, PageRenderSpec::jpeg(dpi, jpeg_quality)));
         let bytes = rendered.unwrap_or_else(|e| {
             tracing::warn!(page = index, error = %e, "page not rendered");
             Vec::new()
@@ -158,12 +258,27 @@ pub fn render_pdf_page_indices(
     dpi: u32,
     jpeg_quality: u8,
 ) -> Result<Vec<PageImage>, ExtractError> {
+    render_pdf_page_indices_spec(pdf_bytes, indices, PageRenderSpec::jpeg(dpi, jpeg_quality))
+}
+
+/// Render the given page indices with a provider's spec: its resolution, its
+/// encoding, and the longest edge it accepts.
+///
+/// # Errors
+///
+/// When pdfium is missing or the PDF cannot be loaded. A page that fails to
+/// render comes back with empty `bytes`.
+pub fn render_pdf_page_indices_spec(
+    pdf_bytes: &[u8],
+    indices: &[u32],
+    spec: PageRenderSpec,
+) -> Result<Vec<PageImage>, ExtractError> {
     let pdfium = get_pdfium()?;
     let document = pdfium
         .load_pdf_from_byte_slice(pdf_bytes, None)
         .map_err(|e| ExtractError::Container(format!("failed to load PDF: {e}")))?;
     #[allow(clippy::cast_precision_loss)]
-    let scale = dpi.clamp(36, 300) as f32 / 72.0;
+    let scale = spec.dpi.clamp(36, 300) as f32 / 72.0;
     let config = PdfRenderConfig::new().scale_page_by_factor(scale);
     let pages = document.pages();
     let mut out = Vec::with_capacity(indices.len());
@@ -174,14 +289,14 @@ pub fn render_pdf_page_indices(
         let rendered = pages
             .get(index as _)
             .map_err(|e| format!("load: {e}"))
-            .and_then(|page| render_one(&page, &config, jpeg_quality));
+            .and_then(|page| render_one(&page, &config, spec));
         let bytes = rendered.unwrap_or_else(|e| {
             tracing::warn!(page = index, error = %e, "page not rendered");
             Vec::new()
         });
         out.push(PageImage {
             page: index,
-            mime: "image/jpeg".to_string(),
+            mime: spec.format.mime().to_string(),
             bytes,
             text: String::new(),
         });
@@ -192,18 +307,38 @@ pub fn render_pdf_page_indices(
 fn render_one(
     page: &PdfPage<'_>,
     config: &PdfRenderConfig,
-    jpeg_quality: u8,
+    spec: PageRenderSpec,
 ) -> Result<Vec<u8>, String> {
-    let rgb = page
+    let bitmap = page
         .render_with_config(config)
         .map_err(|e| format!("render: {e}"))?
         .as_image()
-        .map_err(|e| format!("bitmap: {e}"))?
-        .to_rgb8();
+        .map_err(|e| format!("bitmap: {e}"))?;
+    let rgb = bitmap.to_rgb8();
+    let image = image::DynamicImage::ImageRgb8(match spec.max_edge {
+        0 => rgb,
+        edge => {
+            let (width, height) = fit_within(rgb.width(), rgb.height(), edge);
+            if width == rgb.width() && height == rgb.height() {
+                rgb
+            } else {
+                image::imageops::resize(&rgb, width, height, FilterType::Lanczos3)
+            }
+        }
+    });
     let mut bytes = Vec::new();
-    JpegEncoder::new_with_quality(&mut Cursor::new(&mut bytes), jpeg_quality.clamp(30, 95))
-        .encode_image(&rgb)
-        .map_err(|e| format!("jpeg: {e}"))?;
+    match spec.format {
+        PageImageFormat::Jpeg { quality } => {
+            JpegEncoder::new_with_quality(&mut Cursor::new(&mut bytes), quality.clamp(30, 95))
+                .encode_image(&image.to_rgb8())
+                .map_err(|e| format!("jpeg: {e}"))?;
+        }
+        PageImageFormat::Png => {
+            image
+                .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+                .map_err(|e| format!("png: {e}"))?;
+        }
+    }
     Ok(bytes)
 }
 

@@ -271,6 +271,49 @@ docker compose -f rust/deploy/compose.yaml -p rantai-kb-dev --profile desk \
   stop tei-embed-desk tei-rerank-desk
 ```
 
+## The layout sidecar (Xiaomi-OCR-0)
+
+The Xiaomi-OCR-0 recipe can ask a **layout detector** where a page's regions are, and re-read a
+page region by region when the whole-page answer misses a table the page clearly has (see
+[`docs/kb-tiers.md`](../../docs/kb-tiers.md#ocr-recipes-kb_ocr_recipe)). The detector is a small
+sidecar in `rust/deploy/ocr-layout`: PP-DocLayoutV3 (Apache-2.0) through transformers, on the
+GPU, answering two endpoints.
+
+```sh
+# the weights are a download, so the model directory is mounted, not baked in
+docker build -t ocr-layout rust/deploy/ocr-layout
+docker run --rm --gpus all -p 8193:8193 \
+  -v /srv/models/pp-doclayoutv3:/models/pp-doclayoutv3:ro \
+  -e LAYOUT_MODEL_DIR=/models/pp-doclayoutv3 \
+  ocr-layout
+
+curl -s localhost:8193/health
+# {"status":"ok","model":"pp-doclayoutv3","device":"cuda:0","threshold":0.3}
+```
+
+Then point the service at it:
+
+```sh
+KB_OCR_RECIPE=xiaomi
+KB_OCR_BASE_URL=http://127.0.0.1:8192/v1/chat/completions   # Xiaomi-OCR-0 under vLLM
+KB_OCR_MODEL=xiaomi-ocr-0
+KB_OCR_LAYOUT_URL=http://127.0.0.1:8193
+```
+
+`POST /v1/layout` takes `{"image": "<base64 png>", "mime": "image/png"}` and answers
+`{"regions": [{"label", "score", "bbox_2d", "task_type"}]}` with the boxes normalised to 0–1000
+and the reading order already applied. The detector failing does not fail the page: the service
+keeps the whole-page answer and reports the page as degraded
+(`metadata.ocr.layoutFailed`).
+
+**Measured (2026-11-15, NVIDIA GB10, PP-DocLayoutV3 at a 0.3 threshold).** Over the 1,403 pages
+of the olmOCR benchmark, the sidecar's regions are byte-identical to the reference pipeline's for
+1,218 pages; 1,355 pages agree within one pixel on every box, 1,368 within five. The reference
+and the sidecar disagree about whether a page has a table on **0** pages, so the fallback fires
+on exactly the same 71 pages. 3 pages differ in the number of regions, 16 in a label and 7 in a
+label's task type — the detector's own nondeterminism between GPU runs, not a difference in the
+postprocessing.
+
 ## GPU notes (desk, studio, station)
 
 - Needs the NVIDIA driver plus `nvidia-container-toolkit` on the host
