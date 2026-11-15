@@ -1,0 +1,126 @@
+{
+ "regions": [
+  {
+   "index": 0,
+   "label": "number",
+   "bbox_2d": [
+    966,
+    27,
+    988,
+    39
+   ],
+   "merged": "**"
+  },
+  {
+   "index": 1,
+   "label": "text",
+   "bbox_2d": [
+    37,
+    59,
+    480,
+    160
+   ],
+   "merged": "THE FACULTY OF SOCIAL SCIENCES of the University of the West Indies is pleased to be associated with the Institute of Caribbean Studies at the UWI Mona, in presenting the Conference on Caribbean Culture, in honour of distinguished Caribbean Scholar, Professor Rex Nettleford."
+  },
+  {
+   "index": 2,
+   "label": "text",
+   "bbox_2d": [
+    37,
+    160,
+    470,
+    222
+   ],
+   "merged": "The conference will be opened on Sunday, March 3, 1996 by the Rt. Hon. Michael Manley, P.C., and closes with an address by the honoree on Wednesday, March 6, at 8 pm."
+  },
+  {
+   "index": 3,
+   "label": "paragraph_title",
+   "bbox_2d": [
+    55,
+    258,
+    466,
+    302
+   ],
+   "merged": "PROGRAMME(DRAFT)"
+  },
+  {
+   "index": 4,
+   "label": "text",
+   "bbox_2d": [
+    39,
+    320,
+    402,
+    381
+   ],
+   "merged": "Sunday, March 3,\n\nOfficial opening by Rt. Hon. Michael Manley, P.C. 7 pm\n\nVenue: Phillip Sherlock Centre"
+  },
+  {
+   "index": 5,
+   "label": "table",
+   "bbox_2d": [
+    40,
+    399,
+    465,
+    562
+   ],
+   "merged": "<table><tr><td colspan=\"3\">Monday, March 4th</td></tr><tr><td>9 am</td><td>Plenary</td><td>Social Science Lecture Theatre (SSLT)</td></tr><tr><td>10:00 am</td><td>Coffee Break</td><td></td></tr><tr><td>10:30 - 12:30</td><td>Panels*</td><td></td></tr><tr><td>12:30 - 2 pm</td><td>Lunch</td><td></td></tr><tr><td>2 - 3.30 pm</td><td>Panels*</td><td></td></tr><tr><td>4 - 6 pm</td><td>Panels*</td><td></td></tr></table>"
+  },
+  {
+   "index": 6,
+   "label": "table",
+   "bbox_2d": [
+    40,
+    582,
+    487,
+    741
+   ],
+   "merged": "<table><tr><td colspan=\"3\">Tuesday March 5th.</td></tr><tr><td>9 am</td><td>Plenary</td><td>Social Science Lecture Theatre (SSLT)</td></tr><tr><td>10:00 am</td><td>Coffee Break</td><td></td></tr><tr><td>10:30 - 12:30</td><td>Panels*</td><td></td></tr><tr><td>12:30 - 2 pm</td><td>Lunch</td><td></td></tr><tr><td>2 - 3.30 pm</td><td>Panels*</td><td></td></tr><tr><td>4 - 6 pm</td><td>Panels*</td><td></td></tr></table>"
+  },
+  {
+   "index": 7,
+   "label": "table",
+   "bbox_2d": [
+    42,
+    770,
+    472,
+    958
+   ],
+   "merged": "<table><tr><td>9 am</td><td>Plenary</td><td>Social Science Lecture Theatre (SSLT)</td></tr><tr><td>10:00 am</td><td>Coffee Break</td><td></td></tr><tr><td>10:30 - 12:30</td><td>Panels*</td><td></td></tr><tr><td>12:30 - 2 pm</td><td>Lunch</td><td></td></tr><tr><td>2 - 3.30 pm</td><td>Panels*</td><td></td></tr><tr><td>5:30 pm</td><td>Panel</td><td></td></tr><tr><td>8 pm</td><td>Closing address</td><td>Hon. Rex Nettleford</td></tr><tr><td></td><td>Venue</td><td>Phillip Sherlock Centre</td></tr></table>"
+  },
+  {
+   "index": 8,
+   "label": "table",
+   "bbox_2d": [
+    503,
+    57,
+    966,
+    888
+   ],
+   "merged": "<table><tr><td colspan=\"2\">Plenary Speakers include</td></tr><tr><td>Kamau Braithwaite</td><td>George Lamming</td></tr><tr><td>Stuart Hall</td><td></td></tr><tr><td colspan=\"2\">Conference Language</td></tr><tr><td>English</td><td></td></tr><tr><td colspan=\"2\">Evening Program</td></tr><tr><td>Performance by NDTC</td><td></td></tr><tr><td>Cocktail Reception</td><td></td></tr><tr><td colspan=\"2\">Accommodation Details</td></tr><tr><td colspan=\"2\">The Jamaica Pegasus</td></tr><tr><td>Standard rooms(standard or double occupancy)</td><td>US $85.00</td></tr><tr><td>Executive rooms(standard or double occupancy)</td><td>US$ 130.00</td></tr><tr><td>Junior suites(standard or double occupancy)</td><td>US $175.00</td></tr><tr><td colspan=\"2\">Edge Hill Luxury Apartments</td></tr><tr><td>Studio units</td><td>US$ 55.00</td></tr><tr><td colspan=\"2\">Mayfair Hotel</td></tr><tr><td>Single Standard Room</td><td>US $51.25</td></tr><tr><td>Single Superior Room</td><td>US$ 61.25</td></tr><tr><td>Double Superior Room</td><td>US $51.25</td></tr><tr><td>1 Bedroom Suite</td><td>US$ 88.76</td></tr><tr><td>Double Superior Suite</td><td>US $125.00</td></tr><tr><td colspan=\"2\">Senior Common Room, UWI Mona</td></tr><tr><td colspan=\"2\">(Very limited accommodation, prices subject to change)</td></tr><tr><td>Single occupancy</td><td>US$ 35.00 per night</td></tr><tr><td>Double occupancy</td><td>US $50.00 per night</td></tr><tr><td colspan=\"2\">Wyndham Kingston</td></tr><tr><td>Single/double occupancy</td><td>US$ 80.00</td></tr><tr><td colspan=\"2\">All prices include tax and service charges</td></tr><tr><td colspan=\"2\">Conference attendees traveling from the U.S. via Air Jamaica are eligible for special fares. To inquire about these rates or make</td></tr></table>"
+  },
+  {
+   "index": 9,
+   "label": "vision_footnote",
+   "bbox_2d": [
+    42,
+    967,
+    285,
+    981
+   ],
+   "merged": "- Three panels will be running simultaneously."
+  },
+  {
+   "index": 10,
+   "label": "text",
+   "bbox_2d": [
+    519,
+    843,
+    979,
+    924
+   ],
+   "merged": "Conference attendees traveling from the U.S. via Air Jamaica are eligible for special fares. To inquire about these rates or make reservations, please advise your Air Jamaica representative to use record \"R*CULTURE\"."
+  }
+ ],
+ "expected": "THE FACULTY OF SOCIAL SCIENCES of the University of the West Indies is pleased to be associated with the Institute of Caribbean Studies at the UWI Mona, in presenting the Conference on Caribbean Culture, in honour of distinguished Caribbean Scholar, Professor Rex Nettleford.\n\nThe conference will be opened on Sunday, March 3, 1996 by the Rt. Hon. Michael Manley, P.C., and closes with an address by the honoree on Wednesday, March 6, at 8 pm.\n\n## PROGRAMME(DRAFT)\n\nSunday, March 3,\n\nOfficial opening by Rt. Hon. Michael Manley, P.C. 7 pm\n\nVenue: Phillip Sherlock Centre\n\n<table><tr><td colspan=\"3\">Monday, March 4th</td></tr><tr><td>9 am</td><td>Plenary</td><td>Social Science Lecture Theatre (SSLT)</td></tr><tr><td>10:00 am</td><td>Coffee Break</td><td></td></tr><tr><td>10:30 - 12:30</td><td>Panels*</td><td></td></tr><tr><td>12:30 - 2 pm</td><td>Lunch</td><td></td></tr><tr><td>2 - 3.30 pm</td><td>Panels*</td><td></td></tr><tr><td>4 - 6 pm</td><td>Panels*</td><td></td></tr></table>\n\n<table><tr><td colspan=\"3\">Tuesday March 5th.</td></tr><tr><td>9 am</td><td>Plenary</td><td>Social Science Lecture Theatre (SSLT)</td></tr><tr><td>10:00 am</td><td>Coffee Break</td><td></td></tr><tr><td>10:30 - 12:30</td><td>Panels*</td><td></td></tr><tr><td>12:30 - 2 pm</td><td>Lunch</td><td></td></tr><tr><td>2 - 3.30 pm</td><td>Panels*</td><td></td></tr><tr><td>4 - 6 pm</td><td>Panels*</td><td></td></tr></table>\n\n<table><tr><td>9 am</td><td>Plenary</td><td>Social Science Lecture Theatre (SSLT)</td></tr><tr><td>10:00 am</td><td>Coffee Break</td><td></td></tr><tr><td>10:30 - 12:30</td><td>Panels*</td><td></td></tr><tr><td>12:30 - 2 pm</td><td>Lunch</td><td></td></tr><tr><td>2 - 3.30 pm</td><td>Panels*</td><td></td></tr><tr><td>5:30 pm</td><td>Panel</td><td></td></tr><tr><td>8 pm</td><td>Closing address</td><td>Hon. Rex Nettleford</td></tr><tr><td></td><td>Venue</td><td>Phillip Sherlock Centre</td></tr></table>\n\n<table><tr><td colspan=\"2\">Plenary Speakers include</td></tr><tr><td>Kamau Braithwaite</td><td>George Lamming</td></tr><tr><td>Stuart Hall</td><td></td></tr><tr><td colspan=\"2\">Conference Language</td></tr><tr><td>English</td><td></td></tr><tr><td colspan=\"2\">Evening Program</td></tr><tr><td>Performance by NDTC</td><td></td></tr><tr><td>Cocktail Reception</td><td></td></tr><tr><td colspan=\"2\">Accommodation Details</td></tr><tr><td colspan=\"2\">The Jamaica Pegasus</td></tr><tr><td>Standard rooms(standard or double occupancy)</td><td>US $85.00</td></tr><tr><td>Executive rooms(standard or double occupancy)</td><td>US$ 130.00</td></tr><tr><td>Junior suites(standard or double occupancy)</td><td>US $175.00</td></tr><tr><td colspan=\"2\">Edge Hill Luxury Apartments</td></tr><tr><td>Studio units</td><td>US$ 55.00</td></tr><tr><td colspan=\"2\">Mayfair Hotel</td></tr><tr><td>Single Standard Room</td><td>US $51.25</td></tr><tr><td>Single Superior Room</td><td>US$ 61.25</td></tr><tr><td>Double Superior Room</td><td>US $51.25</td></tr><tr><td>1 Bedroom Suite</td><td>US$ 88.76</td></tr><tr><td>Double Superior Suite</td><td>US $125.00</td></tr><tr><td colspan=\"2\">Senior Common Room, UWI Mona</td></tr><tr><td colspan=\"2\">(Very limited accommodation, prices subject to change)</td></tr><tr><td>Single occupancy</td><td>US$ 35.00 per night</td></tr><tr><td>Double occupancy</td><td>US $50.00 per night</td></tr><tr><td colspan=\"2\">Wyndham Kingston</td></tr><tr><td>Single/double occupancy</td><td>US$ 80.00</td></tr><tr><td colspan=\"2\">All prices include tax and service charges</td></tr><tr><td colspan=\"2\">Conference attendees traveling from the U.S. via Air Jamaica are eligible for special fares. To inquire about these rates or make</td></tr></table>\n\n- Three panels will be running simultaneously.\n\nConference attendees traveling from the U.S. via Air Jamaica are eligible for special fares. To inquire about these rates or make reservations, please advise your Air Jamaica representative to use record \"R*CULTURE\"."
+}

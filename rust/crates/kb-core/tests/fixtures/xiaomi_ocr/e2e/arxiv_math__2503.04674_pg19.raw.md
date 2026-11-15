@@ -1,0 +1,9 @@
+Example 6.2. Consider the two-dimensional semilinear parabolic problem
+
+\[\frac{\partial u}{\partial t}(t, x, y) - \frac{\partial^2 u}{\partial x^2}(t, x, y) - \frac{\partial^2 u}{\partial y^2}(t, x, y) = \frac{1}{1 + u(t, x, y)^2} + \frac{1}{1 + u\left(\frac{t}{2} - \frac{1}{2}, x, y\right)^2}, \tag{6.63}\]
+
+for \((x, y) \in [0, 1]^2\) and \(t \in [0, 3]\), subject to homogeneous Dirichlet boundary conditions. The initial condition is given by \(\phi(t, x, y) = e^{-t} x (1 - x) y (1 - y)\) for \(t \in [-\frac{1}{2}, 0]\).
+
+We apply standard finite differences with \(n = 200\) grid points to discretize the problem in each spatial direction. In this example the exact solution is unknown. The reference solution is computed by the ERKC-C method with Gauss collocation points \((s = 3)\) using the constant step size \(h = 2^{-11}\). The errors of the ERKC-I and ERKC-C methods in the \(L^{\infty}(\Omega)\) and the \(L^{2}(\Omega)\) norm at final time \(T = 3\) are presented in Figures 3 and 4. The figures confirm the theoretical analysis. Moreover, a comparison of computational cost of the ERKC methods with Gauss collocation points \((s = 3)\) is presented in Table 1. For step sizes \(h = 2^{-k}\) with \(k = 3, 4, \ldots, 9\), the ERKC-I method consistently reduces the CPU time by approximately \(12\%\) compared to the ERKC-C method, demonstrating its computational efficiency across a range of step sizes.
+
+Figure 3: The convergence rates of ERKC-I methods (in the left panel) and ERKC-C methods (in the right panel) for (6.63). The errors are measured at \( T = 3 \) in the \( L^{\infty}(\Omega) \) norm.

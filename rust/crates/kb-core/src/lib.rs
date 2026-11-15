@@ -26,6 +26,7 @@ pub mod title;
 pub mod tree;
 pub mod visuals;
 mod weave;
+pub mod xiaomi_ocr;
 
 pub use boost::{
     AuthorityBoost, BoostConfig, MAX_METADATA_KEY_LEN, RecencyBoost, RecencyField,
