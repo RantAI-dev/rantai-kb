@@ -201,6 +201,11 @@ pub struct ExtractConfig {
     /// Full URL of the layout sidecar (`KB_OCR_LAYOUT_URL`). Empty turns the
     /// layout path off, which is the default: a page is read whole.
     pub ocr_layout_url: String,
+    /// How long one layout request may take before the page keeps its
+    /// whole-page answer (`KB_OCR_LAYOUT_TIMEOUT_MS`, default 60 s). A
+    /// detector on CPU serves one page at a time, so a full batch queues
+    /// behind it: raise this there.
+    pub ocr_layout_timeout: Duration,
     /// Rendering resolution for OCR page images (default 150).
     pub ocr_dpi: u32,
     /// Page requests in flight (default 2).
@@ -314,6 +319,7 @@ impl Default for ExtractConfig {
             ocr_recipe: OcrRecipe::Paddle,
             ocr_table_format: OcrTableFormat::Markdown,
             ocr_layout_url: String::new(),
+            ocr_layout_timeout: Duration::from_secs(60),
             ocr_dpi: 150,
             ocr_concurrency: 2,
             ocr_timeout: Duration::from_secs(120),
@@ -437,6 +443,10 @@ impl ExtractConfig {
                 .unwrap_or(default.ocr_layout_url)
                 .trim()
                 .to_string(),
+            ocr_layout_timeout: lookup("KB_OCR_LAYOUT_TIMEOUT_MS")
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|ms| *ms > 0)
+                .map_or(default.ocr_layout_timeout, Duration::from_millis),
             ocr_dpi: lookup("KB_OCR_DPI")
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|dpi| *dpi > 0)
@@ -567,6 +577,7 @@ mod tests {
             ("KB_OCR_DPI", "200"),
             ("KB_OCR_CONCURRENCY", "4"),
             ("KB_OCR_TIMEOUT_MS", "30000"),
+            ("KB_OCR_LAYOUT_TIMEOUT_MS", "900000"),
             ("KB_OCR_MAX_TOKENS", "2048"),
         ];
         let cfg = ExtractConfig::from_lookup(|name| {
@@ -584,6 +595,7 @@ mod tests {
         assert_eq!(cfg.ocr_dpi, 200);
         assert_eq!(cfg.ocr_concurrency, 4);
         assert_eq!(cfg.ocr_timeout, Duration::from_millis(30_000));
+        assert_eq!(cfg.ocr_layout_timeout, Duration::from_millis(900_000));
         assert_eq!(cfg.ocr_max_tokens, 2048);
     }
 

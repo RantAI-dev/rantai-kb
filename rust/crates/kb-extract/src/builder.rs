@@ -9,7 +9,6 @@
 //!   other    → VisionLlmExtractor with that model id
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use kb_ports::{ExtractionOptions, ExtractionResult, Extractor, PortError};
 
@@ -28,9 +27,6 @@ use crate::pdfium::{extract_pdf_text_layer, get_pdfium};
 use crate::smart_router::SmartRouterExtractor;
 use crate::vision_llm::VisionLlmExtractor;
 use crate::xiaomi_ocr::{XiaomiOcrProvider, XiaomiOcrSettings};
-
-/// How long the layout detector may take before the page is read without it.
-const LAYOUT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Text-layer extractor using Pdfium. Replaces `UnpdfExtractor` from the TS codebase.
 #[derive(Debug, Clone, Copy, Default)]
@@ -247,7 +243,7 @@ fn build_layout_detector(cfg: &ExtractConfig) -> Option<Arc<dyn kb_ports::Layout
     if url.is_empty() {
         return None;
     }
-    match HttpLayoutDetector::new(url, LAYOUT_TIMEOUT) {
+    match HttpLayoutDetector::new(url, cfg.ocr_layout_timeout) {
         Ok(detector) => Some(Arc::new(detector) as Arc<dyn kb_ports::LayoutDetector>),
         Err(err) => {
             tracing::warn!(error = %err, "layout detector not built");
