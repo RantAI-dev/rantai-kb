@@ -115,11 +115,20 @@
   - **Measurement:** `kb-server eval ocr --pdfs <list> --root <dir> --out <dir>` reads the first
     page of every listed PDF through the same router the pipeline uses and writes
     `<out>/<name minus .pdf>.md`, with the wall time and pages/s.
-  - **Measured (2026-11-15, NVIDIA GB10, Xiaomi-OCR-0 under vLLM):** 40 benchmark pages of the
-    olmOCR table set (214 tests), read through the router: whole page **100/214 (46.7%)** against
-    the vendor pipeline's own 92/214 (43.0%); with the layout fallback **165/214 (77.1%)**
-    against the vendor's 166/214 (77.6%) — one test apart. 0.38 pages/s whole page, 0.27 pages/s
-    with the fallback.
+  - **Defaults for the Xiaomi recipe:** `KB_OCR_TIMEOUT_MS` 600 s and `KB_OCR_MAX_TOKENS` 12288
+    when unset (the vendor's values; the shared defaults of 120 s and 4096 cut dense pages off).
+    `KB_OCR_LAYOUT_TIMEOUT_MS` (default 60 s) for a detector on CPU.
+  - **`eval ocr` scores only what the model read:** a page that fell back to the text layer
+    (provider failed, breaker open) is counted as failed, not as read.
+  - **Measured (2026-11-16, NVIDIA GB10, Xiaomi-OCR-0 under vLLM):** all 1,403 pages of
+    olmOCR-bench, official scorer, 1,403/1,403 read by the model. Whole page: text-layer PDFs
+    **87.0** (vendor pipeline 87.0), tables **77.9** (76.1), scans **73.7** (73.3), image-only
+    PDFs **77.4** (77.7), at **1.89 pages/s**. With the layout fallback: **89.0** (88.9), tables
+    **87.9** (87.6), scans **73.1** (73.3), image-only **78.2** (78.5). Mistral OCR on the same
+    tracks: 77.4, 85.5, 70.8, 75.3. Run the layout detector off the vLLM GPU: sharing it
+    crashed or hung the engine within minutes (`docs/kb-tiers.md` §OCR recipes).
+  - **Fixed:** reading a page's text facts loaded the page text once per text object (pdfium
+    holds a process-wide lock), 29 s on a dense page; it now loads it once (0.3 s).
 
 - **Pictures are searchable by what they show (`ING-5`).** Before, an image was
   found only by the text OCR read off it: a photo or diagram without text became a

@@ -214,21 +214,45 @@ next run, with the detector back, reads it properly.
 | `KB_OCR_RECIPE` | `paddle` or `xiaomi`; anything else is a configuration error | `paddle` |
 | `KB_OCR_TABLE_FORMAT` | `markdown` or `html` — how a table is written | `markdown` |
 | `KB_OCR_LAYOUT_URL` | base URL of the layout sidecar; empty turns the layout path off | empty (off) |
+| `KB_OCR_LAYOUT_TIMEOUT_MS` | how long one layout request may take before the page keeps its whole-page answer | 60000 |
+| `KB_OCR_TIMEOUT_MS` | one page request; Xiaomi's dense pages take minutes under a full batch | 600000 for `xiaomi`, else 120000 |
+| `KB_OCR_MAX_TOKENS` | `max_tokens` for one page | 12288 for `xiaomi`, else 4096 |
 
-**Measured (2026-11-15, NVIDIA GB10, Xiaomi-OCR-0 under vLLM).** 40 benchmark pages of the
-olmOCR table set, read through the router with `kb-server eval ocr` (the first page of each
-document, 16 concurrent requests), scored with the benchmark's own tests (214 tests over those
-40 pages):
+**Measured (2026-11-16, NVIDIA GB10, Xiaomi-OCR-0 under vLLM 0.33 with `--quantization fp8
+--kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16`).** All 1,403 pages of olmOCR-bench, read
+through the router with `kb-server eval ocr` (64 concurrent requests), scored with the
+benchmark's official scorer. Only pages the model read are scored: a page that fell back to the
+text layer counts as failed. Every run: 1,403/1,403 read by the model, 0 failed.
 
-| Run | This service | The vendor's own pipeline |
-|---|---|---|
-| whole page | **100/214 (46.7%)** | 92/214 (43.0%) |
-| with the layout fallback | **165/214 (77.1%)** | 166/214 (77.6%) |
+| Track (score %) | This service, whole page | Vendor pipeline, whole page | This service, with layout fallback | Vendor pipeline, with layout fallback | Mistral OCR |
+|---|---|---|---|---|---|
+| text-layer PDFs (1,188 PDFs, 5,638 tests) | **87.0** | 87.0 | **89.0** | 88.9 | 77.4 |
+| — tables in those (922 tests) | **77.9** | 76.1 | **87.9** | 87.6 | 85.5 |
+| scans (134 PDFs, 984 tests) | **73.7** | 73.3 | **73.1** | 73.3 | 70.8 |
+| image-only PDFs (81 PDFs, 397 tests) | **77.4** | 77.7 | **78.2** | 78.5 | 75.3 |
 
-The two are one test apart on the fallback (the vendor's page and ours differ where the model
-answered differently — the model is not deterministic across runs, and the pages are rasterised
-by different engines: `pdftoppm` there, `pdfium` here). Speed: 0.38 pages/s for a whole page,
-0.27 pages/s with the fallback, which reads the page again region by region.
+Every difference is inside the scorer's ±1–3.7 interval: the model is not deterministic under
+a full batch, and the pages are rasterised by different engines (`pdftoppm` there, `pdfium`
+here).
+
+Speed: **1.89 pages/s** for a whole page (the vendor pipeline: 2.2). With the fallback the
+detector is asked about every page whose answer has no table (1,210 of 1,403); with the
+detector on CPU (see below) the run took 0.90 pages/s, bound by the detector, which serves one
+page at a time.
+
+**Operating the model server.** Two faults appeared under a full batch, and both need handling
+outside this service:
+
+- **Do not share the GPU with the layout detector.** With PP-DocLayoutV3 on the same GPU as
+  vLLM, the engine died within minutes of a full batch, twice with `CUDA error: an illegal
+  memory access`, and twice hung. With the detector on CPU (`LAYOUT_DEVICE=cpu`), the same
+  1,403 pages ran with no fault. On CPU, raise `KB_OCR_LAYOUT_TIMEOUT_MS`: requests queue
+  behind the one-at-a-time detector, and at the 60 s default 714 of 1,204 timed out.
+- **A hung engine still answers `/health`.** vLLM's engine stopped generating with 35 requests
+  in flight while `/health` returned 200, so a restart policy never fired and every request
+  waited out its timeout. Watch progress, not health: restart the server when
+  `vllm:num_requests_running` is above zero and `vllm:generation_tokens_total` has not moved
+  for 90 s.
 
 ## OCR offload (`ING-6`)
 

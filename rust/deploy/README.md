@@ -276,19 +276,26 @@ docker compose -f rust/deploy/compose.yaml -p rantai-kb-dev --profile desk \
 The Xiaomi-OCR-0 recipe can ask a **layout detector** where a page's regions are, and re-read a
 page region by region when the whole-page answer misses a table the page clearly has (see
 [`docs/kb-tiers.md`](../../docs/kb-tiers.md#ocr-recipes-kb_ocr_recipe)). The detector is a small
-sidecar in `rust/deploy/ocr-layout`: PP-DocLayoutV3 (Apache-2.0) through transformers, on the
-GPU, answering two endpoints.
+sidecar in `rust/deploy/ocr-layout`: PP-DocLayoutV3 (Apache-2.0) through transformers,
+answering two endpoints.
+
+**Do not put it on the GPU that serves Xiaomi-OCR-0.** Sharing it crashed (`CUDA error: an
+illegal memory access`) or hung the vLLM engine within minutes of a full batch; with the
+detector on CPU (`LAYOUT_DEVICE=cpu`) the full benchmark ran clean. Use a second GPU, or the
+CPU with `KB_OCR_LAYOUT_TIMEOUT_MS` raised (it serves one page at a time, so a batch queues).
+Watch the vLLM server for progress, not `/health`: a hung engine still answers it (see
+[`docs/kb-tiers.md`](../../docs/kb-tiers.md#ocr-recipes-kb_ocr_recipe)).
 
 ```sh
 # the weights are a download, so the model directory is mounted, not baked in
 docker build -t ocr-layout rust/deploy/ocr-layout
-docker run --rm --gpus all -p 8193:8193 \
+docker run --rm -p 8193:8193 \
   -v /srv/models/pp-doclayoutv3:/models/pp-doclayoutv3:ro \
-  -e LAYOUT_MODEL_DIR=/models/pp-doclayoutv3 \
+  -e LAYOUT_MODEL_DIR=/models/pp-doclayoutv3 -e LAYOUT_DEVICE=cpu \
   ocr-layout
 
 curl -s localhost:8193/health
-# {"status":"ok","model":"pp-doclayoutv3","device":"cuda:0","threshold":0.3}
+# {"status":"ok","model":"pp-doclayoutv3","device":"cpu","threshold":0.3}
 ```
 
 Then point the service at it:
@@ -298,6 +305,7 @@ KB_OCR_RECIPE=xiaomi
 KB_OCR_BASE_URL=http://127.0.0.1:8192/v1/chat/completions   # Xiaomi-OCR-0 under vLLM
 KB_OCR_MODEL=xiaomi-ocr-0
 KB_OCR_LAYOUT_URL=http://127.0.0.1:8193
+KB_OCR_LAYOUT_TIMEOUT_MS=900000   # detector on CPU: requests queue behind it
 ```
 
 `POST /v1/layout` takes `{"image": "<base64 png>", "mime": "image/png"}` and answers
