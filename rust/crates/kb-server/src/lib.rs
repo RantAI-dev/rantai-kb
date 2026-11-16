@@ -15,6 +15,7 @@ pub mod events;
 pub mod routes;
 pub mod runtime;
 pub mod setup;
+pub mod stack;
 pub mod state;
 pub mod tier;
 
