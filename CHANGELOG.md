@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-11-16
+
 ### Added
 
 - **OCR per tier, chosen by measurement (`ING-8`).** Lite reads scans with a new CPU document
