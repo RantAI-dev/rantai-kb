@@ -188,22 +188,40 @@ fetch_to_file() {
   fi
 }
 
-if [ -z "$version" ]; then
-  say "resolving the latest release…"
-  latest="$(fetch_to_stdout "$API/releases/latest" |
-    sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
-    head -n 1)"
-  [ -n "$latest" ] || die "could not read the latest release from $API (set RANTAI_KB_VERSION)"
-  version="$latest"
+local_tarball="${RANTAI_KB_TARBALL:-}"
+
+if [ -n "$local_tarball" ]; then
+  # A local tarball is installed as it is: its name says which version and
+  # target it is, so nothing is downloaded and no release is looked up.
+  [ -f "$local_tarball" ] || die "RANTAI_KB_TARBALL=$local_tarball is not a file"
+  tarball_name="$(basename "$local_tarball")"
+  case "$tarball_name" in
+    rantai-kb-*.tar.gz) ;;
+    *) die "the tarball must be named rantai-kb-<version>-<target>.tar.gz" ;;
+  esac
+  version_number="${tarball_name#rantai-kb-}"
+  version_number="${version_number%-"$target".tar.gz}"
+  version="v$version_number"
+  [ -n "$version_number" ] || die "could not read the version from $tarball_name"
+  say "installing $version ($tarball_name) from $local_tarball"
+else
+  if [ -z "$version" ]; then
+    say "resolving the latest release…"
+    latest="$(fetch_to_stdout "$API/releases/latest" |
+      sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' |
+      head -n 1)"
+    [ -n "$latest" ] || die "could not read the latest release from $API (set RANTAI_KB_VERSION)"
+    version="$latest"
+  fi
+
+  case "$version" in
+    v*) version_number="${version#v}" ;;
+    *) version_number="$version"; version="v$version" ;;
+  esac
+
+  tarball_name="rantai-kb-$version_number-$target.tar.gz"
+  say "installing $version ($tarball_name)"
 fi
-
-case "$version" in
-  v*) version_number="${version#v}" ;;
-  *) version_number="$version"; version="v$version" ;;
-esac
-
-tarball_name="rantai-kb-$version_number-$target.tar.gz"
-say "installing $version ($tarball_name)"
 
 # ─── Download ───────────────────────────────────────────────────────────────
 
@@ -216,10 +234,8 @@ trap cleanup EXIT INT TERM
 tarball_file="$work_dir/$tarball_name"
 sums_file="$work_dir/SHA256SUMS"
 
-if [ -n "${RANTAI_KB_TARBALL:-}" ]; then
-  [ -f "$RANTAI_KB_TARBALL" ] || die "RANTAI_KB_TARBALL=$RANTAI_KB_TARBALL is not a file"
-  cp "$RANTAI_KB_TARBALL" "$tarball_file"
-  say "using the local tarball $RANTAI_KB_TARBALL"
+if [ -n "$local_tarball" ]; then
+  cp "$local_tarball" "$tarball_file"
 else
   fetch_to_file "$RELEASES/$version/$tarball_name" "$tarball_file" ||
     die "could not download $RELEASES/$version/$tarball_name"
@@ -228,6 +244,8 @@ fi
 if [ -n "${RANTAI_KB_SUMS:-}" ]; then
   [ -f "$RANTAI_KB_SUMS" ] || die "RANTAI_KB_SUMS=$RANTAI_KB_SUMS is not a file"
   cp "$RANTAI_KB_SUMS" "$sums_file"
+elif [ -n "$local_tarball" ]; then
+  die "RANTAI_KB_TARBALL is set but RANTAI_KB_SUMS is not: the tarball cannot be verified"
 else
   fetch_to_file "$RELEASES/$version/SHA256SUMS" "$sums_file" ||
     die "could not download $RELEASES/$version/SHA256SUMS"
