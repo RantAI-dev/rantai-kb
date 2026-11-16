@@ -780,13 +780,13 @@ mod tests {
         let manifest = build_manifest(grid);
         assert_eq!(manifest.columns[0].role, ColumnRole::Code);
         assert_eq!(manifest.columns[1].role, ColumnRole::Identifier);
-        for column in 2..7 {
-            assert_eq!(manifest.columns[column].kind, ColumnKind::Number);
+        for column in &manifest.columns[2..7] {
+            assert_eq!(column.kind, ColumnKind::Number);
             assert_eq!(
-                manifest.columns[column].role,
+                column.role,
                 ColumnRole::Quantity,
                 "{} is a year of numbers, not Mixed",
-                manifest.columns[column].name
+                column.name
             );
         }
         assert_eq!(manifest.derived_rows, vec![3]);

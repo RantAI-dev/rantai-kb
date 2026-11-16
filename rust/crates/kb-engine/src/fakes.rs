@@ -251,12 +251,9 @@ impl DocumentStore for FakeDocumentStore {
                 {
                     return false;
                 }
-                if !req.filter.metadata.iter().all(|predicate| {
+                req.filter.metadata.iter().all(|predicate| {
                     metadata_values_match(d.metadata.as_ref(), &predicate.key, &predicate.values)
-                }) {
-                    return false;
-                }
-                true
+                })
             })
             .map(|d| d.id)
             .collect();
