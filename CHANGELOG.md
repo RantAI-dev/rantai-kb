@@ -30,6 +30,10 @@
     in-process server, which is what the image's CMD runs), and it starts the
     stack when a deploy directory is configured. `serve --foreground` always
     serves in this process.
+  - **What `up` prints:** the API URL, the health URL, the key hint, the
+    upload command and the stop command. The Swagger UI line is printed only
+    when the running server really serves `/docs`, so the summary never points
+    at a URL that answers "Unauthorized".
   - **Packaging:** `rust/scripts/package-release.sh <target> <version> <outdir>`
     builds the binary, fetches libpdfium for the target (macOS arm64 included)
     and writes the tarball the installer downloads. The release workflow
