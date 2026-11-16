@@ -57,8 +57,9 @@ the VRAM budget and the model licences, and refuses a tier that does not fit. `u
 needs Docker and compose ≥ 2.20; the first start downloads the models, so it can
 take a few minutes.
 
-The API is then at `http://127.0.0.1:8080`, and its OpenAPI page — every endpoint,
-with a "try it" button — at `http://127.0.0.1:8080/docs`.
+The API is then at `http://127.0.0.1:8080`. `rantai-kb up` prints where to find
+it, and — on a build that serves the OpenAPI document — its API page (every
+endpoint, with a "try it" button) at `http://127.0.0.1:8080/docs`.
 
 `rantai-kb serve` runs the stack the same way, and `rantai-kb down` stops it
 (`down -v` also wipes the data). `rantai-kb --help` lists everything; the same
