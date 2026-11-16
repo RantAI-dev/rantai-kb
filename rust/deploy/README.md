@@ -91,6 +91,48 @@ rust/scripts/kb-dev.sh down -v           # stop and delete all data + volumes
 The tier is remembered in `rust/deploy/.tier`, so the commands above need no
 tier argument once `up` has run. `kb-dev.sh key` needs the stack running.
 
+## The `rantai-kb` CLI
+
+The same commands are in the binary, so an installed machine needs no checkout and
+no script. `kb-server` and `rantai-kb` are one program under two names: the
+installer links both, and the help text uses whichever name was typed.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/RantAI-dev/rantai-kb/main/install.sh | sh
+
+rantai-kb setup lite-en        # detect the hardware, write deploy/.env + deploy/.tier
+rantai-kb up lite-en           # start the containers, wait for /health
+rantai-kb key my-tenant        # print an API key, once
+rantai-kb status               # GET /health
+rantai-kb logs -f kb-lite-en   # follow the logs
+rantai-kb ps                   # the tier's containers
+rantai-kb down                 # stop (down -v also wipes the data)
+rantai-kb serve                # start the stack and keep it in the foreground
+```
+
+`setup --start` writes the config and then runs `up`, so `rantai-kb setup lite-en --start`
+is the whole install-and-run in one line.
+
+**Where the deploy directory is.** `$RANTAI_KB_HOME/deploy` when that is set, else
+`rust/deploy` (or `deploy`) next to the working directory — a source checkout —
+else `~/.rantai-kb/deploy`, which is where the installer puts it. `setup` writes
+that directory's `.env` and `.tier`; `up`, `down`, `logs`, `ps`, `status` and `key`
+read them.
+
+**Which containers start.** The compose services are behind profiles. If the env
+file sets `COMPOSE_PROFILES`, exactly that list is used and no `--profile` flag is
+added. Otherwise the tier's own profiles are activated: `<tier>`, `<tier>-ocr` and
+`<tier>-vision`. `kb-dev.sh` follows the same rule, so the script and the binary
+start the same containers.
+
+**An installed bundle has no source.** It cannot build the image, so its `.env`
+points compose at the published images (`KB_IMAGE`, `KB_OCR_CPU_IMAGE`,
+`KB_OCR_LAYOUT_IMAGE`) and `up` pulls them instead of building. A source checkout
+still builds the image when it is missing.
+
+`kb-dev.sh` and the binary are ports of each other: `rust/crates/kb-server/src/stack.rs`
+is the Rust side of the script, and both use the compose project `rantai-kb-dev`.
+
 ## `kb-server setup`
 
 `rust/scripts/kb-dev.sh setup [flags]` runs `kb-server setup` from the repo root
