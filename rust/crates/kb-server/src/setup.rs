@@ -21,7 +21,6 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::cli::CliError;
@@ -951,6 +950,10 @@ impl SetupArgs {
     /// Fails on an unknown flag, a missing value, or an invalid tier/port.
     pub fn parse(args: &[String]) -> Result<Self, CliError> {
         let mut parsed = Self::default();
+        // The tier may also be the first argument (`setup desk`), which is
+        // resolved after the flags: giving it twice is a mistake, not a
+        // silent winner.
+        let mut positional_tier: Option<Tier> = None;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
@@ -1110,8 +1113,23 @@ impl SetupArgs {
                     index += 1;
                 }
                 other => {
+                    // `setup <tier>` is the short form of `setup --tier <tier>`:
+                    // the first argument that names a tier is the tier.
+                    if !other.starts_with('-') {
+                        if let Some(tier) = Tier::parse(other) {
+                            if positional_tier.is_some() {
+                                return Err(CliError::Usage(format!(
+                                    "the tier is given twice: {other:?}"
+                                )));
+                            }
+                            positional_tier = Some(tier);
+                            index += 1;
+                            continue;
+                        }
+                    }
                     return Err(CliError::Usage(format!(
-                        "unknown setup argument {other:?}; see `kb-server setup --help`"
+                        "unknown setup argument {other:?}; see `{} setup --help`",
+                        crate::cli::program_name()
                     )));
                 }
             }
@@ -1136,6 +1154,14 @@ impl SetupArgs {
                 "--chat-llm-url and --chat-llm-model go together".to_string(),
             ));
         }
+        if parsed.tier.is_some() && positional_tier.is_some() {
+            return Err(CliError::Usage(
+                "the tier is given twice (as an argument and with --tier)".to_string(),
+            ));
+        }
+        if parsed.tier.is_none() {
+            parsed.tier = positional_tier;
+        }
         Ok(parsed)
     }
 }
@@ -1151,12 +1177,12 @@ fn value_of(args: &[String], index: &mut usize, flag: &str) -> Result<String, Cl
     Ok(value.clone())
 }
 
-/// The `setup --help` text.
+/// The `setup --help` text. `{prog}` is the name the operator invoked.
 pub const HELP: &str = "\
-kb-server setup — detect the hardware, check the budget and licences, write the tier config
+{prog} setup — detect the hardware, check the budget and licences, write the tier config
 
 USAGE
-    kb-server setup [flags]
+    {prog} setup [tier] [flags]
 
 WHAT IT DOES
     1. Detects NVIDIA (nvidia-smi), Apple silicon (sysctl), CPU cores and RAM.
@@ -1164,12 +1190,15 @@ WHAT IT DOES
     3. Compares the tier's VRAM estimate (docs/kb-tiers.md) to the hardware and
        refuses a tier that does not fit unless --force.
     4. Refuses a 🔴 model, and needs --accept-licence <model> for each 🟡 one.
-    5. Writes rust/deploy/.env (from .env.example) and rust/deploy/.tier. The tier
-       preset fills the model roles, so no preset value is duplicated into .env.
-    6. Prints `rust/scripts/kb-dev.sh up <tier>`, or runs it with --start.
+    5. Writes the deploy env file (from .env.example) and the tier file next to
+       it. The tier preset fills the model roles, so no preset value is
+       duplicated into the env file.
+    6. Prints `{prog} up <tier>`, or runs it with --start.
 
 FLAGS
-    --tier <lite|lite-en|desk|studio|station|cloud>   Use this tier, not the suggestion
+    --tier <lite|lite-en|desk|studio|station|cloud>   Use this tier, not the suggestion.
+                                                       The tier may also be given as the first
+                                                       argument: `{prog} setup desk`.
     --english                     Suggest lite-en instead of lite on a CPU-only box
     --force                       Write a tier the budget or GPU check refused
     --accept-licence <model>      Accept a 🟡 model (repeatable; exact model id)
@@ -1197,24 +1226,30 @@ OTHER FLAGS
     --chat-llm-model <NAME>       Model name at that endpoint (needs --chat-llm-url)
     --port <n>                    KB_PORT for the stack (default 8080)
     --cache-dir <path>            KB_CACHE_DIR (default /app/cache in compose)
-    --out <path>                  Where to write the env file (default rust/deploy/.env)
+    --out <path>                  Where to write the env file (default the deploy directory's .env)
     --overwrite                   Replace an existing env file
     --write-secrets               Write key values into .env instead of an empty placeholder
     --detect-only                 Print detection and the plan; write nothing
     --check                       Probe the configured endpoints and stores; exit non-zero on failure
     --check-paid                  Also probe paid hosts (openrouter.ai, api.mistral.ai, voyage)
-    --start                       Run `rust/scripts/kb-dev.sh up <tier>` afterwards
+    --start                       Start the stack afterwards (`{prog} up <tier>`)
 
 EXAMPLES
-    setup --tier lite                                 # everything on this CPU box
-    setup --tier lite --ocr mistral --accept-licence mistral-ocr-latest
+    {prog} setup lite                                 # everything on this CPU box
+    {prog} setup lite --ocr mistral --accept-licence mistral-ocr-latest
                                                       # scans to Mistral, the rest local
-    setup --tier lite --ocr http://desk-box:8000/v1/chat/completions
+    {prog} setup lite --ocr http://desk-box:8000/v1/chat/completions
                                                       # scans to a shared Xiaomi server
-    setup --tier desk --ocr-tables accurate           # best tables, slower OCR
-    setup --tier cloud --ocr mistral --accept-licence mistral-ocr-latest
+    {prog} setup desk --ocr-tables accurate           # best tables, slower OCR
+    {prog} setup cloud --ocr mistral --accept-licence mistral-ocr-latest
                                                       # no local models at all
 ";
+
+/// The `setup --help` text, with the invoked program's name.
+#[must_use]
+pub fn help_text() -> String {
+    HELP.replace("{prog}", &crate::cli::program_name())
+}
 
 // ---------------------------------------------------------------------------
 // Env file: reading, merging, diffing
@@ -1369,16 +1404,67 @@ fn diff_lines(existing: &BTreeMap<String, String>, changes: &[EnvChange]) -> Vec
 // Paths
 // ---------------------------------------------------------------------------
 
-/// The deploy directory: `rust/deploy` from the repo root, `deploy` from
-/// `rust/`. The container never runs `setup`, so only the host matters.
+/// The deploy directory: the one `up`, `down`, `logs` and `key` read.
+///
+/// `$RANTAI_KB_HOME/deploy` when that is set, else `rust/deploy` or `deploy`
+/// next to the working directory (a source checkout, today's behaviour), else
+/// `~/.rantai-kb/deploy` (an installed bundle). The container never runs
+/// `setup`, so only the host matters.
 #[must_use]
 pub fn deploy_dir() -> PathBuf {
-    for candidate in ["rust/deploy", "deploy"] {
-        if Path::new(candidate).is_dir() {
-            return PathBuf::from(candidate);
+    crate::stack::resolve_deploy_dir(
+        &|key: &str| std::env::var(key).ok(),
+        &std::env::current_dir().unwrap_or_default(),
+    )
+    .path
+}
+
+/// The deploy directory an env file belongs to.
+fn deploy_dir_of(env_path: &Path) -> PathBuf {
+    match env_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// The version of an installed bundle: the `VERSION` file the release tarball
+/// carries, else this crate's own version.
+fn bundle_version(deploy_dir: &Path) -> String {
+    if let Ok(text) = std::fs::read_to_string(deploy_dir.join("VERSION")) {
+        let version = text.trim().trim_start_matches('v');
+        if !version.is_empty() {
+            return version.to_string();
         }
     }
-    PathBuf::from("rust/deploy")
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// The published images an installed bundle pulls.
+///
+/// A source checkout builds the image from source; an installed bundle has no
+/// source to build from, so the env file points compose at the published
+/// images and compose pulls them.
+fn installed_image_changes(deploy_dir: &Path) -> Vec<EnvChange> {
+    let version = bundle_version(deploy_dir);
+    vec![
+        EnvChange::plain(
+            "KB_IMAGE",
+            format!("ghcr.io/rantai-dev/rantai-kb:{version}"),
+        )
+        .with_comment(
+            "Published image: this install has no source to build from, so compose pulls it.",
+        ),
+        EnvChange::plain(
+            "KB_OCR_CPU_IMAGE",
+            format!("ghcr.io/rantai-dev/rantai-kb-ocr-cpu:{version}"),
+        )
+        .with_comment("Published CPU OCR sidecar image."),
+        EnvChange::plain(
+            "KB_OCR_LAYOUT_IMAGE",
+            format!("ghcr.io/rantai-dev/rantai-kb-ocr-layout:{version}"),
+        )
+        .with_comment("Published layout sidecar image."),
+    ]
 }
 
 fn env_example_path(env_path: &Path) -> PathBuf {
@@ -1721,7 +1807,13 @@ pub fn plan_and_write(
     write_licences(out, &models, args)?;
     writeln!(out).map_err(io_failed)?;
 
-    let changes = env_changes(args, tier, lookup);
+    let mut changes = env_changes(args, tier, lookup);
+    // An installed bundle has no source to build the image from, so its env
+    // file points compose at the published images.
+    let deploy_dir = deploy_dir_of(env_path);
+    if !crate::stack::is_source_checkout(&deploy_dir) {
+        changes.extend(installed_image_changes(&deploy_dir));
+    }
 
     if args.detect_only {
         writeln!(out, "Nothing written (--detect-only).").map_err(io_failed)?;
@@ -2012,11 +2104,12 @@ fn write_licences(
 }
 
 fn write_next_step(out: &mut dyn Write, tier: Tier, started: bool) -> Result<(), CliError> {
+    let program = crate::cli::program_name();
     writeln!(out).map_err(io_failed)?;
     writeln!(out, "Next step:").map_err(io_failed)?;
     writeln!(
         out,
-        "  rust/scripts/kb-dev.sh up {}{}",
+        "  {program} up {}{}",
         tier.as_str(),
         if started { "   (running now)" } else { "" }
     )
@@ -2042,7 +2135,7 @@ fn write_next_step(out: &mut dyn Write, tier: Tier, started: bool) -> Result<(),
 pub async fn run(args: &[String]) -> Result<(), CliError> {
     let parsed = SetupArgs::parse(args)?;
     if parsed.help {
-        print!("{HELP}");
+        print!("{}", help_text());
         return Ok(());
     }
     let hardware = detect(&SystemRunner);
@@ -2076,32 +2169,12 @@ pub async fn run(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Run `rust/scripts/kb-dev.sh up <tier>`, streaming its output, and propagate
-/// its exit code. The Docker logic stays in the script; this is only a spawn.
+/// Start the stack after `setup` wrote the files.
+///
+/// The Docker logic lives in `stack.rs` — a Rust port of `kb-dev.sh` — so an
+/// installed bundle (which has no script to run) starts the same stack.
 async fn start(tier: Tier) -> Result<(), CliError> {
-    let script = Path::new("rust/scripts/kb-dev.sh");
-    if !script.exists() {
-        return Err(CliError::Failed(format!(
-            "{} not found; run `rust/scripts/kb-dev.sh up {}` yourself",
-            script.display(),
-            tier.as_str()
-        )));
-    }
-    let status = std::process::Command::new(script)
-        .arg("up")
-        .arg(tier.as_str())
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|err| CliError::Failed(format!("could not run {}: {err}", script.display())))?;
-    if status.success() {
-        return Ok(());
-    }
-    let code = status.code().unwrap_or(1);
-    Err(CliError::Exit(
-        u8::try_from(code.clamp(1, 255)).unwrap_or(1),
-    ))
+    crate::stack::up(&[tier.as_str().to_string()]).await
 }
 
 // ---------------------------------------------------------------------------
@@ -3403,6 +3476,36 @@ mod tests {
         let text = std::fs::read_to_string(&env_path).expect("written");
         assert!(text.contains("KB_TIER=studio"), "{text}");
         assert!(text.contains("KEEP=me"), "{text}");
+    }
+
+    // ─── tier on the command line ───────────────────────────────────────────
+
+    #[test]
+    fn the_tier_may_be_the_first_argument() {
+        // `setup desk` is the short form of `setup --tier desk`.
+        let parsed = SetupArgs::parse(&["desk".to_string()]).expect("parse");
+        assert_eq!(parsed.tier, Some(Tier::Desk));
+    }
+
+    #[test]
+    fn a_positional_tier_and_the_flag_agree() {
+        let parsed =
+            SetupArgs::parse(&["cloud".to_string(), "--start".to_string()]).expect("parse");
+        assert_eq!(parsed.tier, Some(Tier::Cloud));
+        assert!(parsed.start);
+    }
+
+    #[test]
+    fn the_tier_may_not_be_given_twice() {
+        let err = SetupArgs::parse(&["lite".to_string(), "--tier".to_string(), "desk".to_string()])
+            .unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err:?}");
+    }
+
+    #[test]
+    fn an_unknown_positional_argument_is_still_a_usage_error() {
+        let err = SetupArgs::parse(&["nonsense".to_string()]).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err:?}");
     }
 
     #[test]

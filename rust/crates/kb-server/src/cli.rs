@@ -12,7 +12,7 @@
 //! carries over during cutover.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use kb_ports::{CreateJobInput, JobStore};
 use kb_store_pg::PgJobStore;
@@ -25,14 +25,16 @@ use crate::config::Config;
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
     #[error(
-        "{0}\n\nusage: kb-server \
-         <serve|create-api-key|apply-schema|migrate|reindex|communities|setup|eval|bench|openapi|check-boundary>"
+        "{}\n\nusage: {} \
+         <serve|up|down|logs|ps|status|key|create-api-key|apply-schema|migrate|reindex|communities|setup|eval|bench|openapi|check-boundary>",
+        .0,
+        program_name()
     )]
     Usage(String),
     #[error("{0}")]
     Failed(String),
     /// A child process failed: exit with its own code rather than folding it
-    /// into a generic 1 (`setup --start` runs `kb-dev.sh up`).
+    /// into a generic 1 (`setup --start` runs the stack's `up`).
     #[error("exited with status {0}")]
     Exit(u8),
 }
@@ -57,7 +59,14 @@ const DEFAULT_MIGRATIONS_DIR: &str = "prisma/migrations";
 /// Returns the command's error; `main` turns it into a non-zero exit.
 pub async fn dispatch(args: &[String]) -> Result<(), CliError> {
     match args.first().map(String::as_str) {
-        None | Some("serve") => serve().await,
+        None => serve(&[]).await,
+        Some("serve") => serve(&args[1..]).await,
+        Some("up") => crate::stack::up(&args[1..]).await,
+        Some("down") => crate::stack::down(&args[1..]).await,
+        Some("logs") => crate::stack::logs(&args[1..]).await,
+        Some("ps") => crate::stack::ps(&args[1..]).await,
+        Some("status") => crate::stack::status(&args[1..]).await,
+        Some("key") => crate::stack::key(&args[1..]).await,
         Some("create-api-key") => create_api_key(&args[1..]).await,
         Some("apply-schema") => apply_schema().await,
         Some("migrate") => migrate().await,
@@ -72,50 +81,133 @@ pub async fn dispatch(args: &[String]) -> Result<(), CliError> {
             print_help();
             Ok(())
         }
+        Some("-V" | "--version" | "version") => {
+            println!("{}", program_version());
+            Ok(())
+        }
         Some(other) => Err(CliError::Usage(format!("unknown command {other:?}"))),
     }
+}
+
+/// The version of this build.
+///
+/// An installed bundle carries the release version in a `VERSION` file next to
+/// the binary (`<home>/bin/kb-server`, `<home>/VERSION`), which is what the
+/// release published — not the crate version the binary was compiled from.
+#[must_use]
+pub fn program_version() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            if let Some(version) = version_near(bin_dir) {
+                return version;
+            }
+        }
+    }
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// The release version recorded next to the binary, if there is one.
+///
+/// The candidates are the ones the release bundle has: `../VERSION` (the
+/// bundle root), `VERSION` (a binary that sits in the bundle root) and
+/// `../deploy/VERSION`.
+#[must_use]
+pub fn version_near(bin_dir: &Path) -> Option<String> {
+    for candidate in [
+        bin_dir.join("../VERSION"),
+        bin_dir.join("VERSION"),
+        bin_dir.join("../deploy/VERSION"),
+    ] {
+        if let Ok(text) = std::fs::read_to_string(&candidate) {
+            let version = text.trim();
+            if !version.is_empty() {
+                return Some(version.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn env_lookup(key: &str) -> Option<String> {
     std::env::var(key).ok()
 }
 
+/// The name the operator invoked: `rantai-kb` or `kb-server`.
+///
+/// The binary is installed under both names, and the help text reads better
+/// when it uses the one that was typed.
+#[must_use]
+pub fn program_name() -> String {
+    program_name_from(std::env::args().next().as_deref())
+}
+
+/// The program name from an `argv[0]`: the file name, without the path.
+///
+/// `rantai-kb` and `kb-server` are the same program, so the help must not
+/// claim to be one of them.
+#[must_use]
+pub fn program_name_from(argv0: Option<&str>) -> String {
+    argv0
+        .and_then(|arg| {
+            Path::new(arg)
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "kb-server".to_string())
+}
+
 fn print_help() {
+    let program = program_name();
     println!(
-        "kb-server — RantAI Knowledge Base service
+        "{program} — RantAI Knowledge Base service
 
 USAGE
-    kb-server                                  Serve HTTP and run the ingest worker
-    kb-server serve                            Same as above
-    kb-server create-api-key <tenantId> [name] [--scopes a,b] [--kb id,id]
-    kb-server apply-schema                     Create the Qdrant collections at the configured width
-    kb-server migrate                          Apply prisma/migrations in order
-    kb-server reindex [--tenant <id>] [--dry-run]
+    {program}                                  Serve HTTP and run the ingest worker
+    {program} serve                            Same as above
+    {program} serve --foreground               Always serve in this process, even when a
+                                               deploy directory is configured
+    {program} setup [tier] [flags]             Detect the hardware, check the VRAM budget and
+                                               model licences, write the deploy env file
+    {program} up [tier] [--build]              Start the tier's compose stack, wait for /health
+    {program} down [-v]                        Stop the stack (-v also removes the volumes)
+    {program} logs [--no-follow] [service...]  The stack's logs
+    {program} ps                               The stack's containers
+    {program} status                           GET /health on the running stack
+    {program} key <tenant> [name]              Create and print an API key
+    {program} create-api-key <tenantId> [name] [--scopes a,b] [--kb id,id]
+    {program} apply-schema                     Create the Qdrant collections at the configured width
+    {program} migrate                          Apply prisma/migrations in order
+    {program} reindex [--tenant <id>] [--dry-run]
                                                Re-queue ingest for every live document so Qdrant
                                                is rebuilt from the originals in S3 (see below)
-    kb-server communities build --tenant <id> [--min-pages 2] [--max-usd X] [--dry-run]
+    {program} communities build --tenant <id> [--min-pages 2] [--max-usd X] [--dry-run]
                                                Detect graph communities and write one LLM summary
                                                per community for the global arm (DEC-5, off by
                                                default). Prints a chars/4 cost estimate first;
                                                --max-usd 0 refuses any paid run. Every summary is
                                                cached under KB_CACHE_DIR
-    kb-server setup [--tier T] [--detect-only] [--check]
-                                               Detect the hardware, check the VRAM budget and
-                                               model licences, write rust/deploy/.env (see
-                                               `kb-server setup --help`)
-    kb-server eval --base-url URL --dataset DIR  Measure retrieval quality
-    kb-server eval score --qrels F --run F       Score an existing run offline
-    kb-server eval compare --baseline F --current F  Compare two runs against a baseline
-    kb-server eval classify --queries FILE [--per-query]  Print the query-class distribution of a
-                                                 queries.tsv / queries.jsonl file (RET-5)
-    kb-server eval ocr --pdfs F --root D --out D  Read the first page of every listed PDF through
+    {program} eval --base-url URL --dataset DIR  Measure retrieval quality
+    {program} eval score --qrels F --run F       Score an existing run offline
+    {program} eval compare --baseline F --current F  Compare two runs against a baseline
+    {program} eval classify --queries FILE [--per-query]  Print the query-class distribution of a
+                                                  queries.tsv / queries.jsonl file (RET-5)
+    {program} eval ocr --pdfs F --root D --out D  Read the first page of every listed PDF through
                                                  the OCR router and write <out>/<name>.md
                                                  [--html] [--concurrency N]
-    kb-server bench search --base-url URL --queries F  Closed-loop load test for /v1/search
-    kb-server openapi                           Print the OpenAPI 3.1 document to stdout (the same
+    {program} bench search --base-url URL --queries F  Closed-loop load test for /v1/search
+    {program} openapi                           Print the OpenAPI 3.1 document to stdout (the same
                                                document GET /openapi.json serves and the Swagger UI
                                                at GET /docs renders)
-    kb-server check-boundary                   Fail if an inner crate depends on an adapter
+    {program} check-boundary                   Fail if an inner crate depends on an adapter
+    {program} --version                         The version of this build
+
+THE STACK
+    `up`, `down`, `logs`, `ps`, `status` and `key` drive the compose stack in the
+    deploy directory: $RANTAI_KB_HOME/deploy, else rust/deploy next to a source
+    checkout, else ~/.rantai-kb/deploy. `setup` writes that directory's .env and
+    .tier; `serve` runs the in-process server when DATABASE_URL is set (the
+    container's CMD) and the stack otherwise.
 
 REINDEX AND COST
     SurrealDB was removed in 2026-10-25; Qdrant is the only chunk store. Data
@@ -131,7 +223,43 @@ ENVIRONMENT
     );
 }
 
-async fn serve() -> Result<(), CliError> {
+/// `kb-server serve [--foreground]`.
+///
+/// With `DATABASE_URL` in the environment this process *is* the server: that is
+/// what the container's CMD runs, and it must keep working. Without it, a
+/// configured deploy directory means "serve the stack": bring the compose
+/// stack up and wait for it.
+async fn serve(args: &[String]) -> Result<(), CliError> {
+    let foreground = args.iter().any(|arg| arg == "--foreground");
+    for arg in args {
+        if arg != "--foreground" {
+            return Err(CliError::Usage(format!(
+                "serve: unknown argument {arg:?}; usage: serve [--foreground]"
+            )));
+        }
+    }
+
+    if !foreground {
+        let stack = crate::stack::current();
+        let mode = crate::stack::decide_serve_mode(
+            env_lookup("DATABASE_URL").is_some_and(|value| !value.trim().is_empty()),
+            crate::stack::is_configured(&stack),
+        );
+        match mode {
+            crate::stack::ServeMode::Foreground => {}
+            crate::stack::ServeMode::Stack => return crate::stack::serve_stack().await,
+            crate::stack::ServeMode::Unconfigured => {
+                return Err(CliError::Failed(format!(
+                    "nothing to serve: DATABASE_URL is not set and no deploy directory is \
+                     configured ({}). Run `{} setup <tier>` first, or set DATABASE_URL to \
+                     run the server in this process.",
+                    stack.deploy.path.display(),
+                    program_name()
+                )));
+            }
+        }
+    }
+
     let config = Config::from_env().map_err(|e| CliError::Failed(e.to_string()))?;
     // One INFO line saying what `KB_TIER` filled, if a tier is set.
     config.log_tier();
@@ -822,5 +950,51 @@ mod tests {
         let mut out = Failing(std::io::ErrorKind::PermissionDenied);
         let err = write_document(&mut out, "{}").unwrap_err();
         assert!(matches!(err, CliError::Failed(_)), "{err:?}");
+    }
+
+    #[test]
+    fn the_program_name_is_the_name_that_was_typed() {
+        // The binary is installed as `rantai-kb` and as `kb-server`; the help
+        // must use the one the operator typed.
+        assert_eq!(
+            program_name_from(Some("/usr/local/bin/rantai-kb")),
+            "rantai-kb"
+        );
+        assert_eq!(program_name_from(Some("./bin/kb-server")), "kb-server");
+        assert_eq!(program_name_from(Some("kb-server")), "kb-server");
+    }
+
+    #[test]
+    fn an_unknown_argv0_falls_back_to_the_binary_name() {
+        assert_eq!(program_name_from(None), "kb-server");
+        assert_eq!(program_name_from(Some("")), "kb-server");
+    }
+
+    #[test]
+    fn the_bundle_version_is_read_from_the_file_next_to_the_binary() {
+        let root = std::env::temp_dir().join(format!("kb-version-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // The bundle's shape: <root>/bin/kb-server and <root>/VERSION.
+        let bundle = root.join("bundle");
+        let bin_dir = bundle.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        std::fs::write(bundle.join("VERSION"), "0.3.0\n").expect("version file");
+        assert_eq!(version_near(&bin_dir), Some("0.3.0".to_string()));
+
+        // A deploy directory carries it too, for a bundle whose binary sits
+        // next to the deploy directory rather than above it.
+        let flat = root.join("flat");
+        let flat_bin = flat.join("bin");
+        std::fs::create_dir_all(&flat_bin).expect("bin dir");
+        std::fs::create_dir_all(flat.join("deploy")).expect("deploy dir");
+        std::fs::write(flat.join("deploy/VERSION"), "0.4.0").expect("version file");
+        assert_eq!(version_near(&flat_bin), Some("0.4.0".to_string()));
+
+        // No file at all: the caller falls back to the crate version.
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&empty).expect("empty dir");
+        assert_eq!(version_near(&empty), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

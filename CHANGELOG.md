@@ -44,6 +44,41 @@
   - **Also printable:** `kb-server openapi` writes the same document to stdout, and
     the generated document is committed as `docs/openapi.json`; a test fails when
     the committed file is out of date.
+- **One command installs the whole stack.** The `kb-dev.sh` script is now also a
+  command in the binary, so an installed machine needs neither a checkout nor a
+  script: `kb-server up|down|logs|ps|status|key` is a Rust port of the script
+  (`rust/crates/kb-server/src/stack.rs`) and drives the same compose project
+  (`rantai-kb-dev`), the same compose file and the same env file. The binary is
+  installed under both names — `kb-server` and `rantai-kb` — and the help and
+  usage text use whichever name was typed.
+  - **Install:** `install.sh` (POSIX sh) downloads the release tarball for the
+    machine, checks it against the release's `SHA256SUMS`, unpacks it into
+    `$RANTAI_KB_HOME` (default `~/.rantai-kb`) and links `rantai-kb` and
+    `kb-server` into `$RANTAI_KB_BIN` (default `~/.local/bin`). A re-run is an
+    upgrade, not a reset: `deploy/.env` and `deploy/.tier` survive it.
+    `--uninstall` removes the links and the directory.
+  - **Deploy directory:** `$RANTAI_KB_HOME/deploy`, else `rust/deploy` (or
+    `deploy`) next to the working directory, else `~/.rantai-kb/deploy`. `setup`
+    writes that directory's `.env` and `.tier`; the stack commands read them.
+    An installed bundle has no source, so its env file points compose at the
+    published images (`KB_IMAGE`, `KB_OCR_CPU_IMAGE`, `KB_OCR_LAYOUT_IMAGE`)
+    and `up` pulls them instead of building.
+  - **Profiles:** one rule in both places. An env file `COMPOSE_PROFILES` wins
+    and no `--profile` flag is passed; otherwise the tier's own profiles are
+    activated (`<tier>`, `<tier>-ocr`, `<tier>-vision`).
+  - **`serve`:** unchanged for the container (`DATABASE_URL` set → the
+    in-process server, which is what the image's CMD runs), and it starts the
+    stack when a deploy directory is configured. `serve --foreground` always
+    serves in this process.
+  - **What `up` prints:** the API URL, the health URL, the key hint, the
+    upload command and the stop command. The Swagger UI line is printed only
+    when the running server really serves `/docs`, so the summary never points
+    at a URL that answers "Unauthorized".
+  - **Packaging:** `rust/scripts/package-release.sh <target> <version> <outdir>`
+    builds the binary, fetches libpdfium for the target (macOS arm64 included)
+    and writes the tarball the installer downloads. The release workflow
+    publishes Linux x86_64, Linux aarch64 and macOS arm64 tarballs with their
+    checksums, and the OCR sidecar images beside the main one.
 
 - **Tables you can ask questions of (`TBL-1`, work package B: store, query, ingest, API).**
   A document's spreadsheets, CSVs, DOCX tables and OCR/markdown tables are now stored

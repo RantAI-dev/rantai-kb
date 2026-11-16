@@ -32,9 +32,43 @@ partner's own frontend without any of them sharing a codebase.
 
 ## Quick start
 
-`rust/scripts/kb-dev.sh` is the interface to the compose stack. `setup` reads the
-hardware, suggests a tier, checks the model licences and writes `rust/deploy/.env`;
-`up` starts the tier and waits for `/health`; `key` prints an API key once.
+One command installs the CLI and the stack it drives:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RantAI-dev/rantai-kb/main/install.sh | sh
+```
+
+The installer puts the binary in `~/.rantai-kb/bin`, links `rantai-kb` (and
+`kb-server`, the same program under its other name) into `~/.local/bin`, and
+keeps the compose stack in `~/.rantai-kb/deploy`. Add `~/.local/bin` to your
+`PATH` if it is not there already.
+
+Then the three commands that matter:
+
+```bash
+rantai-kb setup lite-en        # detect the hardware, write deploy/.env + deploy/.tier
+rantai-kb up lite-en           # start the containers and wait for /health
+rantai-kb key my-tenant        # print an API key, once
+```
+
+`setup` suggests the tier the machine can actually run (`lite` and `lite-en` need
+no GPU; `desk`, `studio` and `station` need an NVIDIA card or Apple silicon), checks
+the VRAM budget and the model licences, and refuses a tier that does not fit. `up`
+needs Docker and compose ≥ 2.20; the first start downloads the models, so it can
+take a few minutes.
+
+The API is then at `http://127.0.0.1:8080`. `rantai-kb up` prints where to find
+it, and — on a build that serves the OpenAPI document — its API page (every
+endpoint, with a "try it" button) at `http://127.0.0.1:8080/docs`.
+
+`rantai-kb serve` runs the stack the same way, and `rantai-kb down` stops it
+(`down -v` also wipes the data). `rantai-kb --help` lists everything; the same
+commands exist in the source checkout as `rust/scripts/kb-dev.sh`.
+
+### From a source checkout
+
+`rust/scripts/kb-dev.sh` is the same interface without the install step, and it
+runs against `rust/deploy/`:
 
 ```bash
 rust/scripts/kb-dev.sh setup                  # detect the hardware, write .env + .tier
@@ -335,9 +369,16 @@ Contributions: [`CONTRIBUTING.md`](CONTRIBUTING.md). Work is tracked in
 ## Releases
 
 Tagging `v*` builds the Rust image from `rust/Dockerfile` for amd64 and arm64, publishes
-it to `ghcr.io/rantai-dev/rantai-kb` and cuts a GitHub release. `/health` reports the
-build version. `v0.2.0` is the first Rust release; `v0.1.0` is the last Bun release.
-Changes are in [`CHANGELOG.md`](CHANGELOG.md).
+it to `ghcr.io/rantai-dev/rantai-kb`, publishes the OCR sidecar images, packages the
+binary for Linux (x86_64, aarch64) and macOS (arm64) as release tarballs with their
+checksums, and cuts a GitHub release. `/health` reports the build version. `v0.2.0` is
+the first Rust release; `v0.1.0` is the last Bun release. Changes are in
+[`CHANGELOG.md`](CHANGELOG.md).
+
+The release tarballs are what `install.sh` downloads; the image is what the compose
+stack runs. An installed bundle has no source, so its `deploy/.env` points at the
+published images (`KB_IMAGE`, `KB_OCR_CPU_IMAGE`, `KB_OCR_LAYOUT_IMAGE`) instead of
+building them.
 
 ## License
 
