@@ -36,6 +36,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
+# The OpenAPI 3.1 document of the HTTP API and the Swagger UI that renders it.
+utoipa = { workspace = true }
+utoipa-swagger-ui = { workspace = true }
 # `kb-server setup --check` probes model endpoints and stores directly.
 reqwest = { workspace = true }
 

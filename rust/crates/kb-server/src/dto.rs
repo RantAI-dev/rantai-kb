@@ -7,6 +7,7 @@ use kb_engine::{RetrievalOutcome, timing::StageTimings};
 use kb_ports::{ProvenanceArm, RetrievalProvenance, SearchHit};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Parse a request body the way the TypeScript routes do: `request.json()`
 /// wrapped in `.catch(() => ({}))`, so a malformed body becomes an empty object
@@ -76,7 +77,7 @@ fn null_if_empty(value: Option<String>) -> Option<String> {
     value.filter(|s| !s.is_empty())
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
 pub struct SearchRequestDto {
     /// Left as raw JSON: the TypeScript route rejects a non-string query with
     /// its own 400, which a typed field would turn into a parser error.
@@ -120,7 +121,7 @@ pub struct SearchRequestDto {
     pub adaptive_arms: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct SearchResponseDto {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub chunks: Option<Vec<ChunkDto>>,
@@ -144,7 +145,7 @@ pub struct SearchResponseDto {
 }
 
 /// One table named by a search answer (`TBL-1`). Additive.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TableRefDto {
     pub table_id: String,
@@ -166,7 +167,7 @@ pub struct TableRefDto {
 /// microsecond resolution: a query-cache hit and a 0.4 ms arm are both "0 ms"
 /// once rounded to an integer, and the difference between them is the whole
 /// reason this exists.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct SearchStatsDto {
     /// Route entry to just before serialisation, in milliseconds.
     #[serde(rename = "totalTimeMs")]
@@ -255,14 +256,14 @@ pub struct SearchStatsDto {
 /// `stats.treeArm`: outline nodes the query scored and the distinct pages the
 /// arm read. Not a latency figure; the counts say how much structure the
 /// question actually reached.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct TreeArmStatsDto {
     pub nodes: usize,
     pub pages: usize,
 }
 
 /// `stats.globalArm`: the communities selected and the chunks contributed.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct GlobalArmStatsDto {
     pub communities: usize,
     pub chunks: usize,
@@ -271,14 +272,14 @@ pub struct GlobalArmStatsDto {
 /// `stats.boost`: how many returned hits carried a usable field for each
 /// requested boost. A hit without the field kept its base relevance and is
 /// not counted; this is not an error count.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct BoostStatsDto {
     pub recency: usize,
     pub authority: usize,
 }
 
 /// One arm adaptive mode skipped, as serialised in `stats.skippedArms`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 pub struct SkippedArmDto {
     pub arm: String,
     pub reason: String,
@@ -290,7 +291,7 @@ pub struct SkippedArmDto {
 /// after another and add up to no more than [`SearchStatsDto::total_time_ms`].
 /// `detail` is the overlapping part — the query embed and the two arms all
 /// happen inside `arms`, so they are reported, never summed with it.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StageTimingsDto {
     /// `build_scope` in Postgres: which documents this caller may see.
@@ -318,7 +319,7 @@ pub struct StageTimingsDto {
 }
 
 /// Measurements that overlap other stages and so are not part of the sum.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StageDetailDto {
     /// What the engine spent inside `execute_pipeline`.
@@ -453,7 +454,7 @@ impl From<&StageTimings> for StageDetailDto {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct SourceDto {
     #[serde(rename = "documentId")]
     pub document_id: Option<String>,
@@ -475,9 +476,10 @@ pub struct SourceDto {
 /// before diffing a Bun answer against a Rust one, because a field only one
 /// implementation produces is not a divergence to fix — see
 /// `docs/rust-cutover.md`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct RetrievalDto {
     /// The arms, in a canonical order: `dense`, `sparse`, `neighbour`, `figure`.
+    #[schema(value_type = Vec<crate::openapi::mirrors::ProvenanceArm>)]
     pub arms: Vec<ProvenanceArm>,
     #[serde(rename = "denseRank", skip_serializing_if = "Option::is_none")]
     pub dense_rank: Option<u32>,
@@ -510,7 +512,7 @@ impl From<RetrievalProvenance> for RetrievalDto {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct ChunkDto {
     pub id: String,
     pub content: String,

@@ -10,13 +10,6 @@
 //! * Anything unmatched authenticates first and then 404s, so an unknown path
 //!   cannot be used to probe which tenants exist.
 
-mod jobs;
-mod media;
-mod structure;
-mod tables;
-mod taxonomy;
-mod upload;
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -29,7 +22,6 @@ use axum::http::header::{
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use kb_core::policy::MimeRegistry;
 use kb_engine::timing::{Stopwatch, SystemClock};
@@ -38,14 +30,24 @@ use kb_ports::{
     ScopeRequest, SearchHit,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::{IntoParams, ToSchema};
 
 use crate::auth::Authed;
 use crate::dto::{
     BoostStatsDto, ChunkDto, SearchRequestDto, SearchResponseDto, SearchStatsDto, StageDetailDto,
     StageTimingsDto, splice_json_member,
 };
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
+
+// The route modules are public because their handlers carry the
+// `#[utoipa::path]` attributes the OpenAPI document is built from.
+pub mod jobs;
+pub mod media;
+pub mod structure;
+pub mod tables;
+pub mod taxonomy;
+pub mod upload;
 
 /// Largest accepted upload, in bytes: `KB_MAX_FILE_BYTES`, read once per
 /// process, defaulting to Bun's 50 MB (`src/lib/files/mime-types.ts`) so an
@@ -85,61 +87,198 @@ mod max_file_bytes_tests {
     }
 }
 
-/// Top-level router. Authenticated routes go here.
-pub fn router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/v1/search", post(search))
-        .route(
-            "/v1/documents",
-            get(list_documents).post(upload::ingest_document),
-        )
-        .route(
-            "/v1/documents/:id",
-            get(get_document)
-                .patch(patch_document)
-                .delete(delete_document),
-        )
-        .route("/v1/documents/:id/raw", get(media::get_document_raw))
-        .route(
-            "/v1/documents/:id/structure",
-            get(structure::get_document_structure),
-        )
-        .route("/v1/documents/:id/assets", get(media::get_document_asset))
-        .route(
-            "/v1/documents/:id/intelligence",
-            get(media::get_document_intelligence),
-        )
-        .route("/v1/jobs/:id", get(jobs::get_job))
-        .route("/v1/jobs/:id/retry", post(jobs::retry_job))
-        .route(
-            "/v1/knowledge-bases",
-            get(list_knowledge_bases).post(taxonomy::create_knowledge_base),
-        )
-        .route(
-            "/v1/knowledge-bases/:id",
-            patch(taxonomy::patch_knowledge_base).delete(taxonomy::delete_knowledge_base),
-        )
-        .route(
-            "/v1/categories",
-            get(taxonomy::list_categories).post(taxonomy::create_category),
-        )
-        .route(
-            "/v1/categories/:id",
-            patch(taxonomy::patch_category).delete(taxonomy::delete_category),
-        )
-        .route("/v1/events", get(crate::events::events_stream))
-        .route("/v1/tables", get(tables::list_tables))
-        .route("/v1/tables/:id", get(tables::get_table))
-        .route("/v1/tables/:id/query", post(tables::query_table))
-        .layer(DefaultBodyLimit::max(upload_body_limit()))
+// ─── The route table ────────────────────────────────────────────────────────
+
+/// One route of the API, as the OpenAPI document names it.
+///
+/// The table is written once, in [`route_table!`], and it builds the router
+/// *and* this list: a route cannot exist without a spec entry, and a spec
+/// entry cannot exist without a route. `tests/openapi_tests.rs` checks the
+/// list against the published document, so a route added to one and not the
+/// other fails the build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteSpec {
+    /// The HTTP method.
+    pub method: Method,
+    /// The path, in axum's spelling (`/v1/documents/:id`).
+    pub path: &'static str,
+    /// The OpenAPI tag the operation is filed under.
+    pub tag: &'static str,
 }
 
-/// Unauthenticated router (health + formats).
-pub fn health_router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/health", get(health))
-        .route("/v1/health", get(health))
-        .route("/v1/formats", get(formats))
+/// The route table.
+///
+/// `public` holds the handful of routes that answer without a key; `api`
+/// holds everything under `/v1` that needs one. Each entry gives the path,
+/// the OpenAPI tag, and the handler per method.
+///
+/// The macro builds three things from that one declaration: the
+/// authenticated router, the public router, and the route list the OpenAPI
+/// document is checked against.
+macro_rules! route_table {
+    (
+        public {
+            $(
+                $public_path:literal => $public_tag:literal {
+                    $( $public_method:ident => $public_handler:path ),* $(,)?
+                }
+            ),* $(,)?
+        }
+        api {
+            $(
+                $api_path:literal => $api_tag:literal {
+                    $( $api_method:ident => $api_handler:path ),* $(,)?
+                }
+            ),* $(,)?
+        }
+    ) => {
+        /// Every public route, in the order the table declares them.
+        pub const PUBLIC_ROUTES: &[RouteSpec] = &[
+            $(
+                $(
+                    RouteSpec {
+                        method: Method::$public_method,
+                        path: $public_path,
+                        tag: $public_tag,
+                    },
+                )*
+            )*
+        ];
+
+        /// Every authenticated route, in the order the table declares them.
+        pub const API_ROUTES: &[RouteSpec] = &[
+            $(
+                $(
+                    RouteSpec {
+                        method: Method::$api_method,
+                        path: $api_path,
+                        tag: $api_tag,
+                    },
+                )*
+            )*
+        ];
+
+        /// Every route the API serves.
+        pub const ALL_ROUTES: &[RouteSpec] = &[
+            $(
+                $(
+                    RouteSpec {
+                        method: Method::$public_method,
+                        path: $public_path,
+                        tag: $public_tag,
+                    },
+                )*
+            )*
+            $(
+                $(
+                    RouteSpec {
+                        method: Method::$api_method,
+                        path: $api_path,
+                        tag: $api_tag,
+                    },
+                )*
+            )*
+        ];
+
+        /// The authenticated router, built from the table above.
+        pub fn router() -> Router<Arc<AppState>> {
+            Router::new()
+            $(
+                .route($api_path, {
+                    let method_router = axum::routing::MethodRouter::<Arc<AppState>>::new();
+                    $( let method_router = method_router.on(axum::routing::MethodFilter::$api_method, $api_handler); )*
+                    method_router
+                })
+            )*
+            .layer(DefaultBodyLimit::max(upload_body_limit()))
+        }
+
+        /// The public router (health + formats), built from the table above.
+        pub fn health_router() -> Router<Arc<AppState>> {
+            Router::new()
+            $(
+                .route($public_path, {
+                    let method_router = axum::routing::MethodRouter::<Arc<AppState>>::new();
+                    $( let method_router = method_router.on(axum::routing::MethodFilter::$public_method, $public_handler); )*
+                    method_router
+                })
+            )*
+        }
+    };
+}
+
+route_table! {
+    public {
+        "/health" => "health" {
+            GET => health,
+        },
+        "/v1/health" => "health" {
+            GET => health_v1,
+        },
+        "/v1/formats" => "health" {
+            GET => formats,
+        },
+    }
+    api {
+        "/v1/search" => "search" {
+            POST => search,
+        },
+        "/v1/documents" => "documents" {
+            GET => list_documents,
+            POST => upload::ingest_document,
+        },
+        "/v1/documents/:id" => "documents" {
+            GET => get_document,
+            PATCH => patch_document,
+            DELETE => delete_document,
+        },
+        "/v1/documents/:id/raw" => "media" {
+            GET => media::get_document_raw,
+        },
+        "/v1/documents/:id/structure" => "structure" {
+            GET => structure::get_document_structure,
+        },
+        "/v1/documents/:id/assets" => "media" {
+            GET => media::get_document_asset,
+        },
+        "/v1/documents/:id/intelligence" => "media" {
+            GET => media::get_document_intelligence,
+        },
+        "/v1/jobs/:id" => "jobs" {
+            GET => jobs::get_job,
+        },
+        "/v1/jobs/:id/retry" => "jobs" {
+            POST => jobs::retry_job,
+        },
+        "/v1/knowledge-bases" => "taxonomy" {
+            GET => list_knowledge_bases,
+            POST => taxonomy::create_knowledge_base,
+        },
+        "/v1/knowledge-bases/:id" => "taxonomy" {
+            PATCH => taxonomy::patch_knowledge_base,
+            DELETE => taxonomy::delete_knowledge_base,
+        },
+        "/v1/categories" => "taxonomy" {
+            GET => taxonomy::list_categories,
+            POST => taxonomy::create_category,
+        },
+        "/v1/categories/:id" => "taxonomy" {
+            PATCH => taxonomy::patch_category,
+            DELETE => taxonomy::delete_category,
+        },
+        "/v1/events" => "events" {
+            GET => crate::events::events_stream,
+        },
+        "/v1/tables" => "tables" {
+            GET => tables::list_tables,
+        },
+        "/v1/tables/:id" => "tables" {
+            GET => tables::get_table,
+        },
+        "/v1/tables/:id/query" => "tables" {
+            POST => tables::query_table,
+        },
+    }
 }
 
 /// CORS headers, verbatim from `CORS_HEADERS` in `src/service/api.ts`.
@@ -187,10 +326,14 @@ pub async fn not_found(State(state): State<Arc<AppState>>, req: Request) -> Resp
 
 // ─── Health ──────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HealthResponse {
+    /// True when every dependency answered. False means at least one is down;
+    /// the `checks` say which.
     pub ok: bool,
+    /// One boolean per dependency.
     pub checks: HealthChecks,
+    /// The server's version.
     pub version: String,
     /// Additive (R3): the `KB_TIER` preset name, or null when none is set.
     pub tier: Option<String>,
@@ -198,13 +341,30 @@ pub struct HealthResponse {
     pub egress: Vec<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct HealthChecks {
+    /// Whether Postgres answered.
     pub postgres: bool,
+    /// Whether the vector store answered.
     pub vectors: bool,
 }
 
-async fn health(State(state): State<Arc<AppState>>) -> Response {
+/// Liveness and readiness: are the dependencies answering?
+///
+/// `GET /health` — the liveness probe. Public: a health check must not need a
+/// key, or an operator cannot use it to find out why the service is not
+/// answering.
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "health",
+    responses(
+        (status = 200, description = "Every dependency answered", body = HealthResponse),
+        (status = 503, description = "At least one dependency did not answer", body = HealthResponse),
+    ),
+    security(()),
+)]
+pub async fn health(State(state): State<Arc<AppState>>) -> Response {
     // Each dependency is probed independently and reported as a boolean: a
     // liveness endpoint that fails the whole request tells an operator nothing
     // about which side is down.
@@ -226,23 +386,92 @@ async fn health(State(state): State<Arc<AppState>>) -> Response {
     (status, Json(body)).into_response()
 }
 
-#[derive(Debug, Serialize)]
-pub struct FormatsResponse {
-    extensions: &'static [&'static str],
-    #[serde(rename = "maxFileBytes")]
-    max_file_bytes: u64,
+/// Liveness and readiness, under the versioned path.
+///
+/// `GET /v1/health` — the same probe as `GET /health`. A separate handler so
+/// that each path is its own OpenAPI operation; the body is the same one
+/// `/health` returns.
+#[utoipa::path(
+    get,
+    path = "/v1/health",
+    tag = "health",
+    responses(
+        (status = 200, description = "Every dependency answered", body = HealthResponse),
+        (status = 503, description = "At least one dependency did not answer", body = HealthResponse),
+    ),
+    security(()),
+)]
+pub async fn health_v1(State(state): State<Arc<AppState>>) -> Response {
+    health(State(state)).await
 }
 
-async fn formats() -> Json<FormatsResponse> {
+#[derive(Debug, Serialize, ToSchema)]
+pub struct FormatsResponse {
+    /// The file extensions the upload route accepts, each with its leading dot.
+    pub extensions: Vec<String>,
+    /// The largest accepted upload, in bytes.
+    #[serde(rename = "maxFileBytes")]
+    pub max_file_bytes: u64,
+}
+
+/// The upload formats the service accepts.
+///
+/// `GET /v1/formats` — the accepted extensions and the size limit. Public,
+/// like the health probe: a client has to know the accepted list before it
+/// has a key.
+#[utoipa::path(
+    get,
+    path = "/v1/formats",
+    tag = "health",
+    responses(
+        (status = 200, description = "The accepted extensions and the size limit", body = FormatsResponse),
+    ),
+    security(()),
+)]
+pub async fn formats() -> Json<FormatsResponse> {
     Json(FormatsResponse {
-        extensions: MimeRegistry::kb_accepted_extensions(),
+        extensions: MimeRegistry::kb_accepted_extensions()
+            .iter()
+            .map(|ext| (*ext).to_string())
+            .collect(),
         max_file_bytes: max_file_bytes(),
     })
 }
 
 // ─── Search ──────────────────────────────────────────────────────────────────
 
-async fn search(
+/// The body every delete answers with.
+///
+/// One shape for every route that removes something: `{"ok": true}`. A delete
+/// that removed nothing answers `404` instead, so `ok` is always `true` when
+/// it is there at all.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct OkResponse {
+    /// Always `true`.
+    pub ok: bool,
+}
+
+/// Ask a question; get the chunks, the sources and the assembled context.
+///
+/// `POST /v1/search` — the retrieval answer. Needs the `kb:read` scope. The
+/// answer carries the chunks, the numbered sources, the assembled context and
+/// the stage timings; `degrades` names the arms that did not run, so an empty
+/// answer is never a silent one.
+#[utoipa::path(
+    post,
+    path = "/v1/search",
+    tag = "search",
+    request_body = SearchRequestDto,
+    responses(
+        (status = 200, description = "The search answer", body = SearchResponseDto),
+        (status = 400, description = "The body has no usable 'query'", body = ErrorBody),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 500, description = "The retrieval pipeline failed", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
+pub async fn search(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
     body: Bytes,
@@ -900,47 +1129,78 @@ pub(crate) fn restrict_kbs(
 
 // ─── Documents ───────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListDocumentsQuery {
-    /// Kept as a string so an unparsable value degrades to the default instead
-    /// of rejecting the request with a body the API never produces.
+    /// How many documents to return. 1–500; anything else is the default (100).
+    // Kept as a string so an unparsable value degrades to the default instead
+    // of rejecting the request with a body the API never produces.
     pub limit: Option<String>,
-    /// Bun/TS name (camelCase), used by existing clients.
+    /// The knowledge bases to list, as a JSON array or a comma-separated list.
+    // Bun/TS name (camelCase), used by existing clients.
     #[serde(alias = "knowledge_base_ids", rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Option<String>,
-    /// Exact-match filter on `Document.externalRef` (R1, additive). Scoped to
-    /// the caller's tenant and to live rows, like every other list filter.
+    /// Only documents with this exact external reference.
+    // Exact-match filter on `Document.externalRef` (R1, additive). Scoped to
+    // the caller's tenant and to live rows, like every other list filter.
     #[serde(rename = "externalRef")]
     pub external_ref: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentListResponse {
+    /// The documents, newest first.
     pub documents: Vec<DocumentSummary>,
 }
 
 /// `GET /v1/documents` row, field for field as `listDocuments` selects it.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentSummary {
+    /// The document's id.
     pub id: String,
+    /// The document's title.
     pub title: String,
+    /// The categories the document is filed under.
     pub categories: Vec<String>,
+    /// The subcategory, when it has one.
     pub subcategory: Option<String>,
+    /// The file's type, as the store recorded it.
     #[serde(rename = "fileType")]
     pub file_type: Option<String>,
+    /// The file's size in bytes.
     #[serde(rename = "fileSize")]
     pub file_size: Option<i32>,
+    /// `processing`, `ready` or `failed`.
     pub status: String,
     /// Additive: the caller's opaque document reference, or null.
     #[serde(rename = "externalRef")]
     pub external_ref: Option<String>,
+    /// When the document was created.
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// The knowledge bases the document belongs to.
     #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Vec<String>,
 }
 
-async fn list_documents(
+/// List the caller's documents.
+///
+/// `GET /v1/documents` — the caller's documents. Needs the `kb:read` scope. A
+/// key bound to some knowledge bases sees only the documents in them.
+#[utoipa::path(
+    get,
+    path = "/v1/documents",
+    tag = "documents",
+    params(ListDocumentsQuery),
+    responses(
+        (status = 200, description = "The documents", body = DocumentListResponse),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 500, description = "The store could not be read", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
+pub async fn list_documents(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
     Query(q): Query<ListDocumentsQuery>,
@@ -1003,12 +1263,16 @@ async fn list_documents(
     Ok(Json(DocumentListResponse { documents }))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct FigureView {
+    /// The figure's storage key.
     #[serde(rename = "assetKey")]
     pub asset_key: String,
+    /// The 0-based page the figure is on.
     pub page: u32,
+    /// The figure's caption, when it has one.
     pub caption: Option<String>,
+    /// The figure's kind (`figure`, `chart`, `photo`, …).
     pub kind: String,
 }
 
@@ -1054,49 +1318,89 @@ pub fn read_document_figures(metadata: Option<&serde_json::Value>) -> Vec<Figure
         .collect()
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentDetailResponse {
+    /// The document's row.
     pub document: DocumentDetail,
+    /// The document's chunks, in reading order.
     pub chunks: Vec<DocumentChunkView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentDetail {
+    /// The document's id.
     pub id: String,
+    /// The document's title.
     pub title: String,
+    /// The categories the document is filed under.
     pub categories: Vec<String>,
+    /// The subcategory, when it has one.
     pub subcategory: Option<String>,
+    /// The file's type, as the store recorded it.
     #[serde(rename = "fileType")]
     pub file_type: Option<String>,
+    /// The file's size in bytes.
     #[serde(rename = "fileSize")]
     pub file_size: Option<i32>,
+    /// The file's MIME type.
     #[serde(rename = "mimeType")]
     pub mime_type: Option<String>,
+    /// `processing`, `ready` or `failed`.
     pub status: String,
+    /// When the document was created.
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// When the document was last changed.
     #[serde(rename = "updatedAt")]
     pub updated_at: String,
+    /// The knowledge bases the document belongs to.
     #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Vec<String>,
+    /// How many chunks the document has.
     #[serde(rename = "chunkCount")]
     pub chunk_count: u32,
+    /// The document's figures.
     pub figures: Vec<FigureView>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentChunkView {
+    /// The chunk's id, in the wire form `document_chunk:⟨{bare}⟩`.
     pub id: String,
+    /// The chunk's 0-based position in the document.
     #[serde(rename = "chunkIndex")]
     pub chunk_index: u32,
+    /// The chunk's text.
     pub content: String,
+    /// The chunk's kind (`text`, `table_summary`, `table_row`, …).
     #[serde(rename = "chunkType")]
     pub chunk_type: Option<String>,
+    /// The heading path the chunk sits under.
     pub section: Option<String>,
+    /// The 0-based page the chunk is on.
     pub page: Option<u32>,
 }
 
-async fn get_document(
+/// Read one document and its chunks.
+///
+/// `GET /v1/documents/{id}` — one document and its chunks. Needs the
+/// `kb:read` scope. A document outside the caller's tenant, or outside a
+/// limited key's knowledge bases, answers the same 404 as an unknown id.
+#[utoipa::path(
+    get,
+    path = "/v1/documents/{id}",
+    tag = "documents",
+    params(("id" = String, Path, description = "The document's id.")),
+    responses(
+        (status = 200, description = "The document and its chunks", body = DocumentDetailResponse),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 404, description = "No such document is visible to this key", body = ErrorBody),
+        (status = 500, description = "A store could not be read", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
+pub async fn get_document(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
     Path(id): Path<String>,
@@ -1148,43 +1452,78 @@ async fn get_document(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct PatchDocumentBody {
+    /// The document's new title.
     pub title: Option<String>,
+    /// The document's new categories.
     pub categories: Option<Vec<String>>,
     /// `Some(None)` clears the column; absent leaves it alone.
     pub subcategory: Option<Option<String>>,
+    /// The knowledge bases the document belongs to.
     #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Option<Vec<String>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PatchedDocumentResponse {
+    /// The document's row, after the patch.
     pub document: PatchedDocument,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct PatchedDocument {
+    /// The document's id.
     pub id: String,
+    /// The document's title.
     pub title: String,
+    /// The categories the document is filed under.
     pub categories: Vec<String>,
+    /// The subcategory, when it has one.
     pub subcategory: Option<String>,
+    /// The file's type, as the store recorded it.
     #[serde(rename = "fileType")]
     pub file_type: Option<String>,
+    /// The file's size in bytes.
     #[serde(rename = "fileSize")]
     pub file_size: Option<i32>,
+    /// The file's MIME type.
     #[serde(rename = "mimeType")]
     pub mime_type: Option<String>,
+    /// `processing`, `ready` or `failed`.
     pub status: String,
+    /// When the document was created.
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// When the document was last changed.
     #[serde(rename = "updatedAt")]
     pub updated_at: String,
+    /// The knowledge bases the document belongs to.
     #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Vec<String>,
 }
 
-async fn patch_document(
+/// Change a document's metadata.
+///
+/// `PATCH /v1/documents/{id}` — change a document's metadata. Needs the
+/// `kb:write` scope. Absent members are left alone; `subcategory` set to
+/// `null` clears the column.
+#[utoipa::path(
+    patch,
+    path = "/v1/documents/{id}",
+    tag = "documents",
+    params(("id" = String, Path, description = "The document's id.")),
+    request_body = PatchDocumentBody,
+    responses(
+        (status = 200, description = "The document, after the patch", body = PatchedDocumentResponse),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:write scope", body = ErrorBody),
+        (status = 404, description = "No such document is visible to this key", body = ErrorBody),
+        (status = 500, description = "The store could not be written", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
+pub async fn patch_document(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
     Path(id): Path<String>,
@@ -1256,10 +1595,30 @@ async fn patch_document(
     }))
 }
 
-/// `DELETE /v1/documents/:id`. Mirrors TS deleteDocument: needs `kb:write`;
+/// Delete a document, softly or for good.
+///
+/// `DELETE /v1/documents/{id}` — mirrors TS deleteDocument: needs `kb:write`;
 /// soft delete sets `deletedAt` and leaves chunks and the blob alone; hard
-/// delete (`?hard=true`) removes the chunks, then the stored object, then the row.
-async fn delete_document(
+/// delete (`?hard=true`) removes the chunks, then the stored object, then the
+/// row.
+#[utoipa::path(
+    delete,
+    path = "/v1/documents/{id}",
+    tag = "documents",
+    params(
+        ("id" = String, Path, description = "The document's id."),
+        DeleteQuery
+    ),
+    responses(
+        (status = 200, description = "The document was deleted", body = OkResponse),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:write scope", body = ErrorBody),
+        (status = 404, description = "No such document is visible to this key", body = ErrorBody),
+        (status = 500, description = "The store could not be written", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
+pub async fn delete_document(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
     Path(id): Path<String>,
@@ -1378,8 +1737,12 @@ async fn delete_document(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-#[derive(Debug, Deserialize)]
+/// The query `DELETE /v1/documents/{id}` accepts.
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct DeleteQuery {
+    /// `"true"` removes the chunks, the stored original and the row. Anything
+    /// else (or nothing) is the soft delete.
     #[serde(default)]
     pub hard: Option<String>,
 }
@@ -1459,23 +1822,46 @@ pub(crate) async fn ensure_document_visible(
 
 // ─── Knowledge bases ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct KbListResponse {
+    /// The knowledge bases the caller may see.
     #[serde(rename = "knowledgeBases")]
     pub knowledge_bases: Vec<KbSummary>,
 }
 
-#[derive(Debug, Serialize)]
+/// One knowledge base, as `GET /v1/knowledge-bases` returns it.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct KbSummary {
+    /// The base's id.
     pub id: String,
+    /// The base's name.
     pub name: String,
+    /// The base's description, when it has one.
     pub description: Option<String>,
+    /// The base's display colour, when it has one.
     pub color: Option<String>,
+    /// How many live documents the base holds.
     #[serde(rename = "documentCount")]
     pub document_count: u32,
 }
 
-async fn list_knowledge_bases(
+/// List the caller's knowledge bases.
+///
+/// `GET /v1/knowledge-bases` — the caller's knowledge bases. Needs the
+/// `kb:read` scope. A key bound to some bases sees only those.
+#[utoipa::path(
+    get,
+    path = "/v1/knowledge-bases",
+    tag = "taxonomy",
+    responses(
+        (status = 200, description = "The knowledge bases", body = KbListResponse),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 500, description = "The store could not be read", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
+pub async fn list_knowledge_bases(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
 ) -> Result<Json<KbListResponse>, ApiError> {

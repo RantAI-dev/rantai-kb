@@ -31,10 +31,11 @@ use axum::extract::{Path, State};
 use serde::Serialize;
 
 use kb_ports::{ChunkType, DocumentMeta, page_image_path};
+use utoipa::ToSchema;
 
 use crate::auth::Authed;
 use crate::dto::chunk_id_for_client;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
 
 /// Text units read for the chunk → page map and the figure list.
@@ -44,14 +45,20 @@ pub const STRUCTURE_MAX_CHUNKS: usize = 20_000;
 pub const STRUCTURE_MAX_PAGES: usize = 2_000;
 
 /// The response body. camelCase on the wire, like every other `/v1` shape.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentStructureResponse {
+    /// The document's id.
     pub document_id: String,
+    /// The caller's own reference for the document, when it has one.
     pub external_ref: Option<String>,
+    /// The document's title.
     pub title: String,
+    /// The document's pages, by page number.
     pub pages: Vec<PageStructure>,
+    /// The document's figures.
     pub figures: Vec<FigureStructure>,
+    /// The document's chunks and the pages they sit on.
     pub chunks: Vec<ChunkPageRef>,
     /// True when either read reached its cap: more units may exist than are
     /// listed. False does not prove there are none (an index can always answer
@@ -61,9 +68,10 @@ pub struct DocumentStructureResponse {
 
 /// One page. `number` is 0-based, the same numbering as `ChunkMetadata.page`
 /// and a search chunk's `page`; the page-image key is built from `number + 1`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PageStructure {
+    /// The 0-based page number.
     pub number: u32,
     /// Whether the PDF page had its own text layer. `None` for a document
     /// ingested before page units recorded it, or a page with no page unit.
@@ -77,17 +85,22 @@ pub struct PageStructure {
 
 /// One figure. `key` is the searchable figure chunk's id when the figure has a
 /// chunk, or the asset key for a figure recorded on the document row alone.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FigureStructure {
+    /// The figure's chunk id, or its asset key.
     pub key: String,
+    /// The 0-based page the figure is on.
     pub page: Option<u32>,
     /// `[x0, y0, x1, y1]` in page points, from `Document.metadata.figures`.
+    #[schema(value_type = Option<Vec<f32>>)]
     pub bbox: Option<[f32; 4]>,
+    /// The figure's caption, when it has one.
     pub caption: Option<String>,
     /// Text legible in the picture, as the image describer read it (`ING-5`);
     /// null when the picture was not read or shows no text.
     pub ocr_text: Option<String>,
+    /// The blob key of the figure's image.
     pub asset_key: Option<String>,
     /// What the picture shows, as the image describer read it (`ING-5`).
     /// Additive; absent for figures from before it existed.
@@ -99,10 +112,12 @@ pub struct FigureStructure {
 }
 
 /// One text chunk's place in the document.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChunkPageRef {
+    /// The chunk's id.
     pub chunk_id: String,
+    /// The chunk's 0-based position in the document.
     pub chunk_index: u32,
     /// 0-based page, or null when the chunk has none (a format without pages).
     pub page: Option<u32>,
@@ -120,11 +135,26 @@ struct StoredFigure {
     kind: Option<String>,
 }
 
-/// `GET /v1/documents/:id/structure`.
+/// The pages, figures and chunk-to-page map of a document.
 ///
-/// Visibility is [`find_visible_document`](crate::routes::find_visible_document):
-/// tenant **and** the key's knowledge-base limit, answering the same 404 as an
+/// `GET /v1/documents/{id}/structure`. Visibility is
+/// [`find_visible_document`](crate::routes::find_visible_document): tenant
+/// **and** the key's knowledge-base limit, answering the same 404 as an
 /// unknown id so a limited key cannot probe for documents outside its bases.
+#[utoipa::path(
+    get,
+    path = "/v1/documents/{id}/structure",
+    tag = "structure",
+    params(("id" = String, Path, description = "The document's id.")),
+    responses(
+        (status = 200, description = "The document's pages, figures and chunk map", body = DocumentStructureResponse),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 404, description = "No such document is visible to this key", body = ErrorBody),
+        (status = 500, description = "The store could not be read", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn get_document_structure(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,

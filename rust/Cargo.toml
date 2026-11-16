@@ -41,6 +41,15 @@ chardetng = "1.0.0"
 fax = "0.2.7"
 base64 = "0.22.1"
 uuid = { version = "1.26.1", features = ["v4"] }
+# The OpenAPI 3.1 document of the HTTP API. `utoipa` derives the schemas from
+# the real DTOs; `utoipa-swagger-ui` serves the browser UI. The UI assets are
+# embedded at build time (`vendored`): the service runs offline/on-prem, so
+# nothing may be fetched from a CDN at runtime.
+utoipa = { version = "5.5.0", features = ["macros"] }
+utoipa-swagger-ui = { version = "8.1.0", default-features = false, features = [
+    "axum",
+    "vendored",
+] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

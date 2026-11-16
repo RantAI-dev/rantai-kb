@@ -8,14 +8,31 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use kb_ports::{DocumentId, JobView, RetryJobOutcome};
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::auth::Authed;
 use crate::error::{ApiError, NOT_FAILED};
 use crate::state::AppState;
 
-/// `GET /v1/jobs/:id`. No scope check, matching the TypeScript route: any key
+/// Read an ingest job's progress.
+///
+/// `GET /v1/jobs/{id}`. No scope check, matching the TypeScript route: any key
 /// of the tenant can poll its own jobs, which is how the upload UI polls the
 /// job the same key just created.
+#[utoipa::path(
+    get,
+    path = "/v1/jobs/{id}",
+    tag = "jobs",
+    params(("id" = String, Path, description = "The job's id.")),
+    responses(
+        (status = 200, description = "The job's progress", body = crate::openapi::mirrors::JobView),
+        (status = 401, description = "No key, or a key that does not resolve", body = crate::error::ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = crate::error::ErrorBody),
+        (status = 404, description = "No such job, or its document is not visible to this key", body = crate::error::ErrorBody),
+        (status = 500, description = "The store could not be read", body = crate::error::ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn get_job(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -36,15 +53,34 @@ pub async fn get_job(
     Ok(Json(job))
 }
 
-#[derive(Debug, Serialize)]
+/// The body `POST /v1/jobs/{id}/retry` answers with.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RetryResponse {
+    /// The job that was requeued.
     #[serde(rename = "jobId")]
     pub job_id: String,
 }
 
-/// `POST /v1/jobs/:id/retry` — only a failed job can be retried (409 otherwise).
-/// The row goes back to `pending` with the shape the worker's claim expects, so
-/// the next poll picks it up exactly like a fresh job.
+/// Requeue a failed ingest job.
+///
+/// `POST /v1/jobs/{id}/retry` — only a failed job can be retried (409
+/// otherwise). The row goes back to `pending` with the shape the worker's
+/// claim expects, so the next poll picks it up exactly like a fresh job.
+#[utoipa::path(
+    post,
+    path = "/v1/jobs/{id}/retry",
+    tag = "jobs",
+    params(("id" = String, Path, description = "The job's id.")),
+    responses(
+        (status = 200, description = "The job was requeued", body = RetryResponse),
+        (status = 401, description = "No key, or a key that does not resolve", body = crate::error::ErrorBody),
+        (status = 403, description = "The key lacks the kb:write scope", body = crate::error::ErrorBody),
+        (status = 404, description = "No such job, or its document is not visible to this key", body = crate::error::ErrorBody),
+        (status = 409, description = "The job is not in the failed state", body = crate::error::ErrorBody),
+        (status = 500, description = "The store could not be written", body = crate::error::ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn retry_job(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
