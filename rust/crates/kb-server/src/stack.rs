@@ -268,10 +268,7 @@ impl Stack {
     /// The profiles a command for `tier` activates.
     #[must_use]
     pub fn profiles(&self, tier: Tier) -> Profiles {
-        let from_file = self
-            .read_env_file()
-            .get("COMPOSE_PROFILES")
-            .cloned();
+        let from_file = self.read_env_file().get("COMPOSE_PROFILES").cloned();
         resolve_profiles(tier, from_file.as_deref())
     }
 
@@ -301,7 +298,9 @@ impl Stack {
         if let Some(image) = self.env_value("KB_IMAGE") {
             return image;
         }
-        let tag = self.env_value("KB_IMAGE_TAG").unwrap_or_else(|| "dev".to_string());
+        let tag = self
+            .env_value("KB_IMAGE_TAG")
+            .unwrap_or_else(|| "dev".to_string());
         format!("rantai-kb-rust:{tag}")
     }
 
@@ -573,8 +572,7 @@ pub async fn up(args: &[String]) -> Result<(), CliError> {
 
     // A source checkout builds the image when it is missing; an installed
     // bundle cannot build (there is no source), so it pulls the published one.
-    let needs_build = build
-        || (is_source_checkout(&stack.deploy.path) && !image_exists(&image));
+    let needs_build = build || (is_source_checkout(&stack.deploy.path) && !image_exists(&image));
     if needs_build {
         if !is_source_checkout(&stack.deploy.path) {
             return Err(CliError::Failed(
@@ -606,7 +604,10 @@ pub async fn up(args: &[String]) -> Result<(), CliError> {
         .unwrap_or(DEFAULT_WAIT_SECONDS);
     if let Err(err) = wait_healthy(&url, seconds).await {
         let _ = stack.run_compose(&profiles, &["ps"]);
-        let _ = stack.run_compose(&profiles, &["logs", "--tail=40", &format!("kb-{}", tier.as_str())]);
+        let _ = stack.run_compose(
+            &profiles,
+            &["logs", "--tail=40", &format!("kb-{}", tier.as_str())],
+        );
         return Err(err);
     }
 
@@ -651,10 +652,7 @@ fn print_up_summary(stack: &Stack, tier: Tier, url: &str) {
     );
     println!("  logs       {program} logs");
     println!("  stop       {program} down        (down -v also wipes data)");
-    println!(
-        "  config     {}",
-        stack.env_file().display()
-    );
+    println!("  config     {}", stack.env_file().display());
 }
 
 /// `kb-server down [-v|--volumes]`.
@@ -896,7 +894,10 @@ pub async fn serve_stack() -> Result<(), CliError> {
     let stack = current();
     let url = stack.api_url();
     println!();
-    println!("{program} is serving the stack.", program = crate::cli::program_name());
+    println!(
+        "{program} is serving the stack.",
+        program = crate::cli::program_name()
+    );
     println!("  API        {url}");
     println!("  health     {url}/health");
     println!("  Swagger UI {url}/docs");
@@ -1124,17 +1125,17 @@ mod tests {
             parse_up_args(&args(&["lite", "--build"])).expect("parse"),
             (Some("lite".to_string()), true)
         );
-        assert_eq!(
-            parse_up_args(&args(&[])).expect("parse"),
-            (None, false)
-        );
+        assert_eq!(parse_up_args(&args(&[])).expect("parse"), (None, false));
         assert!(parse_up_args(&args(&["--nope"])).is_err());
         assert!(parse_up_args(&args(&["lite", "desk"])).is_err());
     }
 
     #[test]
     fn down_takes_a_volumes_flag() {
-        assert_eq!(parse_down_args(&args(&["-v"])).expect("parse"), (true, None));
+        assert_eq!(
+            parse_down_args(&args(&["-v"])).expect("parse"),
+            (true, None)
+        );
         assert_eq!(
             parse_down_args(&args(&["--volumes", "lite"])).expect("parse"),
             (true, Some("lite".to_string()))

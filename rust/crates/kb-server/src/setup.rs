@@ -1269,7 +1269,11 @@ fn bundle_version(deploy_dir: &Path) -> String {
 fn installed_image_changes(deploy_dir: &Path) -> Vec<EnvChange> {
     let version = bundle_version(deploy_dir);
     vec![
-        EnvChange::plain("KB_IMAGE", format!("ghcr.io/rantai-dev/rantai-kb:{version}")).with_comment(
+        EnvChange::plain(
+            "KB_IMAGE",
+            format!("ghcr.io/rantai-dev/rantai-kb:{version}"),
+        )
+        .with_comment(
             "Published image: this install has no source to build from, so compose pulls it.",
         ),
         EnvChange::plain(
@@ -2915,7 +2919,8 @@ mod tests {
 
     #[test]
     fn a_positional_tier_and_the_flag_agree() {
-        let parsed = SetupArgs::parse(&["cloud".to_string(), "--start".to_string()]).expect("parse");
+        let parsed =
+            SetupArgs::parse(&["cloud".to_string(), "--start".to_string()]).expect("parse");
         assert_eq!(parsed.tier, Some(Tier::Cloud));
         assert!(parsed.start);
     }
