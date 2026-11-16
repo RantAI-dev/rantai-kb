@@ -267,8 +267,9 @@ package_dir="$work_dir/rantai-kb-$version_number-$target"
 if [ ! -d "$package_dir" ]; then
   package_dir="$(find "$work_dir" -maxdepth 1 -type d -name 'rantai-kb-*' | head -n 1)"
 fi
-[ -n "$package_dir" ] && [ -d "$package_dir" ] ||
+if [ ! -d "$package_dir" ]; then
   die "the tarball does not contain a rantai-kb-$version_number-$target directory"
+fi
 [ -f "$package_dir/bin/kb-server" ] || die "the tarball has no bin/kb-server"
 
 # ─── Install ────────────────────────────────────────────────────────────────
@@ -322,7 +323,7 @@ say "linked $bin_dir/rantai-kb and $bin_dir/kb-server"
 
 case ":$PATH:" in
   *":$bin_dir:"*) ;;
-  *) warn "$bin_dir is not on your PATH; add it to use `rantai-kb` by name" ;;
+  *) warn "$bin_dir is not on your PATH; add it to use 'rantai-kb' by name" ;;
 esac
 
 # ─── Docker ─────────────────────────────────────────────────────────────────
@@ -334,7 +335,7 @@ if ! have docker; then
   warn "docker is not installed: the stack (up/down/logs/ps) needs it, but a
   native server and the cloud tier do not"
 elif ! docker compose version >/dev/null 2>&1; then
-  warn "the docker compose plugin is missing: `docker compose version` failed"
+  warn "the docker compose plugin is missing: 'docker compose version' failed"
 else
   compose_version="$(docker compose version 2>/dev/null |
     tr ' ' '\n' |
