@@ -17,31 +17,44 @@ use kb_ports::{
     PatchCategory, PatchKnowledgeBase,
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::auth::Authed;
 use crate::dto::parse_json;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize, Default)]
-struct KnowledgeBaseBody {
-    name: Option<String>,
-    description: Option<String>,
-    color: Option<String>,
+/// The body `POST /v1/knowledge-bases` and `PATCH /v1/knowledge-bases/{id}`
+/// accept.
+#[derive(Debug, Deserialize, Default, ToSchema)]
+pub struct KnowledgeBaseBody {
+    /// The base's name. Required when creating one.
+    pub name: Option<String>,
+    /// The base's description.
+    pub description: Option<String>,
+    /// The base's display colour.
+    pub color: Option<String>,
 }
 
 /// The row `prisma.knowledgeBase.create` returns, field for field.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct KnowledgeBaseView {
+    /// The base's id.
     pub id: String,
+    /// The tenant that owns the base.
     #[serde(rename = "tenantId")]
     pub tenant_id: String,
+    /// The base's name.
     pub name: String,
+    /// The base's description, when it has one.
     pub description: Option<String>,
+    /// The base's display colour, when it has one.
     pub color: Option<String>,
+    /// When the base was created.
     #[serde(rename = "createdAt")]
     pub created_at: String,
+    /// When the base was last changed.
     #[serde(rename = "updatedAt")]
     pub updated_at: String,
 }
@@ -60,13 +73,32 @@ impl From<KnowledgeBaseRecord> for KnowledgeBaseView {
     }
 }
 
-#[derive(Debug, Serialize)]
+/// The body `PATCH /v1/knowledge-bases/{id}` answers with.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct KnowledgeBaseEnvelope {
+    /// The base, after the patch.
     #[serde(rename = "knowledgeBase")]
     knowledge_base: KnowledgeBaseView,
 }
 
-/// `POST /v1/knowledge-bases` — 201 with the created row.
+/// Create a knowledge base.
+///
+/// `POST /v1/knowledge-bases` — 201 with the created row. Needs the `kb:write`
+/// scope. A base without a name is a 400.
+#[utoipa::path(
+    post,
+    path = "/v1/knowledge-bases",
+    tag = "taxonomy",
+    request_body = KnowledgeBaseBody,
+    responses(
+        (status = 201, description = "The created knowledge base", body = KnowledgeBaseView),
+        (status = 400, description = "The body has no 'name'", body = ErrorBody),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:write scope", body = ErrorBody),
+        (status = 500, description = "The store could not be written", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn create_knowledge_base(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -95,8 +127,25 @@ pub async fn create_knowledge_base(
     Ok((StatusCode::CREATED, Json(KnowledgeBaseView::from(created))).into_response())
 }
 
-/// `PATCH /v1/knowledge-bases/:id`. Absent fields are untouched; an empty body
-/// returns the row unchanged.
+/// Change a knowledge base.
+///
+/// `PATCH /v1/knowledge-bases/{id}`. Absent fields are untouched; an empty
+/// body returns the row unchanged.
+#[utoipa::path(
+    patch,
+    path = "/v1/knowledge-bases/{id}",
+    tag = "taxonomy",
+    params(("id" = String, Path, description = "The knowledge base's id.")),
+    request_body = KnowledgeBaseBody,
+    responses(
+        (status = 200, description = "The knowledge base, after the patch", body = KnowledgeBaseEnvelope),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:write scope", body = ErrorBody),
+        (status = 404, description = "No such knowledge base in this tenant", body = ErrorBody),
+        (status = 500, description = "The store could not be written", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn patch_knowledge_base(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -129,7 +178,24 @@ pub async fn patch_knowledge_base(
     }))
 }
 
-/// `DELETE /v1/knowledge-bases/:id` — removes the base and its document links.
+/// Delete a knowledge base.
+///
+/// `DELETE /v1/knowledge-bases/{id}` — removes the base and its document
+/// links.
+#[utoipa::path(
+    delete,
+    path = "/v1/knowledge-bases/{id}",
+    tag = "taxonomy",
+    params(("id" = String, Path, description = "The knowledge base's id.")),
+    responses(
+        (status = 200, description = "The knowledge base was removed", body = crate::routes::OkResponse),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:write scope", body = ErrorBody),
+        (status = 404, description = "No such knowledge base in this tenant", body = ErrorBody),
+        (status = 500, description = "The store could not be written", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn delete_knowledge_base(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -151,7 +217,7 @@ pub async fn delete_knowledge_base(
 
 /// One category on the wire. The TypeScript service sends the row as-is, so
 /// the field names are the column names.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CategoryView {
     /// Row id.
     pub id: String,
@@ -174,24 +240,46 @@ impl From<CategoryRecord> for CategoryView {
     }
 }
 
-#[derive(Debug, Serialize)]
+/// The body `GET /v1/categories` answers with.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CategoryListResponse {
+    /// The tenant's categories, ordered by name.
     pub categories: Vec<CategoryView>,
 }
 
-#[derive(Debug, Serialize)]
+/// The body `POST /v1/categories` and `PATCH /v1/categories/{id}` answer with.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct CategoryEnvelope {
+    /// The category.
     category: CategoryView,
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct CategoryBody {
-    name: Option<String>,
-    label: Option<String>,
-    color: Option<String>,
+/// The body `POST /v1/categories` and `PATCH /v1/categories/{id}` accept.
+#[derive(Debug, Deserialize, Default, ToSchema)]
+pub struct CategoryBody {
+    /// The category's machine name. Required when creating one.
+    pub name: Option<String>,
+    /// The category's human label. Required when creating one.
+    pub label: Option<String>,
+    /// The category's display colour.
+    pub color: Option<String>,
 }
 
+/// List the tenant's categories.
+///
 /// `GET /v1/categories` — the tenant's categories, ordered by name.
+#[utoipa::path(
+    get,
+    path = "/v1/categories",
+    tag = "taxonomy",
+    responses(
+        (status = 200, description = "The categories", body = CategoryListResponse),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 500, description = "The store could not be read", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn list_categories(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -210,7 +298,23 @@ pub async fn list_categories(
     Ok(Json(CategoryListResponse { categories }))
 }
 
+/// Create a category.
+///
 /// `POST /v1/categories` — 201 with the created category.
+#[utoipa::path(
+    post,
+    path = "/v1/categories",
+    tag = "taxonomy",
+    request_body = CategoryBody,
+    responses(
+        (status = 201, description = "The created category", body = CategoryEnvelope),
+        (status = 400, description = "The body has no 'name' or no 'label'", body = ErrorBody),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:write scope", body = ErrorBody),
+        (status = 500, description = "The store could not be written", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn create_category(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -250,7 +354,24 @@ pub async fn create_category(
         .into_response())
 }
 
-/// `PATCH /v1/categories/:id`.
+/// Change a category.
+///
+/// `PATCH /v1/categories/{id}`.
+#[utoipa::path(
+    patch,
+    path = "/v1/categories/{id}",
+    tag = "taxonomy",
+    params(("id" = String, Path, description = "The category's id.")),
+    request_body = CategoryBody,
+    responses(
+        (status = 200, description = "The category, after the patch", body = CategoryEnvelope),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:write scope", body = ErrorBody),
+        (status = 404, description = "No such category in this tenant", body = ErrorBody),
+        (status = 500, description = "The store could not be written", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn patch_category(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -280,7 +401,23 @@ pub async fn patch_category(
     }))
 }
 
-/// `DELETE /v1/categories/:id`.
+/// Delete a category.
+///
+/// `DELETE /v1/categories/{id}`.
+#[utoipa::path(
+    delete,
+    path = "/v1/categories/{id}",
+    tag = "taxonomy",
+    params(("id" = String, Path, description = "The category's id.")),
+    responses(
+        (status = 200, description = "The category was removed", body = crate::routes::OkResponse),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:write scope", body = ErrorBody),
+        (status = 404, description = "No such category in this tenant", body = ErrorBody),
+        (status = 500, description = "The store could not be written", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn delete_category(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,

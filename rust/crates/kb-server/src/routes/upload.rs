@@ -15,10 +15,11 @@ use kb_core::policy::{FigureMode, MimeRegistry};
 use kb_ports::{CreateJobInput, DocumentId, KnowledgeBaseId, NewDocument, document_path};
 use serde::Serialize;
 use serde_json::json;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::auth::Authed;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
 
 struct Upload {
@@ -90,8 +91,73 @@ fn title_from_file_name(file_name: &str) -> String {
     }
 }
 
+/// The multipart form `POST /v1/documents` accepts.
+///
+/// The file is the part named `file`; every other part is a text field. The
+/// schema names them all — with the names the form really uses, camelCase
+/// included — so a reader of the spec knows the whole form without reading
+/// the route.
+#[derive(Debug, ToSchema)]
+pub struct UploadForm {
+    /// The document itself. Its extension decides whether it is accepted.
+    #[schema(value_type = String, format = Binary)]
+    pub file: String,
+    /// The document's title. Defaults to the file name without its extension.
+    #[schema(value_type = Option<String>)]
+    pub title: Option<String>,
+    /// The categories the document is filed under, as a JSON array or a
+    /// comma-separated list.
+    #[schema(value_type = Option<String>)]
+    pub categories: Option<String>,
+    /// The subcategory, when the document has one.
+    #[schema(value_type = Option<String>)]
+    pub subcategory: Option<String>,
+    /// The caller's own reference for this document.
+    #[schema(value_type = Option<String>, rename = "externalRef")]
+    pub external_ref: Option<String>,
+    /// A JSON object of extra metadata, stored as the document's JSONB
+    /// metadata and read by the `metadata` search filter.
+    #[schema(value_type = Option<Object>)]
+    pub metadata: Option<serde_json::Value>,
+    /// `aggregate-only` restricts this document's tables to whole-group
+    /// aggregates; `open` (the default) leaves them open.
+    #[schema(value_type = Option<String>, rename = "tablePrivacy")]
+    pub table_privacy: Option<String>,
+    /// The kind of document, as the extractor should read it.
+    #[schema(value_type = Option<String>, rename = "documentType")]
+    pub document_type: Option<String>,
+    /// How hard to look for figures: `auto`, `all`, `none` or `off`.
+    #[schema(value_type = Option<String>)]
+    pub figures: Option<String>,
+    /// The knowledge bases to file the document under, as a JSON array or a
+    /// comma-separated list. Ids the tenant does not own are a 400.
+    #[schema(value_type = Option<String>, rename = "knowledgeBaseIds")]
+    pub knowledge_base_ids: Option<String>,
+}
+
+/// Upload a document.
+///
 /// `POST /v1/documents` — accepts the upload, returns `202` with the document
-/// and job ids.
+/// and job ids. Needs the `kb:write` scope. The answer is `202` because
+/// nothing is indexed yet: a worker picks the job up and the caller polls
+/// `GET /v1/jobs/{id}`.
+#[utoipa::path(
+    post,
+    path = "/v1/documents",
+    tag = "documents",
+    request_body(content = UploadForm, content_type = "multipart/form-data"),
+    responses(
+        (status = 202, description = "The document was accepted and a job was queued", body = IngestResponse),
+        (status = 400, description = "No file, an unsupported extension, or an unknown knowledge base", body = ErrorBody),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:write scope", body = ErrorBody),
+        (status = 413, description = "The upload is larger than the accepted limit", body = ErrorBody),
+        (status = 415, description = "The file extension is not on the accepted list", body = ErrorBody),
+        (status = 500, description = "The store could not be written", body = ErrorBody),
+        (status = 502, description = "The file could not be stored", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn ingest_document(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -263,15 +329,21 @@ pub async fn ingest_document(
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
 
-#[derive(Debug, Serialize)]
-struct IngestResponse {
-    id: String,
+/// The body `POST /v1/documents` answers with.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IngestResponse {
+    /// The new document's id.
+    pub id: String,
+    /// The job that will ingest it.
     #[serde(rename = "jobId")]
-    job_id: String,
-    status: &'static str,
-    title: String,
+    pub job_id: String,
+    /// Always `processing` — the document is not indexed yet.
+    pub status: &'static str,
+    /// The document's title.
+    pub title: String,
+    /// The knowledge bases the document was filed under.
     #[serde(rename = "knowledgeBaseIds")]
-    knowledge_base_ids: Vec<String>,
+    pub knowledge_base_ids: Vec<String>,
 }
 
 /// Figure mode from the `figures` form field, defaulting to `auto` exactly as

@@ -26,7 +26,7 @@ use crate::config::Config;
 pub enum CliError {
     #[error(
         "{0}\n\nusage: kb-server \
-         <serve|create-api-key|apply-schema|migrate|reindex|communities|setup|eval|bench|check-boundary>"
+         <serve|create-api-key|apply-schema|migrate|reindex|communities|setup|eval|bench|openapi|check-boundary>"
     )]
     Usage(String),
     #[error("{0}")]
@@ -67,6 +67,7 @@ pub async fn dispatch(args: &[String]) -> Result<(), CliError> {
         Some("check-boundary") => check_boundary(),
         Some("eval") => eval(&args[1..]).await,
         Some("bench") => bench(&args[1..]).await,
+        Some("openapi") => openapi(),
         Some("-h" | "--help" | "help") => {
             print_help();
             Ok(())
@@ -111,6 +112,9 @@ USAGE
                                                  the OCR router and write <out>/<name>.md
                                                  [--html] [--concurrency N]
     kb-server bench search --base-url URL --queries F  Closed-loop load test for /v1/search
+    kb-server openapi                           Print the OpenAPI 3.1 document to stdout (the same
+                                               document GET /openapi.json serves and the Swagger UI
+                                               at GET /docs renders)
     kb-server check-boundary                   Fail if an inner crate depends on an adapter
 
 REINDEX AND COST
@@ -455,6 +459,17 @@ async fn bench(args: &[String]) -> Result<(), CliError> {
         kb_eval::bench::BenchError::Usage(message) => CliError::Usage(message),
         kb_eval::bench::BenchError::Failed(message) => CliError::Failed(message),
     })
+}
+
+/// `kb-server openapi` — print the OpenAPI document to stdout.
+///
+/// The document is the same one `GET /openapi.json` serves and the same one
+/// `docs/openapi.json` holds, so an operator can diff the contract without
+/// starting the server.
+fn openapi() -> Result<(), CliError> {
+    let document = crate::openapi::spec_json().map_err(|err| CliError::Failed(err.to_string()))?;
+    println!("{document}");
+    Ok(())
 }
 
 /// `kb-server check-boundary` — the layering rule as an executable check.

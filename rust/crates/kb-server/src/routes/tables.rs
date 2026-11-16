@@ -21,9 +21,10 @@ use kb_core::tables::{DEFAULT_MIN_GROUP, QueryPolicy, TableQuery};
 use kb_ports::DocumentId;
 use kb_ports::tables::{TableId, TableQueryFailure, TableRecord};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::auth::Authed;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
 
 /// A table as the API returns it: the record with its manifest, camelCase like
@@ -32,22 +33,38 @@ use crate::state::AppState;
 /// `gridKey` is the caller's own blob key. It is included because the record is
 /// the contract and an operator debugging a stored table needs it; it names no
 /// other tenant's data.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TableDto {
+    /// The table's id.
     pub id: String,
+    /// The tenant that owns the table.
     pub tenant_id: String,
+    /// The document the table came from.
     pub document_id: String,
+    /// The table's position in the document.
     pub index: u32,
+    /// The table's version.
     pub version: u32,
+    /// Where the table came from (`csv`, `xlsx`, `pdf`, …).
     pub source: String,
+    /// The sheet the table was on, for spreadsheets.
     pub sheet: Option<String>,
+    /// The pages the table spans, as `[first, last]`.
+    #[schema(value_type = Option<Vec<u32>>)]
     pub page_span: Option<(u32, u32)>,
+    /// The table's title, when it has one.
     pub title: Option<String>,
+    /// The table's caption, when it has one.
     pub caption: Option<String>,
+    /// The table's column names.
     pub header: Vec<String>,
+    /// What the manifest's own reading of the table can be trusted to mean.
+    #[schema(value_type = crate::openapi::mirrors::TableManifest)]
     pub manifest: kb_core::tables::TableManifest,
+    /// The blob key of the table's stored grid.
     pub grid_key: String,
+    /// When the table was stored.
     pub created_at: String,
 }
 
@@ -76,17 +93,36 @@ impl From<TableRecord> for TableDto {
     }
 }
 
-#[derive(Debug, Deserialize)]
+/// The query `GET /v1/tables` accepts.
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListQuery {
+    /// Only the tables of this document. Without it, every table of the
+    /// tenant is listed.
     #[serde(rename = "documentId")]
     pub document_id: Option<String>,
 }
 
-/// `GET /v1/tables?documentId=…` — the document's tables, current version.
+/// List the tables the extractor found.
 ///
-/// A missing `documentId` lists every table of the tenant: the same scope the
+/// `GET /v1/tables?documentId=…` — the document's tables, current version. A
+/// missing `documentId` lists every table of the tenant: the same scope the
 /// tenant-wide reads use, and the shape a caller needs to discover what it may
 /// query after a search.
+#[utoipa::path(
+    get,
+    path = "/v1/tables",
+    tag = "tables",
+    params(ListQuery),
+    responses(
+        (status = 200, description = "The tables", body = Vec<TableDto>),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 404, description = "No such document is visible to this key, or tables are not configured", body = ErrorBody),
+        (status = 500, description = "The store could not be read", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn list_tables(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -114,7 +150,23 @@ pub async fn list_tables(
     Ok(Json(records.into_iter().map(TableDto::from).collect()))
 }
 
+/// Read one table and its manifest.
+///
 /// `GET /v1/tables/{id}` — one table with its manifest.
+#[utoipa::path(
+    get,
+    path = "/v1/tables/{id}",
+    tag = "tables",
+    params(("id" = String, Path, description = "The table's id.")),
+    responses(
+        (status = 200, description = "The table and its manifest", body = TableDto),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 404, description = "No such table is visible to this key, or tables are not configured", body = ErrorBody),
+        (status = 500, description = "The store could not be read", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn get_table(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -130,8 +182,30 @@ pub async fn get_table(
     Ok(Json(TableDto::from(record)))
 }
 
+/// Run a typed query against a table.
+///
 /// `POST /v1/tables/{id}/query` — run a typed query and return its rows and
-/// receipt.
+/// receipt. The body is a typed query, never SQL: columns are checked against
+/// the manifest and values are bound as parameters. A refused query answers
+/// `400` with the [`kb_core::tables::QueryError`] JSON itself, so a client
+/// can react to `unknown_column` (and read `available`) instead of parsing
+/// prose.
+#[utoipa::path(
+    post,
+    path = "/v1/tables/{id}/query",
+    tag = "tables",
+    params(("id" = String, Path, description = "The table's id.")),
+    request_body = crate::openapi::mirrors::TableQuery,
+    responses(
+        (status = 200, description = "The rows and the receipt", body = crate::openapi::mirrors::QueryResult),
+        (status = 400, description = "The query was refused; the body is the QueryError", body = crate::openapi::mirrors::QueryError),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 404, description = "No such table is visible to this key, or tables are not configured", body = ErrorBody),
+        (status = 500, description = "The store could not be read", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn query_table(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,

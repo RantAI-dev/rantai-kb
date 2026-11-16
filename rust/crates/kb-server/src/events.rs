@@ -20,7 +20,7 @@ use kb_ports::{AuthContext, PortError, ProgressSink, TenantId};
 use tokio::sync::broadcast;
 
 use crate::auth::Authed;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
 
 /// Frames a subscriber may miss before the channel starts dropping for it.
@@ -96,8 +96,9 @@ impl ProgressSink for EventBus {
     }
 }
 
-/// `GET /v1/events` — server-sent ingest progress for the caller's tenant.
+/// Stream ingest progress (server-sent events).
 ///
+/// `GET /v1/events` — server-sent ingest progress for the caller's tenant.
 /// The wire format is the TypeScript one byte for byte: an immediate
 /// `": connected\n\n"`, a `": ping\n\n"` keep-alive every 25 s, and one
 /// `event: <name>\ndata: <json>\n\n` frame per progress update. Only this
@@ -105,6 +106,18 @@ impl ProgressSink for EventBus {
 /// the connection's writer. A key limited to some knowledge bases also drops a
 /// frame that names a document outside them, so the stream does not reveal
 /// progress for a document its other routes answer 404 for.
+#[utoipa::path(
+    get,
+    path = "/v1/events",
+    tag = "events",
+    responses(
+        (status = 200, description = "The event stream", content_type = "text/event-stream", body = String),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 500, description = "The stream could not be opened", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn events_stream(
     State(state): State<Arc<crate::state::AppState>>,
     Authed(auth): Authed,
