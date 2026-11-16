@@ -67,7 +67,7 @@ jobs:
           # The CPU sidecar (PP-OCRv6 through ONNX Runtime) is pure python: it
           # builds for both architectures.
           - sidecar: ocr-cpu
-            dirs: ocr-cpu ocr-ppocr
+            dirs: ocr-cpu
             platforms: linux/amd64,linux/arm64
           # The layout sidecar runs a CUDA model, and the CUDA wheels are
           # amd64 only.
@@ -211,9 +211,10 @@ jobs:
             echo
             echo "## Binaries"
             echo
-            echo "The release assets are the tarballs (`rantai-kb-<version>-<target>.tar.gz`),"
-            echo "one per target, with the checksums in SHA256SUMS. `install.sh` picks the"
-            echo "right one for the machine."
+            # Single quotes: backticks inside double quotes are command substitution.
+            echo 'The release assets are the tarballs (`rantai-kb-<version>-<target>.tar.gz`),'
+            echo 'one per target, with the checksums in SHA256SUMS. `install.sh` picks the'
+            echo 'right one for the machine.'
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
