@@ -611,8 +611,27 @@ pub async fn up(args: &[String]) -> Result<(), CliError> {
         return Err(err);
     }
 
-    print_up_summary(&stack, tier, &url);
+    print_up_summary(&stack, tier, &url, serves_docs(&url).await);
     Ok(())
+}
+
+/// Whether the running server serves an OpenAPI page at `/docs`.
+///
+/// The summary must not point at a URL that answers "Unauthorized": the
+/// OpenAPI work (`/docs`, `/openapi.json`) is not in every build, so the line
+/// is printed only when the page is really there.
+async fn serves_docs(url: &str) -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    else {
+        return false;
+    };
+    client
+        .get(format!("{url}/docs"))
+        .send()
+        .await
+        .is_ok_and(|response| response.status().is_success())
 }
 
 /// The arguments of `up`: an optional tier and `--build`.
@@ -639,20 +658,38 @@ fn parse_up_args(args: &[String]) -> Result<(Option<String>, bool), CliError> {
 }
 
 /// What a successful `up` prints.
-fn print_up_summary(stack: &Stack, tier: Tier, url: &str) {
+fn print_up_summary(stack: &Stack, tier: Tier, url: &str, docs: bool) {
     let program = crate::cli::program_name();
     println!();
-    println!("{program} ({}) is up.", tier.as_str());
-    println!("  API        {url}");
-    println!("  health     {url}/health");
-    println!("  Swagger UI {url}/docs");
-    println!("  API key    {program} key my-tenant");
-    println!(
+    for line in summary_lines(&program, tier, url, docs, &stack.env_file()) {
+        println!("{line}");
+    }
+}
+
+/// The lines of the `up` summary.
+///
+/// The Swagger line is printed only when the running server really serves
+/// `/docs`: the summary is the operator's map of the stack, and a URL that
+/// answers "Unauthorized" is worse than no line at all.
+fn summary_lines(program: &str, tier: Tier, url: &str, docs: bool, config: &Path) -> Vec<String> {
+    let mut lines = vec![
+        format!("{program} ({}) is up.", tier.as_str()),
+        format!("  API        {url}"),
+        format!("  health     {url}/health"),
+    ];
+    if docs {
+        lines.push(format!("  Swagger UI {url}/docs"));
+    }
+    lines.push(format!("  API key    {program} key my-tenant"));
+    lines.push(format!(
         "  upload     curl -H \"Authorization: Bearer <key>\" -F file=@doc.pdf {url}/v1/documents"
-    );
-    println!("  logs       {program} logs");
-    println!("  stop       {program} down        (down -v also wipes data)");
-    println!("  config     {}", stack.env_file().display());
+    ));
+    lines.push(format!("  logs       {program} logs"));
+    lines.push(format!(
+        "  stop       {program} down        (down -v also wipes data)"
+    ));
+    lines.push(format!("  config     {}", config.display()));
+    lines
 }
 
 /// `kb-server down [-v|--volumes]`.
@@ -900,7 +937,9 @@ pub async fn serve_stack() -> Result<(), CliError> {
     );
     println!("  API        {url}");
     println!("  health     {url}/health");
-    println!("  Swagger UI {url}/docs");
+    if serves_docs(&url).await {
+        println!("  Swagger UI {url}/docs");
+    }
     Ok(())
 }
 
@@ -1166,5 +1205,58 @@ mod tests {
             ("acme".to_string(), Some("ci-key".to_string()))
         );
         assert!(parse_key_args(&args(&[])).is_err());
+    }
+
+    // ─── the summary ────────────────────────────────────────────────────────
+
+    #[test]
+    fn the_summary_names_the_api_the_health_url_and_the_key_hint() {
+        let lines = summary_lines(
+            "rantai-kb",
+            Tier::Lite,
+            "http://127.0.0.1:8080",
+            false,
+            Path::new("/home/op/deploy/.env"),
+        );
+        assert_eq!(lines[0], "rantai-kb (lite) is up.");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("http://127.0.0.1:8080"))
+        );
+        assert!(lines.iter().any(|line| line.contains("/health")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("rantai-kb key my-tenant"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("/home/op/deploy/.env"))
+        );
+    }
+
+    #[test]
+    fn the_swagger_line_appears_only_when_the_server_serves_the_page() {
+        let without = summary_lines(
+            "kb-server",
+            Tier::Lite,
+            "http://127.0.0.1:8080",
+            false,
+            Path::new("/deploy/.env"),
+        );
+        assert!(!without.iter().any(|line| line.contains("Swagger")));
+        let with = summary_lines(
+            "kb-server",
+            Tier::Lite,
+            "http://127.0.0.1:8080",
+            true,
+            Path::new("/deploy/.env"),
+        );
+        assert!(
+            with.iter()
+                .any(|line| line.contains("Swagger UI http://127.0.0.1:8080/docs"))
+        );
     }
 }
