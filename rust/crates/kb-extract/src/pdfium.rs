@@ -82,6 +82,23 @@ pub fn find_pdfium_library_path() -> Option<PathBuf> {
         }
     }
 
+    // Next to the program: an installed bundle is `<home>/bin/kb-server` and
+    // `<home>/lib/libpdfium.so`, and it is run from wherever the operator is.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            for name in ["libpdfium.so", "libpdfium.dylib"] {
+                let candidate = bin_dir.join("../lib").join(name);
+                if candidate.exists() {
+                    return Some(candidate);
+                }
+                let beside = bin_dir.join(name);
+                if beside.exists() {
+                    return Some(beside);
+                }
+            }
+        }
+    }
+
     let candidates = [
         "rust/.vendor/pdfium/lib/libpdfium.so",
         ".vendor/pdfium/lib/libpdfium.so",

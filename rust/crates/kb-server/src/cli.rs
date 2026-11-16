@@ -80,8 +80,51 @@ pub async fn dispatch(args: &[String]) -> Result<(), CliError> {
             print_help();
             Ok(())
         }
+        Some("-V" | "--version" | "version") => {
+            println!("{}", program_version());
+            Ok(())
+        }
         Some(other) => Err(CliError::Usage(format!("unknown command {other:?}"))),
     }
+}
+
+/// The version of this build.
+///
+/// An installed bundle carries the release version in a `VERSION` file next to
+/// the binary (`<home>/bin/kb-server`, `<home>/VERSION`), which is what the
+/// release published — not the crate version the binary was compiled from.
+#[must_use]
+pub fn program_version() -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            if let Some(version) = version_near(bin_dir) {
+                return version;
+            }
+        }
+    }
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// The release version recorded next to the binary, if there is one.
+///
+/// The candidates are the ones the release bundle has: `../VERSION` (the
+/// bundle root), `VERSION` (a binary that sits in the bundle root) and
+/// `../deploy/VERSION`.
+#[must_use]
+pub fn version_near(bin_dir: &Path) -> Option<String> {
+    for candidate in [
+        bin_dir.join("../VERSION"),
+        bin_dir.join("VERSION"),
+        bin_dir.join("../deploy/VERSION"),
+    ] {
+        if let Ok(text) = std::fs::read_to_string(&candidate) {
+            let version = text.trim();
+            if !version.is_empty() {
+                return Some(version.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn env_lookup(key: &str) -> Option<String> {
@@ -150,6 +193,7 @@ USAGE
                                                   queries.tsv / queries.jsonl file (RET-5)
     {program} bench search --base-url URL --queries F  Closed-loop load test for /v1/search
     {program} check-boundary                   Fail if an inner crate depends on an adapter
+    {program} --version                         The version of this build
 
 THE STACK
     `up`, `down`, `logs`, `ps`, `status` and `key` drive the compose stack in the
@@ -844,5 +888,33 @@ mod tests {
     fn an_unknown_argv0_falls_back_to_the_binary_name() {
         assert_eq!(program_name_from(None), "kb-server");
         assert_eq!(program_name_from(Some("")), "kb-server");
+    }
+
+    #[test]
+    fn the_bundle_version_is_read_from_the_file_next_to_the_binary() {
+        let root = std::env::temp_dir().join(format!("kb-version-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // The bundle's shape: <root>/bin/kb-server and <root>/VERSION.
+        let bundle = root.join("bundle");
+        let bin_dir = bundle.join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        std::fs::write(bundle.join("VERSION"), "0.3.0\n").expect("version file");
+        assert_eq!(version_near(&bin_dir), Some("0.3.0".to_string()));
+
+        // A deploy directory carries it too, for a bundle whose binary sits
+        // next to the deploy directory rather than above it.
+        let flat = root.join("flat");
+        let flat_bin = flat.join("bin");
+        std::fs::create_dir_all(&flat_bin).expect("bin dir");
+        std::fs::create_dir_all(flat.join("deploy")).expect("deploy dir");
+        std::fs::write(flat.join("deploy/VERSION"), "0.4.0").expect("version file");
+        assert_eq!(version_near(&flat_bin), Some("0.4.0".to_string()));
+
+        // No file at all: the caller falls back to the crate version.
+        let empty = root.join("empty");
+        std::fs::create_dir_all(&empty).expect("empty dir");
+        assert_eq!(version_near(&empty), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
