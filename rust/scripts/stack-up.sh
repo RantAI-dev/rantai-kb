@@ -250,9 +250,13 @@ for _ in {1..60}; do
 done
 
 echo "Creating S3 bucket rantai-kb..."
+# The region is required: RustFS (from the 2026-11-16 image) rejects a bucket
+# created with no region as InvalidLocationConstraint. compose.yaml's
+# createbucket service already passes it.
 docker run --rm --network host \
   -e AWS_ACCESS_KEY_ID=kbadmin \
   -e AWS_SECRET_ACCESS_KEY=kbsecret123 \
+  -e AWS_DEFAULT_REGION="${S3_REGION:-us-east-1}" \
   amazon/aws-cli:latest --endpoint-url "http://127.0.0.1:${S3_PORT}" s3 mb s3://rantai-kb >/dev/null
 
 # Qdrant is the only chunk store, so it is not optional.
