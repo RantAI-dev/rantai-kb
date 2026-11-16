@@ -174,7 +174,8 @@ stack's configuration directory.
     rantai-kb logs            # follow the logs
     rantai-kb down            # stop (down -v also wipes the data)
 
-The API is at http://127.0.0.1:8080 by default, and its OpenAPI page is at
+The API is at http://127.0.0.1:8080 by default. \`rantai-kb up\` prints where to
+find it, and — on a build that serves the OpenAPI document — the API page is at
 http://127.0.0.1:8080/docs.
 
 ## Layout
