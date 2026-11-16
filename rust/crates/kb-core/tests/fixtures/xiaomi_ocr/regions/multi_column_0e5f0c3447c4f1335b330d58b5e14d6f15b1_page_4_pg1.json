@@ -1,0 +1,170 @@
+{
+ "regions": [
+  {
+   "index": 0,
+   "label": "header",
+   "bbox_2d": [
+    54,
+    32,
+    308,
+    45
+   ],
+   "merged": "Clin J Am Soc Nephrol 5: 762-769, 2010"
+  },
+  {
+   "index": 1,
+   "label": "header",
+   "bbox_2d": [
+    708,
+    32,
+    872,
+    45
+   ],
+   "merged": "Serum Potassium in CKD"
+  },
+  {
+   "index": 2,
+   "label": "number",
+   "bbox_2d": [
+    917,
+    33,
+    944,
+    44
+   ],
+   "merged": "765"
+  },
+  {
+   "index": 3,
+   "label": "figure_title",
+   "bbox_2d": [
+    55,
+    69,
+    508,
+    85
+   ],
+   "merged": "Table 2. Predictors of \\( {S}_{K} \\) at baseline and during follow-up"
+  },
+  {
+   "index": 4,
+   "label": "table",
+   "bbox_2d": [
+    56,
+    84,
+    937,
+    278
+   ],
+   "merged": "<table><tr><td rowspan=\"2\">Predictors</td><td colspan=\"2\">Predictors of \\(S_k\\) at Baseline \\((n = 729)^a\\)</td><td colspan=\"2\">Predictors of \\(S_k\\) over Time \\((n = 5111)^b\\)</td></tr><tr><td>Estimate</td><td>P</td><td>Estimate</td><td>P</td></tr><tr><td>Male gender</td><td>0.18</td><td><0.0001</td><td>0.18</td><td><0.0001</td></tr><tr><td>Serum \\(CO_2\\) (mEq/L)</td><td>-0.05</td><td><0.0001</td><td>-0.03</td><td><0.0001</td></tr><tr><td>eGFR (per 10 ml/min per 1.73 m\\(^2\\))</td><td>-0.02</td><td>0.39</td><td>-0.06</td><td><0.0001</td></tr><tr><td>Diabetes</td><td>0.10</td><td>0.029</td><td>0.06</td><td>0.030</td></tr><tr><td>ACEI use</td><td>0.21</td><td><0.0001</td><td>0.17</td><td><0.0001</td></tr><tr><td>Diuretic use</td><td>-0.07</td><td>0.76</td><td>-0.12</td><td><0.0001</td></tr><tr><td>Calcium channel blocker use</td><td>-0.06</td><td>0.12</td><td>-0.09</td><td><0.0001</td></tr><tr><td>Statin use</td><td>0.11</td><td>0.001</td><td>0.12</td><td><0.0001</td></tr></table>"
+  },
+  {
+   "index": 5,
+   "label": "vision_footnote",
+   "bbox_2d": [
+    71,
+    284,
+    833,
+    299
+   ],
+   "merged": "All variables from Table 1 were tested in the selection models, with significant variables retained (\\(\\alpha = 0.05\\))."
+  },
+  {
+   "index": 6,
+   "label": "vision_footnote",
+   "bbox_2d": [
+    70,
+    298,
+    607,
+    311
+   ],
+   "merged": "\\(^{a}\\)All variables simultaneously entered in a multiple linear regression model."
+  },
+  {
+   "index": 7,
+   "label": "vision_footnote",
+   "bbox_2d": [
+    55,
+    311,
+    939,
+    338
+   ],
+   "merged": "\\(^{b}\\)All variables simultaneously entered in a repeated measures regression model. The values of all covariates (except gender) were allowed to change with follow-up time."
+  },
+  {
+   "index": 8,
+   "label": "text",
+   "bbox_2d": [
+    54,
+    376,
+    493,
+    514
+   ],
+   "merged": "For the composite outcome of death or ESRD (Figure 3c), a U-shaped relationship between \\( S_{\\mathrm{K}} \\) and the composite outcome was evident. There was a significantly higher hazard for death/ESRD at lower serum \\( S_{\\mathrm{K}} \\), the significance of which was attenuated by adjustment for serum albumin in the model. As a categorical variable, lower \\( S_{\\mathrm{K}} \\) levels remained a significant predictor of the composite outcome before and after adjustment for serum albumin (Table 3). Higher \\( S_{\\mathrm{K}} \\) was not significantly associated with the composite outcome."
+  },
+  {
+   "index": 9,
+   "label": "text",
+   "bbox_2d": [
+    53,
+    514,
+    493,
+    669
+   ],
+   "merged": "A total of 190 cardiovascular events (70 coronary, 50 cerebrovascular, and 70 peripheral vascular) that required hospitalization were documented during the course of the study. A significant quadratic relationship was seen between \\( S_{\\mathrm{K}} \\), and the relative hazard of first cardiovascular event or death (Figure 3d) was noted. Unlike overall mortality, this was statistically significant for \\( S_{\\mathrm{K}} > 5.5 \\) mmol/L but not for lower potassium (<4.0 mmol/L). After addition of serum albumin to the model, higher \\( S_{\\mathrm{K}} \\) but not lower \\( S_{\\mathrm{K}} \\) was associated with the composite outcome (Table 3)."
+  },
+  {
+   "index": 10,
+   "label": "paragraph_title",
+   "bbox_2d": [
+    55,
+    682,
+    165,
+    697
+   ],
+   "merged": "## Discussion"
+  },
+  {
+   "index": 11,
+   "label": "text",
+   "bbox_2d": [
+    52,
+    697,
+    493,
+    944
+   ],
+   "merged": "To the best of our knowledge, this is the first study to investigate systematically the prevalence and mortality associated with \\(S_{K}\\) levels that are obtained during routine clinical practice in a large and diverse nondialysis prospective CKD cohort. Our main finding is that \\(S_{K}\\) level \\(\\leq4.0\\) mmol/L was associated with a higher risk for mortality and ESRD compared with \\(S_{K}\\) between 4.1 and 5.5 mmol/L. These observations are of clinical importance, because most physicians consider \\(S_{K}\\) values of 3.5 to 3.9 mmol/L to be “within normal limits.” Our multivariable analyses show that the lowest risk for mortality was in the \\(S_{K}\\) range of 4.1 to 5.5 mmol/L and that mortality or ESRD risk was not significantly higher even at \\(S_{K}\\) levels of 5.5 to 5.9 mmol/L, a range of \\(S_{K}\\) values that almost always evokes clinical concern with or without intervention (e.g., dietary advice, prescription of loop diuretic, discontinuation of potassium-sparing diuretics). This modest level of hyperkalemia"
+  },
+  {
+   "index": 12,
+   "label": "text",
+   "bbox_2d": [
+    505,
+    376,
+    944,
+    407
+   ],
+   "merged": "seemed to be well tolerated in this patient population from the perspective of predicting mortality risk."
+  },
+  {
+   "index": 13,
+   "label": "text",
+   "bbox_2d": [
+    505,
+    407,
+    946,
+    713
+   ],
+   "merged": "The link between relatively normal or low-normal levels of  \\( S_{K} \\)  (3.5 to 4.0 mmol/L) and mortality has not been previously documented in the CKD population. This finding is not altogether surprising, however. Low  \\( S_{K} \\)  levels affect myocardial resting membrane potential, which increases the probability of ventricular arrhythmias and sudden cardiac death (11). Hypokalemia can also predispose patients to developing diastolic dysfunction, digoxin toxicity, and insulin resistance, all of which increase the risk for cardiovascular events and death (12–16). Dietary potassium depletion has been linked to the genesis of hypertension, and supplementation can improve BP control (17–19). Data from the cardiovascular literature suggest that serum potassium levels <4.0 mmol/L portend a worse prognosis among those who have a history of heart failure or acute myocardial infarction (20,21). Current American Heart Association/American College of Cardiology guidelines recommend that serum potassium levels be maintained between 4.0 and 5.0 mmol/L in those with chronic heart failure (22). Our study provides observational evidence that necessitates similar guidelines for patients with CKD."
+  },
+  {
+   "index": 14,
+   "label": "text",
+   "bbox_2d": [
+    503,
+    714,
+    946,
+    944
+   ],
+   "merged": "Not surprising, diuretic use was associated with lower  \\( S_{K} \\)  levels in this study. Non-potassium-sparing diuretic use has been linked with increased mortality and hospitalization that can likely be attributed to low  \\( S_{K} \\)  levels (23). Several case-control studies reported an increased risk for cardiac arrest among patients who received high dosages of thiazide diuretics. This risk was lowered when thiazide therapy was combined with potassium-sparing diuretics (24–26). Because diuretics are very commonly used for volume and BP control in the CKD population and hypokalemia is a frequent complication of this class of medications, these results suggest that clinicians need to monitor  \\( S_{K} \\)  levels closely and consider using potassium-sparing diuretics and/or potassium supplements in patients who have CKD and are prone to hypokalemia; however, clinical trials will need to be performed before formulating defin-"
+  }
+ ],
+ "expected": "Table 2. Predictors of \\( {S}_{K} \\) at baseline and during follow-up\n\n<table><tr><td rowspan=\"2\">Predictors</td><td colspan=\"2\">Predictors of \\(S_k\\) at Baseline \\((n = 729)^a\\)</td><td colspan=\"2\">Predictors of \\(S_k\\) over Time \\((n = 5111)^b\\)</td></tr><tr><td>Estimate</td><td>P</td><td>Estimate</td><td>P</td></tr><tr><td>Male gender</td><td>0.18</td><td><0.0001</td><td>0.18</td><td><0.0001</td></tr><tr><td>Serum \\(CO_2\\) (mEq/L)</td><td>-0.05</td><td><0.0001</td><td>-0.03</td><td><0.0001</td></tr><tr><td>eGFR (per 10 ml/min per 1.73 m\\(^2\\))</td><td>-0.02</td><td>0.39</td><td>-0.06</td><td><0.0001</td></tr><tr><td>Diabetes</td><td>0.10</td><td>0.029</td><td>0.06</td><td>0.030</td></tr><tr><td>ACEI use</td><td>0.21</td><td><0.0001</td><td>0.17</td><td><0.0001</td></tr><tr><td>Diuretic use</td><td>-0.07</td><td>0.76</td><td>-0.12</td><td><0.0001</td></tr><tr><td>Calcium channel blocker use</td><td>-0.06</td><td>0.12</td><td>-0.09</td><td><0.0001</td></tr><tr><td>Statin use</td><td>0.11</td><td>0.001</td><td>0.12</td><td><0.0001</td></tr></table>\n\nAll variables from Table 1 were tested in the selection models, with significant variables retained (\\(\\alpha = 0.05\\)).\n\n\\(^{a}\\)All variables simultaneously entered in a multiple linear regression model.\n\n\\(^{b}\\)All variables simultaneously entered in a repeated measures regression model. The values of all covariates (except gender) were allowed to change with follow-up time.\n\nFor the composite outcome of death or ESRD (Figure 3c), a U-shaped relationship between \\( S_{\\mathrm{K}} \\) and the composite outcome was evident. There was a significantly higher hazard for death/ESRD at lower serum \\( S_{\\mathrm{K}} \\), the significance of which was attenuated by adjustment for serum albumin in the model. As a categorical variable, lower \\( S_{\\mathrm{K}} \\) levels remained a significant predictor of the composite outcome before and after adjustment for serum albumin (Table 3). Higher \\( S_{\\mathrm{K}} \\) was not significantly associated with the composite outcome.\n\nA total of 190 cardiovascular events (70 coronary, 50 cerebrovascular, and 70 peripheral vascular) that required hospitalization were documented during the course of the study. A significant quadratic relationship was seen between \\( S_{\\mathrm{K}} \\), and the relative hazard of first cardiovascular event or death (Figure 3d) was noted. Unlike overall mortality, this was statistically significant for \\( S_{\\mathrm{K}} > 5.5 \\) mmol/L but not for lower potassium (<4.0 mmol/L). After addition of serum albumin to the model, higher \\( S_{\\mathrm{K}} \\) but not lower \\( S_{\\mathrm{K}} \\) was associated with the composite outcome (Table 3).\n\n## Discussion\n\nTo the best of our knowledge, this is the first study to investigate systematically the prevalence and mortality associated with \\(S_{K}\\) levels that are obtained during routine clinical practice in a large and diverse nondialysis prospective CKD cohort. Our main finding is that \\(S_{K}\\) level \\(\\leq4.0\\) mmol/L was associated with a higher risk for mortality and ESRD compared with \\(S_{K}\\) between 4.1 and 5.5 mmol/L. These observations are of clinical importance, because most physicians consider \\(S_{K}\\) values of 3.5 to 3.9 mmol/L to be “within normal limits.” Our multivariable analyses show that the lowest risk for mortality was in the \\(S_{K}\\) range of 4.1 to 5.5 mmol/L and that mortality or ESRD risk was not significantly higher even at \\(S_{K}\\) levels of 5.5 to 5.9 mmol/L, a range of \\(S_{K}\\) values that almost always evokes clinical concern with or without intervention (e.g., dietary advice, prescription of loop diuretic, discontinuation of potassium-sparing diuretics). This modest level of hyperkalemia\n\nseemed to be well tolerated in this patient population from the perspective of predicting mortality risk.\n\nThe link between relatively normal or low-normal levels of  \\( S_{K} \\)  (3.5 to 4.0 mmol/L) and mortality has not been previously documented in the CKD population. This finding is not altogether surprising, however. Low  \\( S_{K} \\)  levels affect myocardial resting membrane potential, which increases the probability of ventricular arrhythmias and sudden cardiac death (11). Hypokalemia can also predispose patients to developing diastolic dysfunction, digoxin toxicity, and insulin resistance, all of which increase the risk for cardiovascular events and death (12–16). Dietary potassium depletion has been linked to the genesis of hypertension, and supplementation can improve BP control (17–19). Data from the cardiovascular literature suggest that serum potassium levels <4.0 mmol/L portend a worse prognosis among those who have a history of heart failure or acute myocardial infarction (20,21). Current American Heart Association/American College of Cardiology guidelines recommend that serum potassium levels be maintained between 4.0 and 5.0 mmol/L in those with chronic heart failure (22). Our study provides observational evidence that necessitates similar guidelines for patients with CKD.\n\nNot surprising, diuretic use was associated with lower  \\( S_{K} \\)  levels in this study. Non-potassium-sparing diuretic use has been linked with increased mortality and hospitalization that can likely be attributed to low  \\( S_{K} \\)  levels (23). Several case-control studies reported an increased risk for cardiac arrest among patients who received high dosages of thiazide diuretics. This risk was lowered when thiazide therapy was combined with potassium-sparing diuretics (24–26). Because diuretics are very commonly used for volume and BP control in the CKD population and hypokalemia is a frequent complication of this class of medications, these results suggest that clinicians need to monitor  \\( S_{K} \\)  levels closely and consider using potassium-sparing diuretics and/or potassium supplements in patients who have CKD and are prone to hypokalemia; however, clinical trials will need to be performed before formulating defin-"
+}

@@ -21,7 +21,6 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::cli::CliError;
@@ -667,22 +666,52 @@ pub const LICENCES: &[LicenceEntry] = &[
         "cloud reranker; billed per search",
     ),
     entry(
-        "PaddlePaddle/PP-OCRv6",
+        "rantai-kb/ocr-cpu",
+        "Apache-2.0 (PP-OCRv6 tiny, PP-Layout CDLA, SLANet-plus)",
+        LicenceClass::Green,
+        "document OCR on the CPU, lite",
+    ),
+    entry(
+        "xiaomi-research/Xiaomi-OCR-0",
         "Apache-2.0",
         LicenceClass::Green,
-        "OCR sidecar, lite",
+        "OCR, desk/studio/station",
+    ),
+    entry(
+        "PaddlePaddle/PP-DocLayoutV3",
+        "Apache-2.0",
+        LicenceClass::Green,
+        "OCR table pass (--ocr-tables accurate), desk/studio/station",
     ),
     entry(
         "PaddlePaddle/PaddleOCR-VL-1.6",
         "Apache-2.0",
         LicenceClass::Green,
-        "OCR, desk/studio/station",
+        "OCR, alternative (not in a preset)",
+    ),
+    entry(
+        "qihoo360/360LayoutAnalysis",
+        "model licence: commercial use by application to 360",
+        LicenceClass::Yellow,
+        "faster layout model for the CPU OCR sidecar (KB_LITE_LAYOUT_MODEL), opt-in",
     ),
     entry(
         "opendatalab/MinerU2.5-Pro",
         "Apache-2.0 weights (pipeline code 🟡)",
         LicenceClass::Green,
         "OCR, station alternative (not in the preset)",
+    ),
+    entry(
+        "Qwen/Qwen3-VL-2B-Instruct",
+        "Apache-2.0",
+        LicenceClass::Green,
+        "picture reading (ING-5), every local tier",
+    ),
+    entry(
+        "nvidia/nemotron-3.5-super-vl",
+        "hosted service, provider terms",
+        LicenceClass::Yellow,
+        "cloud picture reading (ING-5); billed per token",
     ),
     entry(
         "Qwen/Qwen3-VL-Embedding-2B",
@@ -736,32 +765,44 @@ pub fn licence_entry(model: &str) -> Option<&'static LicenceEntry> {
 #[must_use]
 pub fn tier_models(tier: Tier) -> Vec<&'static str> {
     match tier {
-        Tier::Lite => vec!["intfloat/multilingual-e5-small", "PaddlePaddle/PP-OCRv6"],
+        Tier::Lite => vec![
+            "intfloat/multilingual-e5-small",
+            "rantai-kb/ocr-cpu",
+            "Qwen/Qwen3-VL-2B-Instruct",
+        ],
         Tier::LiteEn => vec![
             "sentence-transformers/all-MiniLM-L6-v2",
-            "PaddlePaddle/PP-OCRv6",
+            "rantai-kb/ocr-cpu",
+            "Qwen/Qwen3-VL-2B-Instruct",
         ],
         Tier::Desk => vec![
             "Qwen/Qwen3-Embedding-0.6B",
             "BAAI/bge-reranker-v2-m3",
-            "PaddlePaddle/PaddleOCR-VL-1.6",
+            "xiaomi-research/Xiaomi-OCR-0",
+            "Qwen/Qwen3-VL-2B-Instruct",
         ],
         Tier::Studio => vec![
             "Qwen/Qwen3-Embedding-0.6B",
             "Qwen/Qwen3-VL-Reranker-2B",
-            "PaddlePaddle/PaddleOCR-VL-1.6",
+            "xiaomi-research/Xiaomi-OCR-0",
             "Qwen/Qwen3-VL-Embedding-2B",
+            "Qwen/Qwen3-VL-2B-Instruct",
         ],
-        // MinerU2.5-Pro stays in the licence table as Station's alternative
-        // parser (`KB_LAYOUT_EXTRACTOR_ORDER=sidecar`); the preset and the
-        // compose profile run PaddleOCR-VL, the same parser as Desk/Studio.
+        // MinerU2.5-Pro and PaddleOCR-VL stay in the licence table as
+        // alternatives; every GPU tier's preset runs Xiaomi-OCR-0, the best
+        // measured local OCR (docs/eval-ab/ocr-tiers).
         Tier::Station => vec![
             "Qwen/Qwen3-Embedding-0.6B",
             "Qwen/Qwen3-VL-Reranker-8B",
-            "PaddlePaddle/PaddleOCR-VL-1.6",
+            "xiaomi-research/Xiaomi-OCR-0",
             "Qwen/Qwen3-VL-Embedding-8B",
+            "Qwen/Qwen3-VL-2B-Instruct",
         ],
-        Tier::Cloud => vec!["voyageai/voyage-multimodal-3.5", "voyageai/rerank-2.5"],
+        Tier::Cloud => vec![
+            "voyageai/voyage-multimodal-3.5",
+            "voyageai/rerank-2.5",
+            "nvidia/nemotron-3.5-super-vl",
+        ],
     }
 }
 
@@ -839,6 +880,27 @@ pub fn gate_licences(
 // Arguments
 // ---------------------------------------------------------------------------
 
+/// Where scanned pages are OCRed (`--ocr`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OcrChoice {
+    /// The tier's own OCR container (the default).
+    Local,
+    /// Mistral OCR (hosted, paid per page): no local OCR container.
+    Mistral,
+    /// No OCR: a page without a text layer is reported as unread.
+    Off,
+    /// An OpenAI-compatible OCR server elsewhere, e.g. a shared Desk box.
+    Url(String),
+}
+
+/// Where pictures are read (`--vision`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VisionChoice {
+    Local,
+    Off,
+    Url(String),
+}
+
 /// Parsed `setup` arguments.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SetupArgs {
@@ -850,6 +912,22 @@ pub struct SetupArgs {
     pub accepted: Vec<String>,
     pub openrouter_key_env: Option<String>,
     pub mistral_key_env: Option<String>,
+    /// `--ocr`; `None` is the tier's default.
+    pub ocr: Option<OcrChoice>,
+    /// `--ocr-model` for `--ocr <url>`.
+    pub ocr_model: Option<String>,
+    /// `--ocr-recipe` for `--ocr <url>` (`xiaomi` or `paddle`).
+    pub ocr_recipe: Option<String>,
+    /// `--ocr-key-env` for `--ocr <url>`.
+    pub ocr_key_env: Option<String>,
+    /// `--ocr-tables accurate`: the layout table pass on a GPU tier.
+    pub ocr_tables_accurate: bool,
+    /// `--vision`; `None` is the tier's default.
+    pub vision: Option<VisionChoice>,
+    /// `--vision-model` for `--vision <url>`.
+    pub vision_model: Option<String>,
+    /// `--set KEY=VALUE`, in order.
+    pub sets: Vec<(String, String)>,
     pub chat_llm_url: Option<String>,
     pub chat_llm_model: Option<String>,
     pub port: Option<u16>,
@@ -872,6 +950,10 @@ impl SetupArgs {
     /// Fails on an unknown flag, a missing value, or an invalid tier/port.
     pub fn parse(args: &[String]) -> Result<Self, CliError> {
         let mut parsed = Self::default();
+        // The tier may also be the first argument (`setup desk`), which is
+        // resolved after the flags: giving it twice is a mistake, not a
+        // silent winner.
+        let mut positional_tier: Option<Tier> = None;
         let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
@@ -902,6 +984,86 @@ impl SetupArgs {
                 }
                 "--mistral-key-env" => {
                     parsed.mistral_key_env = Some(value_of(args, &mut index, "--mistral-key-env")?);
+                }
+                "--ocr" => {
+                    let value = value_of(args, &mut index, "--ocr")?;
+                    parsed.ocr = Some(match value.as_str() {
+                        "local" => OcrChoice::Local,
+                        "mistral" => OcrChoice::Mistral,
+                        "off" | "none" => OcrChoice::Off,
+                        url if url.starts_with("http://") || url.starts_with("https://") => {
+                            OcrChoice::Url(url.to_string())
+                        }
+                        other => {
+                            return Err(CliError::Usage(format!(
+                                "--ocr must be local, mistral, off or an http(s) URL, got {other:?}"
+                            )));
+                        }
+                    });
+                }
+                "--ocr-model" => {
+                    parsed.ocr_model = Some(value_of(args, &mut index, "--ocr-model")?);
+                }
+                "--ocr-recipe" => {
+                    let value = value_of(args, &mut index, "--ocr-recipe")?;
+                    if value != "xiaomi" && value != "paddle" {
+                        return Err(CliError::Usage(format!(
+                            "--ocr-recipe must be xiaomi or paddle, got {value:?}"
+                        )));
+                    }
+                    parsed.ocr_recipe = Some(value);
+                }
+                "--ocr-key-env" => {
+                    parsed.ocr_key_env = Some(value_of(args, &mut index, "--ocr-key-env")?);
+                }
+                "--ocr-tables" => {
+                    let value = value_of(args, &mut index, "--ocr-tables")?;
+                    parsed.ocr_tables_accurate = match value.as_str() {
+                        "accurate" => true,
+                        "fast" => false,
+                        other => {
+                            return Err(CliError::Usage(format!(
+                                "--ocr-tables must be fast or accurate, got {other:?}"
+                            )));
+                        }
+                    };
+                }
+                "--vision" => {
+                    let value = value_of(args, &mut index, "--vision")?;
+                    parsed.vision = Some(match value.as_str() {
+                        "local" => VisionChoice::Local,
+                        "off" | "none" => VisionChoice::Off,
+                        url if url.starts_with("http://") || url.starts_with("https://") => {
+                            VisionChoice::Url(url.to_string())
+                        }
+                        other => {
+                            return Err(CliError::Usage(format!(
+                                "--vision must be local, off or an http(s) URL, got {other:?}"
+                            )));
+                        }
+                    });
+                }
+                "--vision-model" => {
+                    parsed.vision_model = Some(value_of(args, &mut index, "--vision-model")?);
+                }
+                "--set" => {
+                    let value = value_of(args, &mut index, "--set")?;
+                    let Some((key, val)) = value.split_once('=') else {
+                        return Err(CliError::Usage(format!(
+                            "--set needs KEY=VALUE, got {value:?}"
+                        )));
+                    };
+                    let key = key.trim();
+                    if key.is_empty()
+                        || !key
+                            .chars()
+                            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+                    {
+                        return Err(CliError::Usage(format!(
+                            "--set key must be an UPPER_CASE environment name, got {key:?}"
+                        )));
+                    }
+                    parsed.sets.push((key.to_string(), val.to_string()));
                 }
                 "--chat-llm-url" => {
                     parsed.chat_llm_url = Some(value_of(args, &mut index, "--chat-llm-url")?);
@@ -951,16 +1113,54 @@ impl SetupArgs {
                     index += 1;
                 }
                 other => {
+                    // `setup <tier>` is the short form of `setup --tier <tier>`:
+                    // the first argument that names a tier is the tier.
+                    if !other.starts_with('-') {
+                        if let Some(tier) = Tier::parse(other) {
+                            if positional_tier.is_some() {
+                                return Err(CliError::Usage(format!(
+                                    "the tier is given twice: {other:?}"
+                                )));
+                            }
+                            positional_tier = Some(tier);
+                            index += 1;
+                            continue;
+                        }
+                    }
                     return Err(CliError::Usage(format!(
-                        "unknown setup argument {other:?}; see `kb-server setup --help`"
+                        "unknown setup argument {other:?}; see `{} setup --help`",
+                        crate::cli::program_name()
                     )));
                 }
             }
+        }
+        let remote_ocr = matches!(parsed.ocr, Some(OcrChoice::Url(_)));
+        if !remote_ocr
+            && (parsed.ocr_model.is_some()
+                || parsed.ocr_recipe.is_some()
+                || parsed.ocr_key_env.is_some())
+        {
+            return Err(CliError::Usage(
+                "--ocr-model, --ocr-recipe and --ocr-key-env go with --ocr <url>".to_string(),
+            ));
+        }
+        if parsed.vision_model.is_some() && !matches!(parsed.vision, Some(VisionChoice::Url(_))) {
+            return Err(CliError::Usage(
+                "--vision-model goes with --vision <url>".to_string(),
+            ));
         }
         if parsed.chat_llm_url.is_some() != parsed.chat_llm_model.is_some() {
             return Err(CliError::Usage(
                 "--chat-llm-url and --chat-llm-model go together".to_string(),
             ));
+        }
+        if parsed.tier.is_some() && positional_tier.is_some() {
+            return Err(CliError::Usage(
+                "the tier is given twice (as an argument and with --tier)".to_string(),
+            ));
+        }
+        if parsed.tier.is_none() {
+            parsed.tier = positional_tier;
         }
         Ok(parsed)
     }
@@ -977,12 +1177,12 @@ fn value_of(args: &[String], index: &mut usize, flag: &str) -> Result<String, Cl
     Ok(value.clone())
 }
 
-/// The `setup --help` text.
+/// The `setup --help` text. `{prog}` is the name the operator invoked.
 pub const HELP: &str = "\
-kb-server setup — detect the hardware, check the budget and licences, write the tier config
+{prog} setup — detect the hardware, check the budget and licences, write the tier config
 
 USAGE
-    kb-server setup [flags]
+    {prog} setup [tier] [flags]
 
 WHAT IT DOES
     1. Detects NVIDIA (nvidia-smi), Apple silicon (sysctl), CPU cores and RAM.
@@ -990,29 +1190,66 @@ WHAT IT DOES
     3. Compares the tier's VRAM estimate (docs/kb-tiers.md) to the hardware and
        refuses a tier that does not fit unless --force.
     4. Refuses a 🔴 model, and needs --accept-licence <model> for each 🟡 one.
-    5. Writes rust/deploy/.env (from .env.example) and rust/deploy/.tier. The tier
-       preset fills the model roles, so no preset value is duplicated into .env.
-    6. Prints `rust/scripts/kb-dev.sh up <tier>`, or runs it with --start.
+    5. Writes the deploy env file (from .env.example) and the tier file next to
+       it. The tier preset fills the model roles, so no preset value is
+       duplicated into the env file.
+    6. Prints `{prog} up <tier>`, or runs it with --start.
 
 FLAGS
-    --tier <lite|lite-en|desk|studio|station|cloud>   Use this tier, not the suggestion
+    --tier <lite|lite-en|desk|studio|station|cloud>   Use this tier, not the suggestion.
+                                                       The tier may also be given as the first
+                                                       argument: `{prog} setup desk`.
     --english                     Suggest lite-en instead of lite on a CPU-only box
     --force                       Write a tier the budget or GPU check refused
     --accept-licence <model>      Accept a 🟡 model (repeatable; exact model id)
     --openrouter-key-env <NAME>   Read the OpenRouter key from $NAME (cloud)
-    --mistral-key-env <NAME>      Read the Mistral OCR key from $NAME (cloud, optional)
+    --mistral-key-env <NAME>      Read the Mistral OCR key from $NAME (implies --ocr mistral on cloud)
+MODEL ROLES (each defaults to the tier's own local model)
+    --ocr <local|mistral|off|URL> Where scanned pages are read. `mistral` sends them to
+                                  Mistral OCR (hosted, billed; needs --accept-licence
+                                  mistral-ocr-latest and the key in $MISTRAL_API_KEY or
+                                  --mistral-key-env); a URL is an OCR server elsewhere,
+                                  e.g. a Desk box shared by Lite machines. No local OCR
+                                  container runs unless `local`.
+    --ocr-model <NAME>            Model name at --ocr <URL> (default xiaomi-research/Xiaomi-OCR-0)
+    --ocr-recipe <xiaomi|paddle>  Prompt/postprocessing for --ocr <URL> (default xiaomi)
+    --ocr-key-env <NAME>          Read the --ocr <URL> server's key from $NAME
+    --ocr-tables <fast|accurate>  accurate adds the layout table pass (GPU tiers; ~+10
+                                  points on tables, slower; detector on the CPU)
+    --vision <local|off|URL>      Where pictures are read (ING-5); off keeps them undescribed
+    --vision-model <NAME>         Model name at --vision <URL>
+    --set KEY=VALUE               Write any setting into .env (repeatable), e.g.
+                                  --set KB_OCR_DPI=150 --set KB_PORT=9000
+
+OTHER FLAGS
     --chat-llm-url <URL>          OpenAI-compatible chat endpoint for page captions
     --chat-llm-model <NAME>       Model name at that endpoint (needs --chat-llm-url)
     --port <n>                    KB_PORT for the stack (default 8080)
     --cache-dir <path>            KB_CACHE_DIR (default /app/cache in compose)
-    --out <path>                  Where to write the env file (default rust/deploy/.env)
+    --out <path>                  Where to write the env file (default the deploy directory's .env)
     --overwrite                   Replace an existing env file
     --write-secrets               Write key values into .env instead of an empty placeholder
     --detect-only                 Print detection and the plan; write nothing
     --check                       Probe the configured endpoints and stores; exit non-zero on failure
     --check-paid                  Also probe paid hosts (openrouter.ai, api.mistral.ai, voyage)
-    --start                       Run `rust/scripts/kb-dev.sh up <tier>` afterwards
+    --start                       Start the stack afterwards (`{prog} up <tier>`)
+
+EXAMPLES
+    {prog} setup lite                                 # everything on this CPU box
+    {prog} setup lite --ocr mistral --accept-licence mistral-ocr-latest
+                                                      # scans to Mistral, the rest local
+    {prog} setup lite --ocr http://desk-box:8000/v1/chat/completions
+                                                      # scans to a shared Xiaomi server
+    {prog} setup desk --ocr-tables accurate           # best tables, slower OCR
+    {prog} setup cloud --ocr mistral --accept-licence mistral-ocr-latest
+                                                      # no local models at all
 ";
+
+/// The `setup --help` text, with the invoked program's name.
+#[must_use]
+pub fn help_text() -> String {
+    HELP.replace("{prog}", &crate::cli::program_name())
+}
 
 // ---------------------------------------------------------------------------
 // Env file: reading, merging, diffing
@@ -1167,16 +1404,67 @@ fn diff_lines(existing: &BTreeMap<String, String>, changes: &[EnvChange]) -> Vec
 // Paths
 // ---------------------------------------------------------------------------
 
-/// The deploy directory: `rust/deploy` from the repo root, `deploy` from
-/// `rust/`. The container never runs `setup`, so only the host matters.
+/// The deploy directory: the one `up`, `down`, `logs` and `key` read.
+///
+/// `$RANTAI_KB_HOME/deploy` when that is set, else `rust/deploy` or `deploy`
+/// next to the working directory (a source checkout, today's behaviour), else
+/// `~/.rantai-kb/deploy` (an installed bundle). The container never runs
+/// `setup`, so only the host matters.
 #[must_use]
 pub fn deploy_dir() -> PathBuf {
-    for candidate in ["rust/deploy", "deploy"] {
-        if Path::new(candidate).is_dir() {
-            return PathBuf::from(candidate);
+    crate::stack::resolve_deploy_dir(
+        &|key: &str| std::env::var(key).ok(),
+        &std::env::current_dir().unwrap_or_default(),
+    )
+    .path
+}
+
+/// The deploy directory an env file belongs to.
+fn deploy_dir_of(env_path: &Path) -> PathBuf {
+    match env_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// The version of an installed bundle: the `VERSION` file the release tarball
+/// carries, else this crate's own version.
+fn bundle_version(deploy_dir: &Path) -> String {
+    if let Ok(text) = std::fs::read_to_string(deploy_dir.join("VERSION")) {
+        let version = text.trim().trim_start_matches('v');
+        if !version.is_empty() {
+            return version.to_string();
         }
     }
-    PathBuf::from("rust/deploy")
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// The published images an installed bundle pulls.
+///
+/// A source checkout builds the image from source; an installed bundle has no
+/// source to build from, so the env file points compose at the published
+/// images and compose pulls them.
+fn installed_image_changes(deploy_dir: &Path) -> Vec<EnvChange> {
+    let version = bundle_version(deploy_dir);
+    vec![
+        EnvChange::plain(
+            "KB_IMAGE",
+            format!("ghcr.io/rantai-dev/rantai-kb:{version}"),
+        )
+        .with_comment(
+            "Published image: this install has no source to build from, so compose pulls it.",
+        ),
+        EnvChange::plain(
+            "KB_OCR_CPU_IMAGE",
+            format!("ghcr.io/rantai-dev/rantai-kb-ocr-cpu:{version}"),
+        )
+        .with_comment("Published CPU OCR sidecar image."),
+        EnvChange::plain(
+            "KB_OCR_LAYOUT_IMAGE",
+            format!("ghcr.io/rantai-dev/rantai-kb-ocr-layout:{version}"),
+        )
+        .with_comment("Published layout sidecar image."),
+    ]
 }
 
 fn env_example_path(env_path: &Path) -> PathBuf {
@@ -1204,6 +1492,109 @@ fn env_and_file_lookup(env_path: &Path) -> impl Fn(&str) -> Option<String> + use
 #[must_use]
 pub fn has_page_arm(tier: Tier) -> bool {
     matches!(tier, Tier::Studio | Tier::Station | Tier::Cloud)
+}
+
+/// Where this setup sends scanned pages: `--ocr`, else Mistral when cloud got
+/// `--mistral-key-env` (the flag that predates `--ocr`), else the tier default
+/// (local on every tier but cloud, which has no OCR container).
+#[must_use]
+pub fn effective_ocr(args: &SetupArgs, tier: Tier) -> OcrChoice {
+    match &args.ocr {
+        Some(choice) => choice.clone(),
+        None if tier == Tier::Cloud && args.mistral_key_env.is_some() => OcrChoice::Mistral,
+        None if tier == Tier::Cloud => OcrChoice::Off,
+        None => OcrChoice::Local,
+    }
+}
+
+/// Where pictures are read: `--vision`, else the tier default.
+#[must_use]
+pub fn effective_vision(args: &SetupArgs, tier: Tier) -> VisionChoice {
+    match &args.vision {
+        Some(choice) => choice.clone(),
+        // Cloud reads pictures through its hosted preset; nothing local runs.
+        None if tier == Tier::Cloud => VisionChoice::Off,
+        None => VisionChoice::Local,
+    }
+}
+
+/// Refuse role choices the tier cannot run.
+///
+/// # Errors
+///
+/// `--ocr local` / `--vision local` on cloud (no model containers there), and
+/// `--ocr-tables accurate` anywhere but a GPU tier reading with its own OCR.
+pub fn check_roles(args: &SetupArgs, tier: Tier) -> Result<(), CliError> {
+    if tier == Tier::Cloud {
+        if args.ocr == Some(OcrChoice::Local) {
+            return Err(CliError::Usage(
+                "cloud runs no OCR container: use --ocr mistral, --ocr <url> or --ocr off"
+                    .to_string(),
+            ));
+        }
+        if args.vision == Some(VisionChoice::Local) {
+            return Err(CliError::Usage(
+                "cloud runs no picture model: use --vision <url> or --vision off".to_string(),
+            ));
+        }
+    }
+    if args.ocr_tables_accurate {
+        let gpu = matches!(tier, Tier::Desk | Tier::Studio | Tier::Station);
+        if !gpu || effective_ocr(args, tier) != OcrChoice::Local {
+            return Err(CliError::Usage(
+                "--ocr-tables accurate is the Xiaomi-OCR-0 table pass: it needs a GPU tier \
+                 (desk, studio, station) with --ocr local"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The compose profiles this setup turns on: the tier, plus each model role it
+/// runs locally (`<tier>-ocr`, `<tier>-vision`, `<tier>-ocr-layout`). Written
+/// to `.env` as `COMPOSE_PROFILES`, which `docker compose` reads by itself.
+#[must_use]
+pub fn compose_profiles(args: &SetupArgs, tier: Tier) -> String {
+    let name = tier.as_str();
+    let mut profiles = vec![name.to_string()];
+    if tier != Tier::Cloud {
+        if effective_ocr(args, tier) == OcrChoice::Local {
+            profiles.push(format!("{name}-ocr"));
+            if args.ocr_tables_accurate {
+                profiles.push(format!("{name}-ocr-layout"));
+            }
+        }
+        if effective_vision(args, tier) == VisionChoice::Local {
+            profiles.push(format!("{name}-vision"));
+        }
+    }
+    profiles.join(",")
+}
+
+/// A key read from `$NAME`: the value when `--write-secrets`, an empty
+/// placeholder otherwise, and a comment that never contains the value.
+fn secret_from_env(
+    args: &SetupArgs,
+    lookup: &dyn Fn(&str) -> Option<String>,
+    key: &str,
+    name: &str,
+    what: &str,
+) -> EnvChange {
+    let value = lookup(name).unwrap_or_default();
+    let comment = if value.trim().is_empty() {
+        format!("{what}: ${name} was not set; put the key here.")
+    } else if args.write_secrets {
+        format!("{what}: from ${name}; never printed by setup.")
+    } else {
+        format!("{what}: put the key from ${name} here (or re-run setup with --write-secrets).")
+    };
+    let value = if args.write_secrets {
+        value
+    } else {
+        String::new()
+    };
+    EnvChange::secret(key, value).with_comment(comment)
 }
 
 /// The keys setup writes for a tier.
@@ -1248,27 +1639,100 @@ fn env_changes(
             String::new()
         };
         changes.push(EnvChange::secret("OPENROUTER_API_KEY", value).with_comment(comment));
+    }
 
-        if let Some(name) = &args.mistral_key_env {
-            let value = lookup(name).unwrap_or_default();
-            let comment = if value.trim().is_empty() {
-                format!("Mistral OCR key from ${name} was not set; OCR stays on the default chain.")
-            } else {
-                format!("Mistral OCR key from ${name}; never printed by setup.")
-            };
-            let value = if args.write_secrets {
-                value
-            } else {
-                String::new()
-            };
-            changes.push(EnvChange::secret("KB_MISTRAL_OCR_KEY", value).with_comment(comment));
-            changes.push(
-                EnvChange::plain("KB_LAYOUT_EXTRACTOR_ORDER", "mistral").with_comment(
-                    "Cloud has no local OCR sidecar: use Mistral OCR for scans \
-                     (docs/kb-tiers.md).",
-                ),
-            );
+    match effective_ocr(args, tier) {
+        OcrChoice::Local => {}
+        OcrChoice::Mistral => {
+            let name = args.mistral_key_env.as_deref().unwrap_or("MISTRAL_API_KEY");
+            changes.push(EnvChange::plain("KB_OCR_BASE_URL", "").with_comment(
+                "--ocr mistral: no local OCR server; scanned pages go to Mistral OCR \
+                     (hosted, billed per page).",
+            ));
+            changes.push(secret_from_env(
+                args,
+                lookup,
+                "KB_MISTRAL_OCR_KEY",
+                name,
+                "Mistral OCR key",
+            ));
+            changes.push(EnvChange::plain("KB_LAYOUT_EXTRACTOR_ORDER", "mistral"));
         }
+        OcrChoice::Off => {
+            if tier != Tier::Cloud || args.ocr.is_some() {
+                changes
+                    .push(EnvChange::plain("KB_OCR_BASE_URL", "").with_comment(
+                        "--ocr off: pages without a text layer are reported unread.",
+                    ));
+                changes.push(EnvChange::plain("KB_OCR_MODE", "off"));
+            }
+        }
+        OcrChoice::Url(url) => {
+            let recipe = args.ocr_recipe.as_deref().unwrap_or("xiaomi");
+            let model = args.ocr_model.clone().unwrap_or_else(|| {
+                if recipe == "xiaomi" {
+                    "xiaomi-research/Xiaomi-OCR-0".to_string()
+                } else {
+                    "rantai-kb/ocr-cpu".to_string()
+                }
+            });
+            changes.push(EnvChange::plain("KB_OCR_BASE_URL", url).with_comment(
+                "--ocr <url>: an OCR server elsewhere (e.g. a shared Desk box); no local \
+                 OCR container runs here.",
+            ));
+            changes.push(EnvChange::plain("KB_OCR_MODEL", model));
+            changes.push(EnvChange::plain("KB_OCR_RECIPE", recipe));
+            if let Some(name) = &args.ocr_key_env {
+                changes.push(secret_from_env(
+                    args,
+                    lookup,
+                    "KB_OCR_API_KEY",
+                    name,
+                    "OCR server key",
+                ));
+            }
+        }
+    }
+    if args.ocr_tables_accurate {
+        changes.push(
+            EnvChange::plain("KB_OCR_LAYOUT_URL", "http://ocr-layout:8193").with_comment(
+                "--ocr-tables accurate: re-read a page region by region when the layout \
+                 detector sees a table the whole-page answer missed (detector on the CPU).",
+            ),
+        );
+    }
+    match effective_vision(args, tier) {
+        VisionChoice::Local => {}
+        VisionChoice::Off => {
+            if tier != Tier::Cloud || args.vision.is_some() {
+                // An empty URL would fall back to OpenRouter (paid): turn the
+                // describer off by its model instead.
+                changes.push(
+                    EnvChange::plain("KB_IMAGE_DESCRIBE_MODEL", "")
+                        .with_comment("--vision off: pictures are kept but not described."),
+                );
+            }
+        }
+        VisionChoice::Url(url) => {
+            changes.push(EnvChange::plain("KB_IMAGE_DESCRIBE_BASE_URL", url));
+            if let Some(model) = &args.vision_model {
+                changes.push(EnvChange::plain("KB_IMAGE_DESCRIBE_MODEL", model.clone()));
+            }
+        }
+    }
+    changes.push(
+        EnvChange::plain("COMPOSE_PROFILES", compose_profiles(args, tier)).with_comment(
+            "Which containers `rantai-kb up` starts: the tier and the model roles that \
+             run here (rewritten by setup).",
+        ),
+    );
+    for (key, value) in &args.sets {
+        let change = if crate::tier::is_secret_name(key) {
+            EnvChange::secret(key, value.clone())
+        } else {
+            EnvChange::plain(key, value.clone())
+        };
+        changes.push(change.with_comment("--set"));
     }
 
     if let (Some(url), Some(model)) = (&args.chat_llm_url, &args.chat_llm_model) {
@@ -1304,6 +1768,7 @@ pub fn plan_and_write(
     env_path: &Path,
     out: &mut dyn Write,
 ) -> Result<(), CliError> {
+    check_roles(args, tier)?;
     write_hardware(out, hardware, args.english)?;
     let suggestion = suggest_tier(hardware, args.english);
     writeln!(
@@ -1342,7 +1807,13 @@ pub fn plan_and_write(
     write_licences(out, &models, args)?;
     writeln!(out).map_err(io_failed)?;
 
-    let changes = env_changes(args, tier, lookup);
+    let mut changes = env_changes(args, tier, lookup);
+    // An installed bundle has no source to build the image from, so its env
+    // file points compose at the published images.
+    let deploy_dir = deploy_dir_of(env_path);
+    if !crate::stack::is_source_checkout(&deploy_dir) {
+        changes.extend(installed_image_changes(&deploy_dir));
+    }
 
     if args.detect_only {
         writeln!(out, "Nothing written (--detect-only).").map_err(io_failed)?;
@@ -1429,16 +1900,23 @@ fn models_for(
     tier: Tier,
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<&'static str> {
+    let _ = lookup;
     let mut models = tier_models(tier);
-    if tier == Tier::Cloud {
-        let mistral = args
-            .mistral_key_env
-            .as_ref()
-            .and_then(|name| lookup(name))
-            .is_some_and(|value| !value.trim().is_empty());
-        if mistral {
-            models.push("mistral-ocr-latest");
-        }
+    let ocr = effective_ocr(args, tier);
+    if ocr != OcrChoice::Local {
+        // The tier's own OCR model does not run.
+        let own = ["rantai-kb/ocr-cpu", "xiaomi-research/Xiaomi-OCR-0"];
+        models.retain(|m| !own.contains(m));
+    }
+    if ocr == OcrChoice::Mistral {
+        // Customer pages leave the machine and are billed: a 🟡 opt-in.
+        models.push("mistral-ocr-latest");
+    }
+    if args.ocr_tables_accurate {
+        models.push("PaddlePaddle/PP-DocLayoutV3");
+    }
+    if effective_vision(args, tier) != VisionChoice::Local {
+        models.retain(|m| *m != "Qwen/Qwen3-VL-2B-Instruct");
     }
     models
 }
@@ -1626,11 +2104,12 @@ fn write_licences(
 }
 
 fn write_next_step(out: &mut dyn Write, tier: Tier, started: bool) -> Result<(), CliError> {
+    let program = crate::cli::program_name();
     writeln!(out).map_err(io_failed)?;
     writeln!(out, "Next step:").map_err(io_failed)?;
     writeln!(
         out,
-        "  rust/scripts/kb-dev.sh up {}{}",
+        "  {program} up {}{}",
         tier.as_str(),
         if started { "   (running now)" } else { "" }
     )
@@ -1656,7 +2135,7 @@ fn write_next_step(out: &mut dyn Write, tier: Tier, started: bool) -> Result<(),
 pub async fn run(args: &[String]) -> Result<(), CliError> {
     let parsed = SetupArgs::parse(args)?;
     if parsed.help {
-        print!("{HELP}");
+        print!("{}", help_text());
         return Ok(());
     }
     let hardware = detect(&SystemRunner);
@@ -1690,32 +2169,12 @@ pub async fn run(args: &[String]) -> Result<(), CliError> {
     Ok(())
 }
 
-/// Run `rust/scripts/kb-dev.sh up <tier>`, streaming its output, and propagate
-/// its exit code. The Docker logic stays in the script; this is only a spawn.
+/// Start the stack after `setup` wrote the files.
+///
+/// The Docker logic lives in `stack.rs` — a Rust port of `kb-dev.sh` — so an
+/// installed bundle (which has no script to run) starts the same stack.
 async fn start(tier: Tier) -> Result<(), CliError> {
-    let script = Path::new("rust/scripts/kb-dev.sh");
-    if !script.exists() {
-        return Err(CliError::Failed(format!(
-            "{} not found; run `rust/scripts/kb-dev.sh up {}` yourself",
-            script.display(),
-            tier.as_str()
-        )));
-    }
-    let status = std::process::Command::new(script)
-        .arg("up")
-        .arg(tier.as_str())
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .map_err(|err| CliError::Failed(format!("could not run {}: {err}", script.display())))?;
-    if status.success() {
-        return Ok(());
-    }
-    let code = status.code().unwrap_or(1);
-    Err(CliError::Exit(
-        u8::try_from(code.clamp(1, 255)).unwrap_or(1),
-    ))
+    crate::stack::up(&[tier.as_str().to_string()]).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2637,10 +3096,11 @@ mod tests {
         let accepted = vec![
             "voyageai/voyage-multimodal-3.5".to_string(),
             "voyageai/rerank-2.5".to_string(),
+            "nvidia/nemotron-3.5-super-vl".to_string(),
         ];
         let report = gate_licences(&models, &accepted).expect("accepted");
         assert!(report.green.is_empty());
-        assert_eq!(report.yellow_accepted.len(), 2);
+        assert_eq!(report.yellow_accepted.len(), 3);
     }
 
     #[test]
@@ -2688,6 +3148,214 @@ mod tests {
         assert!(!map.contains_key("# c"));
     }
 
+    fn args_of(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn written(
+        args: &SetupArgs,
+        tier: Tier,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> BTreeMap<String, String> {
+        let dir = TempDir::new("roles");
+        let env_path = dir.path.join(".env");
+        let mut output = Vec::new();
+        plan_and_write(
+            args,
+            &FakeRunner::linux(8, 11.7).hardware(),
+            tier,
+            lookup,
+            &env_path,
+            &mut output,
+        )
+        .unwrap_or_else(|err| panic!("plan: {err}\n{}", String::from_utf8_lossy(&output)));
+        parse_env(&std::fs::read_to_string(&env_path).expect("written"))
+    }
+
+    #[test]
+    fn a_tier_runs_every_local_role_by_default() {
+        let args = SetupArgs::default();
+        assert_eq!(
+            compose_profiles(&args, Tier::Lite),
+            "lite,lite-ocr,lite-vision"
+        );
+        assert_eq!(
+            compose_profiles(&args, Tier::Desk),
+            "desk,desk-ocr,desk-vision"
+        );
+        assert_eq!(compose_profiles(&args, Tier::Cloud), "cloud");
+        let env = written(
+            &SetupArgs {
+                force: true,
+                ..SetupArgs::default()
+            },
+            Tier::Desk,
+            &|_: &str| None,
+        );
+        assert_eq!(
+            env.get("COMPOSE_PROFILES").map(String::as_str),
+            Some("desk,desk-ocr,desk-vision")
+        );
+        assert!(
+            !env.contains_key("KB_OCR_BASE_URL"),
+            "the preset fills the local OCR: {env:?}"
+        );
+    }
+
+    #[test]
+    fn mistral_ocr_on_a_local_tier_drops_the_ocr_container_and_needs_the_licence_opt_in() {
+        let parsed = SetupArgs::parse(&args_of(&[
+            "--ocr",
+            "mistral",
+            "--mistral-key-env",
+            "MY_MISTRAL",
+        ]))
+        .expect("parse");
+        assert_eq!(compose_profiles(&parsed, Tier::Lite), "lite,lite-vision");
+        // Pages leave the machine: refused without --accept-licence.
+        let dir = TempDir::new("mistral-refused");
+        let mut output = Vec::new();
+        let refused = plan_and_write(
+            &parsed,
+            &FakeRunner::linux(8, 11.7).hardware(),
+            Tier::Lite,
+            &|_: &str| None,
+            &dir.path.join(".env"),
+            &mut output,
+        );
+        assert!(refused.is_err(), "mistral-ocr-latest is a 🟡 opt-in");
+
+        let accepted = SetupArgs {
+            accepted: vec!["mistral-ocr-latest".to_string()],
+            ..parsed
+        };
+        let lookup = |key: &str| (key == "MY_MISTRAL").then(|| "mistral-secret".to_string());
+        let env = written(&accepted, Tier::Lite, &lookup);
+        assert_eq!(
+            env.get("KB_OCR_BASE_URL").map(String::as_str),
+            Some(""),
+            "{env:?}"
+        );
+        assert_eq!(
+            env.get("KB_MISTRAL_OCR_KEY").map(String::as_str),
+            Some(""),
+            "no secret without --write-secrets"
+        );
+        assert_eq!(
+            env.get("KB_LAYOUT_EXTRACTOR_ORDER").map(String::as_str),
+            Some("mistral")
+        );
+        assert_eq!(
+            env.get("COMPOSE_PROFILES").map(String::as_str),
+            Some("lite,lite-vision")
+        );
+    }
+
+    #[test]
+    fn a_shared_ocr_server_is_used_with_the_xiaomi_recipe_unless_told_otherwise() {
+        let parsed = SetupArgs::parse(&args_of(&[
+            "--ocr",
+            "http://desk-box:8000/v1/chat/completions",
+        ]))
+        .expect("parse");
+        let env = written(&parsed, Tier::Lite, &|_: &str| None);
+        assert_eq!(
+            env.get("KB_OCR_BASE_URL").map(String::as_str),
+            Some("http://desk-box:8000/v1/chat/completions")
+        );
+        assert_eq!(env.get("KB_OCR_RECIPE").map(String::as_str), Some("xiaomi"));
+        assert_eq!(
+            env.get("KB_OCR_MODEL").map(String::as_str),
+            Some("xiaomi-research/Xiaomi-OCR-0")
+        );
+        assert_eq!(
+            env.get("COMPOSE_PROFILES").map(String::as_str),
+            Some("lite,lite-vision")
+        );
+        assert!(
+            SetupArgs::parse(&args_of(&["--ocr-model", "x"])).is_err(),
+            "--ocr-model needs --ocr <url>"
+        );
+    }
+
+    #[test]
+    fn vision_off_turns_the_describer_off_by_its_model_not_its_url() {
+        // An empty KB_IMAGE_DESCRIBE_BASE_URL falls back to OpenRouter (paid).
+        let parsed = SetupArgs::parse(&args_of(&["--vision", "off"])).expect("parse");
+        let env = written(&parsed, Tier::Lite, &|_: &str| None);
+        assert_eq!(
+            env.get("KB_IMAGE_DESCRIBE_MODEL").map(String::as_str),
+            Some("")
+        );
+        assert!(!env.contains_key("KB_IMAGE_DESCRIBE_BASE_URL"));
+        assert_eq!(
+            env.get("COMPOSE_PROFILES").map(String::as_str),
+            Some("lite,lite-ocr")
+        );
+    }
+
+    #[test]
+    fn accurate_tables_add_the_layout_pass_only_on_a_gpu_tier() {
+        let parsed = SetupArgs::parse(&args_of(&["--ocr-tables", "accurate"])).expect("parse");
+        assert!(check_roles(&parsed, Tier::Lite).is_err());
+        assert!(check_roles(&parsed, Tier::Desk).is_ok());
+        assert_eq!(
+            compose_profiles(&parsed, Tier::Studio),
+            "studio,studio-ocr,studio-ocr-layout,studio-vision"
+        );
+        let env = written(
+            &SetupArgs {
+                force: true,
+                ..parsed
+            },
+            Tier::Desk,
+            &|_: &str| None,
+        );
+        assert_eq!(
+            env.get("KB_OCR_LAYOUT_URL").map(String::as_str),
+            Some("http://ocr-layout:8193")
+        );
+    }
+
+    #[test]
+    fn cloud_refuses_local_roles_and_set_writes_any_setting() {
+        let local = SetupArgs::parse(&args_of(&["--ocr", "local"])).expect("parse");
+        assert!(check_roles(&local, Tier::Cloud).is_err());
+        assert!(SetupArgs::parse(&args_of(&["--set", "lower=1"])).is_err());
+        assert!(SetupArgs::parse(&args_of(&["--set", "NOEQUALS"])).is_err());
+        let parsed = SetupArgs::parse(&args_of(&[
+            "--set",
+            "KB_OCR_DPI=150",
+            "--set",
+            "KB_FOO_API_KEY=s3cret",
+        ]))
+        .expect("parse");
+        let dir = TempDir::new("set");
+        let env_path = dir.path.join(".env");
+        let mut output = Vec::new();
+        plan_and_write(
+            &parsed,
+            &FakeRunner::linux(8, 11.7).hardware(),
+            Tier::Lite,
+            &|_: &str| None,
+            &env_path,
+            &mut output,
+        )
+        .expect("plan");
+        let env = parse_env(&std::fs::read_to_string(&env_path).expect("written"));
+        assert_eq!(env.get("KB_OCR_DPI").map(String::as_str), Some("150"));
+        assert_eq!(
+            env.get("KB_FOO_API_KEY").map(String::as_str),
+            Some("s3cret"),
+            "--set writes what it is given"
+        );
+        let printed = String::from_utf8(output).expect("utf8");
+        assert!(
+            !printed.contains("s3cret"),
+            "a secret --set value is never printed: {printed}"
+        );
+    }
+
     #[test]
     fn secrets_are_never_written_without_write_secrets() {
         let dir = TempDir::new("secret");
@@ -2697,6 +3365,7 @@ mod tests {
             accepted: vec![
                 "voyageai/voyage-multimodal-3.5".to_string(),
                 "voyageai/rerank-2.5".to_string(),
+                "nvidia/nemotron-3.5-super-vl".to_string(),
             ],
             ..SetupArgs::default()
         };
@@ -2730,6 +3399,7 @@ mod tests {
             accepted: vec![
                 "voyageai/voyage-multimodal-3.5".to_string(),
                 "voyageai/rerank-2.5".to_string(),
+                "nvidia/nemotron-3.5-super-vl".to_string(),
             ],
             write_secrets: true,
             openrouter_key_env: Some("TEST_OPENROUTER_KEY".to_string()),
@@ -2806,6 +3476,36 @@ mod tests {
         let text = std::fs::read_to_string(&env_path).expect("written");
         assert!(text.contains("KB_TIER=studio"), "{text}");
         assert!(text.contains("KEEP=me"), "{text}");
+    }
+
+    // ─── tier on the command line ───────────────────────────────────────────
+
+    #[test]
+    fn the_tier_may_be_the_first_argument() {
+        // `setup desk` is the short form of `setup --tier desk`.
+        let parsed = SetupArgs::parse(&["desk".to_string()]).expect("parse");
+        assert_eq!(parsed.tier, Some(Tier::Desk));
+    }
+
+    #[test]
+    fn a_positional_tier_and_the_flag_agree() {
+        let parsed =
+            SetupArgs::parse(&["cloud".to_string(), "--start".to_string()]).expect("parse");
+        assert_eq!(parsed.tier, Some(Tier::Cloud));
+        assert!(parsed.start);
+    }
+
+    #[test]
+    fn the_tier_may_not_be_given_twice() {
+        let err = SetupArgs::parse(&["lite".to_string(), "--tier".to_string(), "desk".to_string()])
+            .unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err:?}");
+    }
+
+    #[test]
+    fn an_unknown_positional_argument_is_still_a_usage_error() {
+        let err = SetupArgs::parse(&["nonsense".to_string()]).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)), "{err:?}");
     }
 
     #[test]

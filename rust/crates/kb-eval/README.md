@@ -58,6 +58,37 @@ To build or rebuild the identical dataset:
 uv run rust/crates/kb-eval/scripts/import_miracl.py --seed 42 --num-queries 200 --num-distractors 1000
 ```
 
+### Tables (`tables-v1`, TBL-1)
+
+Tables you can ask questions of, not just find: spreadsheets, DOCX tables and
+(externally) OCR'd tables become structured grids, and a typed query answers
+them exactly. The set is built by `scripts/import_tables.py` and scored by
+`scripts/score_tables.py`; the design and the failure paths are in
+`docs/eval-ab/tables-v1/README.md`.
+
+- **Sources**: 25 xlsx/csv tables from Satu Data Kabupaten Klaten
+  (`opendata.klaten.go.id`, CC BY 4.0 — BPS Klaten tables with `Jumlah` subtotal
+  rows, a six-digit kode wilayah and 18-digit NIP columns, multi-level headers and
+  year columns) and the World Bank Open Data indicator CSVs (CC BY 4.0, English,
+  country codes and one column per year); plus 5 DOCX generated from five of the
+  spreadsheets and marked `generated`.
+- **Composition**: 386 questions, Indonesian and English, seven templates: cell
+  lookup, a sum with a filter, a count, a top-k, a group maximum, the subtotal
+  trap (a total where adding the `Jumlah` row is wrong) and the code trap (a
+  distinct count where summing the code is wrong).
+- **Gold answers** are computed from an independent read of each grid, and
+  `--self-check` validates every gold `TableQuery` through a reference executor.
+- **Three scores**: table retrieval (gold `tableId` in the top 5 of
+  `/v1/search`), execution (gold `TableQuery` through `/v1/tables/{id}/query`)
+  and an optional two-arm end-to-end model run.
+
+```sh
+uv run rust/crates/kb-eval/scripts/import_tables.py --out ~/kbdata/tables-v1
+uv run rust/crates/kb-eval/scripts/import_tables.py --out ~/kbdata/tables-v1 --self-check
+python3 rust/crates/kb-eval/scripts/score_tables.py --dataset ~/kbdata/tables-v1 \
+  --base-url http://127.0.0.1:8080 --key "$KB_API_KEY"
+```
+
 ## Running it
 
 ```sh
@@ -115,6 +146,7 @@ kb-server eval … --gain exponential
 | `report.md` | the same numbers as a table, for a human |
 | `run.trec` | document-level TREC run (`qid Q0 docno rank score tag`) |
 | `run.page.trec` | page-level TREC run |
+| `latency.json` | one record per query: id, client latency, status, and the server's `queryClass` / skipped-arm count when adaptive mode ran (RET-5) |
 | `ingest-map.json` | `doc-key → documentId`, reused by `--skip-ingest` |
 
 The TREC files are the interoperability surface: `trec_eval` and `ranx` re-score

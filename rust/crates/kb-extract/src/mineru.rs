@@ -177,12 +177,15 @@ impl MineruExtractor {
         });
 
         Ok(ExtractionResult {
+            tables: Vec::new(),
+            ocr: None,
             content: text,
             file_type: "pdf".to_string(),
             used_ocr: true,
             figures,
             pages_blocks,
             page_map,
+            outline: None,
             error: None,
         })
     }

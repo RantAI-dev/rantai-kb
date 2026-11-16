@@ -5,8 +5,12 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use kb_core::{
-    ContextItem, RrfOptions, SourceEntry, build_context_and_sources, reciprocal_rank_fusion_with,
+    ArmPlan, BoostConfig, ContextItem, QueryClass, RecencyField, RrfOptions, SkippedArm,
+    SourceEntry, authority_factor, authority_value, base_from_rank, base_from_rerank_in,
+    build_context_and_sources, classify_query, date_value, normalise_authority, parse_date,
+    recency_factor, reciprocal_rank_fusion_with, rerank_scores_are_probabilities,
     weave_neighbours_with,
 };
 use kb_ports::{
@@ -18,15 +22,23 @@ use kb_ports::{
 use tracing::Instrument;
 
 use crate::QueryExpander;
+use crate::global_arm::{GlobalArm, fuse_global};
 use crate::graph_arm::{GraphArm, GraphRanking};
 use crate::page_arm::PageArm;
 use crate::timing::{Clock, StageTimings, Stopwatch, stage_span};
+use crate::tree_arm::{TreeArm, TreeStats, fuse_tree, tree_chunk_ids};
 
 /// Parameters for one retrieval execution.
 #[derive(Clone)]
 pub struct RetrievalOptions {
     pub max_chunks: u32,
     pub min_similarity: f32,
+    /// Optional relevance floor (RET-2). `None` leaves the pipeline exactly as
+    /// it was; `Some(t)` keeps only hits whose comparable score is `>= t`.
+    ///
+    /// The per-request `minScore` overrides the server default, which is
+    /// resolved by the caller ([`crate::Engine::retrieve_with_floor`]).
+    pub min_score: Option<f32>,
     pub candidate_pool_size: u32,
     /// RRF constant for the two-arm fusion (`EngineSettings::rrf_k`).
     pub rrf_k: u32,
@@ -49,8 +61,27 @@ pub struct RetrievalOptions {
     /// The entity-graph arm, when `KB_GRAPH_ARM` is on. `None` leaves the
     /// pipeline byte-identical to the two-arm version it has always been.
     pub graph_arm: Option<std::sync::Arc<GraphArm>>,
+    /// The global (graph community) arm, when `KB_GLOBAL_ARM` is on. `None`
+    /// leaves the pipeline byte-identical to the one before `DEC-5`: the query
+    /// is not classified for this arm and no community store is read.
+    pub global_arm: Option<std::sync::Arc<GlobalArm>>,
     /// The page-image arm, when configured. `None` leaves the pipeline as it was.
     pub page_arm: Option<std::sync::Arc<PageArm>>,
+    /// The tree arm (`DEC-4`), when `KB_TREE_ARM` is on. `None` leaves the
+    /// pipeline byte-identical to the previous release; `Some` only runs it for
+    /// queries the classifier labels `structural`.
+    pub tree_arm: Option<std::sync::Arc<TreeArm>>,
+    /// Optional recency/authority boost (`RET-4`). `None` — or a config with
+    /// neither boost — leaves the ranking exactly as it was.
+    pub boost: Option<BoostConfig>,
+    /// Evaluation instant for the recency boost. Tests pin it; production
+    /// leaves it `None` and the pipeline reads the clock once, at the boost
+    /// step.
+    pub boost_now: Option<DateTime<Utc>>,
+    /// Adaptive arm choice (RET-5). Off by default: the pipeline runs exactly
+    /// the arms every earlier release ran. On, the query is classified and the
+    /// arms its class cannot use are not launched.
+    pub adaptive_arms: bool,
 }
 
 impl fmt::Debug for RetrievalOptions {
@@ -58,6 +89,7 @@ impl fmt::Debug for RetrievalOptions {
         f.debug_struct("RetrievalOptions")
             .field("max_chunks", &self.max_chunks)
             .field("min_similarity", &self.min_similarity)
+            .field("min_score", &self.min_score)
             .field("candidate_pool_size", &self.candidate_pool_size)
             .field("rrf_k", &self.rrf_k)
             .field("rerank_candidate_limit", &self.rerank_candidate_limit)
@@ -70,7 +102,11 @@ impl fmt::Debug for RetrievalOptions {
             .field("expansion_paraphrases", &self.expansion_paraphrases)
             .field("hybrid_bm25_enabled", &self.hybrid_bm25_enabled)
             .field("graph_arm", &self.graph_arm.as_ref().map(|_| "<GraphArm>"))
+            .field("global_arm", &self.global_arm.as_ref().map(|a| a.config()))
             .field("page_arm", &self.page_arm.as_ref().map(|a| a.config))
+            .field("tree_arm", &self.tree_arm.as_ref().map(|a| a.config))
+            .field("boost", &self.boost)
+            .field("adaptive_arms", &self.adaptive_arms)
             .field(
                 "figure_gate",
                 &self.figure_gate.as_ref().map(|_| "<FigureGate>"),
@@ -84,6 +120,7 @@ impl Default for RetrievalOptions {
         Self {
             max_chunks: 8,
             min_similarity: 0.30,
+            min_score: None,
             candidate_pool_size: 20,
             rrf_k: 60,
             rerank_candidate_limit: 0,
@@ -98,9 +135,86 @@ impl Default for RetrievalOptions {
             figure_gate: None,
             rerank_enabled: false,
             graph_arm: None,
+            global_arm: None,
             page_arm: None,
+            tree_arm: None,
+            boost: None,
+            boost_now: None,
+            adaptive_arms: false,
         }
     }
+}
+
+/// What the global arm did, for `stats.globalArm`.
+///
+/// Present only when the arm ran: `KB_GLOBAL_ARM` on *and* the query classified
+/// aggregative. `communities: 0` is a legitimate answer — the tenant has no
+/// community set, so the arm had nothing to say. It is not a degrade.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GlobalArmStats {
+    /// Communities selected by BM25 over the summary text.
+    pub communities: usize,
+    /// Member chunks the arm contributed to the fused list.
+    pub chunks: usize,
+}
+
+/// Which comparable score the relevance floor compared against.
+///
+/// The fused RRF score is deliberately absent: it is a sum of `1/(k + rank)`
+/// terms, so it is rank-only and its absolute value says nothing about how
+/// relevant a hit is, let alone how relevant it is across queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloorScoreKind {
+    /// The cross-encoder reranker's score. Comparable across queries only
+    /// after calibration, which is why the default is unset.
+    Rerank,
+    /// The dense arm's cosine similarity.
+    Dense,
+}
+
+impl FloorScoreKind {
+    /// The wire spelling, matching `stats.floorScoreKind`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rerank => "rerank",
+            Self::Dense => "dense",
+        }
+    }
+}
+
+/// What the floor did, for the response's `stats` object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloorStats {
+    pub score_kind: FloorScoreKind,
+    /// Hits removed by the floor (before neighbours and figures are woven in).
+    pub dropped: usize,
+}
+
+/// What a recency/authority boost did (`RET-4`), for `stats.boost`.
+///
+/// Each count is the number of returned hits that carried a usable field for
+/// that boost — a parseable date, or a numeric authority. A hit without the
+/// field is not an error and is counted nowhere: it kept its base relevance.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BoostStats {
+    pub recency: usize,
+    pub authority: usize,
+}
+
+/// What adaptive arm choice did, for the response's `stats` object.
+///
+/// Present only when adaptive mode ran. `skipped_arms` is empty after a
+/// fallback, because a fallback ran the full plan: naming an arm as skipped
+/// while it actually ran would be a lie.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdaptiveStats {
+    /// The question's class (`stats.queryClass`).
+    pub class: QueryClass,
+    /// The arms the plan turned off, each with the class's reason.
+    pub skipped_arms: Vec<SkippedArm>,
+    /// True when the plan's skip left nothing and the full plan was run once.
+    pub arm_plan_fallback: bool,
 }
 
 /// The outcome of the retrieval pipeline.
@@ -110,6 +224,27 @@ pub struct RetrievalOutcome {
     pub sources: Vec<SourceEntry>,
     pub context: String,
     pub degrades: Vec<RetrievalDegrade>,
+    /// A human-readable explanation for a result that is empty on purpose,
+    /// e.g. "the floor removed every hit". `None` for an ordinary answer.
+    pub note: Option<String>,
+    /// `Some` only when a floor was configured and actually applied.
+    pub floor: Option<FloorStats>,
+    /// `Some` only when the request asked for a boost; absent (not zero) when
+    /// it did not, so a response that never boosted is byte-identical to one
+    /// from before `RET-4`.
+    pub boost: Option<BoostStats>,
+    /// `Some` only when adaptive arm choice ran (`stats.queryClass` and
+    /// `stats.skippedArms`). `None` on a default search, so an old client sees
+    /// exactly the earlier shape.
+    pub adaptive: Option<AdaptiveStats>,
+    /// `Some` only when the tree arm ran and had nodes to offer (`stats.treeArm`).
+    /// `None` on every ordinary search, so an old client sees exactly the
+    /// earlier shape.
+    pub tree: Option<TreeStats>,
+    /// `Some` only when the global community arm ran (`KB_GLOBAL_ARM` on and an
+    /// aggregative query). `None` on every other search, so a server with the
+    /// flag off answers exactly as it did before `DEC-5`.
+    pub global_arm: Option<GlobalArmStats>,
     /// What each stage cost. Always present: a request nobody times is a
     /// request nobody can make faster, and the numbers are the only evidence
     /// a retrieval change can be judged by.
@@ -216,11 +351,12 @@ fn candidate_to_hit_with(c: Candidate, retrieval: Option<RetrievalProvenance>) -
             .and_then(|v| v.as_u64())
             .map(|n| n as u32)
     });
-    let is_bm25 = c.scores.dense.is_none() && c.scores.sparse.is_some();
+    let dense_score = c.scores.dense;
+    let is_bm25 = dense_score.is_none() && c.scores.sparse.is_some();
     let similarity = if is_bm25 {
         0.0
     } else {
-        c.scores.dense.unwrap_or(c.scores.fused)
+        dense_score.unwrap_or(c.scores.fused)
     };
     SearchHit {
         chunk: Chunk {
@@ -237,6 +373,12 @@ fn candidate_to_hit_with(c: Candidate, retrieval: Option<RetrievalProvenance>) -
                 asset_key,
                 anchor_chunk_index,
                 contextual_prefix: c.contextual_prefix,
+                table_id: c
+                    .metadata
+                    .get("tableId")
+                    .or_else(|| c.metadata.get("table_id"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
             },
             categories: Vec::new(),
             subcategory: None,
@@ -245,6 +387,9 @@ fn candidate_to_hit_with(c: Candidate, retrieval: Option<RetrievalProvenance>) -
         rank: c.ranks.fused,
         is_bm25,
         retrieval,
+        dense_score,
+        // Set later, only when a reranker actually scored this hit.
+        rerank_score: None,
     }
 }
 
@@ -467,11 +612,208 @@ async fn fuse_graph(
     Ok((out, ranks))
 }
 
+/// Did the keyword arm produce this hit?
+///
+/// A hit can carry both arms; the exemption the floor grants is for the
+/// keyword arm's exact match, so a hit the sparse arm never ranked is not
+/// exempt even when its text happens to contain the token.
+fn keyword_matched(hit: &SearchHit) -> bool {
+    hit.is_bm25
+        || hit
+            .retrieval
+            .as_ref()
+            .is_some_and(|p| p.has(ProvenanceArm::Sparse))
+}
+
+/// The comparable score the floor compares against, if this hit has one.
+///
+/// Missing is *not* the same as zero: a hit with no dense score (BM25-only, or
+/// fetched without scoring) has no evidence either way, and a floor that
+/// treated "unknown" as "passes" would let every keyword hit through.
+fn floor_score(hit: &SearchHit, kind: FloorScoreKind) -> Option<f32> {
+    match kind {
+        FloorScoreKind::Rerank => hit.rerank_score,
+        FloorScoreKind::Dense => hit.dense_score,
+    }
+}
+
+/// Keep hits at or above `threshold`, except an exact-match hit the keyword
+/// arm matched. Returns the kept hits (ranks renumbered) and how many dropped.
+fn apply_relevance_floor(
+    hits: Vec<SearchHit>,
+    kind: FloorScoreKind,
+    threshold: f32,
+    signature: &kb_core::QuerySignature,
+) -> (Vec<SearchHit>, usize) {
+    let mut kept: Vec<SearchHit> = Vec::with_capacity(hits.len());
+    let mut dropped = 0usize;
+    for hit in hits {
+        // The exemption is deliberately narrow: the query must be an
+        // identifier/quoted phrase, the keyword arm must have matched this
+        // hit, and the hit's text must literally contain the token. A question
+        // that merely mentions a model number does not get a free pass for
+        // unrelated passages.
+        let exempt = signature.is_exact()
+            && keyword_matched(&hit)
+            && signature.matches_content(&hit.chunk.content);
+        let passes = floor_score(&hit, kind).is_some_and(|score| score >= threshold);
+        if exempt || passes {
+            kept.push(hit);
+        } else {
+            dropped += 1;
+        }
+    }
+    for (rank, hit) in kept.iter_mut().enumerate() {
+        hit.rank = rank as u32;
+    }
+    (kept, dropped)
+}
+
+/// The document's date in the field the request named.
+///
+/// `createdAt`/`updatedAt` are the Postgres timestamps the store already
+/// returned with the document row; `metadata.<key>` reads the top-level JSONB
+/// key. An absent or unparseable value is `None` — no boost, never an error.
+fn recency_date(meta: &DocumentMeta, field: &RecencyField) -> Option<DateTime<Utc>> {
+    match field {
+        RecencyField::CreatedAt => parse_date(&meta.created_at),
+        RecencyField::UpdatedAt => parse_date(&meta.updated_at),
+        RecencyField::Metadata(key) => meta
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(key))
+            .and_then(date_value),
+    }
+}
+
+/// The document's authority value, when the JSONB metadata carries a number.
+fn authority_number(meta: &DocumentMeta, key: &str) -> Option<f64> {
+    meta.metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get(key))
+        .and_then(authority_value)
+}
+
+/// Apply the request's recency/authority boosts and re-order the hits.
+///
+/// Runs after fusion, the rerank and the relevance floor, and before the final
+/// truncation to `max_chunks`. It deliberately touches only the *order* and
+/// `rank`: `rerank_score`, `dense_score` and `similarity` are the scores the
+/// floor compares against, and the floor must keep meaning what RET-2 defined.
+///
+/// The new order is `final` descending, then the same deterministic keys
+/// `kb_ports::sort_candidates` uses (content, page, chunk index) — never a
+/// document or chunk uuid, so a tie does not depend on an ingest's random id.
+///
+/// Returns what was actually applied. When the request is off, or no hit
+/// carries a usable field, the hits are left exactly as they arrived: that is
+/// the "rank-identical when off" guarantee, and it also covers a request that
+/// asks for a boost the corpus cannot satisfy.
+pub fn apply_boosts(
+    hits: &mut Vec<SearchHit>,
+    meta: &HashMap<DocumentId, DocumentMeta>,
+    config: &BoostConfig,
+    now: DateTime<Utc>,
+) -> BoostStats {
+    let mut stats = BoostStats::default();
+    if config.is_off() || hits.is_empty() {
+        return stats;
+    }
+
+    let metas: Vec<Option<&DocumentMeta>> = hits
+        .iter()
+        .map(|hit| meta.get(&hit.chunk.document_id))
+        .collect();
+    let dates: Vec<Option<DateTime<Utc>>> = match &config.recency {
+        Some(recency) => metas
+            .iter()
+            .map(|meta| meta.and_then(|meta| recency_date(meta, &recency.field)))
+            .collect(),
+        None => vec![None; hits.len()],
+    };
+    let authority_values: Vec<Option<f64>> = match &config.authority {
+        Some(authority) => metas
+            .iter()
+            .map(|meta| meta.and_then(|meta| authority_number(meta, &authority.field)))
+            .collect(),
+        None => vec![None; hits.len()],
+    };
+    let authority_normalised = normalise_authority(&authority_values);
+
+    stats.recency = dates.iter().filter(|date| date.is_some()).count();
+    stats.authority = authority_values
+        .iter()
+        .filter(|value| value.is_some())
+        .count();
+    if stats.recency == 0 && stats.authority == 0 {
+        return stats;
+    }
+
+    let recency = config.recency.as_ref();
+    let authority = config.authority.as_ref();
+    let probabilities = rerank_scores_are_probabilities(hits.iter().filter_map(|h| h.rerank_score));
+    let mut scored: Vec<(SearchHit, f64)> = std::mem::take(hits)
+        .into_iter()
+        .enumerate()
+        .map(|(index, hit)| {
+            let base = hit.rerank_score.map_or_else(
+                || base_from_rank(hit.rank),
+                |score| base_from_rerank_in(score, probabilities),
+            );
+            let mut factor = 1.0_f64;
+            if let (Some(recency), Some(date)) = (recency, dates[index]) {
+                factor *= recency_factor(date, now, recency.half_life_days, recency.weight);
+            }
+            if let (Some(authority), Some(normalised)) = (authority, authority_normalised[index]) {
+                factor *= authority_factor(normalised, authority.weight);
+            }
+            (hit, base * factor)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        b.1.total_cmp(&a.1)
+            .then_with(|| a.0.chunk.content.cmp(&b.0.chunk.content))
+            .then_with(|| a.0.chunk.metadata.page.cmp(&b.0.chunk.metadata.page))
+            .then_with(|| {
+                a.0.chunk
+                    .metadata
+                    .chunk_index
+                    .cmp(&b.0.chunk.metadata.chunk_index)
+            })
+    });
+    for (rank, (mut hit, _)) in scored.into_iter().enumerate() {
+        hit.rank = rank as u32;
+        hits.push(hit);
+    }
+    stats
+}
+
+/// [`apply_boosts`] at the current wall clock.
+///
+/// Used by the by-id search branch, which does not go through the pipeline but
+/// still has the document rows it read for titles.
+pub fn apply_boosts_now(
+    hits: &mut Vec<SearchHit>,
+    meta: &HashMap<DocumentId, DocumentMeta>,
+    config: &BoostConfig,
+) -> BoostStats {
+    apply_boosts(hits, meta, config, Utc::now())
+}
+
 /// Execute the full retrieval pipeline.
 ///
 /// Every collaborator is passed explicitly rather than behind a context
 /// object: the engine receives its stores as arguments, which is the whole
 /// point of the port boundary.
+///
+/// With `RetrievalOptions::adaptive_arms` off this is exactly the pre-RET-5
+/// pipeline. With it on, the query is classified once and the arms its class
+/// cannot use are not launched; every skipped arm is named on
+/// [`RetrievalOutcome::adaptive`]. If the skip leaves nothing and a skipped arm
+/// could have contributed candidates, the full plan runs once more and the
+/// outcome says `arm_plan_fallback: true` — a plan that guessed wrong must not
+/// turn a searchable question into an empty answer.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_pipeline(
     doc_store: &Arc<dyn DocumentStore>,
@@ -484,6 +826,80 @@ pub async fn execute_pipeline(
     opts: &RetrievalOptions,
     clock: &dyn Clock,
 ) -> Result<RetrievalOutcome, EngineError> {
+    if !opts.adaptive_arms {
+        return execute_pipeline_with_plan(
+            doc_store,
+            index,
+            embedder,
+            reranker,
+            expander,
+            scope,
+            query,
+            opts,
+            clock,
+            &ArmPlan::all(),
+        )
+        .await;
+    }
+
+    let signature = classify_query(query);
+    let plan = signature.arm_plan();
+    let skipped_candidate_arm = !plan.dense
+        || !plan.sparse
+        || (!plan.page_image && opts.page_arm.is_some())
+        || (!plan.graph && opts.graph_arm.is_some());
+    let mut outcome = execute_pipeline_with_plan(
+        doc_store, index, embedder, reranker, expander, scope, query, opts, clock, &plan,
+    )
+    .await?;
+
+    if outcome.chunks.is_empty() && skipped_candidate_arm && outcome.note.is_none() {
+        tracing::info!(
+            class = signature.class.as_str(),
+            "adaptive plan returned nothing; re-running the full plan once"
+        );
+        outcome = execute_pipeline_with_plan(
+            doc_store,
+            index,
+            embedder,
+            reranker,
+            expander,
+            scope,
+            query,
+            opts,
+            clock,
+            &ArmPlan::all(),
+        )
+        .await?;
+        outcome.adaptive = Some(AdaptiveStats {
+            class: signature.class,
+            skipped_arms: Vec::new(),
+            arm_plan_fallback: true,
+        });
+        return Ok(outcome);
+    }
+
+    outcome.adaptive = Some(AdaptiveStats {
+        class: signature.class,
+        skipped_arms: signature.skipped_arms(),
+        arm_plan_fallback: false,
+    });
+    Ok(outcome)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_pipeline_with_plan(
+    doc_store: &Arc<dyn DocumentStore>,
+    index: &Arc<dyn RetrievalIndex>,
+    embedder: &Arc<dyn Embedder>,
+    reranker: &Arc<dyn Reranker>,
+    expander: &Arc<dyn QueryExpander>,
+    scope: &DocumentScope,
+    query: &str,
+    opts: &RetrievalOptions,
+    clock: &dyn Clock,
+    plan: &ArmPlan,
+) -> Result<RetrievalOutcome, EngineError> {
     let total_sw = Stopwatch::start(clock);
     let mut timings = StageTimings::default();
     let mut degrades: Vec<RetrievalDegrade> = Vec::new();
@@ -492,7 +908,15 @@ pub async fn execute_pipeline(
     // 0. The page-image arm runs alongside everything below: its query embedding
     // is a second round trip to a different model, and it must not add to the
     // text arms' latency. Joined after the rerank, where it is fused.
-    let page_task = opts.page_arm.clone().map(|arm| {
+    //
+    // Adaptive mode may skip the arm entirely: no task is spawned, so its query
+    // embed and page search (the expensive part) never happen.
+    let page_task = if plan.page_image {
+        opts.page_arm.clone()
+    } else {
+        None
+    }
+    .map(|arm| {
         let scope = scope.clone();
         let query = query.to_string();
         tokio::spawn(async move {
@@ -502,9 +926,10 @@ pub async fn execute_pipeline(
         })
     });
 
-    // 1. Query expansion.
+    // 1. Query expansion. Expansion feeds the dense arm only, so it is skipped
+    // with that arm rather than spending a paid call for nothing.
     let expand_sw = Stopwatch::start(clock);
-    let variants: Vec<String> = if opts.expansion_enabled {
+    let variants: Vec<String> = if opts.expansion_enabled && plan.dense {
         match expander.expand(query).await {
             Ok(mut v) => {
                 if !v.iter().any(|q| q == query) {
@@ -525,31 +950,32 @@ pub async fn execute_pipeline(
 
     // 2. Query embedding & sparse encoding
     let embed_sw = Stopwatch::start(clock);
-    let embeds = variants.iter().map(|q| embedder.embed_query_detailed(q));
-    let vectors = futures::future::join_all(embeds).await;
-    timings.query_embed_ms = embed_sw.elapsed_ms();
-
-    let mut query_vectors: Vec<Vec<f32>> = Vec::with_capacity(vectors.len());
     let mut cached: Option<bool> = None;
     let mut embed_failed = false;
-    for res in vectors {
-        match res {
-            Ok(qe) => {
-                cached = Some(cached.map_or(qe.cached, |seen| seen && qe.cached));
-                query_vectors.push(qe.vector);
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "query embed failed");
-                embed_failed = true;
+    let mut query_vectors: Vec<Vec<f32>> = Vec::new();
+    if plan.dense {
+        let embeds = variants.iter().map(|q| embedder.embed_query_detailed(q));
+        let vectors = futures::future::join_all(embeds).await;
+        for res in vectors {
+            match res {
+                Ok(qe) => {
+                    cached = Some(cached.map_or(qe.cached, |seen| seen && qe.cached));
+                    query_vectors.push(qe.vector);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "query embed failed");
+                    embed_failed = true;
+                }
             }
         }
     }
+    timings.query_embed_ms = embed_sw.elapsed_ms();
     timings.query_embed_cached = cached.unwrap_or(false);
-    if embed_failed || query_vectors.is_empty() {
+    if plan.dense && (embed_failed || query_vectors.is_empty()) {
         degrades.push(RetrievalDegrade::VectorArmFailed);
     }
 
-    let sparse_query = if opts.hybrid_bm25_enabled {
+    let sparse_query = if opts.hybrid_bm25_enabled && plan.sparse {
         let sq = KeywordQuery::from_text(query);
         if sq.is_empty() { None } else { Some(sq) }
     } else {
@@ -721,43 +1147,48 @@ pub async fn execute_pipeline(
             .is_none_or(|sim| sim >= opts.min_similarity || c.scores.sparse.is_some())
     });
 
-    // 4b. The graph arm, fused as one more ranked list.
+    // 4b. The graph arm, fused as one more ranked list. Adaptive mode may skip
+    // it: no seed lookup and no scoped-graph walk happens at all.
     let graph_sw = Stopwatch::start(clock);
-    let graph_ranks = match &opts.graph_arm {
-        None => HashMap::new(),
-        Some(arm) => {
-            let ranking = match arm.rank(scope, query, clock).await {
-                Ok(ranking) => ranking,
-                Err(e) => {
-                    // A failed arm is a degraded search, not a failed one. The
-                    // other arms' candidates are already in `candidates` and go
-                    // out unchanged; what must not happen is silence, because a
-                    // graph arm that quietly stopped running looks exactly like a
-                    // graph arm that has stopped helping (AGENTS rule 6).
-                    tracing::warn!(error = %e, "graph arm failed (non-fatal)");
-                    degrades.push(RetrievalDegrade::GraphArmUnavailable);
-                    GraphRanking::default()
-                }
-            };
-            if ranking.chunks.is_empty() {
-                // No entity in this scope matches the query. That is the graph
-                // having nothing to say, not a failure, so no degrade.
-                tracing::debug!(
-                    seeds = ranking.seeds,
-                    unmatched_terms = ranking.unmatched_terms,
-                    "graph arm had nothing to say",
-                );
-                HashMap::new()
-            } else {
-                match fuse_graph(index, scope, &ranking.chunks, &candidates, pool_size).await {
-                    Ok((fused, ranks)) => {
-                        candidates = fused;
-                        ranks
-                    }
+    let graph_ranks = if !plan.graph {
+        HashMap::new()
+    } else {
+        match &opts.graph_arm {
+            None => HashMap::new(),
+            Some(arm) => {
+                let ranking = match arm.rank(scope, query, clock).await {
+                    Ok(ranking) => ranking,
                     Err(e) => {
-                        tracing::warn!(error = %e, "graph arm fetch failed (non-fatal)");
+                        // A failed arm is a degraded search, not a failed one. The
+                        // other arms' candidates are already in `candidates` and go
+                        // out unchanged; what must not happen is silence, because a
+                        // graph arm that quietly stopped running looks exactly like a
+                        // graph arm that has stopped helping (AGENTS rule 6).
+                        tracing::warn!(error = %e, "graph arm failed (non-fatal)");
                         degrades.push(RetrievalDegrade::GraphArmUnavailable);
-                        HashMap::new()
+                        GraphRanking::default()
+                    }
+                };
+                if ranking.chunks.is_empty() {
+                    // No entity in this scope matches the query. That is the graph
+                    // having nothing to say, not a failure, so no degrade.
+                    tracing::debug!(
+                        seeds = ranking.seeds,
+                        unmatched_terms = ranking.unmatched_terms,
+                        "graph arm had nothing to say",
+                    );
+                    HashMap::new()
+                } else {
+                    match fuse_graph(index, scope, &ranking.chunks, &candidates, pool_size).await {
+                        Ok((fused, ranks)) => {
+                            candidates = fused;
+                            ranks
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "graph arm fetch failed (non-fatal)");
+                            degrades.push(RetrievalDegrade::GraphArmUnavailable);
+                            HashMap::new()
+                        }
                     }
                 }
             }
@@ -765,7 +1196,109 @@ pub async fn execute_pipeline(
     };
     timings.graph_arm_ms = graph_sw.elapsed_ms();
 
+    // 4c. The tree arm (`DEC-4`): structural questions only, never the full
+    // corpus. The classifier runs regardless of adaptive mode, because the
+    // gate is a property of the question, not of whether other arms were
+    // skipped. A failed outline read or page fetch is one more degraded arm;
+    // the candidates already scored go out unchanged (AGENTS rule 6).
+    let mut tree_stats: Option<TreeStats> = None;
+    let mut tree_ids: HashSet<ChunkId> = HashSet::new();
+    let tree_class = opts.tree_arm.as_ref().map(|_| classify_query(query).class);
+    if let (Some(arm), Some(QueryClass::Structural)) = (opts.tree_arm.as_ref(), tree_class) {
+        match arm.rank(doc_store, index, scope, query).await {
+            Ok(ranking) => {
+                if !ranking.chunks.is_empty() {
+                    tree_ids = tree_chunk_ids(&ranking.chunks);
+                    candidates = fuse_tree(candidates, ranking.chunks, &arm.config);
+                }
+                if ranking.stats.nodes > 0 {
+                    tree_stats = Some(ranking.stats);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "tree arm failed (non-fatal)");
+                degrades.push(RetrievalDegrade::TreeArmFailed);
+            }
+        }
+    }
+    // 4c. The global (graph community) arm, `DEC-5`. It runs only when the flag
+    // is on *and* the query is aggregative: a summary of a whole community
+    // cannot answer "what does chapter 2 say", and running it for every query
+    // would spend latency on the questions it was measured to hurt. With the
+    // flag off (`opts.global_arm == None`) nothing here executes, so the
+    // pipeline is byte-identical to the one before this arm existed.
+    // No clock read when the flag is off: a request that never looked at this
+    // arm must not pay even two `Instant::now` calls for it.
+    let global_sw = opts.global_arm.as_ref().map(|_| Stopwatch::start(clock));
+    let mut global_stats: Option<GlobalArmStats> = None;
+    let mut global_ranks: HashMap<ChunkId, u32> = HashMap::new();
+    if let Some(arm) = opts.global_arm.as_ref() {
+        let aggregative = classify_query(query).class == QueryClass::Aggregative;
+        if aggregative {
+            match arm.rank(scope, query).await {
+                Ok(ranking) => {
+                    // No communities is the arm having nothing to say, not a
+                    // failure: stats says so and the other arms go out unchanged.
+                    global_stats = Some(GlobalArmStats {
+                        communities: ranking.communities,
+                        chunks: ranking.chunks.len(),
+                    });
+                    if !ranking.chunks.is_empty() {
+                        match fuse_global(
+                            index,
+                            scope,
+                            &ranking.chunks,
+                            &candidates,
+                            arm.config().weight,
+                            opts.rrf_k,
+                            pool_size,
+                        )
+                        .await
+                        {
+                            Ok((fused, ranks)) => {
+                                candidates = fused;
+                                global_ranks = ranks;
+                            }
+                            Err(e) => {
+                                // A failed arm is a degraded search, not a failed
+                                // one: the candidates already fused go out as they
+                                // are, and the response names the failure.
+                                tracing::warn!(error = %e, "global arm fetch failed (non-fatal)");
+                                degrades.push(RetrievalDegrade::GlobalArmFailed);
+                                // Nothing was fused, so the count is 0 even
+                                // though the communities were selected.
+                                global_stats = Some(GlobalArmStats {
+                                    communities: ranking.communities,
+                                    chunks: 0,
+                                });
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "global arm failed (non-fatal)");
+                    degrades.push(RetrievalDegrade::GlobalArmFailed);
+                }
+            }
+        }
+    }
+    if let Some(stopwatch) = global_sw {
+        timings.global_arm_ms = stopwatch.elapsed_ms();
+    }
+
     let mut hits: Vec<SearchHit> = candidates.into_iter().map(candidate_to_hit).collect();
+
+    // A tree hit is one the outline brought in; the text arms never scored it.
+    for hit in &mut hits {
+        if tree_ids.contains(&hit.chunk.id) {
+            hit.retrieval = Some(
+                hit.retrieval
+                    .clone()
+                    .unwrap_or_else(|| RetrievalProvenance::unscored(ProvenanceArm::Tree))
+                    .with_arm(ProvenanceArm::Tree),
+            );
+        }
+    }
 
     // The graph arm's rank is provenance, not a score: the fused score a graph
     // chunk carries is an RRF sum like everyone else's, and comparing it to
@@ -778,6 +1311,17 @@ pub async fn execute_pipeline(
                     .unwrap_or_else(|| RetrievalProvenance::unscored(ProvenanceArm::Graph))
                     .with_arm(ProvenanceArm::Graph)
                     .with_graph_rank(*rank),
+            );
+        }
+        // The global arm's position is provenance too, and it is the only record
+        // that a chunk reached the answer through a community summary rather
+        // than through its own text.
+        if global_ranks.contains_key(&hit.chunk.id) {
+            hit.retrieval = Some(
+                hit.retrieval
+                    .clone()
+                    .unwrap_or_else(|| RetrievalProvenance::unscored(ProvenanceArm::Global))
+                    .with_arm(ProvenanceArm::Global),
             );
         }
     }
@@ -798,7 +1342,7 @@ pub async fn execute_pipeline(
     let max_chunks = opts.max_chunks.clamp(1, 50) as usize;
     let rerank_sw = Stopwatch::start(clock);
     let rerank_future = async {
-        if opts.rerank_enabled && hits.len() > 1 {
+        if plan.rerank && opts.rerank_enabled && hits.len() > 1 {
             let final_k = opts.rerank_final_k.clamp(1, 100);
             // 0 means no limit: every candidate goes to the reranker, as before L.4.
             let candidate_limit = match opts.rerank_candidate_limit {
@@ -839,9 +1383,25 @@ pub async fn execute_pipeline(
                 })
                 .collect();
 
+            // With a relevance floor (RET-2) every candidate needs a score, or the
+            // floor would drop every hit below `final_k` for having none and cut
+            // the answer to `final_k` hits. So the reranker scores them all (a
+            // rerank API bills per document sent, not per result returned), while
+            // the order below stays exactly the floorless one: the first
+            // `final_k` by rerank score, the rest in fused order.
+            let request_k = if opts.min_score.is_some() {
+                u32::try_from(candidates.len())
+                    .unwrap_or(u32::MAX)
+                    .max(final_k)
+            } else {
+                final_k
+            };
             let rerank_timeout = std::time::Duration::from_millis(opts.rerank_timeout_ms.max(100));
-            match tokio::time::timeout(rerank_timeout, reranker.rerank(query, candidates, final_k))
-                .await
+            match tokio::time::timeout(
+                rerank_timeout,
+                reranker.rerank(query, candidates, request_k),
+            )
+            .await
             {
                 Ok(Ok(ordered)) => {
                     // Remember the fused order so hits the reranker did not return are
@@ -853,11 +1413,20 @@ pub async fn execute_pipeline(
                         hit_map.entry(h.chunk.id.0.clone()).or_default().push(h);
                     }
                     let mut reordered: Vec<SearchHit> = Vec::new();
+                    // Scores of candidates past `final_k`, attached in fused order.
+                    let mut tail_scores: HashMap<String, f32> = HashMap::new();
                     for (rank, item) in ordered.into_iter().enumerate() {
+                        if rank >= final_k as usize {
+                            tail_scores.entry(item.id.0.clone()).or_insert(item.score);
+                            continue;
+                        }
                         if let Some(hits_for_id) = hit_map.get_mut(&item.id.0) {
                             if !hits_for_id.is_empty() {
                                 let mut hit = hits_for_id.remove(0);
                                 hit.rank = rank as u32;
+                                // Keep the score the floor will compare against.
+                                // It was previously thrown away after ordering.
+                                hit.rerank_score = Some(item.score);
                                 reordered.push(hit);
                             }
                         }
@@ -866,6 +1435,9 @@ pub async fn execute_pipeline(
                         if let Some(remaining_hits) = hit_map.get_mut(&id) {
                             for mut hit in remaining_hits.drain(..) {
                                 hit.rank = reordered.len() as u32;
+                                if let Some(score) = tail_scores.get(&id) {
+                                    hit.rerank_score = Some(*score);
+                                }
                                 reordered.push(hit);
                             }
                         }
@@ -903,6 +1475,78 @@ pub async fn execute_pipeline(
         .instrument(stage_span("rerank", "RERANKER"))
         .await;
     timings.rerank_ms = rerank_sw.elapsed_ms();
+
+    // 5a. Optional relevance floor (RET-2). This is the only place the
+    // pipeline answers "nothing here is relevant" instead of "here is the
+    // nearest of nothing".
+    //
+    // It runs after the rerank because the reranker's score is the one that
+    // means the same across queries when a reranker ran. It runs before the
+    // page arm, neighbours and figures because those phases attach context to
+    // a ranked hit: with no hit left there is nothing to attach, and letting
+    // the page arm repopulate the answer would defeat the floor.
+    let mut floor_stats: Option<FloorStats> = None;
+    let mut floor_note: Option<String> = None;
+    if let Some(threshold) = opts.min_score {
+        let rerank_ran =
+            opts.rerank_enabled && reranked_hits.iter().any(|h| h.rerank_score.is_some());
+        let rerank_failed = degrades.contains(&RetrievalDegrade::RerankUnavailable);
+        let vector_failed = degrades.contains(&RetrievalDegrade::VectorArmFailed);
+        // A floor whose score arm failed must not run: an empty answer from a
+        // failed arm is indistinguishable from "nothing is relevant", which is
+        // exactly the silent failure AGENTS rule 6 forbids.
+        let skip = (opts.rerank_enabled && rerank_failed) || (!rerank_ran && vector_failed);
+        if skip {
+            tracing::warn!(
+                min_score = threshold,
+                "relevance floor skipped: the arm that supplies its score degraded"
+            );
+            degrades.push(RetrievalDegrade::FloorSkipped);
+        } else {
+            let kind = if rerank_ran {
+                FloorScoreKind::Rerank
+            } else {
+                FloorScoreKind::Dense
+            };
+            let signature = kb_core::classify_query(query);
+            let (kept, dropped) = apply_relevance_floor(reranked_hits, kind, threshold, &signature);
+            reranked_hits = kept;
+            floor_stats = Some(FloorStats {
+                score_kind: kind,
+                dropped,
+            });
+            if dropped > 0 && reranked_hits.is_empty() {
+                floor_note = Some(format!(
+                    "No result passed the relevance floor (minScore={threshold}, score={}): \
+                     {} candidate(s) were dropped",
+                    kind.as_str(),
+                    dropped
+                ));
+                // Nothing is left to rank, so do not let the page arm turn
+                // this into a non-empty visual answer.
+                if let Some(task) = page_task.as_ref() {
+                    task.abort();
+                }
+                timings.total_ms = total_sw.elapsed_ms();
+                timings.engine_total_ms = timings.total_ms;
+                return Ok(RetrievalOutcome {
+                    chunks: Vec::new(),
+                    sources: Vec::new(),
+                    context: String::new(),
+                    degrades,
+                    note: floor_note,
+                    floor: floor_stats,
+                    boost: opts.boost.as_ref().map(|_| BoostStats::default()),
+                    adaptive: None,
+                    tree: tree_stats,
+                    // The global arm runs after the floor, so a floored-to-empty
+                    // answer has not reached it: absent is the honest value.
+                    global_arm: None,
+                    timings,
+                });
+            }
+        }
+    }
 
     // 5b. Fuse the page-image arm's pages with the ranked text hits, at page
     // level. A failed or slow arm degrades the search; it never empties it.
@@ -969,7 +1613,8 @@ pub async fn execute_pipeline(
                 // one by weighted RRF; any failure keeps the order and is
                 // reported, never swallowed (AGENTS rule 6). Every page it sees
                 // comes from a hit that already passed scope.
-                if opts.rerank_enabled
+                if plan.rerank
+                    && opts.rerank_enabled
                     && let Some(vision) = arm.vision.as_ref()
                 {
                     let vision_sw = Stopwatch::start(clock);
@@ -1009,6 +1654,23 @@ pub async fn execute_pipeline(
     }
     timings.pages_ms = pages_sw.elapsed_ms();
 
+    // 5d. Optional recency/authority boosts (`RET-4`). Deliberately after the
+    // floor: the floor must keep comparing the raw rerank/dense score, and a
+    // boost that moved a hit below the threshold would erase the only
+    // cross-query meaning the floor has. It runs before the cut to
+    // `max_chunks`, so a promoted hit is not lost to a pre-boost truncation.
+    // The document rows are the ones already read for title enrichment — no
+    // extra round trip — and a document missing from that map simply gets no
+    // boost, which is the same as "the document has no field".
+    let boost_stats = opts
+        .boost
+        .as_ref()
+        .filter(|config| !config.is_off())
+        .map(|config| {
+            let now = opts.boost_now.unwrap_or_else(Utc::now);
+            apply_boosts(&mut reranked_hits, &meta_cache, config, now)
+        });
+
     // 6. Cut to max_chunks (1..=50)
     reranked_hits.truncate(max_chunks);
     // The ranking, before neighbours and figures are woven in for context.
@@ -1016,7 +1678,7 @@ pub async fn execute_pipeline(
 
     // 7. Neighbours (when window > 0)
     let neighbours_sw = Stopwatch::start(clock);
-    if opts.neighbour_window > 0 && !reranked_hits.is_empty() {
+    if plan.neighbour && opts.neighbour_window > 0 && !reranked_hits.is_empty() {
         let mut by_doc: HashMap<DocumentId, Vec<u32>> = HashMap::new();
         for h in &reranked_hits {
             if let Some(idx) = h.chunk.metadata.chunk_index {
@@ -1071,7 +1733,7 @@ pub async fn execute_pipeline(
 
     // 8. Figures (when figure_limit > 0)
     let figures_sw = Stopwatch::start(clock);
-    if opts.figure_limit > 0 && !reranked_hits.is_empty() {
+    if plan.figure && opts.figure_limit > 0 && !reranked_hits.is_empty() {
         let mut retrieved_doc_ids: Vec<DocumentId> = Vec::new();
         let mut seen_docs: HashSet<DocumentId> = HashSet::new();
         for c in &reranked_hits {
@@ -1172,6 +1834,12 @@ pub async fn execute_pipeline(
         sources,
         context,
         degrades,
+        note: floor_note,
+        floor: floor_stats,
+        boost: boost_stats,
+        adaptive: None,
+        tree: tree_stats,
+        global_arm: global_stats,
         timings,
     })
 }

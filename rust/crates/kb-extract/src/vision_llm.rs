@@ -87,12 +87,15 @@ impl VisionLlmExtractor {
         if page_count == 0 || page_count <= self.segment_pages {
             let text = self.extract_single_call(pdf_bytes, "document.pdf").await?;
             return Ok(ExtractionResult {
+                tables: Vec::new(),
+                ocr: None,
                 content: text,
                 file_type: "pdf".to_string(),
                 used_ocr: true,
                 figures: Vec::new(),
                 pages_blocks: None,
                 page_map: None,
+                outline: None,
                 error: None,
             });
         }
@@ -126,12 +129,15 @@ impl VisionLlmExtractor {
 
         let combined = results.join("\n\n");
         Ok(ExtractionResult {
+            tables: Vec::new(),
+            ocr: None,
             content: combined,
             file_type: "pdf".to_string(),
             used_ocr: true,
             figures: Vec::new(),
             pages_blocks: None,
             page_map: None,
+            outline: None,
             error: None,
         })
     }

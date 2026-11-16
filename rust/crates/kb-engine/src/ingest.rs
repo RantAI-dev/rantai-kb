@@ -24,10 +24,11 @@ use kb_core::{
 use kb_ports::{
     BlobStore, ChunkId, ChunkType, DocumentId, DocumentStore, Embedder, EntityExtractor,
     EntityUpsert, ExtractedFigure, ExtractionOptions, Extractor, GraphStore, IndexUnit, JobRecord,
-    JobStore, PortError, ProgressSink, RelationUpsert, RetrievalIndex, asset_path,
+    JobStore, PortError, ProgressSink, RelationUpsert, RetrievalIndex, TableStore, asset_path,
 };
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 
 /// Chunking settings, copied from the call the Bun worker makes
 /// (`src/lib/ingest/index-document.ts`, `smartChunkDocument` options).
@@ -48,6 +49,10 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 /// `updateIngestJobProgress` throttles in `src/lib/ingest/job.ts:72`.
 pub const PROGRESS_EMIT_MIN_GAP: Duration = Duration::from_millis(900);
 
+/// How many jobs the worker runs at once when nothing says otherwise
+/// (`KB_JOB_WORKERS`).
+pub const DEFAULT_JOB_WORKERS: usize = 6;
+
 /// How a claimed job ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobOutcome {
@@ -63,10 +68,11 @@ pub enum JobOutcome {
 /// Tunables, one per `KB_INGEST_*` environment variable.
 #[derive(Debug, Clone)]
 pub struct IngestSettings {
-    /// Jobs claimed per poll. This slice runs a claimed job to completion
-    /// before claiming the next one, so a value above 1 only widens the batch
-    /// a single tick takes.
-    pub claims_per_tick: usize,
+    /// How many jobs may run at once (`KB_JOB_WORKERS`, default 6).
+    ///
+    /// Each admitted job runs as its own task with its own heartbeat, so a
+    /// long document no longer holds every small file behind it.
+    pub job_workers: usize,
     /// How often the queue is polled for work.
     pub poll_interval: Duration,
     /// How long a `processing` job may go without an update before it is
@@ -98,12 +104,14 @@ pub struct IngestSettings {
     /// e5-small at 128 tokens embeds ~2x the chunks/s of a full ~234-token chunk
     /// (`docs/eval-ab/lite-2core`).
     pub embedding_max_chars: usize,
+    /// How many seats each stage of the pipeline has (`KB_SEATS`).
+    pub seats: crate::seats::SeatCapacity,
 }
 
 impl Default for IngestSettings {
     fn default() -> Self {
         Self {
-            claims_per_tick: 1,
+            job_workers: DEFAULT_JOB_WORKERS,
             poll_interval: Duration::from_secs(3),
             stale_after: Duration::from_secs(300),
             max_attempts: 3,
@@ -114,6 +122,7 @@ impl Default for IngestSettings {
             strip_page_furniture: false,
             entity_extraction_enabled: true,
             embedding_max_chars: 0,
+            seats: crate::seats::SeatCapacity::default(),
         }
     }
 }
@@ -156,6 +165,11 @@ impl Default for CancelToken {
 }
 
 /// The ingest pipeline. Holds ports, names no adapter.
+///
+/// Cloning a worker shares it: the ports, the seat pools and the progress
+/// throttle are the same, which is what lets the worker run several jobs at
+/// once.
+#[derive(Clone)]
 pub struct IngestWorker {
     jobs: Arc<dyn JobStore>,
     documents: Arc<dyn DocumentStore>,
@@ -169,12 +183,22 @@ pub struct IngestWorker {
     graph: Option<Arc<dyn GraphStore>>,
     /// The page-image arm's ingest side, when configured.
     page_ingest: Option<Arc<crate::page_arm::PageIngest>>,
+    /// The visual stage (`ING-5`), when configured. Without it, layout crops
+    /// are indexed by caption and page text exactly as before.
+    visuals: Option<Arc<crate::visuals::VisualPipeline>>,
+    /// The table store (`TBL-1`), when configured. Without it a document's
+    /// grids are not stored and its table units are not indexed; everything
+    /// else the ingest does is unchanged.
+    tables: Option<Arc<dyn TableStore>>,
     progress_sink: Option<Arc<dyn ProgressSink>>,
     /// Per-job throttle state for progress emits, mirroring `lastEmit` in
     /// `src/lib/ingest/job.ts`: always emit on a step change, otherwise at most
     /// one emit per `PROGRESS_EMIT_MIN_GAP`. Without it a large book produces
     /// hundreds of socket frames per second for a single document.
-    emit_state: Mutex<HashMap<String, (Instant, String)>>,
+    emit_state: Arc<Mutex<HashMap<String, (Instant, String)>>>,
+    /// The stage seats (`ING-6`): how many jobs may be in each stage at once.
+    /// Shared by every job the worker runs.
+    seats: crate::seats::StageSeats,
     settings: IngestSettings,
 }
 
@@ -200,8 +224,11 @@ impl IngestWorker {
             entity_extractor: None,
             graph: None,
             page_ingest: None,
+            visuals: None,
+            tables: None,
             progress_sink: None,
-            emit_state: Mutex::new(HashMap::new()),
+            emit_state: Arc::new(Mutex::new(HashMap::new())),
+            seats: settings.seats.seats(),
             settings,
         }
     }
@@ -232,6 +259,20 @@ impl IngestWorker {
         self
     }
 
+    /// Make every picture in a document searchable by what it shows (`ING-5`).
+    #[must_use]
+    pub fn with_visuals(mut self, visuals: Arc<crate::visuals::VisualPipeline>) -> Self {
+        self.visuals = Some(visuals);
+        self
+    }
+
+    /// Store the document's tables and index them as retrieval units (`TBL-1`).
+    #[must_use]
+    pub fn with_table_store(mut self, tables: Arc<dyn TableStore>) -> Self {
+        self.tables = Some(tables);
+        self
+    }
+
     /// Equip the worker with a progress sink.
     #[must_use]
     pub fn with_progress_sink(mut self, sink: Arc<dyn ProgressSink>) -> Self {
@@ -241,59 +282,83 @@ impl IngestWorker {
 
     /// Poll until cancelled, sweeping for stranded jobs on `reclaim_interval`.
     ///
-    /// The job in flight is never abandoned: cancellation is only observed
-    /// between claims, because a half-indexed document is exactly the state the
-    /// stale reclaim exists to clean up.
+    /// Up to `job_workers` jobs run at once, each in its own task with its own
+    /// heartbeat, progress events and terminal events. A claimed job is never
+    /// abandoned: cancellation stops the claiming, and the jobs already
+    /// admitted are given until they finish (the caller bounds that wait with
+    /// its drain timeout), because a half-indexed document is exactly the
+    /// state the stale reclaim exists to clean up.
     pub async fn run(&self, cancel: CancelToken) {
         let mut cancelled = cancel.subscribe();
         let mut last_reclaim = Instant::now();
         self.reclaim().await;
+        let mut inflight = JoinSet::new();
         loop {
             if *cancelled.borrow() {
-                return;
+                break;
             }
-            let queue_may_have_more = self.tick().await;
+            // Fill the free slots with claimed jobs.
+            self.claim_into(&mut inflight).await;
+            if inflight.is_empty() {
+                // Nothing is running and nothing was claimed: wait for work.
+                tokio::select! {
+                    () = tokio::time::sleep(self.settings.poll_interval) => {}
+                    _ = cancelled.changed() => {}
+                }
+            } else {
+                // Work is in flight: wake when a job finishes (its slot is
+                // refilled at once), and on the poll interval too, so a file
+                // uploaded while a long document runs is claimed into a free
+                // slot instead of waiting for that document to finish, and the
+                // stale reclaim keeps its schedule.
+                tokio::select! {
+                    joined = inflight.join_next() => {
+                        if let Some(Err(err)) = joined {
+                            tracing::error!(error = %err, "ingest job task failed");
+                        }
+                    }
+                    () = tokio::time::sleep(self.settings.poll_interval) => {}
+                    _ = cancelled.changed() => {}
+                }
+            }
+            if *cancelled.borrow() {
+                break;
+            }
             if last_reclaim.elapsed() >= self.settings.reclaim_interval {
                 self.reclaim().await;
                 last_reclaim = Instant::now();
             }
-            // A full tick means the queue may still hold work: claim again at
-            // once. Sleeping here put a whole poll interval between every
-            // `claims_per_tick` jobs, so a 3,000-file upload at the default 3 s
-            // poll spent hours asleep with work waiting.
-            if queue_may_have_more {
-                continue;
-            }
-            tokio::select! {
-                () = tokio::time::sleep(self.settings.poll_interval) => {}
-                _ = cancelled.changed() => {
-                    if *cancelled.borrow() {
-                        // One last sweep, so a job the departing worker was
-                        // holding does not sit stranded until the next boot.
-                        self.reclaim().await;
-                        return;
-                    }
-                }
+        }
+        // The jobs that were admitted are finished before the worker returns.
+        // One last sweep, so a job the departing worker was holding does not
+        // sit stranded until the next boot.
+        self.reclaim().await;
+        while let Some(joined) = inflight.join_next().await {
+            if let Err(err) = joined {
+                tracing::error!(error = %err, "ingest job task failed");
             }
         }
     }
 
-    /// Claim up to `claims_per_tick` jobs and run them. Returns `true` when
-    /// every claim found a job, so the queue may hold more.
-    async fn tick(&self) -> bool {
-        for _ in 0..self.settings.claims_per_tick.max(1) {
+    /// Claim jobs into the free slots and start them.
+    ///
+    /// Claims as many as there is room for, so a backlog does not wait for a
+    /// poll interval between documents.
+    async fn claim_into(&self, inflight: &mut JoinSet<JobOutcome>) {
+        let slots = self.settings.job_workers.max(1);
+        while inflight.len() < slots {
             match self.jobs.claim_next_pending().await {
                 Ok(Some(job)) => {
-                    self.run_job(job).await;
+                    let worker = self.clone();
+                    inflight.spawn(async move { worker.run_job(job).await });
                 }
-                Ok(None) => return false,
+                Ok(None) => return,
                 Err(err) => {
                     tracing::warn!(error = %err, "ingest claim failed");
-                    return false;
+                    return;
                 }
             }
         }
-        true
     }
 
     /// Claim and run one job. Returns `false` when the queue was empty.
@@ -321,7 +386,10 @@ impl IngestWorker {
         let _heartbeat = self.start_heartbeat(&job.id);
         let started = Instant::now();
         tracing::info!(job_id = %job.id, filename = %job.filename, "ingest claimed");
-        let outcome = match self.index(&job, started).await {
+        // The job's place in every queue it waits in: the oldest upload is
+        // served first (`ING-6`).
+        let priority = crate::seats::SeatPriority::of_job(&job);
+        let outcome = match self.index(&job, started, &priority).await {
             Ok((chunks, document_id)) => {
                 if let Err(err) = self.jobs.finish_success(&job.id, &document_id).await {
                     // The chunks are already stored and the document is ready;
@@ -332,7 +400,7 @@ impl IngestWorker {
                 JobOutcome::Ready { chunks }
             }
             Err(reason) => {
-                self.mark_failed(&job, &reason).await;
+                self.mark_failed(&job, &reason, &priority).await;
                 JobOutcome::Failed { reason }
             }
         };
@@ -374,6 +442,7 @@ impl IngestWorker {
         &self,
         job: &JobRecord,
         started: Instant,
+        priority: &crate::seats::SeatPriority,
     ) -> Result<(usize, DocumentId), String> {
         if job.tenant_id.as_str().trim().is_empty() {
             return Err("job has no tenant".to_string());
@@ -423,16 +492,26 @@ impl IngestWorker {
         )
         .await;
 
+        // The extract seat covers the local reading. It is lent to the
+        // extractor through the options: an extractor about to wait on a
+        // remote service (the OCR router, a layout server) gives it back
+        // first, so a document waiting at OCR holds no seat and the local work
+        // of the documents behind it goes on (ING-6, as paragon's kb-bridge
+        // does). Whatever is still held is released when the call returns.
+        let seat =
+            kb_ports::SeatRelease::holding(self.seats.extract.acquire(priority.clone()).await);
         let options = ExtractionOptions {
             figures: policy.figures,
             force_layout: policy.force_layout,
             document_type: doc_type,
+            seat: seat.clone(),
         };
         let extraction = self
             .extractor
             .extract_with_options(&job.filename, mime, &bytes, options)
-            .await
-            .map_err(|e| e.to_string())?;
+            .await;
+        seat.release();
+        let extraction = extraction.map_err(|e| e.to_string())?;
 
         // A parser that could not read the file reports the reason and leaves
         // `content` empty (`extract.ts:192`). Indexing that would put an empty
@@ -456,15 +535,73 @@ impl IngestWorker {
         );
 
         let file_size = i32::try_from(bytes.len()).unwrap_or(i32::MAX);
-        self.documents
-            .update_extracted_content(
-                document_id,
-                &content,
-                Some(&extraction.file_type),
-                Some(file_size),
-            )
-            .await
-            .map_err(|e| format!("document update failed: {e}"))?;
+        {
+            // The store seat: the document row is a write like any other.
+            let _seat = self.seats.store.acquire(priority.clone()).await;
+            self.documents
+                .update_extracted_content(
+                    document_id,
+                    &content,
+                    Some(&extraction.file_type),
+                    Some(file_size),
+                )
+                .await
+                .map_err(|e| format!("document update failed: {e}"))?;
+        }
+
+        // The section hierarchy the tree arm navigates (DEC-4). Stored
+        // additively in `metadata.outline` (JSONB, no schema migration) and
+        // only for a format that produced one. There is no model call: the
+        // extraction read bookmarks or numbered headings from the same bytes it
+        // and the page text already parsed. A failure here is logged and
+        // non-fatal; the document indexes normally and the tree arm simply has
+        // nothing for it until a re-ingest.
+        // An extraction with no outline (a cache entry from before DEC-4, or an
+        // OCR/layout parser) gets one from the extractor's free outline read,
+        // so a paid extraction is never repeated for it.
+        let fallback_outline = if extraction.outline.is_none() {
+            let pages: Vec<String> = extraction
+                .page_map
+                .as_ref()
+                .map(|map| {
+                    let len = map.iter().map(|p| p.page as usize + 1).max().unwrap_or(0);
+                    let mut pages = vec![String::new(); len];
+                    for p in map {
+                        pages[p.page as usize].clone_from(&p.text);
+                    }
+                    pages
+                })
+                .unwrap_or_default();
+            let outline_mime = if extraction.file_type.eq_ignore_ascii_case("pdf") {
+                "application/pdf"
+            } else {
+                mime
+            };
+            self.extractor.outline(outline_mime, &bytes, &pages).await
+        } else {
+            None
+        };
+        if let Some(outline) = extraction.outline.as_ref().or(fallback_outline.as_ref()) {
+            let mut outline = outline.clone();
+            outline.document_title = Some(title.clone());
+            let patch = json!({ "outline": outline });
+            let _seat = self.seats.store.acquire(priority.clone()).await;
+            if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
+                tracing::warn!(error = %e, "could not store the document outline");
+            }
+        }
+
+        // What the OCR offload did (ING-6): pages sent, pages served from the
+        // cache, pages read locally and the pages that could not be read. An
+        // operator sees a lost page without opening the logs. Additive in
+        // `metadata.ocr`, no schema migration; formats that never go to OCR
+        // carry no report.
+        if let Some(ocr) = extraction.ocr.as_ref() {
+            let patch = json!({ "ocr": ocr });
+            if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
+                tracing::warn!(error = %e, "could not store the OCR report");
+            }
+        }
 
         self.progress(job, StepProgress::of(IngestStep::Chunking), started, &flags)
             .await;
@@ -522,6 +659,22 @@ impl IngestWorker {
             )
         });
 
+        // The tables (`TBL-1`): store each grid with its manifest and index the
+        // two retrieval units. A document with no tables is untouched, and a
+        // store failure fails the job like any other store failure; a grid that
+        // could not be parsed never reaches here (the extractor notes it).
+        self.index_tables(
+            job,
+            document_id,
+            &title,
+            category_of(&params),
+            subcategory_of(&params).as_deref(),
+            &extraction.tables,
+            &mut chunks,
+            priority,
+        )
+        .await?;
+
         // Entity / relation extraction (non-fatal, mirrors index-document.ts:58-185)
         if policy.entities {
             if !entity_extraction_enabled {
@@ -536,8 +689,15 @@ impl IngestWorker {
                     &flags,
                 )
                 .await;
-                self.extract_and_store_entities(job, document_id, &content, &chunks, use_combined)
-                    .await;
+                self.extract_and_store_entities(
+                    job,
+                    document_id,
+                    &content,
+                    &chunks,
+                    use_combined,
+                    priority,
+                )
+                .await;
             }
         }
 
@@ -562,8 +722,68 @@ impl IngestWorker {
             }
         }
 
-        // Figure asset layer (multimodal RAG): upload crops + append searchable figure chunks
-        if !extraction.figures.is_empty() {
+        // The visual stage (ING-5): every picture in the document, read by what
+        // it shows. Without a pipeline, the figure asset layer below runs as it
+        // always has.
+        if let Some(pipeline) = self.visuals.clone() {
+            self.progress(
+                job,
+                StepProgress::at(
+                    IngestStep::ProcessingFigures,
+                    0,
+                    u32::try_from(extraction.figures.len()).unwrap_or(u32::MAX),
+                ),
+                started,
+                &flags,
+            )
+            .await;
+            let outcome = self
+                .run_visuals(
+                    &pipeline,
+                    job,
+                    document_id,
+                    &title,
+                    category_of(&params),
+                    subcategory_of(&params).as_deref(),
+                    mime,
+                    &bytes,
+                    &extraction,
+                    &mut chunks,
+                )
+                .await;
+            // An image upload that nothing can find is a failure, not a ready
+            // document with zero chunks. The page arm, when on, still gives the
+            // picture a visual embedding, so it is searchable that way.
+            if chunks.is_empty()
+                && (outcome.is_upload || extraction.file_type == "image")
+                && self.page_ingest.is_none()
+            {
+                return Err(crate::visuals::nothing_searchable_reason(
+                    &job.filename,
+                    &outcome,
+                    pipeline.can_describe(),
+                ));
+            }
+            if !outcome.is_empty() {
+                let patch = crate::visuals::metadata_patch(&outcome);
+                if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
+                    tracing::warn!(error = %e, "could not record the visual outcome");
+                }
+                tracing::info!(
+                    found = outcome.found,
+                    indexed = outcome.indexed,
+                    described = outcome.described,
+                    failed = outcome.describe_failed,
+                    "[kb-ingest] visuals"
+                );
+            }
+        } else if chunks.is_empty() && extraction.file_type == "image" && self.page_ingest.is_none()
+        {
+            return Err(format!(
+                "nothing searchable in \"{}\": OCR found no text and no image describer is configured (set KB_IMAGE_DESCRIBE_MODEL)",
+                job.filename
+            ));
+        } else if !extraction.figures.is_empty() {
             self.progress(
                 job,
                 StepProgress::at(
@@ -603,6 +823,10 @@ impl IngestWorker {
                 )));
             }
         }
+        // What the extractor knows about each page's text origin, so the page
+        // unit can carry it for the structure read. Derived from the extraction
+        // result, never guessed from the text later.
+        let page_semantics = crate::page_arm::PageTextSemantics::from_extraction(&extraction);
         let pages = async {
             let pages = self.page_ingest.as_ref()?;
             let page_texts: HashMap<u32, String> = extraction
@@ -617,7 +841,7 @@ impl IngestWorker {
             );
             Some(
                 pages
-                    .index_document(
+                    .index_document_with_semantics(
                         &job.tenant_id,
                         document_id,
                         category,
@@ -625,12 +849,13 @@ impl IngestWorker {
                         &bytes,
                         &chunks_by_page,
                         &page_texts,
+                        &page_semantics,
                     )
                     .await,
             )
         };
         let (text, pages) = tokio::join!(
-            self.embed_and_store(job, document_id, &title, &chunks, started, &flags),
+            self.embed_and_store(job, document_id, &title, &chunks, started, &flags, priority),
             pages
         );
         let written = match text {
@@ -655,7 +880,7 @@ impl IngestWorker {
                 Ok(outcome) => outcome.descriptions.clone(),
                 Err(_) => Vec::new(),
             };
-            self.record_pages(document_id, pages).await;
+            self.record_pages(document_id, pages, priority).await;
             // The caption stage's second use: make chart and table content
             // searchable as text. Best-effort — the document is ready either
             // way, and a failure here is counted, not raised.
@@ -672,18 +897,141 @@ impl IngestWorker {
                     subcategory_of(&params).as_deref(),
                     &descriptions,
                     written,
+                    priority,
                 )
                 .await;
             }
         }
 
-        self.finish_ready(job, document_id, written, started, &flags)
+        self.finish_ready(job, document_id, written, started, &flags, priority)
             .await
+    }
+
+    /// Store a document's tables and index their two retrieval units (`TBL-1`).
+    ///
+    /// The grid and its manifest go to the table store in one call (which
+    /// holds the store seat: the Parquet write and the Postgres rows are
+    /// writes like any other). Then each table contributes:
+    ///
+    /// * one `table_summary` unit — title, caption, sheet or page, the headers
+    ///   with kind/role/unit and the sample values — so retrieval can find the
+    ///   table and a caller can see what it can ask;
+    /// * one `table_row` unit per row for tables of at most
+    ///   [`TABLE_ROW_UNIT_MAX_ROWS`] rows, as `Header: value; …`.
+    ///
+    /// Both carry `tableId` in their metadata. No tables: nothing happens.
+    #[allow(clippy::too_many_arguments)]
+    async fn index_tables(
+        &self,
+        job: &JobRecord,
+        document_id: &DocumentId,
+        title: &str,
+        category: &str,
+        subcategory: Option<&str>,
+        tables: &[kb_core::tables::TableGrid],
+        chunks: &mut Vec<Chunk>,
+        priority: &crate::seats::SeatPriority,
+    ) -> Result<(), String> {
+        let Some(store) = self.tables.clone() else {
+            return Ok(());
+        };
+        if tables.is_empty() {
+            return Ok(());
+        }
+        let prepared: Vec<(kb_core::tables::TableGrid, kb_core::tables::TableManifest)> = tables
+            .iter()
+            .map(|grid| (grid.clone(), kb_core::tables::build_manifest(grid)))
+            .collect();
+        let table_count = prepared.len();
+        let records = {
+            // The store seat: the grid blobs and the table rows are writes.
+            let _seat = self.seats.store.acquire(priority.clone()).await;
+            store
+                .put_tables(&job.tenant_id, document_id, prepared)
+                .await
+                .map_err(|e| format!("storing tables failed: {e}"))?
+        };
+        if records.len() != table_count {
+            return Err(format!(
+                "table store returned {} records for {table_count} tables",
+                records.len()
+            ));
+        }
+        let mut next_index = chunks
+            .iter()
+            .map(|c| c.metadata.chunk_index)
+            .max()
+            .map_or(0, |last| last.saturating_add(1));
+        let mut summary_chunks = 0usize;
+        let mut row_chunks = 0usize;
+        for (grid, record) in tables.iter().zip(records.iter()) {
+            let manifest = kb_core::tables::build_manifest(grid);
+            let section = grid
+                .title
+                .clone()
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| format!("Table {}", record.index + 1));
+            chunks.push(Chunk {
+                content: table_summary_content(grid, &manifest),
+                metadata: ChunkMetadata {
+                    document_title: title.to_string(),
+                    category: category.to_string(),
+                    subcategory: subcategory.map(str::to_string),
+                    section: Some(section.clone()),
+                    heading_path: None,
+                    chunk_index: next_index,
+                    contextual_prefix: None,
+                    chunk_type: Some("table_summary".to_string()),
+                    page: grid.page_span.map(|(first, _)| first),
+                    asset_key: None,
+                    anchor_chunk_index: None,
+                    table_id: Some(record.id.to_string()),
+                },
+            });
+            next_index = next_index.saturating_add(1);
+            summary_chunks += 1;
+            if grid.rows.len() > TABLE_ROW_UNIT_MAX_ROWS {
+                continue;
+            }
+            for (row_index, row) in grid.rows.iter().enumerate() {
+                let content = table_row_content(&grid.header, row);
+                if content.is_empty() {
+                    continue;
+                }
+                chunks.push(Chunk {
+                    content,
+                    metadata: ChunkMetadata {
+                        document_title: title.to_string(),
+                        category: category.to_string(),
+                        subcategory: subcategory.map(str::to_string),
+                        section: Some(format!("{section} — row {}", row_index + 1)),
+                        heading_path: None,
+                        chunk_index: next_index,
+                        contextual_prefix: None,
+                        chunk_type: Some("table_row".to_string()),
+                        page: grid.page_span.map(|(first, _)| first),
+                        asset_key: None,
+                        anchor_chunk_index: None,
+                        table_id: Some(record.id.to_string()),
+                    },
+                });
+                next_index = next_index.saturating_add(1);
+                row_chunks += 1;
+            }
+        }
+        tracing::info!(
+            tables = records.len(),
+            summaries = summary_chunks,
+            rows = row_chunks,
+            "[kb-ingest] tables stored and indexed"
+        );
+        Ok(())
     }
 
     /// Embed and store a document's text chunks; returns how many were stored.
     /// No chunks: nothing is touched, as in the Bun worker (`storeChunks`
     /// returns early on an empty batch and the document is still ready).
+    #[allow(clippy::too_many_arguments)]
     async fn embed_and_store(
         &self,
         job: &JobRecord,
@@ -692,6 +1040,7 @@ impl IngestWorker {
         chunks: &[Chunk],
         started: Instant,
         flags: &ProgressFlags,
+        priority: &crate::seats::SeatPriority,
     ) -> Result<usize, String> {
         if chunks.is_empty() {
             return Ok(0);
@@ -730,11 +1079,14 @@ impl IngestWorker {
             flags,
         )
         .await;
-        let embeddings = self
-            .embedder
-            .embed_passages(&texts)
-            .await
-            .map_err(|e| format!("embedding failed: {e}"))?;
+        let embeddings = {
+            // The embed seat: one document's embedding requests at a time.
+            let _seat = self.seats.embed.acquire(priority.clone()).await;
+            self.embedder
+                .embed_passages(&texts)
+                .await
+                .map_err(|e| format!("embedding failed: {e}"))?
+        };
         if embeddings.len() != chunks.len() {
             // `generateEmbeddings` degrades to a short list rather than
             // throwing, and a short list would index some chunks with nothing.
@@ -767,6 +1119,8 @@ impl IngestWorker {
                 let chunk_type = match chunk.metadata.chunk_type.as_deref() {
                     Some("figure") => ChunkType::Figure,
                     Some("table") => ChunkType::Table,
+                    Some("table_summary") => ChunkType::TableSummary,
+                    Some("table_row") => ChunkType::TableRow,
                     _ => ChunkType::Text,
                 };
                 let sparse = kb_core::sparse::encode_document(&chunk.content);
@@ -789,15 +1143,19 @@ impl IngestWorker {
             .collect();
 
         // Clear first: `delete_document` removes old units for this document within tenant.
-        self.index
-            .delete_document(&job.tenant_id, document_id)
-            .await
-            .map_err(|e| format!("clearing old chunks failed: {e}"))?;
         let written = units.len();
-        self.index
-            .upsert(units)
-            .await
-            .map_err(|e| format!("storing chunks failed: {e}"))?;
+        {
+            // The store seat: the vector upsert is a write like any other.
+            let _seat = self.seats.store.acquire(priority.clone()).await;
+            self.index
+                .delete_document(&job.tenant_id, document_id)
+                .await
+                .map_err(|e| format!("clearing old chunks failed: {e}"))?;
+            self.index
+                .upsert(units)
+                .await
+                .map_err(|e| format!("storing chunks failed: {e}"))?;
+        }
         Ok(written)
     }
 
@@ -808,6 +1166,7 @@ impl IngestWorker {
         &self,
         document_id: &DocumentId,
         pages: Result<crate::page_arm::PageOutcome, PortError>,
+        priority: &crate::seats::SeatPriority,
     ) {
         let patch = match pages {
             Ok(o) if o.indexed == 0 && o.failed == 0 => return,
@@ -846,6 +1205,7 @@ impl IngestWorker {
                 json!({"pageImages": {"indexed": 0, "error": e.to_string()}})
             }
         };
+        let _seat = self.seats.store.acquire(priority.clone()).await;
         if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
             tracing::warn!(error = %e, "could not record the page-image outcome");
         }
@@ -868,13 +1228,19 @@ impl IngestWorker {
         subcategory: Option<&str>,
         descriptions: &[(u32, String)],
         first_index: usize,
+        priority: &crate::seats::SeatPriority,
     ) {
         let contents: Vec<(u32, String)> = descriptions
             .iter()
             .map(|(page, description)| (*page, format!("[Visual] {description}")))
             .collect();
         let texts: Vec<String> = contents.iter().map(|(_, text)| text.clone()).collect();
-        let embeddings = match self.embedder.embed_passages(&texts).await {
+        let embeddings = {
+            // The embed seat, like every other embedding request.
+            let _seat = self.seats.embed.acquire(priority.clone()).await;
+            self.embedder.embed_passages(&texts).await
+        };
+        let embeddings = match embeddings {
             Ok(vectors) if vectors.len() == descriptions.len() => vectors,
             Ok(vectors) => {
                 tracing::warn!(
@@ -882,13 +1248,13 @@ impl IngestWorker {
                     descriptions = descriptions.len(),
                     "visual description embedding returned the wrong count (non-fatal)"
                 );
-                self.record_visual_chunks(document_id, 0, descriptions.len())
+                self.record_visual_chunks(document_id, 0, descriptions.len(), priority)
                     .await;
                 return;
             }
             Err(e) => {
                 tracing::warn!(error = %e, "visual description embedding failed (non-fatal)");
-                self.record_visual_chunks(document_id, 0, descriptions.len())
+                self.record_visual_chunks(document_id, 0, descriptions.len(), priority)
                     .await;
                 return;
             }
@@ -912,6 +1278,7 @@ impl IngestWorker {
                     asset_key: None,
                     anchor_chunk_index: None,
                     contextual_prefix: None,
+                    table_id: None,
                 };
                 IndexUnit {
                     id: ChunkId(format!("{}_{}", document_id.0, chunk_index)),
@@ -931,14 +1298,21 @@ impl IngestWorker {
             })
             .collect();
         let written = units.len();
-        match self.index.upsert(units).await {
+        let outcome = {
+            // The store seat: the visual chunks are a vector write.
+            let _seat = self.seats.store.acquire(priority.clone()).await;
+            self.index.upsert(units).await
+        };
+        match outcome {
             Ok(()) => {
                 tracing::info!(chunks = written, "page visual descriptions indexed");
-                self.record_visual_chunks(document_id, written, 0).await;
+                self.record_visual_chunks(document_id, written, 0, priority)
+                    .await;
             }
             Err(e) => {
                 tracing::warn!(error = %e, chunks = written, "visual descriptions not indexed (non-fatal)");
-                self.record_visual_chunks(document_id, 0, written).await;
+                self.record_visual_chunks(document_id, 0, written, priority)
+                    .await;
             }
         }
     }
@@ -946,11 +1320,18 @@ impl IngestWorker {
     /// Put how the visual-description chunk write went on the document. Only
     /// when there was something to write, so an ingest without captions keeps
     /// exactly the metadata it had.
-    async fn record_visual_chunks(&self, document_id: &DocumentId, written: usize, failed: usize) {
+    async fn record_visual_chunks(
+        &self,
+        document_id: &DocumentId,
+        written: usize,
+        failed: usize,
+        priority: &crate::seats::SeatPriority,
+    ) {
         if written == 0 && failed == 0 {
             return;
         }
         let patch = json!({"visualChunks": {"written": written, "failed": failed}});
+        let _seat = self.seats.store.acquire(priority.clone()).await;
         if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
             tracing::warn!(error = %e, "could not record the visual-chunk outcome");
         }
@@ -968,6 +1349,7 @@ impl IngestWorker {
         content: &str,
         chunks: &[Chunk],
         use_combined: bool,
+        priority: &crate::seats::SeatPriority,
     ) {
         if self.graph.is_none() {
             return;
@@ -979,7 +1361,7 @@ impl IngestWorker {
             return;
         };
 
-        self.store_entities_graph(job, document_id, chunks, &entities, &relations)
+        self.store_entities_graph(job, document_id, chunks, &entities, &relations, priority)
             .await;
     }
 
@@ -1058,10 +1440,15 @@ impl IngestWorker {
         chunks: &[Chunk],
         entities: &[kb_core::Entity],
         relations: &[kb_core::Relation],
+        priority: &crate::seats::SeatPriority,
     ) {
         let Some(graph) = &self.graph else {
             return;
         };
+
+        // The graph writes are writes: they hold the store seat, like the
+        // vector upsert and the document row.
+        let _seat = self.seats.store.acquire(priority.clone()).await;
 
         if let Err(e) = graph.delete_document(&job.tenant_id, document_id).await {
             tracing::warn!(
@@ -1127,6 +1514,49 @@ impl IngestWorker {
         );
     }
 
+    /// The visual stage for one document: page text and figure anchors from
+    /// the chunks, then [`crate::visuals::index_visuals`].
+    #[allow(clippy::too_many_arguments)]
+    async fn run_visuals(
+        &self,
+        pipeline: &crate::visuals::VisualPipeline,
+        job: &JobRecord,
+        document_id: &DocumentId,
+        document_title: &str,
+        category: &str,
+        subcategory: Option<&str>,
+        mime: &str,
+        bytes: &[u8],
+        extraction: &kb_ports::ExtractionResult,
+        chunks: &mut Vec<Chunk>,
+    ) -> crate::visuals::VisualOutcome {
+        let page_text_tuples: Vec<(Option<u32>, &str)> = chunks
+            .iter()
+            .map(|c| (c.metadata.page, c.content.as_str()))
+            .collect();
+        let page_text = build_page_text(&page_text_tuples);
+        let anchors = figure_anchors(extraction.pages_blocks.as_deref(), chunks);
+        crate::visuals::index_visuals(
+            pipeline,
+            self.blobs.as_ref(),
+            crate::visuals::VisualInput {
+                tenant_id: job.tenant_id.as_str(),
+                document_id,
+                document_title,
+                category,
+                subcategory,
+                filename: &job.filename,
+                mime,
+                bytes,
+                layout_figures: &extraction.figures,
+                page_text: &page_text,
+                anchors: &anchors,
+            },
+            chunks,
+        )
+        .await
+    }
+
     /// Process figure crops: upload images to BlobStore, compute captions and anchors,
     /// and build searchable figure chunks. Non-fatal: logs warning and continues.
     #[allow(clippy::too_many_arguments)]
@@ -1147,36 +1577,7 @@ impl IngestWorker {
             .collect();
         let page_text = build_page_text(&page_text_tuples);
 
-        // Convert pages_blocks to LayoutBlockRef if present
-        let core_pages_blocks: Option<Vec<Vec<LayoutBlockRef<'_>>>> = pages_blocks.map(|pbs| {
-            pbs.iter()
-                .map(|page| {
-                    page.iter()
-                        .map(|b| LayoutBlockRef {
-                            kind: match b.kind {
-                                kb_ports::PageBlockKind::Text => "text",
-                                kb_ports::PageBlockKind::Caption => "caption",
-                                kb_ports::PageBlockKind::Figure => "figure",
-                            },
-                            id: b.id.as_deref(),
-                            text: b.text.as_deref(),
-                        })
-                        .collect()
-                })
-                .collect()
-        });
-
-        let text_chunk_tuples: Vec<(u32, &str)> = chunks
-            .iter()
-            .filter(|c| c.metadata.chunk_type.as_deref() != Some("figure"))
-            .map(|c| (c.metadata.chunk_index, c.content.as_str()))
-            .collect();
-
-        let anchors = if let Some(pbs) = &core_pages_blocks {
-            resolve_figure_anchors(pbs, &text_chunk_tuples)
-        } else {
-            HashMap::new()
-        };
+        let anchors = figure_anchors(pages_blocks, chunks);
 
         let mut fig_chunks = Vec::new();
         let mut assets = Vec::new();
@@ -1245,6 +1646,7 @@ impl IngestWorker {
                     asset_key: Some(key),
                     anchor_chunk_index,
                     contextual_prefix: None,
+                    table_id: None,
                 },
             });
         }
@@ -1277,11 +1679,16 @@ impl IngestWorker {
         chunks: usize,
         started: Instant,
         flags: &ProgressFlags,
+        priority: &crate::seats::SeatPriority,
     ) -> Result<(usize, DocumentId), String> {
-        self.documents
-            .set_status(document_id, "ready")
-            .await
-            .map_err(|e| format!("marking document ready failed: {e}"))?;
+        {
+            // The store seat: the document row is a write like any other.
+            let _seat = self.seats.store.acquire(priority.clone()).await;
+            self.documents
+                .set_status(document_id, "ready")
+                .await
+                .map_err(|e| format!("marking document ready failed: {e}"))?;
+        }
 
         self.progress(job, StepProgress::of(IngestStep::Done), started, flags)
             .await;
@@ -1294,11 +1701,17 @@ impl IngestWorker {
     }
 
     /// Terminal failure: job row plus, when known, the document.
-    async fn mark_failed(&self, job: &JobRecord, reason: &str) {
+    async fn mark_failed(
+        &self,
+        job: &JobRecord,
+        reason: &str,
+        priority: &crate::seats::SeatPriority,
+    ) {
         if let Err(err) = self.jobs.finish_failure(&job.id, reason).await {
             tracing::error!(error = %err, job_id = %job.id, "could not mark job failed");
         }
         if let Some(document_id) = &job.document_id {
+            let _seat = self.seats.store.acquire(priority.clone()).await;
             if let Err(err) = self.documents.set_status(document_id, "failed").await {
                 tracing::error!(error = %err, "could not mark document failed");
             }
@@ -1642,6 +2055,39 @@ fn relation_name(relation: &kb_core::Relation, field: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Layout figure id → the text chunk it belongs to, from the layout parser's
+/// reading-order blocks; empty when there are none.
+fn figure_anchors(
+    pages_blocks: Option<&[Vec<kb_ports::PageBlock>]>,
+    chunks: &[Chunk],
+) -> HashMap<String, u32> {
+    let Some(pbs) = pages_blocks else {
+        return HashMap::new();
+    };
+    let core_pages_blocks: Vec<Vec<LayoutBlockRef<'_>>> = pbs
+        .iter()
+        .map(|page| {
+            page.iter()
+                .map(|b| LayoutBlockRef {
+                    kind: match b.kind {
+                        kb_ports::PageBlockKind::Text => "text",
+                        kb_ports::PageBlockKind::Caption => "caption",
+                        kb_ports::PageBlockKind::Figure => "figure",
+                    },
+                    id: b.id.as_deref(),
+                    text: b.text.as_deref(),
+                })
+                .collect()
+        })
+        .collect();
+    let text_chunk_tuples: Vec<(u32, &str)> = chunks
+        .iter()
+        .filter(|c| c.metadata.chunk_type.as_deref() != Some("figure"))
+        .map(|c| (c.metadata.chunk_index, c.content.as_str()))
+        .collect();
+    resolve_figure_anchors(&core_pages_blocks, &text_chunk_tuples)
+}
+
 /// Title for the embedding prefix and the chunk metadata: the job's explicit
 /// title, else the document's own H1 (markdown and text files usually start
 /// with one), else the filename without its extension.
@@ -1679,6 +2125,126 @@ fn subcategory_of(params: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Tables at most this many rows long are indexed row by row as well as by
+/// their summary. Above it the row units would outnumber the document's own
+/// text and every query would rank table noise; the summary still finds it.
+pub const TABLE_ROW_UNIT_MAX_ROWS: usize = 60;
+
+/// The `table_summary` unit's text: what the table is and what can be asked of
+/// it. Pure, so the wording is testable without a store.
+#[must_use]
+pub fn table_summary_content(
+    grid: &kb_core::tables::TableGrid,
+    manifest: &kb_core::tables::TableManifest,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    out.push_str("Table");
+    if let Some(title) = grid.title.as_deref().filter(|t| !t.is_empty()) {
+        let _ = write!(out, ": {title}");
+    }
+    out.push('\n');
+    if let Some(caption) = grid.caption.as_deref().filter(|c| !c.is_empty()) {
+        let _ = writeln!(out, "Caption: {caption}");
+    }
+    if let Some(sheet) = grid.sheet.as_deref().filter(|s| !s.is_empty()) {
+        let _ = writeln!(out, "Sheet: {sheet}");
+    }
+    if let Some((first, last)) = grid.page_span {
+        if first == last {
+            let _ = writeln!(out, "Page: {first}");
+        } else {
+            let _ = writeln!(out, "Pages: {first}-{last}");
+        }
+    }
+    let _ = write!(
+        out,
+        "Rows: {}; columns: {}",
+        manifest.n_rows, manifest.n_cols
+    );
+    if !manifest.derived_rows.is_empty() {
+        let _ = write!(
+            out,
+            "; {} subtotal/total row(s), excluded from totals by default",
+            manifest.derived_rows.len()
+        );
+    }
+    out.push('\n');
+    for column in &manifest.columns {
+        let _ = write!(
+            out,
+            "- {}: {} {}",
+            column.name,
+            kind_word(column.kind),
+            role_word(column.role)
+        );
+        if let Some(unit) = column.unit.as_deref().filter(|u| !u.is_empty()) {
+            let _ = write!(out, ", unit {unit}");
+        }
+        out.push('\n');
+        if !column.sample_values.is_empty() {
+            let _ = writeln!(out, "  sample values: {}", column.sample_values.join(", "));
+        }
+    }
+    out
+}
+
+/// One row as `Header: value; …`, with empty cells left out. Pure.
+#[must_use]
+pub fn table_row_content(header: &[String], row: &[kb_core::tables::Cell]) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(header.len());
+    for (index, name) in header.iter().enumerate() {
+        let value = row.get(index).map(cell_word).unwrap_or_default();
+        if value.is_empty() {
+            continue;
+        }
+        parts.push(format!("{name}: {value}"));
+    }
+    parts.join("; ")
+}
+
+fn cell_word(cell: &kb_core::tables::Cell) -> String {
+    use kb_core::tables::Cell;
+    let text = match cell {
+        Cell::Empty => String::new(),
+        Cell::Text(s) | Cell::Date(s) => s.clone(),
+        Cell::Number(n) if n.is_finite() && n.fract() == 0.0 && n.abs() < 1e15 => {
+            format!("{}", *n as i64)
+        }
+        Cell::Number(n) => n.to_string(),
+        Cell::Bool(b) => b.to_string(),
+    };
+    const MAX_CELL_CHARS: usize = 200;
+    if text.chars().count() > MAX_CELL_CHARS {
+        text.chars().take(MAX_CELL_CHARS).collect()
+    } else {
+        text
+    }
+}
+
+fn kind_word(kind: kb_core::tables::ColumnKind) -> &'static str {
+    use kb_core::tables::ColumnKind;
+    match kind {
+        ColumnKind::Number => "number",
+        ColumnKind::Text => "text",
+        ColumnKind::Date => "date",
+        ColumnKind::Bool => "boolean",
+        ColumnKind::Mixed => "mixed",
+        ColumnKind::Empty => "empty",
+    }
+}
+
+fn role_word(role: kb_core::tables::ColumnRole) -> &'static str {
+    use kb_core::tables::ColumnRole;
+    match role {
+        ColumnRole::Quantity => "quantity",
+        ColumnRole::Code => "code",
+        ColumnRole::Identifier => "identifier",
+        ColumnRole::Label => "label",
+        ColumnRole::Date => "date",
+    }
+}
+
 /// The metadata object stored on each chunk, with the field names the Bun
 /// chunker writes. An absent value is left out rather than written as null,
 /// matching how an `undefined` property drops out of the TS object.
@@ -1708,6 +2274,10 @@ fn storage_metadata(meta: &ChunkMetadata) -> Value {
     if let Some(anchor) = meta.anchor_chunk_index {
         map.insert("anchorChunkIndex".to_string(), json!(anchor));
     }
+    if let Some(table_id) = &meta.table_id {
+        // `TBL-1`: the table a search hit can be queried through.
+        map.insert("tableId".to_string(), json!(table_id));
+    }
     Value::Object(map)
 }
 
@@ -1729,7 +2299,88 @@ mod tests {
             page: None,
             asset_key: None,
             anchor_chunk_index: None,
+            table_id: None,
         }
+    }
+
+    #[test]
+    fn a_table_summary_says_what_can_be_asked() {
+        use kb_core::tables::{Cell, ColumnInfo, ColumnKind, ColumnRole, TableGrid};
+        let grid = TableGrid {
+            source: Some(kb_core::tables::TableSource::Xlsx),
+            sheet: Some("PDRB".to_string()),
+            title: Some("Tabel 3.1 PDRB".to_string()),
+            caption: Some("Harga berlaku".to_string()),
+            header: vec!["Region".to_string(), "Revenue".to_string()],
+            rows: vec![
+                vec![Cell::Text("Jawa Timur".to_string()), Cell::Number(10.0)],
+                vec![Cell::Text("Bali".to_string()), Cell::Number(5.0)],
+                vec![Cell::Text("Jumlah".to_string()), Cell::Number(15.0)],
+            ],
+            ..TableGrid::default()
+        };
+        let manifest = kb_core::tables::TableManifest {
+            columns: vec![
+                ColumnInfo {
+                    name: "Region".to_string(),
+                    kind: ColumnKind::Text,
+                    role: ColumnRole::Identifier,
+                    unit: None,
+                    sample_values: vec!["Jawa Timur".to_string(), "Bali".to_string()],
+                    distinct_count: 3,
+                },
+                ColumnInfo {
+                    name: "Revenue".to_string(),
+                    kind: ColumnKind::Number,
+                    role: ColumnRole::Quantity,
+                    unit: Some("Rp juta".to_string()),
+                    sample_values: Vec::new(),
+                    distinct_count: 3,
+                },
+            ],
+            derived_rows: vec![2],
+            formulas_known: true,
+            confidence: kb_core::tables::Confidence::High,
+            n_rows: 3,
+            n_cols: 2,
+            truncated: false,
+            notes: Vec::new(),
+        };
+        let text = table_summary_content(&grid, &manifest);
+        assert!(text.contains("Table: Tabel 3.1 PDRB"), "{text}");
+        assert!(text.contains("Caption: Harga berlaku"), "{text}");
+        assert!(text.contains("Sheet: PDRB"), "{text}");
+        assert!(text.contains("Rows: 3; columns: 2"), "{text}");
+        assert!(text.contains("1 subtotal/total row(s)"), "{text}");
+        assert!(
+            text.contains("- Revenue: number quantity, unit Rp juta"),
+            "{text}"
+        );
+        assert!(text.contains("sample values: Jawa Timur, Bali"), "{text}");
+    }
+
+    #[test]
+    fn a_table_row_is_header_colon_value_with_empty_cells_left_out() {
+        use kb_core::tables::{Cell, TableGrid};
+        let row = vec![
+            Cell::Text("Bali".to_string()),
+            Cell::Number(10.0),
+            Cell::Empty,
+            Cell::Date("2023-01-01".to_string()),
+        ];
+        let header = vec![
+            "Region".to_string(),
+            "Revenue".to_string(),
+            "Catatan".to_string(),
+            "Tahun".to_string(),
+        ];
+        assert_eq!(
+            table_row_content(&header, &row),
+            "Region: Bali; Revenue: 10; Tahun: 2023-01-01"
+        );
+        let empty = TableGrid::default();
+        assert_eq!(table_row_content(&[], &[]), "");
+        assert_eq!(empty.header.len(), 0);
     }
 
     #[test]

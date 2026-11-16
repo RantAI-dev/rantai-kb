@@ -337,8 +337,10 @@ async fn test_scanned_pdf_chain_failure_single_error_prefix() {
             force_layout: true,
             figures: false,
             document_type: None,
+            ..ExtractionOptions::default()
         },
         &chain,
+        None,
         None,
     )
     .await
@@ -423,6 +425,7 @@ async fn test_local_ocr_fallback_keeps_page_numbers_end_to_end() {
                 force_layout: true,
                 figures: false,
                 document_type: None,
+                ..ExtractionOptions::default()
             },
         )
         .await

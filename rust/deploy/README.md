@@ -91,6 +91,48 @@ rust/scripts/kb-dev.sh down -v           # stop and delete all data + volumes
 The tier is remembered in `rust/deploy/.tier`, so the commands above need no
 tier argument once `up` has run. `kb-dev.sh key` needs the stack running.
 
+## The `rantai-kb` CLI
+
+The same commands are in the binary, so an installed machine needs no checkout and
+no script. `kb-server` and `rantai-kb` are one program under two names: the
+installer links both, and the help text uses whichever name was typed.
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/RantAI-dev/rantai-kb/main/install.sh | sh
+
+rantai-kb setup lite-en        # detect the hardware, write deploy/.env + deploy/.tier
+rantai-kb up lite-en           # start the containers, wait for /health
+rantai-kb key my-tenant        # print an API key, once
+rantai-kb status               # GET /health
+rantai-kb logs -f kb-lite-en   # follow the logs
+rantai-kb ps                   # the tier's containers
+rantai-kb down                 # stop (down -v also wipes the data)
+rantai-kb serve                # start the stack and keep it in the foreground
+```
+
+`setup --start` writes the config and then runs `up`, so `rantai-kb setup lite-en --start`
+is the whole install-and-run in one line.
+
+**Where the deploy directory is.** `$RANTAI_KB_HOME/deploy` when that is set, else
+`rust/deploy` (or `deploy`) next to the working directory — a source checkout —
+else `~/.rantai-kb/deploy`, which is where the installer puts it. `setup` writes
+that directory's `.env` and `.tier`; `up`, `down`, `logs`, `ps`, `status` and `key`
+read them.
+
+**Which containers start.** The compose services are behind profiles. If the env
+file sets `COMPOSE_PROFILES`, exactly that list is used and no `--profile` flag is
+added. Otherwise the tier's own profiles are activated: `<tier>`, `<tier>-ocr` and
+`<tier>-vision`. `kb-dev.sh` follows the same rule, so the script and the binary
+start the same containers.
+
+**An installed bundle has no source.** It cannot build the image, so its `.env`
+points compose at the published images (`KB_IMAGE`, `KB_OCR_CPU_IMAGE`,
+`KB_OCR_LAYOUT_IMAGE`) and `up` pulls them instead of building. A source checkout
+still builds the image when it is missing.
+
+`kb-dev.sh` and the binary are ports of each other: `rust/crates/kb-server/src/stack.rs`
+is the Rust side of the script, and both use the compose project `rantai-kb-dev`.
+
 ## `kb-server setup`
 
 `rust/scripts/kb-dev.sh setup [flags]` runs `kb-server setup` from the repo root
@@ -149,17 +191,20 @@ and the caption priority queue do not exist, so setup does not ask about them.
 
 ## Tiers
 
-One profile per tier; `up <tier>` starts that profile's model containers plus
-the shared stores. Only one tier runs at a time (they share the stores and the
+One profile per tier, plus one per model role (`<tier>-ocr`, `<tier>-vision`,
+`<tier>-ocr-layout`); `up <tier>` starts the tier, the roles `.env` names in
+`COMPOSE_PROFILES` (written by `setup`) and the shared stores. A role that runs
+elsewhere (`setup --ocr mistral`, `--ocr <url>`, `--vision off`) starts no
+container. Only one tier runs at a time (they share the stores and the
 host port). Chunks, vectors, BM25 and page images live in Qdrant on every tier;
 Postgres holds documents, jobs, KBs, keys and the entity graph.
 
 | Tier | Model containers | Hardware | Measured (see below) |
 |---|---|---|---|
-| `lite` | TEI CPU, `intfloat/multilingual-e5-small` (384-d); `ocr-ppocr` (PP-OCRv6, CPU) for scanned pages | CPU, 1–2 cores, no GPU | MIRACL-id-50 nDCG@10 **0.802**, recall@10 0.938, MRR@10 0.823; 1,485 passages ingest ~126 s; search p50 42 ms / p95 49 ms. ViDoRe HR: 1.55 pages/s at page nDCG@10 0.545 |
-| `lite-en` | TEI CPU, `sentence-transformers/all-MiniLM-L6-v2` (384-d, English only); `ocr-ppocr` | CPU, 1–2 cores, no GPU | ViDoRe HR: **6.43 pages/s** at page nDCG@10 0.517. English only: 0.679 vs 0.802 for `lite` on Indonesian MIRACL-id |
-| `desk` | TEI CUDA, `Qwen/Qwen3-Embedding-0.6B` (1024-d) + `BAAI/bge-reranker-v2-m3`; `ocr-paddlevl-desk` (PaddleOCR-VL-1.6 GGUF on llama.cpp CUDA) | NVIDIA 8 GB | **not measured on this hardware** — see `docs/kb-tiers.md` for estimates |
-| `studio` | TEI CUDA Qwen3-Embedding-0.6B; vLLM: `vllm-page-embed-studio` (Qwen3-VL-Embedding-2B, 2048-d page images), `vllm-rerank-studio` (Qwen3-VL-Reranker-2B), `vllm-ocr-studio` (PaddleOCR-VL-1.6) | NVIDIA 24 GB | not measured; `docker compose config` only |
+| `lite` | TEI CPU, `intfloat/multilingual-e5-small` (384-d); `ocr-cpu` (layout + PP-OCRv6 tiny + SLANet-plus tables, CPU) for scanned pages | CPU, 1–2 cores, no GPU | MIRACL-id-50 nDCG@10 **0.802**, recall@10 0.938, MRR@10 0.823; 1,485 passages ingest ~126 s; search p50 42 ms / p95 49 ms. ViDoRe HR: 1.55 pages/s at page nDCG@10 0.545 |
+| `lite-en` | TEI CPU, `sentence-transformers/all-MiniLM-L6-v2` (384-d, English only); `ocr-cpu` | CPU, 1–2 cores, no GPU | ViDoRe HR: **6.43 pages/s** at page nDCG@10 0.517. English only: 0.679 vs 0.802 for `lite` on Indonesian MIRACL-id |
+| `desk` | TEI CUDA, `Qwen/Qwen3-Embedding-0.6B` (1024-d) + `BAAI/bge-reranker-v2-m3`; `vllm-ocr-desk` (Xiaomi-OCR-0, vLLM fp8) | NVIDIA 8 GB | OCR measured on a GB10 at a Desk-sized share ([ocr-tiers](../../docs/eval-ab/ocr-tiers/)); the rest **not measured on this hardware** |
+| `studio` | TEI CUDA Qwen3-Embedding-0.6B; vLLM: `vllm-page-embed-studio` (Qwen3-VL-Embedding-2B, 2048-d page images), `vllm-rerank-studio` (Qwen3-VL-Reranker-2B), `vllm-ocr-studio` (Xiaomi-OCR-0) | NVIDIA 24 GB | not measured; `docker compose config` only |
 | `station` | as studio with the 8B Qwen3-VL models in FP8 (4096-d page images) | NVIDIA 48 GB | not measured; `docker compose config` only |
 | `cloud` | none (OpenRouter: `voyage-multimodal-3.5` embeddings, `voyageai/rerank-2.5`); page-image arm on | any machine + `OPENROUTER_API_KEY` | ViDoRe HR page nDCG@10 **0.711** ([vidore3-hr-en-image](../../docs/eval-ab/vidore3-hr-en-image/)), ViDoRe CS **0.828** ([vidore3-cs-en-night](../../docs/eval-ab/vidore3-cs-en-night/)); **paid** per page and query |
 
@@ -270,6 +315,57 @@ up:
 docker compose -f rust/deploy/compose.yaml -p rantai-kb-dev --profile desk \
   stop tei-embed-desk tei-rerank-desk
 ```
+
+## The layout sidecar (Xiaomi-OCR-0)
+
+The Xiaomi-OCR-0 recipe can ask a **layout detector** where a page's regions are, and re-read a
+page region by region when the whole-page answer misses a table the page clearly has (see
+[`docs/kb-tiers.md`](../../docs/kb-tiers.md#ocr-recipes-kb_ocr_recipe)). The detector is a small
+sidecar in `rust/deploy/ocr-layout`: PP-DocLayoutV3 (Apache-2.0) through transformers,
+answering two endpoints.
+
+**Do not put it on the GPU that serves Xiaomi-OCR-0.** Sharing it crashed (`CUDA error: an
+illegal memory access`) or hung the vLLM engine within minutes of a full batch; with the
+detector on CPU (`LAYOUT_DEVICE=cpu`) the full benchmark ran clean. Use a second GPU, or the
+CPU with `KB_OCR_LAYOUT_TIMEOUT_MS` raised (it serves one page at a time, so a batch queues).
+Watch the vLLM server for progress, not `/health`: a hung engine still answers it (see
+[`docs/kb-tiers.md`](../../docs/kb-tiers.md#ocr-recipes-kb_ocr_recipe)).
+
+```sh
+# the weights are a download, so the model directory is mounted, not baked in
+docker build -t ocr-layout rust/deploy/ocr-layout
+docker run --rm -p 8193:8193 \
+  -v /srv/models/pp-doclayoutv3:/models/pp-doclayoutv3:ro \
+  -e LAYOUT_MODEL_DIR=/models/pp-doclayoutv3 -e LAYOUT_DEVICE=cpu \
+  ocr-layout
+
+curl -s localhost:8193/health
+# {"status":"ok","model":"pp-doclayoutv3","device":"cpu","threshold":0.3}
+```
+
+Then point the service at it:
+
+```sh
+KB_OCR_RECIPE=xiaomi
+KB_OCR_BASE_URL=http://127.0.0.1:8192/v1/chat/completions   # Xiaomi-OCR-0 under vLLM
+KB_OCR_MODEL=xiaomi-ocr-0
+KB_OCR_LAYOUT_URL=http://127.0.0.1:8193
+KB_OCR_LAYOUT_TIMEOUT_MS=900000   # detector on CPU: requests queue behind it
+```
+
+`POST /v1/layout` takes `{"image": "<base64 png>", "mime": "image/png"}` and answers
+`{"regions": [{"label", "score", "bbox_2d", "task_type"}]}` with the boxes normalised to 0–1000
+and the reading order already applied. The detector failing does not fail the page: the service
+keeps the whole-page answer and reports the page as degraded
+(`metadata.ocr.layoutFailed`).
+
+**Measured (2026-11-15, NVIDIA GB10, PP-DocLayoutV3 at a 0.3 threshold).** Over the 1,403 pages
+of the olmOCR benchmark, the sidecar's regions are byte-identical to the reference pipeline's for
+1,218 pages; 1,355 pages agree within one pixel on every box, 1,368 within five. The reference
+and the sidecar disagree about whether a page has a table on **0** pages, so the fallback fires
+on exactly the same 71 pages. 3 pages differ in the number of regions, 16 in a label and 7 in a
+label's task type — the detector's own nondeterminism between GPU runs, not a difference in the
+postprocessing.
 
 ## GPU notes (desk, studio, station)
 

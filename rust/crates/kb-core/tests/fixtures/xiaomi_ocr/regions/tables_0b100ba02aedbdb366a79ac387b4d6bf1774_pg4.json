@@ -1,0 +1,82 @@
+{
+ "regions": [
+  {
+   "index": 0,
+   "label": "header",
+   "bbox_2d": [
+    90,
+    41,
+    365,
+    67
+   ],
+   "merged": "Sidorov et al. Molecular Brain 2013, 6:15 http://www.molecularbrain.com/content/6/1/15"
+  },
+  {
+   "index": 1,
+   "label": "number",
+   "bbox_2d": [
+    829,
+    40,
+    905,
+    54
+   ],
+   "merged": "Page 3 of 11"
+  },
+  {
+   "index": 2,
+   "label": "figure_title",
+   "bbox_2d": [
+    89,
+    110,
+    473,
+    124
+   ],
+   "merged": "Table 1 Fragile X mouse synaptic plasticity phenotypes"
+  },
+  {
+   "index": 3,
+   "label": "table",
+   "bbox_2d": [
+    94,
+    121,
+    906,
+    743
+   ],
+   "merged": "<table><tr><td>Category</td><td>Region</td><td>Fragile X Mouse Phenotype</td><td>Age</td><td>References</td></tr><tr><td>mGluR LTD</td><td>hippocampus</td><td>enhanced</td><td>P25-30</td><td>Huber et al., 2002; Hou et al., 2006; Bhattacharya et al., 2012; Michalon et al., 2012</td></tr><tr><td>mGluR LTD</td><td>hippocampus</td><td>does not require new protein synthesis</td><td>4-12 wk</td><td>Nosyreva and Huber, 2006; Hou, et al., 2006; Zang et al., 2009**</td></tr><tr><td>mGluR LTD</td><td>hippocampus</td><td>*enhanced and not PS-dependent</td><td>P35-42</td><td>Iliff et al., 2012</td></tr><tr><td>mGluR LTD</td><td>cerebellum</td><td>enhanced</td><td>3-7 wk</td><td>Koekkoek et al., 2005</td></tr><tr><td>mGluR LTD</td><td>hippocampus</td><td>enhanced and does not require new protein synthesis</td><td>3-7 wk</td><td>Volk et al., J Neurosci, 2007</td></tr><tr><td>LTP</td><td>hippocampus</td><td>NONE</td><td>20-26 wk; 8-10 wk; 3-12 month</td><td>Godfraind et al., 1996; Li et al., 2002; Larson et al., 2005</td></tr><tr><td>L-LTP</td><td>hippocampus</td><td>NONE</td><td>5-7 wk; 2-4 month</td><td>Paradee et al., 1999; Zhang et al., J 2009</td></tr><tr><td>LTP</td><td>hippocampus</td><td>deficient</td><td>2 wk; 6-8 wk</td><td>Hu et al., 2008; Shang et al., 2009</td></tr><tr><td>LTP</td><td>hippocampus</td><td>deficient with weak stimulus; normal with strong stimulus</td><td>2-3 month</td><td>Lauterborn et al., 2007</td></tr><tr><td>LTP</td><td>hippocampus</td><td>enhanced B-adrenergic-facilitated heterosynaptic LTP (PS-dependent)</td><td>3-4 month</td><td>Connor et al., 2011</td></tr><tr><td>LTP priming</td><td>hippocampus</td><td>does not require new protein synthesis (mGluR-dependent)</td><td>6-10 wk</td><td>Auerbach and Bear, 2010</td></tr><tr><td>LTP</td><td>anterior cingulate ctx</td><td>deficient</td><td>6-8 wk</td><td>Zhao et al., 2005; Xu et al., 2012</td></tr><tr><td>LTP</td><td>anterior cingulate ctx</td><td>impaired facilitation of LTP by 5-HT2AR agonist</td><td>6-8 wk</td><td>Xu et al., 2012</td></tr><tr><td>LTP</td><td>somatosensory, temporal ctx</td><td>deficient</td><td>8-10 wk; 3 month</td><td>Li et al., 2002; Hayashi et al., 2007</td></tr><tr><td>LTP</td><td>somatosensory ctx</td><td>delayed window for plasticity</td><td>P3-10</td><td>Harlow et al., 2010</td></tr><tr><td>LTP</td><td>visual ctx</td><td>deficient (mGluR-dependent)</td><td>P13-25</td><td>Wilson and Cox, 2007</td></tr><tr><td>LTP</td><td>anterior piriform ctx</td><td>deficient in aged mice; normal in 3-6 mo mice</td><td>6-18 month</td><td>Larson et al., 2005</td></tr><tr><td>LTP</td><td>amygdala</td><td>impaired (mGluR-dependent)</td><td>6-8 wk; 3.5-6 mo</td><td>Zhao et al., 2005; Suvrathan et al., 2010</td></tr><tr><td>STD-LTP</td><td>somatosensory ctx</td><td>deficient with weak stimulus</td><td>P10-18</td><td>Desai et al., 2006</td></tr><tr><td>STD-LTP</td><td>prefrontal ctx</td><td>deficient with weak stimulus; normal with strong stimulus</td><td>P14-23</td><td>Meredith et al., 2007</td></tr><tr><td>homeostasis</td><td>hippocampus</td><td>deficient translation-dependent scaling</td><td>P6-7 slice culture</td><td>Soden and Chen, 2010</td></tr><tr><td>homeostasis</td><td>hippocampus</td><td>normal transcription-dependent scaling</td><td>P6-7 slice culture</td><td>Soden and Chen, 2010</td></tr><tr><td>experience-dependent</td><td>visual ctx (in vivo)</td><td>altered ocular dominance plasticity</td><td>LTD</td><td>Dolen et al., 2007</td></tr><tr><td>experience-dependent</td><td>somatosensory ctx</td><td>deficient experience-dependent plasticity (induced by whisker trimming)</td><td>LTD</td><td>Bureau et al., 2008</td></tr></table>"
+  },
+  {
+   "index": 4,
+   "label": "vision_footnote",
+   "bbox_2d": [
+    90,
+    749,
+    904,
+    782
+   ],
+   "merged": "LEGEND: Fragile X mouse models have multiple altered forms of synaptic plasticity across multiple brain regions. The majority of phenotypes were assessed in the Fmr1 KO mouse which lacks FMRP. *Assessed using a CGG knock-in mouse which models FX premutation. **Assessed using an FMRP point mutant mouse with disrupted FMRP-mRNA binding."
+  },
+  {
+   "index": 5,
+   "label": "text",
+   "bbox_2d": [
+    88,
+    804,
+    491,
+    928
+   ],
+   "merged": "LTD (Figure 1B). However, while the magnitude of L-LTP is unchanged, it is possible that L-LTP is qualitatively different in its requirement for new protein synthesis when FMRP is absent, as is the case for mGluR-LTD (and LTP priming, see below). Therefore, it will be important to test the protein synthesis-dependency of L-LTP in Fmr1 KO mice to show that FMRP truly does not play a role in regulating the persistence of LTP."
+  },
+  {
+   "index": 6,
+   "label": "text",
+   "bbox_2d": [
+    504,
+    804,
+    908,
+    928
+   ],
+   "merged": "Alternatively, FMRP may be required for the regulation of local but not somatic translation in the context of L-LTP (Figure 1C). L-LTP is traditionally induced by multiple trains of high frequency tetanus or theta burst stimulation, protocols that rely on cell-wide transcription and translation [63-65]. L-LTP was characterized in the Fmr1 KO mouse using these classical paradigms [61,62]. However, using a less intense induction protocol"
+  }
+ ],
+ "expected": "Table 1 Fragile X mouse synaptic plasticity phenotypes\n\n<table><tr><td>Category</td><td>Region</td><td>Fragile X Mouse Phenotype</td><td>Age</td><td>References</td></tr><tr><td>mGluR LTD</td><td>hippocampus</td><td>enhanced</td><td>P25-30</td><td>Huber et al., 2002; Hou et al., 2006; Bhattacharya et al., 2012; Michalon et al., 2012</td></tr><tr><td>mGluR LTD</td><td>hippocampus</td><td>does not require new protein synthesis</td><td>4-12 wk</td><td>Nosyreva and Huber, 2006; Hou, et al., 2006; Zang et al., 2009**</td></tr><tr><td>mGluR LTD</td><td>hippocampus</td><td>*enhanced and not PS-dependent</td><td>P35-42</td><td>Iliff et al., 2012</td></tr><tr><td>mGluR LTD</td><td>cerebellum</td><td>enhanced</td><td>3-7 wk</td><td>Koekkoek et al., 2005</td></tr><tr><td>mGluR LTD</td><td>hippocampus</td><td>enhanced and does not require new protein synthesis</td><td>3-7 wk</td><td>Volk et al., J Neurosci, 2007</td></tr><tr><td>LTP</td><td>hippocampus</td><td>NONE</td><td>20-26 wk; 8-10 wk; 3-12 month</td><td>Godfraind et al., 1996; Li et al., 2002; Larson et al., 2005</td></tr><tr><td>L-LTP</td><td>hippocampus</td><td>NONE</td><td>5-7 wk; 2-4 month</td><td>Paradee et al., 1999; Zhang et al., J 2009</td></tr><tr><td>LTP</td><td>hippocampus</td><td>deficient</td><td>2 wk; 6-8 wk</td><td>Hu et al., 2008; Shang et al., 2009</td></tr><tr><td>LTP</td><td>hippocampus</td><td>deficient with weak stimulus; normal with strong stimulus</td><td>2-3 month</td><td>Lauterborn et al., 2007</td></tr><tr><td>LTP</td><td>hippocampus</td><td>enhanced B-adrenergic-facilitated heterosynaptic LTP (PS-dependent)</td><td>3-4 month</td><td>Connor et al., 2011</td></tr><tr><td>LTP priming</td><td>hippocampus</td><td>does not require new protein synthesis (mGluR-dependent)</td><td>6-10 wk</td><td>Auerbach and Bear, 2010</td></tr><tr><td>LTP</td><td>anterior cingulate ctx</td><td>deficient</td><td>6-8 wk</td><td>Zhao et al., 2005; Xu et al., 2012</td></tr><tr><td>LTP</td><td>anterior cingulate ctx</td><td>impaired facilitation of LTP by 5-HT2AR agonist</td><td>6-8 wk</td><td>Xu et al., 2012</td></tr><tr><td>LTP</td><td>somatosensory, temporal ctx</td><td>deficient</td><td>8-10 wk; 3 month</td><td>Li et al., 2002; Hayashi et al., 2007</td></tr><tr><td>LTP</td><td>somatosensory ctx</td><td>delayed window for plasticity</td><td>P3-10</td><td>Harlow et al., 2010</td></tr><tr><td>LTP</td><td>visual ctx</td><td>deficient (mGluR-dependent)</td><td>P13-25</td><td>Wilson and Cox, 2007</td></tr><tr><td>LTP</td><td>anterior piriform ctx</td><td>deficient in aged mice; normal in 3-6 mo mice</td><td>6-18 month</td><td>Larson et al., 2005</td></tr><tr><td>LTP</td><td>amygdala</td><td>impaired (mGluR-dependent)</td><td>6-8 wk; 3.5-6 mo</td><td>Zhao et al., 2005; Suvrathan et al., 2010</td></tr><tr><td>STD-LTP</td><td>somatosensory ctx</td><td>deficient with weak stimulus</td><td>P10-18</td><td>Desai et al., 2006</td></tr><tr><td>STD-LTP</td><td>prefrontal ctx</td><td>deficient with weak stimulus; normal with strong stimulus</td><td>P14-23</td><td>Meredith et al., 2007</td></tr><tr><td>homeostasis</td><td>hippocampus</td><td>deficient translation-dependent scaling</td><td>P6-7 slice culture</td><td>Soden and Chen, 2010</td></tr><tr><td>homeostasis</td><td>hippocampus</td><td>normal transcription-dependent scaling</td><td>P6-7 slice culture</td><td>Soden and Chen, 2010</td></tr><tr><td>experience-dependent</td><td>visual ctx (in vivo)</td><td>altered ocular dominance plasticity</td><td>LTD</td><td>Dolen et al., 2007</td></tr><tr><td>experience-dependent</td><td>somatosensory ctx</td><td>deficient experience-dependent plasticity (induced by whisker trimming)</td><td>LTD</td><td>Bureau et al., 2008</td></tr></table>\n\nLEGEND: Fragile X mouse models have multiple altered forms of synaptic plasticity across multiple brain regions. The majority of phenotypes were assessed in the Fmr1 KO mouse which lacks FMRP. *Assessed using a CGG knock-in mouse which models FX premutation. **Assessed using an FMRP point mutant mouse with disrupted FMRP-mRNA binding.\n\nLTD (Figure 1B). However, while the magnitude of L-LTP is unchanged, it is possible that L-LTP is qualitatively different in its requirement for new protein synthesis when FMRP is absent, as is the case for mGluR-LTD (and LTP priming, see below). Therefore, it will be important to test the protein synthesis-dependency of L-LTP in Fmr1 KO mice to show that FMRP truly does not play a role in regulating the persistence of LTP.\n\nAlternatively, FMRP may be required for the regulation of local but not somatic translation in the context of L-LTP (Figure 1C). L-LTP is traditionally induced by multiple trains of high frequency tetanus or theta burst stimulation, protocols that rely on cell-wide transcription and translation [63-65]. L-LTP was characterized in the Fmr1 KO mouse using these classical paradigms [61,62]. However, using a less intense induction protocol"
+}

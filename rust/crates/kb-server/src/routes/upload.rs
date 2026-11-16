@@ -15,10 +15,11 @@ use kb_core::policy::{FigureMode, MimeRegistry};
 use kb_ports::{CreateJobInput, DocumentId, KnowledgeBaseId, NewDocument, document_path};
 use serde::Serialize;
 use serde_json::json;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::auth::Authed;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
 
 struct Upload {
@@ -46,6 +47,29 @@ impl Upload {
     }
 }
 
+/// Parse the optional `metadata` multipart field: a JSON object, or nothing.
+///
+/// The whole object is stored as `Document.metadata`; the keys are not
+/// interpreted here (a filter or a boost names the key it wants later). A
+/// malformed value is the route's own 400, so a caller learns what to fix
+/// instead of getting a parser message.
+fn parse_upload_metadata(value: Option<&str>) -> Result<Option<serde_json::Value>, ApiError> {
+    let Some(raw) = value.filter(|v| !v.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let parsed: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
+        ApiError::BadRequest(format!(
+            "Invalid 'metadata': expected a JSON object (e.g. {{\"effectiveDate\": \"2025-03-01\"}}): {e}"
+        ))
+    })?;
+    if !parsed.is_object() {
+        return Err(ApiError::BadRequest(
+            "Invalid 'metadata': expected a JSON object of key/value pairs".to_string(),
+        ));
+    }
+    Ok(Some(parsed))
+}
+
 /// Accepted extension check, including the extensionless case: `slice(lastIndexOf("."))`
 /// returns the whole name when there is no dot, so "README" is tested as "readme".
 fn is_accepted_extension(file_name: &str) -> bool {
@@ -67,8 +91,73 @@ fn title_from_file_name(file_name: &str) -> String {
     }
 }
 
+/// The multipart form `POST /v1/documents` accepts.
+///
+/// The file is the part named `file`; every other part is a text field. The
+/// schema names them all — with the names the form really uses, camelCase
+/// included — so a reader of the spec knows the whole form without reading
+/// the route.
+#[derive(Debug, ToSchema)]
+pub struct UploadForm {
+    /// The document itself. Its extension decides whether it is accepted.
+    #[schema(value_type = String, format = Binary)]
+    pub file: String,
+    /// The document's title. Defaults to the file name without its extension.
+    #[schema(value_type = Option<String>)]
+    pub title: Option<String>,
+    /// The categories the document is filed under, as a JSON array or a
+    /// comma-separated list.
+    #[schema(value_type = Option<String>)]
+    pub categories: Option<String>,
+    /// The subcategory, when the document has one.
+    #[schema(value_type = Option<String>)]
+    pub subcategory: Option<String>,
+    /// The caller's own reference for this document.
+    #[schema(value_type = Option<String>, rename = "externalRef")]
+    pub external_ref: Option<String>,
+    /// A JSON object of extra metadata, stored as the document's JSONB
+    /// metadata and read by the `metadata` search filter.
+    #[schema(value_type = Option<Object>)]
+    pub metadata: Option<serde_json::Value>,
+    /// `aggregate-only` restricts this document's tables to whole-group
+    /// aggregates; `open` (the default) leaves them open.
+    #[schema(value_type = Option<String>, rename = "tablePrivacy")]
+    pub table_privacy: Option<String>,
+    /// The kind of document, as the extractor should read it.
+    #[schema(value_type = Option<String>, rename = "documentType")]
+    pub document_type: Option<String>,
+    /// How hard to look for figures: `auto`, `all`, `none` or `off`.
+    #[schema(value_type = Option<String>)]
+    pub figures: Option<String>,
+    /// The knowledge bases to file the document under, as a JSON array or a
+    /// comma-separated list. Ids the tenant does not own are a 400.
+    #[schema(value_type = Option<String>, rename = "knowledgeBaseIds")]
+    pub knowledge_base_ids: Option<String>,
+}
+
+/// Upload a document.
+///
 /// `POST /v1/documents` — accepts the upload, returns `202` with the document
-/// and job ids.
+/// and job ids. Needs the `kb:write` scope. The answer is `202` because
+/// nothing is indexed yet: a worker picks the job up and the caller polls
+/// `GET /v1/jobs/{id}`.
+#[utoipa::path(
+    post,
+    path = "/v1/documents",
+    tag = "documents",
+    request_body(content = UploadForm, content_type = "multipart/form-data"),
+    responses(
+        (status = 202, description = "The document was accepted and a job was queued", body = IngestResponse),
+        (status = 400, description = "No file, an unsupported extension, or an unknown knowledge base", body = ErrorBody),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:write scope", body = ErrorBody),
+        (status = 413, description = "The upload is larger than the accepted limit", body = ErrorBody),
+        (status = 415, description = "The file extension is not on the accepted list", body = ErrorBody),
+        (status = 500, description = "The store could not be written", body = ErrorBody),
+        (status = 502, description = "The file could not be stored", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn ingest_document(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -108,6 +197,29 @@ pub async fn ingest_document(
         .field("externalRef")
         .filter(|v| !v.is_empty())
         .map(str::to_string);
+    // Additive: an optional JSON object for the document's JSONB metadata, the
+    // same store `RET-3` filters and `RET-4` boosts read. Absent keeps exactly
+    // the metadata an upload had before this field existed.
+    let mut metadata = parse_upload_metadata(upload.field("metadata"))?;
+    // Additive (`TBL-1`): `tablePrivacy: "aggregate-only"` asks the table
+    // routes to answer only whole-group aggregates for this document's tables.
+    // It lives in the document's JSONB metadata, so no column and no migration
+    // are added to the shared `Document` table.
+    if let Some(privacy) = upload
+        .field("tablePrivacy")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if privacy != "aggregate-only" && privacy != "open" {
+            return Err(ApiError::BadRequest(
+                "'tablePrivacy' must be 'aggregate-only' or 'open'".to_string(),
+            ));
+        }
+        let object = metadata.get_or_insert_with(|| json!({}));
+        if let Some(object) = object.as_object_mut() {
+            object.insert("tablePrivacy".to_string(), json!(privacy));
+        }
+    }
     let document_type = upload
         .field("documentType")
         .filter(|v| !v.is_empty())
@@ -173,6 +285,7 @@ pub async fn ingest_document(
                 mime_type: upload.content_type.clone().filter(|v| !v.is_empty()),
                 status: "processing".to_string(),
                 external_ref: external_ref.clone(),
+                metadata: metadata.clone(),
             },
             &knowledge_base_ids,
         )
@@ -216,15 +329,21 @@ pub async fn ingest_document(
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
 }
 
-#[derive(Debug, Serialize)]
-struct IngestResponse {
-    id: String,
+/// The body `POST /v1/documents` answers with.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IngestResponse {
+    /// The new document's id.
+    pub id: String,
+    /// The job that will ingest it.
     #[serde(rename = "jobId")]
-    job_id: String,
-    status: &'static str,
-    title: String,
+    pub job_id: String,
+    /// Always `processing` — the document is not indexed yet.
+    pub status: &'static str,
+    /// The document's title.
+    pub title: String,
+    /// The knowledge bases the document was filed under.
     #[serde(rename = "knowledgeBaseIds")]
-    knowledge_base_ids: Vec<String>,
+    pub knowledge_base_ids: Vec<String>,
 }
 
 /// Figure mode from the `figures` form field, defaulting to `auto` exactly as

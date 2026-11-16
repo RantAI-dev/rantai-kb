@@ -5,14 +5,18 @@
 pub mod auth;
 pub mod boundary;
 pub mod cli;
+pub mod communities;
 pub mod config;
 pub mod dto;
 pub mod egress;
 pub mod error;
+pub mod eval_ocr;
 pub mod events;
+pub mod openapi;
 pub mod routes;
 pub mod runtime;
 pub mod setup;
+pub mod stack;
 pub mod state;
 pub mod tier;
 
@@ -38,10 +42,15 @@ use kb_engine::CancelToken;
 /// Two layers wrap every route: the CORS layer (preflights answered before
 /// authentication, allow-origin stamped on every response) and a fallback that
 /// authenticates an unmatched path before answering 404.
+///
+/// The OpenAPI document (`GET /openapi.json`) and the Swagger UI (`GET /docs`)
+/// are served here too, and are public: a caller has to be able to read the
+/// contract before it has a key, exactly as with `/health`.
 pub fn build_router(state: AppState) -> Router {
     let shared = Arc::new(state);
     routes::health_router()
         .merge(routes::router())
+        .merge(openapi::router::<Arc<AppState>>())
         .fallback(any(routes::not_found))
         .layer(axum::middleware::from_fn(routes::cors))
         .with_state(shared)

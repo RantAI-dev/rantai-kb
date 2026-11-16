@@ -38,12 +38,14 @@ fn engine_settings() -> EngineSettings {
         rerank_final_k: 10,
         max_chunks: 10,
         min_similarity: 0.30,
+        min_score: None,
         neighbour_window: 1,
         figure_limit: 3,
         expansion_enabled: false,
         expansion_paraphrases: 3,
         hybrid_bm25_enabled: false,
         rerank_enabled: false,
+        adaptive_arms: false,
     }
 }
 
@@ -74,6 +76,8 @@ fn hit(
         rank: 0,
         is_bm25: false,
         retrieval: None,
+        dense_score: Some(similarity),
+        rerank_score: None,
     }
 }
 
@@ -148,6 +152,7 @@ async fn serve() -> String {
             embedder: Arc::new(embedder),
             jobs: Arc::new(jobs),
             events: Arc::clone(&events),
+            tables: None,
             version: "test".to_string(),
         },
         Arc::new(FakeReranker::default()),

@@ -52,6 +52,23 @@ pub const SELECT_ALIVE_BY_IDS: &str = r#"
        AND d."deletedAt" IS NULL
 "#;
 
+/// Section outlines for the tree arm (DEC-4).
+///
+/// Tenant and the caller's visible document ids are both bound: `$1` is the
+/// tenant, `$2` the scope's document list. A document with no outline is
+/// filtered out rather than returned as a JSON `null`, so the arm can tell "no
+/// structure" from "never extracted". The whole contract is one statement, so
+/// there is no second read a scope bug could hide in.
+pub const SELECT_OUTLINES: &str = r#"
+    SELECT d.id,
+           d.metadata -> 'outline' AS outline
+      FROM "Document" d
+     WHERE d."tenantId" = $1
+       AND d.id = ANY($2::text[])
+       AND d."deletedAt" IS NULL
+       AND jsonb_typeof(d.metadata -> 'outline') = 'object'
+"#;
+
 pub const SELECT_DOCS_TENANT_ONLY: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
            d."externalRef" AS external_ref,
@@ -194,7 +211,8 @@ pub const CLAIM_NEXT_PENDING: &str = r#"
         LIMIT 1
         FOR UPDATE SKIP LOCKED
      )
-    RETURNING id, "tenantId", "externalRef", "documentId", "s3Key", filename, "mimeType", attempt, params
+    RETURNING id, "tenantId", "externalRef", "documentId", "s3Key", filename, "mimeType", attempt, params,
+              (EXTRACT(EPOCH FROM ("createdAt" AT TIME ZONE 'UTC')) * 1000)::bigint AS created_at_ms
 "#;
 
 /// Persist step, overall progress and per-step counters.
@@ -271,10 +289,10 @@ pub const UPDATE_METADATA: &str = r#"
 pub const INSERT_DOCUMENT: &str = r#"
     INSERT INTO "Document" (
         id, "tenantId", title, content, categories, "subcategory",
-        "s3Key", "fileSize", "mimeType", status, "externalRef",
+        "s3Key", "fileSize", "mimeType", status, "externalRef", metadata,
         "createdAt", "updatedAt"
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now(), now()
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now()
     )
 "#;
 

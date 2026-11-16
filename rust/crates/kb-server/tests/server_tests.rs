@@ -52,12 +52,14 @@ impl Harness {
             rerank_final_k: 10,
             max_chunks: 10,
             min_similarity: 0.30,
+            min_score: None,
             neighbour_window: 1,
             figure_limit: 3,
             expansion_enabled: false,
             expansion_paraphrases: 3,
             hybrid_bm25_enabled: true,
             rerank_enabled: false,
+            adaptive_arms: false,
         };
 
         let state = AppState::from_parts(
@@ -71,6 +73,7 @@ impl Harness {
                 embedder: Arc::new(embedder),
                 jobs: Arc::new(jobs.clone()),
                 events: Arc::clone(&events),
+                tables: None,
                 version: "test".to_string(),
             },
             Arc::new(FakeReranker::default()),
@@ -217,6 +220,92 @@ async fn test_search_happy_path_fields() {
     let context = body.context.expect("context present");
     assert!(context.contains("[1] Happy Path Document"));
     assert!(context.contains("Happy path content line"));
+}
+
+#[tokio::test]
+async fn test_search_min_score_floor_empties_with_a_note_and_reports_stats() {
+    let harness = Harness::new();
+    let tenant = TenantId("tenant-1".into());
+    harness
+        .documents
+        .insert_api_key("valid-key", tenant.clone());
+    harness.documents.insert_doc(
+        tenant,
+        DocumentMeta {
+            id: DocumentId("doc-1".into()),
+            title: "Floor Document".into(),
+            categories: vec![],
+            subcategory: None,
+            status: "ready".into(),
+            external_ref: None,
+            chunk_count: 1,
+            file_type: None,
+            file_size: None,
+            mime_type: None,
+            s3_key: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+            knowledge_base_ids: vec![],
+            metadata: None,
+        },
+    );
+    // Above min_similarity (0.30) so only the request's floor can drop it.
+    harness
+        .chunks
+        .vector_hits
+        .write()
+        .unwrap()
+        .push(make_fake_hit(
+            "c_1",
+            "doc-1",
+            "Floor Document",
+            "nearest of nothing",
+            1,
+            0.40,
+        ));
+
+    let request = |min_score: f32| {
+        Request::builder()
+            .uri("/v1/search")
+            .method("POST")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer valid-key")
+            .body(Body::from(
+                serde_json::json!({"query": "how do I reset my Acme X200 router", "minScore": min_score})
+                    .to_string(),
+            ))
+            .unwrap()
+    };
+
+    let response = harness.app.clone().oneshot(request(0.9)).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body: SearchResponseDto = serde_json::from_slice(&bytes).unwrap();
+    assert!(
+        body.chunks.expect("chunks present").is_empty(),
+        "the floor removed every hit"
+    );
+    let note = body.note.expect("the empty answer says why");
+    assert!(note.contains("relevance floor"), "{note}");
+    let stats = body.stats.expect("stats present");
+    assert_eq!(stats.floor_score_kind.as_deref(), Some("dense"));
+    assert_eq!(stats.floor_dropped, Some(1));
+
+    // The same hit survives a floor it passes.
+    let response = harness.app.clone().oneshot(request(0.35)).await.unwrap();
+    let body: SearchResponseDto = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body.chunks.expect("chunks present").len(), 1);
+    assert!(body.note.is_none());
+    let stats = body.stats.expect("stats present");
+    assert_eq!(stats.floor_score_kind.as_deref(), Some("dense"));
+    assert_eq!(stats.floor_dropped, Some(0));
 }
 
 #[tokio::test]
@@ -946,6 +1035,7 @@ async fn test_ingest_worker_with_real_local_extractor() {
         mime_type: Some("text/plain".into()),
         attempt: 1,
         params: None,
+        created_at: None,
     };
     jobs.push(job);
 

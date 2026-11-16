@@ -5,8 +5,10 @@
 
 #![allow(clippy::module_name_repetitions)]
 
+pub mod community_summary;
 pub mod embedder;
 pub mod heuristic_extractor;
+pub mod image_describer;
 pub mod llm_extractor;
 pub mod llm_reranker;
 pub mod page_describer;
@@ -17,8 +19,14 @@ pub mod rerankers;
 pub mod vision_scorer;
 pub mod vlm_gate;
 
+pub use community_summary::{
+    CommunitySummariser, CommunitySummarySettings, LlmCommunitySummariser,
+};
 pub use embedder::{EmbedderImpl, EmbedderSettings};
 pub use heuristic_extractor::{HeuristicExtractor, HeuristicExtractorSettings};
+pub use image_describer::{
+    HttpImageDescriber, IMAGE_READ_PROMPT, IMAGE_READ_PROMPT_VERSION, ImageDescriberSettings,
+};
 pub use llm_extractor::{ExtractorSettings, LlmCombinedExtractor};
 /// Type alias for ExtractorSettings.
 pub type ExtractorConfig = ExtractorSettings;

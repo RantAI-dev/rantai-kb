@@ -313,6 +313,29 @@ pub trait RetrievalIndex: Send + Sync {
         document_ids: &[DocumentId],
     ) -> Result<Vec<Candidate>, PortError>;
 
+    /// Read the text units that sit on the given zero-based pages, within scope.
+    ///
+    /// This is the tree arm's second read (DEC-4): the outline names pages, and
+    /// the arm needs the chunks on them. A page with no chunk simply contributes
+    /// nothing. `per_page` bounds how many units one page contributes, so a
+    /// 30-page section cannot flood the candidate pool from one heading.
+    ///
+    /// The default is an error rather than an empty list: an adapter that has
+    /// not implemented the read would otherwise make the tree arm look like it
+    /// found nothing, which is exactly the silent degradation AGENTS rule 6
+    /// forbids. The engine turns the error into `tree_arm_failed` and returns
+    /// the other arms' results.
+    async fn fetch_pages(
+        &self,
+        _scope: &DocumentScope,
+        _pages: &[(DocumentId, u32)],
+        _per_page: usize,
+    ) -> Result<Vec<Candidate>, PortError> {
+        Err(PortError::Unavailable(
+            "this index does not support reading units by page".to_string(),
+        ))
+    }
+
     /// Retrieve all stored units of a single document, ordered by `chunk_index` ascending.
     /// Used by document inspection routes (`GET /v1/documents/:id`).
     async fn ordered_chunks(
@@ -320,6 +343,31 @@ pub trait RetrievalIndex: Send + Sync {
         tenant: &TenantId,
         document_id: &DocumentId,
     ) -> Result<Vec<Candidate>, PortError>;
+
+    /// Read at most `max_units` stored units of one document, ordered by
+    /// `chunk_index` ascending, for the document-structure read.
+    ///
+    /// The default is the honest smallest implementation — [`Self::ordered_chunks`]
+    /// followed by a truncation — which is what a fake or a small adapter needs.
+    /// A real adapter overrides it and scrolls in windows, so a 2,000-page
+    /// document is never one unbounded store round trip. `max_units` is the
+    /// caller's memory cap as well as the read cap: the adapter must not read
+    /// past it, and a caller that gets exactly `max_units` units cannot tell
+    /// whether more exist (the route reports `truncated` when the cap is hit).
+    ///
+    /// Document visibility is the caller's job, exactly as for
+    /// [`Self::ordered_chunks`]: pass a document id only after the tenant and
+    /// knowledge-base check.
+    async fn document_units(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+        max_units: usize,
+    ) -> Result<Vec<Candidate>, PortError> {
+        let mut units = self.ordered_chunks(tenant, document_id).await?;
+        units.truncate(max_units);
+        Ok(units)
+    }
 
     /// Probe whether the index backend is healthy and responding.
     async fn health_check(&self) -> Result<(), PortError> {

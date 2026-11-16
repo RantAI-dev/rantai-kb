@@ -78,12 +78,17 @@ change; MinerU's did.
 | Model | Size | Licence | Verdict |
 |---|---|---|---|
 | PaddlePaddle/PP-OCRv6 (tiny/small/medium, ONNX) | 1.5–34.5M | Apache-2.0 | 🟢 |
+| PP-Layout CDLA (PicoDet-LCNet, PaddleOCR; the CPU OCR sidecar's default layout) | ~10M | Apache-2.0 | 🟢 |
+| SLANet-plus (PaddleOCR table structure; the CPU OCR sidecar's tables) | ~7M | Apache-2.0 | 🟢 |
+| qihoo360/360LayoutAnalysis (YOLOv8n layout weights) | 6M | Apache-2.0 code; the model licence asks for an application to 360 for commercial use | 🟡 (opt-in `KB_LITE_LAYOUT_MODEL`, not a default) |
 | PaddlePaddle/PaddleOCR-VL-1.6 (+ official GGUF) | 0.9B | Apache-2.0 | 🟢 |
+| PaddlePaddle/PP-DocLayoutV3 (the layout sidecar's detector) | — | Apache-2.0 | 🟢 |
 | zai-org/GLM-OCR | 0.9B | MIT | 🟢 |
 | opendatalab/MinerU2.5-Pro (weights) | 1.2B | Apache-2.0 | 🟢 (the MinerU *pipeline code* is 🟡, see below) |
 | ibm-granite/granite-docling-258M | 258M | Apache-2.0 | 🟢 |
 | lightonai/LightOnOCR-2-1B, LightOnOCR-3-0.8B / 1B | 0.8–1B | Apache-2.0 | 🟢 |
 | ATH-MaaS/OvisOCR2 | 0.8B | Apache-2.0 (base Qwen3.5-0.8B) | 🟢 |
+| xiaomi-research/Xiaomi-OCR-0 | 0.8B | Apache-2.0 (base Qwen3.5-0.8B) | 🟢 |
 | deepseek-ai/DeepSeek-OCR (MIT), DeepSeek-OCR-2 (Apache-2.0) | ~3B MoE | MIT / Apache-2.0 | 🟢 |
 | infly/Infinity-Parser2-Pro | — | Apache-2.0 | 🟢 |
 | allenai/olmOCR-2-7B | 7B | Apache-2.0 (base Qwen2.5-VL-7B, Apache) | 🟢 |
@@ -111,6 +116,7 @@ change; MinerU's did.
 | PaddleOCR, RapidOCR | Apache-2.0 | 🟢 |
 | Docling | MIT | 🟢 |
 | MinerU (pipeline code) | Apache-2.0 + terms: separate licence above 100M MAU or $20M monthly revenue; **must credit MinerU** in the product or public docs | 🟡 |
+| Xiaomi-OCR-0 postprocessing (ported into `kb-core`) | Apache-2.0 | 🟢 |
 | llama.cpp | MIT | 🟢 |
 | vLLM, text-embeddings-inference | Apache-2.0 | 🟢 |
 | Qdrant | Apache-2.0 | 🟢 |

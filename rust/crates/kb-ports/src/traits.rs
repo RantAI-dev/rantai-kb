@@ -21,6 +21,11 @@ use crate::types::{
 
 /// What the chunk store is allowed to look at. Currently the empty case is
 /// allowed (it short-circuits to zero results).
+///
+/// Every field narrows the tenant's visible documents and is applied by
+/// `DocumentStore::build_scope` in one Postgres query, so every retrieval arm
+/// inherits the narrowed [`DocumentScope`] instead of post-filtering a ranked
+/// list.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DocumentFilter {
     /// Restrict to documents in any of these knowledge bases. Empty = no
@@ -29,6 +34,35 @@ pub struct DocumentFilter {
     /// Restrict to documents whose `categories` array contains this value.
     /// `None` = no category filter.
     pub category: Option<String>,
+    /// Restrict to documents whose `Document.externalRef` is one of these.
+    ///
+    /// `Some(vec![])` selects no document; `None` means the filter is absent.
+    /// The distinction matters because a caller that sends an empty list is
+    /// asking for nothing, not for everything.
+    #[serde(default)]
+    pub external_refs: Option<Vec<String>>,
+    /// Restrict to documents whose JSONB metadata `language` key equals this
+    /// value. There is no dedicated `Document.language` column; the metadata
+    /// key is the stored language (see `CHANGELOG.md`).
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Restrict to documents whose top-level JSONB metadata matches every
+    /// predicate. An empty list means no metadata filter.
+    #[serde(default)]
+    pub metadata: Vec<MetadataFilter>,
+}
+
+/// One top-level JSONB metadata predicate: `metadata[key]` equals one of
+/// `values`.
+///
+/// A document value that is an array matches when any element is in `values`;
+/// a scalar document value matches when it is one of `values`. The scalar
+/// comparison uses the JSON text rendering (`2024`, `true`, `"draft"`), which
+/// is what the HTTP layer validates and normalises.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetadataFilter {
+    pub key: String,
+    pub values: Vec<String>,
 }
 
 /// What the document store can build a [`DocumentScope`] from.
@@ -95,6 +129,18 @@ pub trait DocumentStore: Send + Sync {
         tenant: &TenantId,
         document_ids: &[DocumentId],
     ) -> Result<Vec<DocumentMeta>, PortError>;
+
+    /// Every visible document's section outline (`Document.metadata.outline`).
+    ///
+    /// Scope is a parameter, not an option: the adapter resolves it as
+    /// `tenant = scope.tenant AND id = ANY(scope ids) AND deletedAt IS NULL`,
+    /// never as a post-filter of a wider read. A document with no outline is
+    /// absent from the result rather than present with an empty one, so the
+    /// tree arm can tell "no structure" from "never extracted".
+    async fn outlines(
+        &self,
+        scope: &DocumentScope,
+    ) -> Result<Vec<(DocumentId, kb_core::tree::Outline)>, PortError>;
 
     /// List documents visible to the tenant (optionally filtered). Used by
     /// `GET /v1/documents`.
@@ -441,6 +487,21 @@ pub trait ProgressSink: Send + Sync {
 /// or one of the local parsers; the port only cares about the result shape.
 #[async_trait]
 pub trait Extractor: Send + Sync {
+    /// The section outline of `file_bytes` (DEC-4), read without re-extracting
+    /// the document: PDF bookmarks, else numbered headings in `pages` (the
+    /// extraction's own page text, zero-based). Ingest calls it when an
+    /// extraction carries no outline — a cache entry from before DEC-4, or a
+    /// parser (OCR, layout API) that does not produce one — so no paid
+    /// extraction is ever repeated to get one. `None` when the format has none.
+    async fn outline(
+        &self,
+        _mime_type: &str,
+        _file_bytes: &[u8],
+        _pages: &[String],
+    ) -> Option<kb_core::tree::Outline> {
+        None
+    }
+
     /// Extract text (and, when the format has them, figures) from `file_bytes`.
     async fn extract(
         &self,

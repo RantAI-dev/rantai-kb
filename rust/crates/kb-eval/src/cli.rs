@@ -81,8 +81,15 @@ RUN FLAGS
     --poll-ms MS        job poll interval (default 500)
     --ingest-concurrency N
                         corpus files uploaded at once (default 16)
+    --boost JSON        send this boost object with every search (RET-4), e.g.
+                        '{{\"recency\":{{\"field\":\"metadata.effectiveDate\",\"halfLifeDays\":365,\"weight\":1}}}}';
+                        omitted by default, which is the off run
     --allow-failures    exit 0 even when queries or corpus files failed
                         (the outputs are written either way)
+    --adaptive-arms     force per-request adaptive arm choice on (RET-5)
+    --no-adaptive-arms  force it off, whatever the server default is
+                        (default: omit `adaptiveArms`; env KB_EVAL_ADAPTIVE_ARMS
+                        does the same)
 
 LEAK FLAGS
     --base-url URL      kb-server to probe (required)
@@ -100,9 +107,13 @@ LEAK FLAGS
     --strict            also exit non-zero when an arm is UNTESTED
     --pdf               seed the corpus as two-page PDFs instead of markdown;
                         the page-image arm only sees PDFs, so its row needs it
+    --docx              seed the corpus as .docx files with a picture whose alt text
+                        is the figure canary, so the figure arm has something to find
 
 OUTPUTS (in --out)
     metrics.json  every metric with a 95% bootstrap CI, plus latency
+    latency.json  one record per query: id, client latency, status, and the
+                  server's queryClass/skippedArms when adaptive mode ran
     report.md     the same, as a table
     run.trec      document-level TREC run
     run.page.trec page-level TREC run
@@ -143,6 +154,15 @@ async fn eval(args: &[String]) -> Result<(), EvalError> {
     config.job_timeout = Duration::from_secs(parse_uint_u64(args, "--timeout", 900)?);
     config.poll_interval = Duration::from_millis(parse_uint_u64(args, "--poll-ms", 500)?);
     config.ingest_concurrency = parse_uint(args, "--ingest-concurrency", 16)?.max(1);
+    config.boost = match flag(args, "--boost") {
+        None => None,
+        Some(raw) => Some(serde_json::from_str(&raw).map_err(|e| {
+            EvalError::Usage(format!(
+                "--boost must be a JSON object accepted by /v1/search: {e}"
+            ))
+        })?),
+    };
+    config.adaptive_arms = adaptive_override(args);
 
     let allow_failures = has_flag(args, "--allow-failures");
     let report = run_harness(config).await?;
@@ -234,6 +254,12 @@ async fn leak(args: &[String]) -> Result<(), EvalError> {
     config.keep = has_flag(args, "--keep");
     config.strict = has_flag(args, "--strict");
     config.pdf_corpus = has_flag(args, "--pdf");
+    config.docx_corpus = has_flag(args, "--docx");
+    if config.pdf_corpus && config.docx_corpus {
+        return Err(EvalError::Usage(
+            "--pdf and --docx are mutually exclusive".to_string(),
+        ));
+    }
 
     let run = leak_http::run(config)
         .await
@@ -490,6 +516,28 @@ fn flag(args: &[String], name: &str) -> Option<String> {
 
 fn has_flag(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
+}
+
+/// `--adaptive-arms` / `--no-adaptive-arms`, with `KB_EVAL_ADAPTIVE_ARMS` as
+/// the environment fallback. `None` omits the request field, so the server's
+/// `KB_ADAPTIVE_ARMS` decides — the A/B must be able to test the *default* too.
+fn adaptive_override(args: &[String]) -> Option<bool> {
+    if has_flag(args, "--adaptive-arms") {
+        return Some(true);
+    }
+    if has_flag(args, "--no-adaptive-arms") {
+        return Some(false);
+    }
+    match std::env::var("KB_EVAL_ADAPTIVE_ARMS")
+        .ok()?
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn parse_uint(args: &[String], name: &str, default: usize) -> Result<usize, EvalError> {

@@ -50,6 +50,14 @@ pub const EXACT_SEARCH_THRESHOLD: u64 = 20_000;
 /// *fast* an answer comes, never whether it is right.
 const POINT_COUNT_TTL_MS: u64 = 60_000;
 
+/// Points read per scroll call by [`RetrievalIndex::document_units`].
+///
+/// The structure read only needs ids, pages, types and metadata, but the
+/// payload always carries the text, so the window bounds one response's memory
+/// rather than the whole document's. 512 keeps a single response small enough
+/// to be cheap while a 20,000-unit cap costs at most ~40 round trips.
+const DOCUMENT_SCROLL_WINDOW: u32 = 512;
+
 /// The Qdrant adapter for `RetrievalIndex`.
 #[derive(Clone)]
 pub struct QdrantIndex {
@@ -712,6 +720,97 @@ impl RetrievalIndex for QdrantIndex {
         Ok(out)
     }
 
+    async fn fetch_pages(
+        &self,
+        scope: &DocumentScope,
+        pages: &[(DocumentId, u32)],
+        per_page: usize,
+    ) -> Result<Vec<Candidate>, PortError> {
+        if pages.is_empty() || per_page == 0 || scope.document_ids().is_empty() {
+            return Ok(Vec::new());
+        }
+        // Group the request by document so one filter and one scroll window
+        // serve every page of it. Documents outside the scope are dropped here
+        // as well as by the adapter filter: two independent refusals, so a
+        // caller bug cannot become a read.
+        let mut by_document: std::collections::HashMap<&DocumentId, Vec<u32>> =
+            std::collections::HashMap::new();
+        for (document, page) in pages {
+            if scope.document_ids().contains(document) {
+                by_document.entry(document).or_default().push(*page);
+            }
+        }
+
+        let mut out: Vec<Candidate> = Vec::new();
+        for (document, mut wanted) in by_document {
+            wanted.sort_unstable();
+            wanted.dedup();
+            let filter = crate::payload::pages_filter(scope.tenant(), document, &wanted);
+            // The cap is a safety valve, not the contract: keep scrolling until
+            // every page has `per_page` units, the server has no more matches,
+            // or the read cap is reached. A page with more chunks than
+            // `per_page` therefore contributes exactly `per_page`, whichever
+            // point ids the server happened to return first.
+            let read_cap = wanted
+                .len()
+                .saturating_mul(per_page)
+                .saturating_mul(4)
+                .clamp(64, 4096);
+            let mut per_page_count: std::collections::HashMap<u32, usize> =
+                std::collections::HashMap::new();
+            let mut offset: Option<PointId> = None;
+            let mut read = 0usize;
+            loop {
+                let mut builder = ScrollPointsBuilder::new(&self.collection)
+                    .filter(filter.clone())
+                    .limit(256)
+                    .with_payload(true);
+                if let Some(offset) = offset.take() {
+                    builder = builder.offset(offset);
+                }
+                let response = self.client.scroll(builder).await.map_err(map)?;
+                if response.result.is_empty() {
+                    break;
+                }
+                read += response.result.len();
+                for point in response.result {
+                    let Some(candidate) =
+                        candidate_from(&point.payload, ArmScores::default(), ArmRanks::default())
+                    else {
+                        continue;
+                    };
+                    let Some(page) = candidate.page else {
+                        continue;
+                    };
+                    let count = per_page_count.entry(page).or_insert(0);
+                    if *count >= per_page {
+                        continue;
+                    }
+                    *count += 1;
+                    out.push(candidate);
+                }
+                let full = wanted
+                    .iter()
+                    .all(|page| per_page_count.get(page).copied().unwrap_or(0) >= per_page);
+                if full || read >= read_cap {
+                    break;
+                }
+                match response.next_page_offset {
+                    Some(next) => offset = Some(next),
+                    None => break,
+                }
+            }
+        }
+        out.sort_by(|a, b| {
+            a.document_id
+                .as_str()
+                .cmp(b.document_id.as_str())
+                .then_with(|| a.page.cmp(&b.page))
+                .then_with(|| a.chunk_index.cmp(&b.chunk_index))
+        });
+        Ok(out)
+    }
+
     async fn ordered_chunks(
         &self,
         tenant: &TenantId,
@@ -734,6 +833,51 @@ impl RetrievalIndex for QdrantIndex {
                 out.push(c);
             }
         }
+        out.sort_by_key(|c| c.chunk_index);
+        Ok(out)
+    }
+
+    async fn document_units(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+        max_units: usize,
+    ) -> Result<Vec<Candidate>, PortError> {
+        if max_units == 0 {
+            return Ok(Vec::new());
+        }
+        let filter = crate::payload::one_document_filter(tenant, document_id);
+        let mut out: Vec<Candidate> = Vec::with_capacity(max_units.min(1024));
+        let mut offset: Option<PointId> = None;
+        while out.len() < max_units {
+            let remaining = max_units - out.len();
+            let window = u32::try_from(remaining)
+                .unwrap_or(u32::MAX)
+                .min(DOCUMENT_SCROLL_WINDOW);
+            let mut builder = ScrollPointsBuilder::new(&self.collection)
+                .filter(filter.clone())
+                .limit(window)
+                .with_payload(true);
+            if let Some(offset) = offset.take() {
+                builder = builder.offset(offset);
+            }
+            let response = self.client.scroll(builder).await.map_err(map)?;
+            if response.result.is_empty() {
+                break;
+            }
+            for point in response.result {
+                if let Some(candidate) =
+                    candidate_from(&point.payload, ArmScores::default(), ArmRanks::default())
+                {
+                    out.push(candidate);
+                }
+            }
+            match response.next_page_offset {
+                Some(next) => offset = Some(next),
+                None => break,
+            }
+        }
+        out.truncate(max_units);
         out.sort_by_key(|c| c.chunk_index);
         Ok(out)
     }

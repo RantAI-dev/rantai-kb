@@ -1,0 +1,203 @@
+{
+ "regions": [
+  {
+   "index": 0,
+   "label": "header",
+   "bbox_2d": [
+    471,
+    81,
+    850,
+    97
+   ],
+   "merged": "Fifth day fits: a syndrome of neonatal convulsions"
+  },
+  {
+   "index": 1,
+   "label": "number",
+   "bbox_2d": [
+    862,
+    81,
+    893,
+    95
+   ],
+   "merged": "755"
+  },
+  {
+   "index": 2,
+   "label": "figure_title",
+   "bbox_2d": [
+    70,
+    109,
+    268,
+    122
+   ],
+   "merged": "Table 2 Caesarean section"
+  },
+  {
+   "index": 3,
+   "label": "table",
+   "bbox_2d": [
+    69,
+    124,
+    889,
+    261
+   ],
+   "merged": "<table><tr><td>Case</td><td>Onset of fits</td><td>Duration of fits</td><td>Comment</td></tr><tr><td>8</td><td>3 days 5 hours</td><td>50 hours</td><td>Birthweight 2690 g, Apgar scores 3 and 5</td></tr><tr><td>19</td><td>4 days 6 hours</td><td>23 hours</td><td>Elective for cephalopelvic disproportion</td></tr><tr><td>21</td><td>3 days 9 hours</td><td>35 hours</td><td>Failed induction for toxaemia</td></tr><tr><td>23</td><td>5 days 2 hours</td><td>1 minute</td><td>Fibroid. Classical section</td></tr><tr><td>24</td><td>5 days 6 hours</td><td>3 hours</td><td>Elective for maternal oedema</td></tr><tr><td>29</td><td>3 days 12 hours</td><td>27 hours</td><td>Antepartum haemorrhage. Irritable, lethargic baby, feeding poorly</td></tr><tr><td>34</td><td>3 days 19 hours</td><td>12 hours</td><td>Anteoid pelvis and breech presentation</td></tr><tr><td>37</td><td>5 days 10 hours</td><td>15 minutes</td><td>Failed induction, breech presentation</td></tr><tr><td>75</td><td>3 days 10 hours</td><td>12 hours</td><td>Unstable lie. Fetal distress</td></tr><tr><td>84</td><td>3 days</td><td>24 hours</td><td>Previous caesarean section</td></tr><tr><td>85</td><td>4 days 22 hours</td><td>13 hours</td><td>Birthweight 2460 g</td></tr></table>"
+  },
+  {
+   "index": 4,
+   "label": "figure_title",
+   "bbox_2d": [
+    70,
+    285,
+    226,
+    299
+   ],
+   "merged": "Table 3 Prematurity"
+  },
+  {
+   "index": 5,
+   "label": "table",
+   "bbox_2d": [
+    70,
+    300,
+    890,
+    379
+   ],
+   "merged": "<table><tr><td>Case</td><td>Onset of fits</td><td>Duration of fits (hours)</td><td>Birthweight (g)</td><td>Gestation (weeks)</td><td>Comment</td></tr><tr><td>17</td><td>4 days 6 hours</td><td>11</td><td>2400</td><td>36‡</td><td>—</td></tr><tr><td>32</td><td>4 days 8 hours</td><td>12</td><td>2490</td><td>34‡</td><td>—</td></tr><tr><td>35</td><td>4 days 12 hours</td><td>10</td><td>2480</td><td>40</td><td>Induced</td></tr><tr><td>47</td><td>3 days 10 hours</td><td>22</td><td>2670</td><td>35</td><td>—</td></tr><tr><td>85</td><td>4 days 22 hours</td><td>13</td><td>2460</td><td>38</td><td>Caesarean section</td></tr></table>"
+  },
+  {
+   "index": 6,
+   "label": "text",
+   "bbox_2d": [
+    68,
+    401,
+    471,
+    433
+   ],
+   "merged": "63 were breast fed initially. They appeared to progress normally."
+  },
+  {
+   "index": 7,
+   "label": "paragraph_title",
+   "bbox_2d": [
+    68,
+    443,
+    134,
+    458
+   ],
+   "merged": "## The fits"
+  },
+  {
+   "index": 8,
+   "label": "text",
+   "bbox_2d": [
+    65,
+    469,
+    473,
+    679
+   ],
+   "merged": "Fits were most often described as multifocal with jerking of limbs or face, often unilateral, and sometimes with apnoea or cyanosis. Their duration was from several seconds up to 2 or 3 minutes. Different patterns of fitting occurred at different times in the same case. No apparent precipitating factors were found but between fits the babies were sometimes noted to be jittery in response to stimulation. Neither apnoea alone nor a jittery response was regarded as a fit, although in some infants the seizures were heralded by apnoeic or cyanotic episodes. The frequency of fitting varied with some infants having fits every few minutes. One had 48 fits recorded within one day; others had only 1 attack, and one had 2 attacks separated by a 3-day interval."
+  },
+  {
+   "index": 9,
+   "label": "text",
+   "bbox_2d": [
+    66,
+    679,
+    473,
+    778
+   ],
+   "merged": "Fitting lasted less than 24 hours in 55 (61%) cases and ranged from a single brief episode to one infant who had seizures for 15 days. Treatment did not consistently alter this duration of fitting (Table 4). Occasionally the end of fitting seemed to be related to administration of an anticonvulsant but other cases did not respond and some stopped within"
+  },
+  {
+   "index": 10,
+   "label": "text",
+   "bbox_2d": [
+    486,
+    401,
+    895,
+    485
+   ],
+   "merged": "24 hours without treatment with anticonvulsants. Thirty-seven were treated with phenobarbitone, 54 with phenytoin, 17 with diazepam by intravenous injection, and 10 with paraldehyde. Intravenous calcium was given in 15 cases and intravenous pyridoxine in 22 with no apparent effect."
+  },
+  {
+   "index": 11,
+   "label": "text",
+   "bbox_2d": [
+    485,
+    485,
+    895,
+    555
+   ],
+   "merged": "Each baby remained in hospital until the fits stopped and he appeared to have recovered. There were no deaths. Treatment with anticonvulsants was continued in most infants after discharge from hospital."
+  },
+  {
+   "index": 12,
+   "label": "text",
+   "bbox_2d": [
+    485,
+    554,
+    895,
+    626
+   ],
+   "merged": "Nearly all neonates remained in hospital for at least 5 days. Only one infant was known to have had his first fit after discharge from hospital (on the fifth day). It is possible that other infants had fits after discharge from hospital, but this is unlikely."
+  },
+  {
+   "index": 13,
+   "label": "paragraph_title",
+   "bbox_2d": [
+    487,
+    637,
+    599,
+    653
+   ],
+   "merged": "## Investigations"
+  },
+  {
+   "index": 14,
+   "label": "text",
+   "bbox_2d": [
+    486,
+    664,
+    895,
+    778
+   ],
+   "merged": "Blood sugar was measured by Dextrostix in each infant and in at least 34 a laboratory blood glucose estimation was normal. Haemoglobin level and total and differential white cell counts were performed in nearly every case and were normal, as were the appearances of blood films. Skull x-ray films, serum sodium, potassium, and urea levels were all normal. Serum bilirubin levels were performed regularly if"
+  },
+  {
+   "index": 15,
+   "label": "figure_title",
+   "bbox_2d": [
+    67,
+    796,
+    590,
+    810
+   ],
+   "merged": "Table 4 Duration of fits and number of infants given particular treatment"
+  },
+  {
+   "index": 16,
+   "label": "table",
+   "bbox_2d": [
+    70,
+    812,
+    892,
+    879
+   ],
+   "merged": "<table><tr><td>Duration (hours)</td><td>Phenobarbitone</td><td>Phenytoin</td><td>Calcium</td><td>Pyridoxine</td><td>Paraldehyde</td><td>Diazepam</td><td>Total cases</td></tr><tr><td><12</td><td>11</td><td>15</td><td>3</td><td>3</td><td>0</td><td>2</td><td>22</td></tr><tr><td>12–24</td><td>21</td><td>20</td><td>7</td><td>9</td><td>5</td><td>6</td><td>33</td></tr><tr><td>25–36</td><td>11</td><td>9</td><td>2</td><td>5</td><td>4</td><td>4</td><td>17</td></tr><tr><td>>36</td><td>14</td><td>10</td><td>3</td><td>5</td><td>1</td><td>5</td><td>18</td></tr></table>"
+  },
+  {
+   "index": 17,
+   "label": "aside_text",
+   "bbox_2d": [
+    956,
+    25,
+    981,
+    974
+   ],
+   "merged": "Arch Dis Child, first published as 10.1136/adc.56.10.753 on 1 October 1981. Downloaded from http://adc.bmj.com/ on March 25, 2022 by guest. Protected by copyright."
+  }
+ ],
+ "expected": "Table 2 Caesarean section\n\n<table><tr><td>Case</td><td>Onset of fits</td><td>Duration of fits</td><td>Comment</td></tr><tr><td>8</td><td>3 days 5 hours</td><td>50 hours</td><td>Birthweight 2690 g, Apgar scores 3 and 5</td></tr><tr><td>19</td><td>4 days 6 hours</td><td>23 hours</td><td>Elective for cephalopelvic disproportion</td></tr><tr><td>21</td><td>3 days 9 hours</td><td>35 hours</td><td>Failed induction for toxaemia</td></tr><tr><td>23</td><td>5 days 2 hours</td><td>1 minute</td><td>Fibroid. Classical section</td></tr><tr><td>24</td><td>5 days 6 hours</td><td>3 hours</td><td>Elective for maternal oedema</td></tr><tr><td>29</td><td>3 days 12 hours</td><td>27 hours</td><td>Antepartum haemorrhage. Irritable, lethargic baby, feeding poorly</td></tr><tr><td>34</td><td>3 days 19 hours</td><td>12 hours</td><td>Anteoid pelvis and breech presentation</td></tr><tr><td>37</td><td>5 days 10 hours</td><td>15 minutes</td><td>Failed induction, breech presentation</td></tr><tr><td>75</td><td>3 days 10 hours</td><td>12 hours</td><td>Unstable lie. Fetal distress</td></tr><tr><td>84</td><td>3 days</td><td>24 hours</td><td>Previous caesarean section</td></tr><tr><td>85</td><td>4 days 22 hours</td><td>13 hours</td><td>Birthweight 2460 g</td></tr></table>\n\nTable 3 Prematurity\n\n<table><tr><td>Case</td><td>Onset of fits</td><td>Duration of fits (hours)</td><td>Birthweight (g)</td><td>Gestation (weeks)</td><td>Comment</td></tr><tr><td>17</td><td>4 days 6 hours</td><td>11</td><td>2400</td><td>36‡</td><td>—</td></tr><tr><td>32</td><td>4 days 8 hours</td><td>12</td><td>2490</td><td>34‡</td><td>—</td></tr><tr><td>35</td><td>4 days 12 hours</td><td>10</td><td>2480</td><td>40</td><td>Induced</td></tr><tr><td>47</td><td>3 days 10 hours</td><td>22</td><td>2670</td><td>35</td><td>—</td></tr><tr><td>85</td><td>4 days 22 hours</td><td>13</td><td>2460</td><td>38</td><td>Caesarean section</td></tr></table>\n\n63 were breast fed initially. They appeared to progress normally.\n\n## The fits\n\nFits were most often described as multifocal with jerking of limbs or face, often unilateral, and sometimes with apnoea or cyanosis. Their duration was from several seconds up to 2 or 3 minutes. Different patterns of fitting occurred at different times in the same case. No apparent precipitating factors were found but between fits the babies were sometimes noted to be jittery in response to stimulation. Neither apnoea alone nor a jittery response was regarded as a fit, although in some infants the seizures were heralded by apnoeic or cyanotic episodes. The frequency of fitting varied with some infants having fits every few minutes. One had 48 fits recorded within one day; others had only 1 attack, and one had 2 attacks separated by a 3-day interval.\n\nFitting lasted less than 24 hours in 55 (61%) cases and ranged from a single brief episode to one infant who had seizures for 15 days. Treatment did not consistently alter this duration of fitting (Table 4). Occasionally the end of fitting seemed to be related to administration of an anticonvulsant but other cases did not respond and some stopped within\n\n24 hours without treatment with anticonvulsants. Thirty-seven were treated with phenobarbitone, 54 with phenytoin, 17 with diazepam by intravenous injection, and 10 with paraldehyde. Intravenous calcium was given in 15 cases and intravenous pyridoxine in 22 with no apparent effect.\n\nEach baby remained in hospital until the fits stopped and he appeared to have recovered. There were no deaths. Treatment with anticonvulsants was continued in most infants after discharge from hospital.\n\nNearly all neonates remained in hospital for at least 5 days. Only one infant was known to have had his first fit after discharge from hospital (on the fifth day). It is possible that other infants had fits after discharge from hospital, but this is unlikely.\n\n## Investigations\n\nBlood sugar was measured by Dextrostix in each infant and in at least 34 a laboratory blood glucose estimation was normal. Haemoglobin level and total and differential white cell counts were performed in nearly every case and were normal, as were the appearances of blood films. Skull x-ray films, serum sodium, potassium, and urea levels were all normal. Serum bilirubin levels were performed regularly if\n\nTable 4 Duration of fits and number of infants given particular treatment\n\n<table><tr><td>Duration (hours)</td><td>Phenobarbitone</td><td>Phenytoin</td><td>Calcium</td><td>Pyridoxine</td><td>Paraldehyde</td><td>Diazepam</td><td>Total cases</td></tr><tr><td><12</td><td>11</td><td>15</td><td>3</td><td>3</td><td>0</td><td>2</td><td>22</td></tr><tr><td>12–24</td><td>21</td><td>20</td><td>7</td><td>9</td><td>5</td><td>6</td><td>33</td></tr><tr><td>25–36</td><td>11</td><td>9</td><td>2</td><td>5</td><td>4</td><td>4</td><td>17</td></tr><tr><td>>36</td><td>14</td><td>10</td><td>3</td><td>5</td><td>1</td><td>5</td><td>18</td></tr></table>"
+}

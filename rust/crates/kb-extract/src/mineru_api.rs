@@ -316,12 +316,15 @@ impl MineruApiExtractor {
         }
 
         Ok(ExtractionResult {
+            tables: Vec::new(),
+            ocr: None,
             content: md_text,
             file_type: "pdf".to_string(),
             used_ocr: true,
             figures,
             pages_blocks: None,
             page_map,
+            outline: None,
             error: None,
         })
     }

@@ -1,0 +1,51 @@
+{
+  "vidore3-hr-en": {
+    "queries": 318,
+    "queries_with_label": 318,
+    "enumerative": 61,
+    "multi_hop": 30,
+    "aggregative_candidates_before_gold_filter": 79,
+    "aggregative": 66,
+    "nonaggregative": 252,
+    "aggregative_gold_pages": 395,
+    "aggregative_rows_written": 395,
+    "nonaggregative_rows_written": 1336,
+    "gate": {
+      "tp": 51,
+      "fp": 120,
+      "fn": 15,
+      "tn": 132,
+      "precision": 0.2982456140350877,
+      "recall": 0.7727272727272727
+    }
+  },
+  "vidore3-cs-en": {
+    "queries": 215,
+    "queries_with_label": 215,
+    "enumerative": 42,
+    "multi_hop": 23,
+    "aggregative_candidates_before_gold_filter": 60,
+    "aggregative": 53,
+    "nonaggregative": 162,
+    "aggregative_gold_pages": 310,
+    "aggregative_rows_written": 310,
+    "nonaggregative_rows_written": 739,
+    "gate": {
+      "tp": 42,
+      "fp": 75,
+      "fn": 11,
+      "tn": 87,
+      "precision": 0.358974358974359,
+      "recall": 0.7924528301886793
+    }
+  },
+  "gate_agreement_all": {
+    "tp": 93,
+    "fp": 195,
+    "fn": 26,
+    "tn": 219,
+    "precision": 0.3229166666666667,
+    "recall": 0.7815126050420168,
+    "accuracy": 0.5853658536585366
+  }
+}

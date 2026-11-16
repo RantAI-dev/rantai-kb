@@ -1,0 +1,5800 @@
+{
+  "generator": "rust/crates/kb-eval/scripts/outline.py",
+  "page_numbers": "1-based PDF page; matches ViDoRe <doc>#p<N> qrels",
+  "documents": {
+    "Introduction_to_Computer_Science": {
+      "path": "vidore3-cs-en/corpus/Introduction_to_Computer_Science.pdf",
+      "dataset": "vidore3-cs-en",
+      "title": "Introduction to Computer Science",
+      "pages": 945,
+      "method": "bookmarks",
+      "nodes": [
+        {
+          "title": "Contents",
+          "level": 1,
+          "page": 7,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 10,
+          "out_of_order": false
+        },
+        {
+          "title": "Preface",
+          "level": 1,
+          "page": 11,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 18,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 1 Introduction to Computer Science",
+          "level": 1,
+          "page": 19,
+          "source_level": 1,
+          "id": "n0002",
+          "end_page": 48,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 19,
+          "source_level": 2,
+          "id": "n0003",
+          "end_page": 19,
+          "out_of_order": false
+        },
+        {
+          "title": "1.1 Computer Science",
+          "level": 2,
+          "page": 20,
+          "source_level": 2,
+          "id": "n0004",
+          "end_page": 29,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2 Computer Science across the Disciplines",
+          "level": 2,
+          "page": 30,
+          "source_level": 2,
+          "id": "n0005",
+          "end_page": 34,
+          "out_of_order": false
+        },
+        {
+          "title": "1.3 Computer Science and the Future of Society",
+          "level": 2,
+          "page": 35,
+          "source_level": 2,
+          "id": "n0006",
+          "end_page": 42,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 43,
+          "source_level": 2,
+          "id": "n0007",
+          "end_page": 48,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 2 Computational Thinking and Design Reusability",
+          "level": 1,
+          "page": 49,
+          "source_level": 1,
+          "id": "n0008",
+          "end_page": 100,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 49,
+          "source_level": 2,
+          "id": "n0009",
+          "end_page": 49,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1 Computational Thinking",
+          "level": 2,
+          "page": 50,
+          "source_level": 2,
+          "id": "n0010",
+          "end_page": 62,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2 Architecting Solutions with Adaptive Design Reuse in Mind",
+          "level": 2,
+          "page": 63,
+          "source_level": 2,
+          "id": "n0011",
+          "end_page": 82,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3 Evolving Architectures into Useable Products",
+          "level": 2,
+          "page": 83,
+          "source_level": 2,
+          "id": "n0012",
+          "end_page": 92,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 93,
+          "source_level": 2,
+          "id": "n0013",
+          "end_page": 100,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 3 Data Structures and Algorithms",
+          "level": 1,
+          "page": 101,
+          "source_level": 1,
+          "id": "n0014",
+          "end_page": 154,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 101,
+          "source_level": 2,
+          "id": "n0015",
+          "end_page": 101,
+          "out_of_order": false
+        },
+        {
+          "title": "3.1 Introduction to Data Structures and Algorithms",
+          "level": 2,
+          "page": 101,
+          "source_level": 2,
+          "id": "n0016",
+          "end_page": 109,
+          "out_of_order": false
+        },
+        {
+          "title": "3.2 Algorithm Design and Discovery",
+          "level": 2,
+          "page": 110,
+          "source_level": 2,
+          "id": "n0017",
+          "end_page": 116,
+          "out_of_order": false
+        },
+        {
+          "title": "3.3 Formal Properties of Algorithms",
+          "level": 2,
+          "page": 117,
+          "source_level": 2,
+          "id": "n0018",
+          "end_page": 122,
+          "out_of_order": false
+        },
+        {
+          "title": "3.4 Algorithmic Paradigms",
+          "level": 2,
+          "page": 123,
+          "source_level": 2,
+          "id": "n0019",
+          "end_page": 128,
+          "out_of_order": false
+        },
+        {
+          "title": "3.5 Sample Algorithms by Problem",
+          "level": 2,
+          "page": 129,
+          "source_level": 2,
+          "id": "n0020",
+          "end_page": 136,
+          "out_of_order": false
+        },
+        {
+          "title": "3.6 Computer Science Theory",
+          "level": 2,
+          "page": 137,
+          "source_level": 2,
+          "id": "n0021",
+          "end_page": 140,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 141,
+          "source_level": 2,
+          "id": "n0022",
+          "end_page": 154,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 4 Linguistic Realization of Algorithms: Low-Level Programming Languages",
+          "level": 1,
+          "page": 155,
+          "source_level": 1,
+          "id": "n0023",
+          "end_page": 204,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 155,
+          "source_level": 2,
+          "id": "n0024",
+          "end_page": 155,
+          "out_of_order": false
+        },
+        {
+          "title": "4.1 Models of Computation",
+          "level": 2,
+          "page": 156,
+          "source_level": 2,
+          "id": "n0025",
+          "end_page": 167,
+          "out_of_order": false
+        },
+        {
+          "title": "4.2 Building C Programs",
+          "level": 2,
+          "page": 168,
+          "source_level": 2,
+          "id": "n0026",
+          "end_page": 184,
+          "out_of_order": false
+        },
+        {
+          "title": "4.3 Parallel Programming Models",
+          "level": 2,
+          "page": 185,
+          "source_level": 2,
+          "id": "n0027",
+          "end_page": 190,
+          "out_of_order": false
+        },
+        {
+          "title": "4.4 Applications of Programming Models",
+          "level": 2,
+          "page": 191,
+          "source_level": 2,
+          "id": "n0028",
+          "end_page": 193,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 194,
+          "source_level": 2,
+          "id": "n0029",
+          "end_page": 204,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 5 Hardware Realizations of Algorithms: Computer Systems Design",
+          "level": 1,
+          "page": 205,
+          "source_level": 1,
+          "id": "n0030",
+          "end_page": 252,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 205,
+          "source_level": 2,
+          "id": "n0031",
+          "end_page": 205,
+          "out_of_order": false
+        },
+        {
+          "title": "5.1 Computer Systems Organization",
+          "level": 2,
+          "page": 206,
+          "source_level": 2,
+          "id": "n0032",
+          "end_page": 209,
+          "out_of_order": false
+        },
+        {
+          "title": "5.2 Computer Levels of Abstraction",
+          "level": 2,
+          "page": 210,
+          "source_level": 2,
+          "id": "n0033",
+          "end_page": 217,
+          "out_of_order": false
+        },
+        {
+          "title": "5.3 Machine-Level Information Representation",
+          "level": 2,
+          "page": 218,
+          "source_level": 2,
+          "id": "n0034",
+          "end_page": 223,
+          "out_of_order": false
+        },
+        {
+          "title": "5.4 Machine-Level Program Representation",
+          "level": 2,
+          "page": 224,
+          "source_level": 2,
+          "id": "n0035",
+          "end_page": 230,
+          "out_of_order": false
+        },
+        {
+          "title": "5.5 Memory Hierarchy",
+          "level": 2,
+          "page": 231,
+          "source_level": 2,
+          "id": "n0036",
+          "end_page": 239,
+          "out_of_order": false
+        },
+        {
+          "title": "5.6 Processor Architectures",
+          "level": 2,
+          "page": 240,
+          "source_level": 2,
+          "id": "n0037",
+          "end_page": 243,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 244,
+          "source_level": 2,
+          "id": "n0038",
+          "end_page": 252,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 6 Infrastructure Abstraction Layer: Operating Systems",
+          "level": 1,
+          "page": 253,
+          "source_level": 1,
+          "id": "n0039",
+          "end_page": 312,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 253,
+          "source_level": 2,
+          "id": "n0040",
+          "end_page": 253,
+          "out_of_order": false
+        },
+        {
+          "title": "6.1 What Is an Operating System?",
+          "level": 2,
+          "page": 254,
+          "source_level": 2,
+          "id": "n0041",
+          "end_page": 259,
+          "out_of_order": false
+        },
+        {
+          "title": "6.2 Fundamental OS Concepts",
+          "level": 2,
+          "page": 260,
+          "source_level": 2,
+          "id": "n0042",
+          "end_page": 271,
+          "out_of_order": false
+        },
+        {
+          "title": "6.3 Processes and Concurrency",
+          "level": 2,
+          "page": 272,
+          "source_level": 2,
+          "id": "n0043",
+          "end_page": 281,
+          "out_of_order": false
+        },
+        {
+          "title": "6.4 Memory Management",
+          "level": 2,
+          "page": 282,
+          "source_level": 2,
+          "id": "n0044",
+          "end_page": 288,
+          "out_of_order": false
+        },
+        {
+          "title": "6.5 File Systems",
+          "level": 2,
+          "page": 289,
+          "source_level": 2,
+          "id": "n0045",
+          "end_page": 293,
+          "out_of_order": false
+        },
+        {
+          "title": "6.6 Reliability and Security",
+          "level": 2,
+          "page": 294,
+          "source_level": 2,
+          "id": "n0046",
+          "end_page": 299,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 300,
+          "source_level": 2,
+          "id": "n0047",
+          "end_page": 312,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 7 High-Level Programming Languages",
+          "level": 1,
+          "page": 313,
+          "source_level": 1,
+          "id": "n0048",
+          "end_page": 374,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 313,
+          "source_level": 2,
+          "id": "n0049",
+          "end_page": 313,
+          "out_of_order": false
+        },
+        {
+          "title": "7.1 Programming Language Foundations",
+          "level": 2,
+          "page": 314,
+          "source_level": 2,
+          "id": "n0050",
+          "end_page": 326,
+          "out_of_order": false
+        },
+        {
+          "title": "7.2 Programming Language Constructs",
+          "level": 2,
+          "page": 327,
+          "source_level": 2,
+          "id": "n0051",
+          "end_page": 346,
+          "out_of_order": false
+        },
+        {
+          "title": "7.3 Alternative Programming Models",
+          "level": 2,
+          "page": 347,
+          "source_level": 2,
+          "id": "n0052",
+          "end_page": 355,
+          "out_of_order": false
+        },
+        {
+          "title": "7.4 Programming Language Implementation",
+          "level": 2,
+          "page": 356,
+          "source_level": 2,
+          "id": "n0053",
+          "end_page": 362,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 363,
+          "source_level": 2,
+          "id": "n0054",
+          "end_page": 374,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 8 Data Management",
+          "level": 1,
+          "page": 375,
+          "source_level": 1,
+          "id": "n0055",
+          "end_page": 444,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 375,
+          "source_level": 2,
+          "id": "n0056",
+          "end_page": 375,
+          "out_of_order": false
+        },
+        {
+          "title": "8.1 Data Management Focus",
+          "level": 2,
+          "page": 376,
+          "source_level": 2,
+          "id": "n0057",
+          "end_page": 381,
+          "out_of_order": false
+        },
+        {
+          "title": "8.2 Data Management Systems",
+          "level": 2,
+          "page": 382,
+          "source_level": 2,
+          "id": "n0058",
+          "end_page": 387,
+          "out_of_order": false
+        },
+        {
+          "title": "8.3 Relational Database Management Systems",
+          "level": 2,
+          "page": 388,
+          "source_level": 2,
+          "id": "n0059",
+          "end_page": 405,
+          "out_of_order": false
+        },
+        {
+          "title": "8.4 Nonrelational Database Management Systems",
+          "level": 2,
+          "page": 406,
+          "source_level": 2,
+          "id": "n0060",
+          "end_page": 412,
+          "out_of_order": false
+        },
+        {
+          "title": "8.5 Data Warehousing, Data Lakes, and Business Intelligence",
+          "level": 2,
+          "page": 413,
+          "source_level": 2,
+          "id": "n0061",
+          "end_page": 417,
+          "out_of_order": false
+        },
+        {
+          "title": "8.6 Data Management for Shallow and Deep Learning Applications",
+          "level": 2,
+          "page": 418,
+          "source_level": 2,
+          "id": "n0062",
+          "end_page": 427,
+          "out_of_order": false
+        },
+        {
+          "title": "8.7 Informatics and Data Management",
+          "level": 2,
+          "page": 428,
+          "source_level": 2,
+          "id": "n0063",
+          "end_page": 429,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 430,
+          "source_level": 2,
+          "id": "n0064",
+          "end_page": 444,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 9 Software Engineering",
+          "level": 1,
+          "page": 445,
+          "source_level": 1,
+          "id": "n0065",
+          "end_page": 516,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 445,
+          "source_level": 2,
+          "id": "n0066",
+          "end_page": 445,
+          "out_of_order": false
+        },
+        {
+          "title": "9.1 Software Engineering Fundamentals",
+          "level": 2,
+          "page": 446,
+          "source_level": 2,
+          "id": "n0067",
+          "end_page": 455,
+          "out_of_order": false
+        },
+        {
+          "title": "9.2 Software Engineering Process",
+          "level": 2,
+          "page": 456,
+          "source_level": 2,
+          "id": "n0068",
+          "end_page": 483,
+          "out_of_order": false
+        },
+        {
+          "title": "9.3 Special Topics",
+          "level": 2,
+          "page": 484,
+          "source_level": 2,
+          "id": "n0069",
+          "end_page": 505,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 506,
+          "source_level": 2,
+          "id": "n0070",
+          "end_page": 516,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 10 Enterprise and Solution Architectures Management",
+          "level": 1,
+          "page": 517,
+          "source_level": 1,
+          "id": "n0071",
+          "end_page": 574,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 517,
+          "source_level": 2,
+          "id": "n0072",
+          "end_page": 517,
+          "out_of_order": false
+        },
+        {
+          "title": "10.1 Patterns Management",
+          "level": 2,
+          "page": 518,
+          "source_level": 2,
+          "id": "n0073",
+          "end_page": 525,
+          "out_of_order": false
+        },
+        {
+          "title": "10.2 Enterprise Architecture Management Frameworks",
+          "level": 2,
+          "page": 526,
+          "source_level": 2,
+          "id": "n0074",
+          "end_page": 560,
+          "out_of_order": false
+        },
+        {
+          "title": "10.3 Solution Architecture Management",
+          "level": 2,
+          "page": 561,
+          "source_level": 2,
+          "id": "n0075",
+          "end_page": 565,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 566,
+          "source_level": 2,
+          "id": "n0076",
+          "end_page": 574,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 11 Web Applications Development",
+          "level": 1,
+          "page": 575,
+          "source_level": 1,
+          "id": "n0077",
+          "end_page": 674,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 575,
+          "source_level": 2,
+          "id": "n0078",
+          "end_page": 575,
+          "out_of_order": false
+        },
+        {
+          "title": "11.1 Modern Web Applications Architectures",
+          "level": 2,
+          "page": 576,
+          "source_level": 2,
+          "id": "n0079",
+          "end_page": 593,
+          "out_of_order": false
+        },
+        {
+          "title": "11.2 Sample Responsive WAD with Bootstrap and Django",
+          "level": 2,
+          "page": 594,
+          "source_level": 2,
+          "id": "n0080",
+          "end_page": 619,
+          "out_of_order": false
+        },
+        {
+          "title": "11.3 Sample Responsive WAD with Bootstrap/React and Node",
+          "level": 2,
+          "page": 620,
+          "source_level": 2,
+          "id": "n0081",
+          "end_page": 634,
+          "out_of_order": false
+        },
+        {
+          "title": "11.4 Sample Responsive WAD with Bootstrap/React and Django",
+          "level": 2,
+          "page": 635,
+          "source_level": 2,
+          "id": "n0082",
+          "end_page": 639,
+          "out_of_order": false
+        },
+        {
+          "title": "11.5 Sample Native WAD with React Native and Node or Django",
+          "level": 2,
+          "page": 640,
+          "source_level": 2,
+          "id": "n0083",
+          "end_page": 652,
+          "out_of_order": false
+        },
+        {
+          "title": "11.6 Sample Ethereum Blockchain Web 2.0/Web 3.0 Application",
+          "level": 2,
+          "page": 653,
+          "source_level": 2,
+          "id": "n0084",
+          "end_page": 665,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 666,
+          "source_level": 2,
+          "id": "n0085",
+          "end_page": 674,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 12 Cloud-Native Applications Development",
+          "level": 1,
+          "page": 675,
+          "source_level": 1,
+          "id": "n0086",
+          "end_page": 770,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 675,
+          "source_level": 2,
+          "id": "n0087",
+          "end_page": 675,
+          "out_of_order": false
+        },
+        {
+          "title": "12.1 Introduction to Cloud-Native Applications",
+          "level": 2,
+          "page": 676,
+          "source_level": 2,
+          "id": "n0088",
+          "end_page": 699,
+          "out_of_order": false
+        },
+        {
+          "title": "12.2 Cloud-Based and Cloud-Native Applications Deployment Technologies",
+          "level": 2,
+          "page": 700,
+          "source_level": 2,
+          "id": "n0089",
+          "end_page": 720,
+          "out_of_order": false
+        },
+        {
+          "title": "12.3 Example PaaS and FaaS Deployments of Cloud-Native Applications",
+          "level": 2,
+          "page": 721,
+          "source_level": 2,
+          "id": "n0090",
+          "end_page": 759,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 760,
+          "source_level": 2,
+          "id": "n0091",
+          "end_page": 770,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 13 Hybrid Multicloud Digital Solutions Development",
+          "level": 1,
+          "page": 771,
+          "source_level": 1,
+          "id": "n0092",
+          "end_page": 826,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 771,
+          "source_level": 2,
+          "id": "n0093",
+          "end_page": 771,
+          "out_of_order": false
+        },
+        {
+          "title": "13.1 Hybrid Multicloud Solutions and Cloud Mashups",
+          "level": 2,
+          "page": 772,
+          "source_level": 2,
+          "id": "n0094",
+          "end_page": 775,
+          "out_of_order": false
+        },
+        {
+          "title": "13.2 Big Cloud IaaS Mainstream Capabilities",
+          "level": 2,
+          "page": 776,
+          "source_level": 2,
+          "id": "n0095",
+          "end_page": 783,
+          "out_of_order": false
+        },
+        {
+          "title": "13.3 Big Cloud PaaS Mainstream Capabilities",
+          "level": 2,
+          "page": 784,
+          "source_level": 2,
+          "id": "n0096",
+          "end_page": 799,
+          "out_of_order": false
+        },
+        {
+          "title": "13.4 Towards Intelligent Autonomous Networked Super Systems",
+          "level": 2,
+          "page": 800,
+          "source_level": 2,
+          "id": "n0097",
+          "end_page": 814,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 815,
+          "source_level": 2,
+          "id": "n0098",
+          "end_page": 826,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 14 Cyber Resources Qualities and Cyber Computing Governance",
+          "level": 1,
+          "page": 827,
+          "source_level": 1,
+          "id": "n0099",
+          "end_page": 926,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 827,
+          "source_level": 2,
+          "id": "n0100",
+          "end_page": 827,
+          "out_of_order": false
+        },
+        {
+          "title": "14.1 Cyber Resources Management Frameworks",
+          "level": 2,
+          "page": 828,
+          "source_level": 2,
+          "id": "n0101",
+          "end_page": 848,
+          "out_of_order": false
+        },
+        {
+          "title": "14.2 Cybersecurity Deep Dive",
+          "level": 2,
+          "page": 849,
+          "source_level": 2,
+          "id": "n0102",
+          "end_page": 908,
+          "out_of_order": false
+        },
+        {
+          "title": "14.3 Governing the Use of Cyber Resources",
+          "level": 2,
+          "page": 909,
+          "source_level": 2,
+          "id": "n0103",
+          "end_page": 915,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter Review",
+          "level": 2,
+          "page": 916,
+          "source_level": 2,
+          "id": "n0104",
+          "end_page": 926,
+          "out_of_order": false
+        },
+        {
+          "title": "Appendix A Appendix A: Network Design Application of Algorithms",
+          "level": 1,
+          "page": 927,
+          "source_level": 1,
+          "id": "n0105",
+          "end_page": 932,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction to Data Communications and Networks",
+          "level": 2,
+          "page": 927,
+          "source_level": 2,
+          "id": "n0106",
+          "end_page": 927,
+          "out_of_order": false
+        },
+        {
+          "title": "Network Edge and Core",
+          "level": 2,
+          "page": 928,
+          "source_level": 2,
+          "id": "n0107",
+          "end_page": 928,
+          "out_of_order": false
+        },
+        {
+          "title": "Network Layers and Service Models",
+          "level": 2,
+          "page": 929,
+          "source_level": 2,
+          "id": "n0108",
+          "end_page": 929,
+          "out_of_order": false
+        },
+        {
+          "title": "Internet Network Protocols",
+          "level": 2,
+          "page": 929,
+          "source_level": 2,
+          "id": "n0109",
+          "end_page": 929,
+          "out_of_order": false
+        },
+        {
+          "title": "Wireless and Mobile Networks",
+          "level": 2,
+          "page": 930,
+          "source_level": 2,
+          "id": "n0110",
+          "end_page": 930,
+          "out_of_order": false
+        },
+        {
+          "title": "Distributed and Decentralized Systems",
+          "level": 2,
+          "page": 930,
+          "source_level": 2,
+          "id": "n0111",
+          "end_page": 930,
+          "out_of_order": false
+        },
+        {
+          "title": "History of the Internet and Inner-Workings",
+          "level": 2,
+          "page": 931,
+          "source_level": 2,
+          "id": "n0112",
+          "end_page": 932,
+          "out_of_order": false
+        },
+        {
+          "title": "Index",
+          "level": 1,
+          "page": 933,
+          "source_level": 1,
+          "id": "n0113",
+          "end_page": 945,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "Introduction_to_Python_Programming": {
+      "path": "vidore3-cs-en/corpus/Introduction_to_Python_Programming.pdf",
+      "dataset": "vidore3-cs-en",
+      "title": "Introduction to Python Programming",
+      "pages": 415,
+      "method": "bookmarks",
+      "nodes": [
+        {
+          "title": "Contents",
+          "level": 1,
+          "page": 7,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 10,
+          "out_of_order": false
+        },
+        {
+          "title": "Preface",
+          "level": 1,
+          "page": 11,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 16,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 1 Statements",
+          "level": 1,
+          "page": 17,
+          "source_level": 1,
+          "id": "n0002",
+          "end_page": 48,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 17,
+          "source_level": 2,
+          "id": "n0003",
+          "end_page": 17,
+          "out_of_order": false
+        },
+        {
+          "title": "1.1 Background",
+          "level": 2,
+          "page": 18,
+          "source_level": 2,
+          "id": "n0004",
+          "end_page": 19,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2 Input/output",
+          "level": 2,
+          "page": 20,
+          "source_level": 2,
+          "id": "n0005",
+          "end_page": 23,
+          "out_of_order": false
+        },
+        {
+          "title": "1.3 Variables",
+          "level": 2,
+          "page": 24,
+          "source_level": 2,
+          "id": "n0006",
+          "end_page": 25,
+          "out_of_order": false
+        },
+        {
+          "title": "1.4 String basics",
+          "level": 2,
+          "page": 26,
+          "source_level": 2,
+          "id": "n0007",
+          "end_page": 29,
+          "out_of_order": false
+        },
+        {
+          "title": "1.5 Number basics",
+          "level": 2,
+          "page": 30,
+          "source_level": 2,
+          "id": "n0008",
+          "end_page": 33,
+          "out_of_order": false
+        },
+        {
+          "title": "1.6 Error messages",
+          "level": 2,
+          "page": 34,
+          "source_level": 2,
+          "id": "n0009",
+          "end_page": 36,
+          "out_of_order": false
+        },
+        {
+          "title": "1.7 Comments",
+          "level": 2,
+          "page": 37,
+          "source_level": 2,
+          "id": "n0010",
+          "end_page": 40,
+          "out_of_order": false
+        },
+        {
+          "title": "1.8 Why Python?",
+          "level": 2,
+          "page": 41,
+          "source_level": 2,
+          "id": "n0011",
+          "end_page": 43,
+          "out_of_order": false
+        },
+        {
+          "title": "1.9 Chapter summary",
+          "level": 2,
+          "page": 44,
+          "source_level": 2,
+          "id": "n0012",
+          "end_page": 48,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 2 Expressions",
+          "level": 1,
+          "page": 49,
+          "source_level": 1,
+          "id": "n0013",
+          "end_page": 80,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 49,
+          "source_level": 2,
+          "id": "n0014",
+          "end_page": 49,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1 The Python shell",
+          "level": 2,
+          "page": 50,
+          "source_level": 2,
+          "id": "n0015",
+          "end_page": 51,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2 Type conversion",
+          "level": 2,
+          "page": 52,
+          "source_level": 2,
+          "id": "n0016",
+          "end_page": 54,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3 Mixed data types",
+          "level": 2,
+          "page": 55,
+          "source_level": 2,
+          "id": "n0017",
+          "end_page": 57,
+          "out_of_order": false
+        },
+        {
+          "title": "2.4 Floating-point errors",
+          "level": 2,
+          "page": 58,
+          "source_level": 2,
+          "id": "n0018",
+          "end_page": 60,
+          "out_of_order": false
+        },
+        {
+          "title": "2.5 Dividing integers",
+          "level": 2,
+          "page": 61,
+          "source_level": 2,
+          "id": "n0019",
+          "end_page": 63,
+          "out_of_order": false
+        },
+        {
+          "title": "2.6 The math module",
+          "level": 2,
+          "page": 64,
+          "source_level": 2,
+          "id": "n0020",
+          "end_page": 69,
+          "out_of_order": false
+        },
+        {
+          "title": "2.7 Formatting code",
+          "level": 2,
+          "page": 70,
+          "source_level": 2,
+          "id": "n0021",
+          "end_page": 74,
+          "out_of_order": false
+        },
+        {
+          "title": "2.8 Python careers",
+          "level": 2,
+          "page": 75,
+          "source_level": 2,
+          "id": "n0022",
+          "end_page": 76,
+          "out_of_order": false
+        },
+        {
+          "title": "2.9 Chapter summary",
+          "level": 2,
+          "page": 77,
+          "source_level": 2,
+          "id": "n0023",
+          "end_page": 80,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 3 Objects",
+          "level": 1,
+          "page": 81,
+          "source_level": 1,
+          "id": "n0024",
+          "end_page": 100,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 81,
+          "source_level": 2,
+          "id": "n0025",
+          "end_page": 81,
+          "out_of_order": false
+        },
+        {
+          "title": "3.1 Strings revisited",
+          "level": 2,
+          "page": 81,
+          "source_level": 2,
+          "id": "n0026",
+          "end_page": 85,
+          "out_of_order": false
+        },
+        {
+          "title": "3.2 Formatted strings",
+          "level": 2,
+          "page": 86,
+          "source_level": 2,
+          "id": "n0027",
+          "end_page": 88,
+          "out_of_order": false
+        },
+        {
+          "title": "3.3 Variables revisited",
+          "level": 2,
+          "page": 89,
+          "source_level": 2,
+          "id": "n0028",
+          "end_page": 92,
+          "out_of_order": false
+        },
+        {
+          "title": "3.4 List basics",
+          "level": 2,
+          "page": 93,
+          "source_level": 2,
+          "id": "n0029",
+          "end_page": 94,
+          "out_of_order": false
+        },
+        {
+          "title": "3.5 Tuple basics",
+          "level": 2,
+          "page": 95,
+          "source_level": 2,
+          "id": "n0030",
+          "end_page": 97,
+          "out_of_order": false
+        },
+        {
+          "title": "3.6 Chapter summary",
+          "level": 2,
+          "page": 98,
+          "source_level": 2,
+          "id": "n0031",
+          "end_page": 100,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 4 Decisions",
+          "level": 1,
+          "page": 101,
+          "source_level": 1,
+          "id": "n0032",
+          "end_page": 130,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 101,
+          "source_level": 2,
+          "id": "n0033",
+          "end_page": 101,
+          "out_of_order": false
+        },
+        {
+          "title": "4.1 Boolean values",
+          "level": 2,
+          "page": 101,
+          "source_level": 2,
+          "id": "n0034",
+          "end_page": 105,
+          "out_of_order": false
+        },
+        {
+          "title": "4.2 If-else statements",
+          "level": 2,
+          "page": 106,
+          "source_level": 2,
+          "id": "n0035",
+          "end_page": 109,
+          "out_of_order": false
+        },
+        {
+          "title": "4.3 Boolean operations",
+          "level": 2,
+          "page": 110,
+          "source_level": 2,
+          "id": "n0036",
+          "end_page": 113,
+          "out_of_order": false
+        },
+        {
+          "title": "4.4 Operator precedence",
+          "level": 2,
+          "page": 114,
+          "source_level": 2,
+          "id": "n0037",
+          "end_page": 116,
+          "out_of_order": false
+        },
+        {
+          "title": "4.5 Chained decisions",
+          "level": 2,
+          "page": 117,
+          "source_level": 2,
+          "id": "n0038",
+          "end_page": 122,
+          "out_of_order": false
+        },
+        {
+          "title": "4.6 Nested decisions",
+          "level": 2,
+          "page": 123,
+          "source_level": 2,
+          "id": "n0039",
+          "end_page": 125,
+          "out_of_order": false
+        },
+        {
+          "title": "4.7 Conditional expressions",
+          "level": 2,
+          "page": 126,
+          "source_level": 2,
+          "id": "n0040",
+          "end_page": 127,
+          "out_of_order": false
+        },
+        {
+          "title": "4.8 Chapter summary",
+          "level": 2,
+          "page": 128,
+          "source_level": 2,
+          "id": "n0041",
+          "end_page": 130,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 5 Loops",
+          "level": 1,
+          "page": 131,
+          "source_level": 1,
+          "id": "n0042",
+          "end_page": 154,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 131,
+          "source_level": 2,
+          "id": "n0043",
+          "end_page": 131,
+          "out_of_order": false
+        },
+        {
+          "title": "5.1 While loop",
+          "level": 2,
+          "page": 131,
+          "source_level": 2,
+          "id": "n0044",
+          "end_page": 134,
+          "out_of_order": false
+        },
+        {
+          "title": "5.2 For loop",
+          "level": 2,
+          "page": 135,
+          "source_level": 2,
+          "id": "n0045",
+          "end_page": 138,
+          "out_of_order": false
+        },
+        {
+          "title": "5.3 Nested loops",
+          "level": 2,
+          "page": 139,
+          "source_level": 2,
+          "id": "n0046",
+          "end_page": 142,
+          "out_of_order": false
+        },
+        {
+          "title": "5.4 Break and continue",
+          "level": 2,
+          "page": 143,
+          "source_level": 2,
+          "id": "n0047",
+          "end_page": 146,
+          "out_of_order": false
+        },
+        {
+          "title": "5.5 Loop else",
+          "level": 2,
+          "page": 147,
+          "source_level": 2,
+          "id": "n0048",
+          "end_page": 149,
+          "out_of_order": false
+        },
+        {
+          "title": "5.6 Chapter summary",
+          "level": 2,
+          "page": 150,
+          "source_level": 2,
+          "id": "n0049",
+          "end_page": 154,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 6 Functions",
+          "level": 1,
+          "page": 155,
+          "source_level": 1,
+          "id": "n0050",
+          "end_page": 182,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 155,
+          "source_level": 2,
+          "id": "n0051",
+          "end_page": 155,
+          "out_of_order": false
+        },
+        {
+          "title": "6.1 Defining functions",
+          "level": 2,
+          "page": 155,
+          "source_level": 2,
+          "id": "n0052",
+          "end_page": 158,
+          "out_of_order": false
+        },
+        {
+          "title": "6.2 Control flow",
+          "level": 2,
+          "page": 159,
+          "source_level": 2,
+          "id": "n0053",
+          "end_page": 162,
+          "out_of_order": false
+        },
+        {
+          "title": "6.3 Variable scope",
+          "level": 2,
+          "page": 163,
+          "source_level": 2,
+          "id": "n0054",
+          "end_page": 167,
+          "out_of_order": false
+        },
+        {
+          "title": "6.4 Parameters",
+          "level": 2,
+          "page": 168,
+          "source_level": 2,
+          "id": "n0055",
+          "end_page": 172,
+          "out_of_order": false
+        },
+        {
+          "title": "6.5 Return values",
+          "level": 2,
+          "page": 173,
+          "source_level": 2,
+          "id": "n0056",
+          "end_page": 177,
+          "out_of_order": false
+        },
+        {
+          "title": "6.6 Keyword arguments",
+          "level": 2,
+          "page": 178,
+          "source_level": 2,
+          "id": "n0057",
+          "end_page": 179,
+          "out_of_order": false
+        },
+        {
+          "title": "6.7 Chapter summary",
+          "level": 2,
+          "page": 180,
+          "source_level": 2,
+          "id": "n0058",
+          "end_page": 182,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 7 Modules",
+          "level": 1,
+          "page": 183,
+          "source_level": 1,
+          "id": "n0059",
+          "end_page": 206,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 183,
+          "source_level": 2,
+          "id": "n0060",
+          "end_page": 183,
+          "out_of_order": false
+        },
+        {
+          "title": "7.1 Module basics",
+          "level": 2,
+          "page": 184,
+          "source_level": 2,
+          "id": "n0061",
+          "end_page": 186,
+          "out_of_order": false
+        },
+        {
+          "title": "7.2 Importing names",
+          "level": 2,
+          "page": 187,
+          "source_level": 2,
+          "id": "n0062",
+          "end_page": 189,
+          "out_of_order": false
+        },
+        {
+          "title": "7.3 Top-level code",
+          "level": 2,
+          "page": 190,
+          "source_level": 2,
+          "id": "n0063",
+          "end_page": 193,
+          "out_of_order": false
+        },
+        {
+          "title": "7.4 The help function",
+          "level": 2,
+          "page": 194,
+          "source_level": 2,
+          "id": "n0064",
+          "end_page": 198,
+          "out_of_order": false
+        },
+        {
+          "title": "7.5 Finding modules",
+          "level": 2,
+          "page": 199,
+          "source_level": 2,
+          "id": "n0065",
+          "end_page": 203,
+          "out_of_order": false
+        },
+        {
+          "title": "7.6 Chapter summary",
+          "level": 2,
+          "page": 204,
+          "source_level": 2,
+          "id": "n0066",
+          "end_page": 206,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 8 Strings",
+          "level": 1,
+          "page": 207,
+          "source_level": 1,
+          "id": "n0067",
+          "end_page": 232,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 207,
+          "source_level": 2,
+          "id": "n0068",
+          "end_page": 207,
+          "out_of_order": false
+        },
+        {
+          "title": "8.1 String operations",
+          "level": 2,
+          "page": 207,
+          "source_level": 2,
+          "id": "n0069",
+          "end_page": 209,
+          "out_of_order": false
+        },
+        {
+          "title": "8.2 String slicing",
+          "level": 2,
+          "page": 210,
+          "source_level": 2,
+          "id": "n0070",
+          "end_page": 213,
+          "out_of_order": false
+        },
+        {
+          "title": "8.3 Searching/testing strings",
+          "level": 2,
+          "page": 214,
+          "source_level": 2,
+          "id": "n0071",
+          "end_page": 218,
+          "out_of_order": false
+        },
+        {
+          "title": "8.4 String formatting",
+          "level": 2,
+          "page": 219,
+          "source_level": 2,
+          "id": "n0072",
+          "end_page": 226,
+          "out_of_order": false
+        },
+        {
+          "title": "8.5 Splitting/joining strings",
+          "level": 2,
+          "page": 227,
+          "source_level": 2,
+          "id": "n0073",
+          "end_page": 229,
+          "out_of_order": false
+        },
+        {
+          "title": "8.6 Chapter summary",
+          "level": 2,
+          "page": 230,
+          "source_level": 2,
+          "id": "n0074",
+          "end_page": 232,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 9 Lists",
+          "level": 1,
+          "page": 233,
+          "source_level": 1,
+          "id": "n0075",
+          "end_page": 250,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 233,
+          "source_level": 2,
+          "id": "n0076",
+          "end_page": 233,
+          "out_of_order": false
+        },
+        {
+          "title": "9.1 Modifying and iterating lists",
+          "level": 2,
+          "page": 233,
+          "source_level": 2,
+          "id": "n0077",
+          "end_page": 235,
+          "out_of_order": false
+        },
+        {
+          "title": "9.2 Sorting and reversing lists",
+          "level": 2,
+          "page": 236,
+          "source_level": 2,
+          "id": "n0078",
+          "end_page": 238,
+          "out_of_order": false
+        },
+        {
+          "title": "9.3 Common list operations",
+          "level": 2,
+          "page": 239,
+          "source_level": 2,
+          "id": "n0079",
+          "end_page": 240,
+          "out_of_order": false
+        },
+        {
+          "title": "9.4 Nested lists",
+          "level": 2,
+          "page": 241,
+          "source_level": 2,
+          "id": "n0080",
+          "end_page": 243,
+          "out_of_order": false
+        },
+        {
+          "title": "9.5 List comprehensions",
+          "level": 2,
+          "page": 244,
+          "source_level": 2,
+          "id": "n0081",
+          "end_page": 247,
+          "out_of_order": false
+        },
+        {
+          "title": "9.6 Chapter summary",
+          "level": 2,
+          "page": 248,
+          "source_level": 2,
+          "id": "n0082",
+          "end_page": 250,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 10 Dictionaries",
+          "level": 1,
+          "page": 251,
+          "source_level": 1,
+          "id": "n0083",
+          "end_page": 274,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 251,
+          "source_level": 2,
+          "id": "n0084",
+          "end_page": 251,
+          "out_of_order": false
+        },
+        {
+          "title": "10.1 Dictionary basics",
+          "level": 2,
+          "page": 251,
+          "source_level": 2,
+          "id": "n0085",
+          "end_page": 252,
+          "out_of_order": false
+        },
+        {
+          "title": "10.2 Dictionary creation",
+          "level": 2,
+          "page": 253,
+          "source_level": 2,
+          "id": "n0086",
+          "end_page": 254,
+          "out_of_order": false
+        },
+        {
+          "title": "10.3 Dictionary operations",
+          "level": 2,
+          "page": 255,
+          "source_level": 2,
+          "id": "n0087",
+          "end_page": 259,
+          "out_of_order": false
+        },
+        {
+          "title": "10.4 Conditionals and looping in dictionaries",
+          "level": 2,
+          "page": 260,
+          "source_level": 2,
+          "id": "n0088",
+          "end_page": 265,
+          "out_of_order": false
+        },
+        {
+          "title": "10.5 Nested dictionaries and dictionary comprehension",
+          "level": 2,
+          "page": 266,
+          "source_level": 2,
+          "id": "n0089",
+          "end_page": 269,
+          "out_of_order": false
+        },
+        {
+          "title": "10.6 Chapter summary",
+          "level": 2,
+          "page": 270,
+          "source_level": 2,
+          "id": "n0090",
+          "end_page": 274,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 11 Classes",
+          "level": 1,
+          "page": 275,
+          "source_level": 1,
+          "id": "n0091",
+          "end_page": 296,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 275,
+          "source_level": 2,
+          "id": "n0092",
+          "end_page": 275,
+          "out_of_order": false
+        },
+        {
+          "title": "11.1 Object-oriented programming basics",
+          "level": 2,
+          "page": 275,
+          "source_level": 2,
+          "id": "n0093",
+          "end_page": 276,
+          "out_of_order": false
+        },
+        {
+          "title": "11.2 Classes and instances",
+          "level": 2,
+          "page": 277,
+          "source_level": 2,
+          "id": "n0094",
+          "end_page": 281,
+          "out_of_order": false
+        },
+        {
+          "title": "11.3 Instance methods",
+          "level": 2,
+          "page": 282,
+          "source_level": 2,
+          "id": "n0095",
+          "end_page": 285,
+          "out_of_order": false
+        },
+        {
+          "title": "11.4 Overloading operators",
+          "level": 2,
+          "page": 286,
+          "source_level": 2,
+          "id": "n0096",
+          "end_page": 290,
+          "out_of_order": false
+        },
+        {
+          "title": "11.5 Using modules with classes",
+          "level": 2,
+          "page": 291,
+          "source_level": 2,
+          "id": "n0097",
+          "end_page": 292,
+          "out_of_order": false
+        },
+        {
+          "title": "11.6 Chapter summary",
+          "level": 2,
+          "page": 293,
+          "source_level": 2,
+          "id": "n0098",
+          "end_page": 296,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 12 Recursion",
+          "level": 1,
+          "page": 297,
+          "source_level": 1,
+          "id": "n0099",
+          "end_page": 312,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 297,
+          "source_level": 2,
+          "id": "n0100",
+          "end_page": 297,
+          "out_of_order": false
+        },
+        {
+          "title": "12.1 Recursion basics",
+          "level": 2,
+          "page": 297,
+          "source_level": 2,
+          "id": "n0101",
+          "end_page": 298,
+          "out_of_order": false
+        },
+        {
+          "title": "12.2 Simple math recursion",
+          "level": 2,
+          "page": 299,
+          "source_level": 2,
+          "id": "n0102",
+          "end_page": 301,
+          "out_of_order": false
+        },
+        {
+          "title": "12.3 Recursion with strings and lists",
+          "level": 2,
+          "page": 302,
+          "source_level": 2,
+          "id": "n0103",
+          "end_page": 303,
+          "out_of_order": false
+        },
+        {
+          "title": "12.4 More math recursion",
+          "level": 2,
+          "page": 304,
+          "source_level": 2,
+          "id": "n0104",
+          "end_page": 306,
+          "out_of_order": false
+        },
+        {
+          "title": "12.5 Using recursion to solve problems",
+          "level": 2,
+          "page": 307,
+          "source_level": 2,
+          "id": "n0105",
+          "end_page": 310,
+          "out_of_order": false
+        },
+        {
+          "title": "12.6 Chapter summary",
+          "level": 2,
+          "page": 311,
+          "source_level": 2,
+          "id": "n0106",
+          "end_page": 312,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 13 Inheritance",
+          "level": 1,
+          "page": 313,
+          "source_level": 1,
+          "id": "n0107",
+          "end_page": 336,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 313,
+          "source_level": 2,
+          "id": "n0108",
+          "end_page": 313,
+          "out_of_order": false
+        },
+        {
+          "title": "13.1 Inheritance basics",
+          "level": 2,
+          "page": 313,
+          "source_level": 2,
+          "id": "n0109",
+          "end_page": 315,
+          "out_of_order": false
+        },
+        {
+          "title": "13.2 Attribute access",
+          "level": 2,
+          "page": 316,
+          "source_level": 2,
+          "id": "n0110",
+          "end_page": 319,
+          "out_of_order": false
+        },
+        {
+          "title": "13.3 Methods",
+          "level": 2,
+          "page": 320,
+          "source_level": 2,
+          "id": "n0111",
+          "end_page": 325,
+          "out_of_order": false
+        },
+        {
+          "title": "13.4 Hierarchical inheritance",
+          "level": 2,
+          "page": 326,
+          "source_level": 2,
+          "id": "n0112",
+          "end_page": 329,
+          "out_of_order": false
+        },
+        {
+          "title": "13.5 Multiple inheritance and mixin classes",
+          "level": 2,
+          "page": 330,
+          "source_level": 2,
+          "id": "n0113",
+          "end_page": 332,
+          "out_of_order": false
+        },
+        {
+          "title": "13.6 Chapter summary",
+          "level": 2,
+          "page": 333,
+          "source_level": 2,
+          "id": "n0114",
+          "end_page": 336,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 14 Files",
+          "level": 1,
+          "page": 337,
+          "source_level": 1,
+          "id": "n0115",
+          "end_page": 358,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 337,
+          "source_level": 2,
+          "id": "n0116",
+          "end_page": 337,
+          "out_of_order": false
+        },
+        {
+          "title": "14.1 Reading from files",
+          "level": 2,
+          "page": 337,
+          "source_level": 2,
+          "id": "n0117",
+          "end_page": 340,
+          "out_of_order": false
+        },
+        {
+          "title": "14.2 Writing to files",
+          "level": 2,
+          "page": 341,
+          "source_level": 2,
+          "id": "n0118",
+          "end_page": 344,
+          "out_of_order": false
+        },
+        {
+          "title": "14.3 Files in different locations and working with CSV files",
+          "level": 2,
+          "page": 345,
+          "source_level": 2,
+          "id": "n0119",
+          "end_page": 348,
+          "out_of_order": false
+        },
+        {
+          "title": "14.4 Handling exceptions",
+          "level": 2,
+          "page": 349,
+          "source_level": 2,
+          "id": "n0120",
+          "end_page": 353,
+          "out_of_order": false
+        },
+        {
+          "title": "14.5 Raising exceptions",
+          "level": 2,
+          "page": 354,
+          "source_level": 2,
+          "id": "n0121",
+          "end_page": 356,
+          "out_of_order": false
+        },
+        {
+          "title": "14.6 Chapter summary",
+          "level": 2,
+          "page": 357,
+          "source_level": 2,
+          "id": "n0122",
+          "end_page": 358,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 15 Data Science",
+          "level": 1,
+          "page": 359,
+          "source_level": 1,
+          "id": "n0123",
+          "end_page": 388,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 2,
+          "page": 359,
+          "source_level": 2,
+          "id": "n0124",
+          "end_page": 359,
+          "out_of_order": false
+        },
+        {
+          "title": "15.1 Introduction to data science",
+          "level": 2,
+          "page": 359,
+          "source_level": 2,
+          "id": "n0125",
+          "end_page": 361,
+          "out_of_order": false
+        },
+        {
+          "title": "15.2 NumPy",
+          "level": 2,
+          "page": 362,
+          "source_level": 2,
+          "id": "n0126",
+          "end_page": 363,
+          "out_of_order": false
+        },
+        {
+          "title": "15.3 Pandas",
+          "level": 2,
+          "page": 364,
+          "source_level": 2,
+          "id": "n0127",
+          "end_page": 371,
+          "out_of_order": false
+        },
+        {
+          "title": "15.4 Exploratory data analysis",
+          "level": 2,
+          "page": 372,
+          "source_level": 2,
+          "id": "n0128",
+          "end_page": 377,
+          "out_of_order": false
+        },
+        {
+          "title": "15.5 Data visualization",
+          "level": 2,
+          "page": 378,
+          "source_level": 2,
+          "id": "n0129",
+          "end_page": 384,
+          "out_of_order": false
+        },
+        {
+          "title": "15.6 Summary",
+          "level": 2,
+          "page": 385,
+          "source_level": 2,
+          "id": "n0130",
+          "end_page": 388,
+          "out_of_order": false
+        },
+        {
+          "title": "Answer Key",
+          "level": 1,
+          "page": 389,
+          "source_level": 1,
+          "id": "n0131",
+          "end_page": 389,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 1",
+          "level": 1,
+          "page": 389,
+          "source_level": 2,
+          "id": "n0132",
+          "end_page": 390,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 2",
+          "level": 1,
+          "page": 391,
+          "source_level": 2,
+          "id": "n0133",
+          "end_page": 392,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 3",
+          "level": 1,
+          "page": 393,
+          "source_level": 2,
+          "id": "n0134",
+          "end_page": 393,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 4",
+          "level": 1,
+          "page": 394,
+          "source_level": 2,
+          "id": "n0135",
+          "end_page": 395,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 5",
+          "level": 1,
+          "page": 396,
+          "source_level": 2,
+          "id": "n0136",
+          "end_page": 397,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 6",
+          "level": 1,
+          "page": 398,
+          "source_level": 2,
+          "id": "n0137",
+          "end_page": 399,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 7",
+          "level": 1,
+          "page": 400,
+          "source_level": 2,
+          "id": "n0138",
+          "end_page": 400,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 8",
+          "level": 1,
+          "page": 401,
+          "source_level": 2,
+          "id": "n0139",
+          "end_page": 401,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 9",
+          "level": 1,
+          "page": 402,
+          "source_level": 2,
+          "id": "n0140",
+          "end_page": 403,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 10",
+          "level": 1,
+          "page": 404,
+          "source_level": 2,
+          "id": "n0141",
+          "end_page": 404,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 11",
+          "level": 1,
+          "page": 405,
+          "source_level": 2,
+          "id": "n0142",
+          "end_page": 405,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 12",
+          "level": 1,
+          "page": 406,
+          "source_level": 2,
+          "id": "n0143",
+          "end_page": 407,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 13",
+          "level": 1,
+          "page": 408,
+          "source_level": 2,
+          "id": "n0144",
+          "end_page": 408,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 14",
+          "level": 1,
+          "page": 409,
+          "source_level": 2,
+          "id": "n0145",
+          "end_page": 410,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 15",
+          "level": 1,
+          "page": 411,
+          "source_level": 2,
+          "id": "n0146",
+          "end_page": 412,
+          "out_of_order": false
+        },
+        {
+          "title": "Index",
+          "level": 1,
+          "page": 413,
+          "source_level": 1,
+          "id": "n0147",
+          "end_page": 415,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "a_demographic_perspective_on_the_future_of_european-KJ0125152ENN": {
+      "path": "vidore3-hr-en/corpus/a_demographic_perspective_on_the_future_of_european-KJ0125152ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "A demographic perspective on the future of european",
+      "pages": 20,
+      "method": "bookmarks",
+      "nodes": [
+        {
+          "title": "Abstract",
+          "level": 1,
+          "page": 4,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 4,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 1,
+          "page": 5,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 6,
+          "out_of_order": false
+        },
+        {
+          "title": "1. From static analyses to dynamic projections of the labour force",
+          "level": 1,
+          "page": 7,
+          "source_level": 1,
+          "id": "n0002",
+          "end_page": 10,
+          "out_of_order": false
+        },
+        {
+          "title": "Emancipation and increasing labour force participation of women - a cohort perspective",
+          "level": 2,
+          "page": 7,
+          "source_level": 2,
+          "id": "n0003",
+          "end_page": 10,
+          "out_of_order": false
+        },
+        {
+          "title": "Education is a key variable to consider when assessing gaps in labour force participation",
+          "level": 3,
+          "page": 8,
+          "source_level": 3,
+          "id": "n0004",
+          "end_page": 8,
+          "out_of_order": false
+        },
+        {
+          "title": "Migration increases the size of the future working-age population",
+          "level": 3,
+          "page": 9,
+          "source_level": 3,
+          "id": "n0005",
+          "end_page": 10,
+          "out_of_order": false
+        },
+        {
+          "title": "2. Simulating the effect of different forms of labour force activation",
+          "level": 1,
+          "page": 11,
+          "source_level": 1,
+          "id": "n0006",
+          "end_page": 14,
+          "out_of_order": false
+        },
+        {
+          "title": "Future EU working-age population will decline significantly",
+          "level": 2,
+          "page": 11,
+          "source_level": 2,
+          "id": "n0007",
+          "end_page": 14,
+          "out_of_order": false
+        },
+        {
+          "title": "Activating labour force potential of population subgroups has a large effect",
+          "level": 3,
+          "page": 12,
+          "source_level": 3,
+          "id": "n0008",
+          "end_page": 12,
+          "out_of_order": false
+        },
+        {
+          "title": "Labour force activation potential varies widely across MS",
+          "level": 3,
+          "page": 13,
+          "source_level": 3,
+          "id": "n0009",
+          "end_page": 14,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Educational composition and GDP growth",
+          "level": 1,
+          "page": 15,
+          "source_level": 1,
+          "id": "n0010",
+          "end_page": 16,
+          "out_of_order": false
+        },
+        {
+          "title": "4. Conclusions and limitations",
+          "level": 1,
+          "page": 17,
+          "source_level": 1,
+          "id": "n0011",
+          "end_page": 17,
+          "out_of_order": false
+        },
+        {
+          "title": "References",
+          "level": 1,
+          "page": 18,
+          "source_level": 1,
+          "id": "n0012",
+          "end_page": 20,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "access_for_domestic_workers_to_labour_and_social_protection-KE0124002ENN": {
+      "path": "vidore3-hr-en/corpus/access_for_domestic_workers_to_labour_and_social_protection-KE0124002ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "Access for domestic workers to labour and social protection",
+      "pages": 116,
+      "method": "bookmarks",
+      "nodes": [
+        {
+          "title": "Blank Page",
+          "level": 1,
+          "page": 114,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 116,
+          "out_of_order": false
+        },
+        {
+          "title": "ESPN_cover",
+          "level": 3,
+          "page": 1,
+          "source_level": 3,
+          "id": "n0001",
+          "end_page": 116,
+          "out_of_order": true
+        }
+      ],
+      "out_of_order_nodes": 1
+    },
+    "annual_report_on_intra-eu_labour_mobility-KE0125029ENN": {
+      "path": "vidore3-hr-en/corpus/annual_report_on_intra-eu_labour_mobility-KE0125029ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "Annual report on intra-EU labour mobility 2024 Edition",
+      "pages": 202,
+      "method": "headings",
+      "nodes": [
+        {
+          "title": "2024 Edition",
+          "level": 1,
+          "page": 3,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 12,
+          "out_of_order": false
+        },
+        {
+          "title": "1. Long-term EU movers in the EU according to Eurostat population statistics",
+          "level": 1,
+          "page": 13,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 13,
+          "out_of_order": false
+        },
+        {
+          "title": "2. Long-term EU and EFTA movers in the EU according to the EU-LFS",
+          "level": 1,
+          "page": 13,
+          "source_level": 1,
+          "id": "n0002",
+          "end_page": 13,
+          "out_of_order": false
+        },
+        {
+          "title": "1. Recent developments on the mobile working-age population",
+          "level": 1,
+          "page": 14,
+          "source_level": 1,
+          "id": "n0003",
+          "end_page": 14,
+          "out_of_order": false
+        },
+        {
+          "title": "2. The labour market integration of mobile workers",
+          "level": 1,
+          "page": 15,
+          "source_level": 1,
+          "id": "n0004",
+          "end_page": 15,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Social conditions of movers in the EU",
+          "level": 1,
+          "page": 16,
+          "source_level": 1,
+          "id": "n0005",
+          "end_page": 16,
+          "out_of_order": false
+        },
+        {
+          "title": "4. Mobility of healthcare workers",
+          "level": 1,
+          "page": 16,
+          "source_level": 1,
+          "id": "n0006",
+          "end_page": 18,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 2 focuses on the labour market integration of mobile workers, thereby making",
+          "level": 1,
+          "page": 19,
+          "source_level": 1,
+          "id": "n0007",
+          "end_page": 22,
+          "out_of_order": false
+        },
+        {
+          "title": "1. Recent developments on the mobile",
+          "level": 1,
+          "page": 23,
+          "source_level": 1,
+          "id": "n0008",
+          "end_page": 50,
+          "out_of_order": false
+        },
+        {
+          "title": "1.1. Introduction",
+          "level": 2,
+          "page": 23,
+          "source_level": 2,
+          "id": "n0009",
+          "end_page": 24,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2. The flow of working-age EU movers",
+          "level": 2,
+          "page": 25,
+          "source_level": 2,
+          "id": "n0010",
+          "end_page": 36,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2.1. Trends in the flow of working-age EU movers",
+          "level": 3,
+          "page": 25,
+          "source_level": 3,
+          "id": "n0011",
+          "end_page": 29,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2.1.1. Inflow to the EU and EFTA",
+          "level": 4,
+          "page": 25,
+          "source_level": 4,
+          "id": "n0012",
+          "end_page": 27,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2.1.2. Outflows from the EU and EFTA",
+          "level": 4,
+          "page": 28,
+          "source_level": 4,
+          "id": "n0013",
+          "end_page": 28,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2.1.3. Net mobility in the EU and EFTA",
+          "level": 4,
+          "page": 29,
+          "source_level": 4,
+          "id": "n0014",
+          "end_page": 29,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2.2. Flows and characteristics of working-age EU",
+          "level": 3,
+          "page": 30,
+          "source_level": 3,
+          "id": "n0015",
+          "end_page": 36,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2.2.1. Inflows by EU and EFTA country",
+          "level": 4,
+          "page": 30,
+          "source_level": 4,
+          "id": "n0016",
+          "end_page": 31,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2.2.2. Outflows by EU and EFTA country",
+          "level": 4,
+          "page": 32,
+          "source_level": 4,
+          "id": "n0017",
+          "end_page": 33,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2.2.3. Net mobility by EU and EFTA country",
+          "level": 4,
+          "page": 34,
+          "source_level": 4,
+          "id": "n0018",
+          "end_page": 34,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2.2.4. Inflows by EU and EFTA country and by gender",
+          "level": 4,
+          "page": 35,
+          "source_level": 4,
+          "id": "n0019",
+          "end_page": 36,
+          "out_of_order": false
+        },
+        {
+          "title": "1.3. The total number of working-age EU movers",
+          "level": 2,
+          "page": 37,
+          "source_level": 2,
+          "id": "n0020",
+          "end_page": 37,
+          "out_of_order": false
+        },
+        {
+          "title": "1.3.1. Trends in the total number and structure of",
+          "level": 3,
+          "page": 38,
+          "source_level": 3,
+          "id": "n0021",
+          "end_page": 38,
+          "out_of_order": false
+        },
+        {
+          "title": "5.2 million male and nearly 5 million female EU mobile workers and around 9.9 million",
+          "level": 2,
+          "page": 38,
+          "source_level": 2,
+          "id": "n0022",
+          "end_page": 45,
+          "out_of_order": false
+        },
+        {
+          "title": "1.3.2. Numbers and characteristics of working-age EU",
+          "level": 3,
+          "page": 40,
+          "source_level": 3,
+          "id": "n0023",
+          "end_page": 45,
+          "out_of_order": false
+        },
+        {
+          "title": "1.3.2.1. Main countries of destination for EU movers",
+          "level": 4,
+          "page": 40,
+          "source_level": 4,
+          "id": "n0024",
+          "end_page": 43,
+          "out_of_order": false
+        },
+        {
+          "title": "1.3.2.2. EU movers by country, gender and age group",
+          "level": 4,
+          "page": 44,
+          "source_level": 4,
+          "id": "n0025",
+          "end_page": 45,
+          "out_of_order": false
+        },
+        {
+          "title": "1.4. Specific categories of working-age movers",
+          "level": 2,
+          "page": 46,
+          "source_level": 2,
+          "id": "n0026",
+          "end_page": 50,
+          "out_of_order": false
+        },
+        {
+          "title": "1.4.1. Cross-border workers",
+          "level": 3,
+          "page": 46,
+          "source_level": 3,
+          "id": "n0027",
+          "end_page": 47,
+          "out_of_order": false
+        },
+        {
+          "title": "1.4.2. Posted workers",
+          "level": 3,
+          "page": 48,
+          "source_level": 3,
+          "id": "n0028",
+          "end_page": 48,
+          "out_of_order": false
+        },
+        {
+          "title": "1.4.3. Return mobility and returnees in the EU",
+          "level": 3,
+          "page": 49,
+          "source_level": 3,
+          "id": "n0029",
+          "end_page": 50,
+          "out_of_order": false
+        },
+        {
+          "title": "2. The labour market integration of mobile",
+          "level": 1,
+          "page": 51,
+          "source_level": 1,
+          "id": "n0030",
+          "end_page": 77,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1. Introduction",
+          "level": 2,
+          "page": 51,
+          "source_level": 2,
+          "id": "n0031",
+          "end_page": 52,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2. Participation of movers in the labour market",
+          "level": 2,
+          "page": 53,
+          "source_level": 2,
+          "id": "n0032",
+          "end_page": 65,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.1. Activity, employment and unemployment rates",
+          "level": 3,
+          "page": 53,
+          "source_level": 3,
+          "id": "n0033",
+          "end_page": 58,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.1.1. Comparison of activity rates",
+          "level": 4,
+          "page": 53,
+          "source_level": 4,
+          "id": "n0034",
+          "end_page": 54,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.1.2. Comparison of employment rates",
+          "level": 4,
+          "page": 55,
+          "source_level": 4,
+          "id": "n0035",
+          "end_page": 56,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.1.3. Comparison of unemployment rates104",
+          "level": 4,
+          "page": 57,
+          "source_level": 4,
+          "id": "n0036",
+          "end_page": 58,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.2. Self-employment",
+          "level": 3,
+          "page": 59,
+          "source_level": 3,
+          "id": "n0037",
+          "end_page": 60,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.3. Contractual and working time arrangements",
+          "level": 3,
+          "page": 61,
+          "source_level": 3,
+          "id": "n0038",
+          "end_page": 65,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.3.1. Fixed-term contracts",
+          "level": 4,
+          "page": 61,
+          "source_level": 4,
+          "id": "n0039",
+          "end_page": 62,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.3.2. Part-time employment",
+          "level": 4,
+          "page": 63,
+          "source_level": 4,
+          "id": "n0040",
+          "end_page": 65,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3. Characteristics of mobile workers in",
+          "level": 2,
+          "page": 66,
+          "source_level": 2,
+          "id": "n0041",
+          "end_page": 77,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3.1. Demographic factors",
+          "level": 3,
+          "page": 66,
+          "source_level": 3,
+          "id": "n0042",
+          "end_page": 70,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3.1.1. Employment and unemployment rate by country of",
+          "level": 4,
+          "page": 66,
+          "source_level": 4,
+          "id": "n0043",
+          "end_page": 66,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3.1.2. Employment rate by gender",
+          "level": 4,
+          "page": 67,
+          "source_level": 4,
+          "id": "n0044",
+          "end_page": 69,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3.1.3. Employment rate by age group",
+          "level": 4,
+          "page": 70,
+          "source_level": 4,
+          "id": "n0045",
+          "end_page": 70,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3.2. Socio-economic factors",
+          "level": 3,
+          "page": 71,
+          "source_level": 3,
+          "id": "n0046",
+          "end_page": 77,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3.2.1. Education level",
+          "level": 4,
+          "page": 71,
+          "source_level": 4,
+          "id": "n0047",
+          "end_page": 73,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3.2.2. Occupations",
+          "level": 4,
+          "page": 74,
+          "source_level": 4,
+          "id": "n0048",
+          "end_page": 75,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3.2.3. Economic sectors",
+          "level": 4,
+          "page": 76,
+          "source_level": 4,
+          "id": "n0049",
+          "end_page": 77,
+          "out_of_order": false
+        },
+        {
+          "title": "3. The social conditions of movers in the EU",
+          "level": 1,
+          "page": 78,
+          "source_level": 1,
+          "id": "n0050",
+          "end_page": 126,
+          "out_of_order": false
+        },
+        {
+          "title": "3.1. Introduction",
+          "level": 2,
+          "page": 78,
+          "source_level": 2,
+          "id": "n0051",
+          "end_page": 79,
+          "out_of_order": false
+        },
+        {
+          "title": "3.2. Social protection and inclusion of mobile",
+          "level": 2,
+          "page": 80,
+          "source_level": 2,
+          "id": "n0052",
+          "end_page": 89,
+          "out_of_order": false
+        },
+        {
+          "title": "3.2.1. Poverty and social exclusion",
+          "level": 3,
+          "page": 81,
+          "source_level": 3,
+          "id": "n0053",
+          "end_page": 86,
+          "out_of_order": false
+        },
+        {
+          "title": "3.2.2. Social protection and housing",
+          "level": 3,
+          "page": 87,
+          "source_level": 3,
+          "id": "n0054",
+          "end_page": 89,
+          "out_of_order": false
+        },
+        {
+          "title": "3.3. Education of mobile individuals",
+          "level": 2,
+          "page": 90,
+          "source_level": 2,
+          "id": "n0055",
+          "end_page": 95,
+          "out_of_order": false
+        },
+        {
+          "title": "3.4. Income inequality",
+          "level": 2,
+          "page": 96,
+          "source_level": 2,
+          "id": "n0056",
+          "end_page": 98,
+          "out_of_order": false
+        },
+        {
+          "title": "3.5. Conclusion",
+          "level": 2,
+          "page": 99,
+          "source_level": 2,
+          "id": "n0057",
+          "end_page": 100,
+          "out_of_order": false
+        },
+        {
+          "title": "4.1. Introduction",
+          "level": 2,
+          "page": 101,
+          "source_level": 2,
+          "id": "n0058",
+          "end_page": 102,
+          "out_of_order": false
+        },
+        {
+          "title": "2.4 % of the 8.5 million healthcare professionals in EU and EFTA countries, comparing",
+          "level": 2,
+          "page": 103,
+          "source_level": 2,
+          "id": "n0059",
+          "end_page": 105,
+          "out_of_order": false
+        },
+        {
+          "title": "4.2. Healthcare needs and shortages in Member",
+          "level": 2,
+          "page": 106,
+          "source_level": 2,
+          "id": "n0060",
+          "end_page": 117,
+          "out_of_order": false
+        },
+        {
+          "title": "4.2.1. Medical needs of an ageing Europe",
+          "level": 3,
+          "page": 108,
+          "source_level": 3,
+          "id": "n0061",
+          "end_page": 109,
+          "out_of_order": false
+        },
+        {
+          "title": "4.2.2. Europe’s healthcare professionals",
+          "level": 3,
+          "page": 110,
+          "source_level": 3,
+          "id": "n0062",
+          "end_page": 112,
+          "out_of_order": false
+        },
+        {
+          "title": "4.2.3. EU movers in healthcare",
+          "level": 3,
+          "page": 113,
+          "source_level": 3,
+          "id": "n0063",
+          "end_page": 117,
+          "out_of_order": false
+        },
+        {
+          "title": "4.2.3.1. Stock of EU movers in healthcare professions",
+          "level": 4,
+          "page": 116,
+          "source_level": 4,
+          "id": "n0064",
+          "end_page": 116,
+          "out_of_order": false
+        },
+        {
+          "title": "4.2.3.2. EU Movers over time",
+          "level": 4,
+          "page": 117,
+          "source_level": 4,
+          "id": "n0065",
+          "end_page": 117,
+          "out_of_order": false
+        },
+        {
+          "title": "4.3. Profile of EU Movers in the healthcare sector",
+          "level": 2,
+          "page": 118,
+          "source_level": 2,
+          "id": "n0066",
+          "end_page": 122,
+          "out_of_order": false
+        },
+        {
+          "title": "4.3.1. Gender",
+          "level": 3,
+          "page": 118,
+          "source_level": 3,
+          "id": "n0067",
+          "end_page": 118,
+          "out_of_order": false
+        },
+        {
+          "title": "4.3.2. Age",
+          "level": 3,
+          "page": 119,
+          "source_level": 3,
+          "id": "n0068",
+          "end_page": 119,
+          "out_of_order": false
+        },
+        {
+          "title": "4.3.3. Education",
+          "level": 3,
+          "page": 120,
+          "source_level": 3,
+          "id": "n0069",
+          "end_page": 120,
+          "out_of_order": false
+        },
+        {
+          "title": "4.3.4. Contractual arrangements",
+          "level": 3,
+          "page": 121,
+          "source_level": 3,
+          "id": "n0070",
+          "end_page": 122,
+          "out_of_order": false
+        },
+        {
+          "title": "4.4. Return mobility",
+          "level": 2,
+          "page": 123,
+          "source_level": 2,
+          "id": "n0071",
+          "end_page": 126,
+          "out_of_order": false
+        },
+        {
+          "title": "4.4.1. Trends in return mobility",
+          "level": 3,
+          "page": 123,
+          "source_level": 3,
+          "id": "n0072",
+          "end_page": 124,
+          "out_of_order": false
+        },
+        {
+          "title": "4.4.2. Profile of returnees",
+          "level": 3,
+          "page": 125,
+          "source_level": 3,
+          "id": "n0073",
+          "end_page": 126,
+          "out_of_order": false
+        },
+        {
+          "title": "2023. During this same period, the proportion for returnees peaked at 40 % in 2019",
+          "level": 1,
+          "page": 127,
+          "source_level": 1,
+          "id": "n0074",
+          "end_page": 202,
+          "out_of_order": false
+        },
+        {
+          "title": "4.5. Conclusion",
+          "level": 2,
+          "page": 127,
+          "source_level": 2,
+          "id": "n0075",
+          "end_page": 202,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "employment_and_social_developments_in_europe-KE0125067ENN": {
+      "path": "vidore3-hr-en/corpus/employment_and_social_developments_in_europe-KE0125067ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "Employment and social developments in europe",
+      "pages": 25,
+      "method": "bookmarks",
+      "nodes": [
+        {
+          "title": "Introduction",
+          "level": 1,
+          "page": 5,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 5,
+          "out_of_order": false
+        },
+        {
+          "title": "Main economic and social developments",
+          "level": 1,
+          "page": 5,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 5,
+          "out_of_order": false
+        },
+        {
+          "title": "1. Macroeconomic outlook",
+          "level": 1,
+          "page": 5,
+          "source_level": 1,
+          "id": "n0002",
+          "end_page": 5,
+          "out_of_order": false
+        },
+        {
+          "title": "2. Employment",
+          "level": 1,
+          "page": 6,
+          "source_level": 1,
+          "id": "n0003",
+          "end_page": 7,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Unemployment",
+          "level": 1,
+          "page": 8,
+          "source_level": 1,
+          "id": "n0004",
+          "end_page": 8,
+          "out_of_order": false
+        },
+        {
+          "title": "4. Additional developments in the labour force and labour demand",
+          "level": 1,
+          "page": 9,
+          "source_level": 1,
+          "id": "n0005",
+          "end_page": 10,
+          "out_of_order": false
+        },
+        {
+          "title": "5. Income and financial situation of households",
+          "level": 1,
+          "page": 11,
+          "source_level": 1,
+          "id": "n0006",
+          "end_page": 11,
+          "out_of_order": false
+        },
+        {
+          "title": "Thematic focus: Underemployment among part-time workers in the EU: who works less hours than they want to and why?",
+          "level": 1,
+          "page": 12,
+          "source_level": 1,
+          "id": "n0007",
+          "end_page": 12,
+          "out_of_order": false
+        },
+        {
+          "title": "1. Introduction",
+          "level": 1,
+          "page": 12,
+          "source_level": 1,
+          "id": "n0008",
+          "end_page": 12,
+          "out_of_order": false
+        },
+        {
+          "title": "2. About a fifth of part-time workers are underemployed, with considerable variation across countries and sectors of economic activity",
+          "level": 1,
+          "page": 13,
+          "source_level": 1,
+          "id": "n0009",
+          "end_page": 15,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Underemployment is more common among young, migrant, single part-time workers and those with lower educational attainment",
+          "level": 1,
+          "page": 16,
+          "source_level": 1,
+          "id": "n0010",
+          "end_page": 19,
+          "out_of_order": false
+        },
+        {
+          "title": "4. Conclusions",
+          "level": 1,
+          "page": 20,
+          "source_level": 1,
+          "id": "n0011",
+          "end_page": 20,
+          "out_of_order": false
+        },
+        {
+          "title": "5. Appendix",
+          "level": 1,
+          "page": 21,
+          "source_level": 1,
+          "id": "n0012",
+          "end_page": 22,
+          "out_of_order": false
+        },
+        {
+          "title": "References",
+          "level": 1,
+          "page": 23,
+          "source_level": 1,
+          "id": "n0013",
+          "end_page": 25,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "employment_and_social_developments_in_europe_2024-KEBD24002ENN": {
+      "path": "vidore3-hr-en/corpus/employment_and_social_developments_in_europe_2024-KEBD24002ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "Employment and social developments in europe 2024",
+      "pages": 111,
+      "method": "bookmarks",
+      "nodes": [
+        {
+          "title": "Chapter 1: Main economic, labour market and social developments",
+          "level": 1,
+          "page": 11,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 12,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 2: Social convergence in the EU: taking stock",
+          "level": 1,
+          "page": 13,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 14,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 3: The role of social investment",
+          "level": 1,
+          "page": 15,
+          "source_level": 1,
+          "id": "n0002",
+          "end_page": 16,
+          "out_of_order": false
+        },
+        {
+          "title": "1. Introduction",
+          "level": 1,
+          "page": 17,
+          "source_level": 2,
+          "id": "n0003",
+          "end_page": 18,
+          "out_of_order": false
+        },
+        {
+          "title": "2. Macroeconomic developments and forecast",
+          "level": 1,
+          "page": 19,
+          "source_level": 2,
+          "id": "n0004",
+          "end_page": 20,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Labour market developments",
+          "level": 1,
+          "page": 21,
+          "source_level": 2,
+          "id": "n0005",
+          "end_page": 28,
+          "out_of_order": false
+        },
+        {
+          "title": "3.1. Employment trends",
+          "level": 2,
+          "page": 21,
+          "source_level": 3,
+          "id": "n0006",
+          "end_page": 22,
+          "out_of_order": false
+        },
+        {
+          "title": "3.2. Unemployment rates",
+          "level": 2,
+          "page": 23,
+          "source_level": 3,
+          "id": "n0007",
+          "end_page": 24,
+          "out_of_order": false
+        },
+        {
+          "title": "3.3. Labour market participation",
+          "level": 2,
+          "page": 25,
+          "source_level": 3,
+          "id": "n0008",
+          "end_page": 25,
+          "out_of_order": false
+        },
+        {
+          "title": "3.4. Labour demand",
+          "level": 2,
+          "page": 25,
+          "source_level": 3,
+          "id": "n0009",
+          "end_page": 25,
+          "out_of_order": false
+        },
+        {
+          "title": "3.5. Adult learning",
+          "level": 2,
+          "page": 26,
+          "source_level": 3,
+          "id": "n0010",
+          "end_page": 26,
+          "out_of_order": false
+        },
+        {
+          "title": "3.6. Public expenditure on labour market policies and social protection",
+          "level": 2,
+          "page": 27,
+          "source_level": 3,
+          "id": "n0011",
+          "end_page": 28,
+          "out_of_order": false
+        },
+        {
+          "title": "4. Living conditions, poverty, and income developments",
+          "level": 1,
+          "page": 29,
+          "source_level": 2,
+          "id": "n0012",
+          "end_page": 33,
+          "out_of_order": false
+        },
+        {
+          "title": "4.1. Income and consumptions trends",
+          "level": 2,
+          "page": 29,
+          "source_level": 3,
+          "id": "n0013",
+          "end_page": 31,
+          "out_of_order": false
+        },
+        {
+          "title": "4.2. Income inequality",
+          "level": 2,
+          "page": 32,
+          "source_level": 3,
+          "id": "n0014",
+          "end_page": 32,
+          "out_of_order": false
+        },
+        {
+          "title": "4.3. Risk of poverty and social exclusion",
+          "level": 2,
+          "page": 32,
+          "source_level": 3,
+          "id": "n0015",
+          "end_page": 33,
+          "out_of_order": false
+        },
+        {
+          "title": "5. Conclusions",
+          "level": 1,
+          "page": 34,
+          "source_level": 2,
+          "id": "n0016",
+          "end_page": 35,
+          "out_of_order": false
+        },
+        {
+          "title": "1. Introduction",
+          "level": 1,
+          "page": 36,
+          "source_level": 2,
+          "id": "n0017",
+          "end_page": 36,
+          "out_of_order": false
+        },
+        {
+          "title": "2. Analysis of socioeconomic convergence at EU level",
+          "level": 1,
+          "page": 37,
+          "source_level": 2,
+          "id": "n0018",
+          "end_page": 49,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1. Convergence of economic outcomes and living standards",
+          "level": 2,
+          "page": 38,
+          "source_level": 3,
+          "id": "n0019",
+          "end_page": 41,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2. Convergence of labour market outcomes and skills supply",
+          "level": 2,
+          "page": 42,
+          "source_level": 3,
+          "id": "n0020",
+          "end_page": 47,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3. Developments in convergence of social outcomes",
+          "level": 2,
+          "page": 48,
+          "source_level": 3,
+          "id": "n0021",
+          "end_page": 49,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Convergence in socioeconomic outcomes within Member States",
+          "level": 1,
+          "page": 50,
+          "source_level": 2,
+          "id": "n0022",
+          "end_page": 52,
+          "out_of_order": false
+        },
+        {
+          "title": "4. Convergence in labour market outcomes and related attitudes through a gender lens",
+          "level": 1,
+          "page": 53,
+          "source_level": 2,
+          "id": "n0023",
+          "end_page": 58,
+          "out_of_order": false
+        },
+        {
+          "title": "4.1. Eliminating gender gaps in paid and unpaid work",
+          "level": 2,
+          "page": 54,
+          "source_level": 3,
+          "id": "n0024",
+          "end_page": 55,
+          "out_of_order": false
+        },
+        {
+          "title": "4.2. Attitudes to women’s work and sharing unpaid work",
+          "level": 2,
+          "page": 56,
+          "source_level": 3,
+          "id": "n0025",
+          "end_page": 58,
+          "out_of_order": false
+        },
+        {
+          "title": "5. EU initiatives to support social convergence",
+          "level": 1,
+          "page": 59,
+          "source_level": 2,
+          "id": "n0026",
+          "end_page": 61,
+          "out_of_order": false
+        },
+        {
+          "title": "6. Conclusions",
+          "level": 1,
+          "page": 62,
+          "source_level": 2,
+          "id": "n0027",
+          "end_page": 66,
+          "out_of_order": false
+        },
+        {
+          "title": "A2.1. Measurement of convergence",
+          "level": 2,
+          "page": 64,
+          "source_level": 2,
+          "id": "n0028",
+          "end_page": 64,
+          "out_of_order": false
+        },
+        {
+          "title": "Reduction in disparities across Member States or regions over time (Sigma convergence)",
+          "level": 2,
+          "page": 64,
+          "source_level": 2,
+          "id": "n0029",
+          "end_page": 64,
+          "out_of_order": false
+        },
+        {
+          "title": "Catching-up of worse performing Member States or regions (Beta convergence)",
+          "level": 2,
+          "page": 65,
+          "source_level": 2,
+          "id": "n0030",
+          "end_page": 65,
+          "out_of_order": false
+        },
+        {
+          "title": "Direction of convergence",
+          "level": 2,
+          "page": 65,
+          "source_level": 2,
+          "id": "n0031",
+          "end_page": 66,
+          "out_of_order": false
+        },
+        {
+          "title": "A2.2. Regional convergence",
+          "level": 3,
+          "page": 65,
+          "source_level": 3,
+          "id": "n0032",
+          "end_page": 66,
+          "out_of_order": false
+        },
+        {
+          "title": "1. Introduction",
+          "level": 1,
+          "page": 67,
+          "source_level": 3,
+          "id": "n0033",
+          "end_page": 67,
+          "out_of_order": false
+        },
+        {
+          "title": "2. What do we know about social investment?",
+          "level": 1,
+          "page": 68,
+          "source_level": 3,
+          "id": "n0034",
+          "end_page": 70,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Selected types of social investment",
+          "level": 1,
+          "page": 71,
+          "source_level": 3,
+          "id": "n0035",
+          "end_page": 87,
+          "out_of_order": false
+        },
+        {
+          "title": "3.1. Investing in early childhood-education and care (ECEC)",
+          "level": 2,
+          "page": 71,
+          "source_level": 4,
+          "id": "n0036",
+          "end_page": 74,
+          "out_of_order": false
+        },
+        {
+          "title": "3.2. Impact of investment in school education on learning outcomes",
+          "level": 2,
+          "page": 75,
+          "source_level": 4,
+          "id": "n0037",
+          "end_page": 77,
+          "out_of_order": false
+        },
+        {
+          "title": "3.3. Investing in skills",
+          "level": 2,
+          "page": 78,
+          "source_level": 4,
+          "id": "n0038",
+          "end_page": 83,
+          "out_of_order": false
+        },
+        {
+          "title": "Investment in skills for young unemployed people",
+          "level": 3,
+          "page": 79,
+          "source_level": 3,
+          "id": "n0039",
+          "end_page": 79,
+          "out_of_order": false
+        },
+        {
+          "title": "Investments in skills enhance productivity",
+          "level": 3,
+          "page": 80,
+          "source_level": 3,
+          "id": "n0040",
+          "end_page": 83,
+          "out_of_order": false
+        },
+        {
+          "title": "3.4. Investing in Active Labour Market Policies",
+          "level": 2,
+          "page": 84,
+          "source_level": 4,
+          "id": "n0041",
+          "end_page": 87,
+          "out_of_order": false
+        },
+        {
+          "title": "4. Impact of housing policies on poverty reduction and upward social convergence",
+          "level": 1,
+          "page": 88,
+          "source_level": 3,
+          "id": "n0042",
+          "end_page": 93,
+          "out_of_order": false
+        },
+        {
+          "title": "5. Conclusions",
+          "level": 1,
+          "page": 94,
+          "source_level": 3,
+          "id": "n0043",
+          "end_page": 111,
+          "out_of_order": false
+        },
+        {
+          "title": "Description of input data",
+          "level": 3,
+          "page": 98,
+          "source_level": 3,
+          "id": "n0044",
+          "end_page": 98,
+          "out_of_order": false
+        },
+        {
+          "title": "Modelling assumptions",
+          "level": 3,
+          "page": 99,
+          "source_level": 3,
+          "id": "n0045",
+          "end_page": 99,
+          "out_of_order": false
+        },
+        {
+          "title": "Simulation results",
+          "level": 3,
+          "page": 100,
+          "source_level": 3,
+          "id": "n0046",
+          "end_page": 100,
+          "out_of_order": false
+        },
+        {
+          "title": "Results – additional graphs",
+          "level": 3,
+          "page": 101,
+          "source_level": 3,
+          "id": "n0047",
+          "end_page": 101,
+          "out_of_order": false
+        },
+        {
+          "title": "Definition and data sources of main indicators",
+          "level": 2,
+          "page": 102,
+          "source_level": 2,
+          "id": "n0048",
+          "end_page": 111,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "estimating_labour_market_transitions_and_skills_investment-KE0125066ENN": {
+      "path": "vidore3-hr-en/corpus/estimating_labour_market_transitions_and_skills_investment-KE0125066ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "Estimating labour market transitions and skills investment",
+      "pages": 47,
+      "method": "headings",
+      "nodes": [
+        {
+          "title": "1. Introduction",
+          "level": 1,
+          "page": 8,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 9,
+          "out_of_order": false
+        },
+        {
+          "title": "2. Exploring labour market transitions towards",
+          "level": 1,
+          "page": 10,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 21,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1. Literature review and definitions",
+          "level": 2,
+          "page": 10,
+          "source_level": 2,
+          "id": "n0002",
+          "end_page": 11,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2. Labour market transitions and demographical",
+          "level": 2,
+          "page": 12,
+          "source_level": 2,
+          "id": "n0003",
+          "end_page": 21,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.1. Characterisation and demographical composition of EU",
+          "level": 3,
+          "page": 12,
+          "source_level": 3,
+          "id": "n0004",
+          "end_page": 15,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.2. Sectoral transitions in the total economy in the EU",
+          "level": 3,
+          "page": 16,
+          "source_level": 3,
+          "id": "n0005",
+          "end_page": 16,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.3. Transitions out and into ‘transforming sectors’",
+          "level": 3,
+          "page": 17,
+          "source_level": 3,
+          "id": "n0006",
+          "end_page": 21,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Estimating skills investment needs of the",
+          "level": 1,
+          "page": 22,
+          "source_level": 1,
+          "id": "n0007",
+          "end_page": 26,
+          "out_of_order": false
+        },
+        {
+          "title": "3.1. Data used and calculations",
+          "level": 2,
+          "page": 24,
+          "source_level": 2,
+          "id": "n0008",
+          "end_page": 25,
+          "out_of_order": false
+        },
+        {
+          "title": "3.2. Additional jobs and re-training costs in 2030",
+          "level": 2,
+          "page": 26,
+          "source_level": 2,
+          "id": "n0009",
+          "end_page": 26,
+          "out_of_order": false
+        },
+        {
+          "title": "2030. Overall, we find that the installations of wind turbines and solar panels would require",
+          "level": 1,
+          "page": 27,
+          "source_level": 1,
+          "id": "n0010",
+          "end_page": 30,
+          "out_of_order": false
+        },
+        {
+          "title": "4. Conclusions",
+          "level": 1,
+          "page": 31,
+          "source_level": 1,
+          "id": "n0011",
+          "end_page": 47,
+          "out_of_order": false
+        },
+        {
+          "title": "1.1 to 1.4 billion by 2030. This investment is about 1% of the average annual investment",
+          "level": 2,
+          "page": 32,
+          "source_level": 2,
+          "id": "n0012",
+          "end_page": 47,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "european_network_of_public_employment_services_annual-KE0124024ENN": {
+      "path": "vidore3-hr-en/corpus/european_network_of_public_employment_services_annual-KE0124024ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "European Network of Public Employment Services Annual Report",
+      "pages": 31,
+      "method": "bookmarks",
+      "nodes": [
+        {
+          "title": "_Hlk57735334",
+          "level": 1,
+          "page": 3,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 4,
+          "out_of_order": false
+        },
+        {
+          "title": "FOREWORD",
+          "level": 1,
+          "page": 5,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 5,
+          "out_of_order": false
+        },
+        {
+          "title": "1. INTRODUCTION",
+          "level": 1,
+          "page": 6,
+          "source_level": 1,
+          "id": "n0002",
+          "end_page": 7,
+          "out_of_order": false
+        },
+        {
+          "title": "1.1. PES Network in 2024",
+          "level": 2,
+          "page": 6,
+          "source_level": 2,
+          "id": "n0003",
+          "end_page": 6,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2. Snapshot of the 2024 Work Programme implementation",
+          "level": 2,
+          "page": 7,
+          "source_level": 3,
+          "id": "n0004",
+          "end_page": 7,
+          "out_of_order": false
+        },
+        {
+          "title": "2. ADDRESSING THE COMPLEX CHALLENGES FACED BY PES",
+          "level": 1,
+          "page": 8,
+          "source_level": 1,
+          "id": "n0005",
+          "end_page": 23,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1. PES responses to structural and labour market challenges",
+          "level": 2,
+          "page": 8,
+          "source_level": 2,
+          "id": "n0006",
+          "end_page": 14,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2. Improving service delivery while supporting those most in need",
+          "level": 2,
+          "page": 15,
+          "source_level": 3,
+          "id": "n0007",
+          "end_page": 18,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3. Improving performance, driving quality",
+          "level": 2,
+          "page": 19,
+          "source_level": 3,
+          "id": "n0008",
+          "end_page": 20,
+          "out_of_order": false
+        },
+        {
+          "title": "2.4. PES governance and its ecosystems",
+          "level": 2,
+          "page": 21,
+          "source_level": 3,
+          "id": "n0009",
+          "end_page": 23,
+          "out_of_order": false
+        },
+        {
+          "title": "3. BENCHMARKING TO SUPPORT PES MODERNISATION",
+          "level": 1,
+          "page": 24,
+          "source_level": 1,
+          "id": "n0010",
+          "end_page": 25,
+          "out_of_order": false
+        },
+        {
+          "title": "4. LOOKING AHEAD",
+          "level": 1,
+          "page": 26,
+          "source_level": 1,
+          "id": "n0011",
+          "end_page": 27,
+          "out_of_order": false
+        },
+        {
+          "title": "ANNEX 1 – WORK PROGRAMME",
+          "level": 1,
+          "page": 28,
+          "source_level": 2,
+          "id": "n0012",
+          "end_page": 28,
+          "out_of_order": false
+        },
+        {
+          "title": "ANNEX 2 – OUTPUTS FROM 2024 MUTUAL LEARNING ACTIVITIES",
+          "level": 1,
+          "page": 29,
+          "source_level": 2,
+          "id": "n0013",
+          "end_page": 31,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "future-oriented_occupations_in_the_eu-KE0125043ENN": {
+      "path": "vidore3-hr-en/corpus/future-oriented_occupations_in_the_eu-KE0125043ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "Future-oriented occupations in the eu",
+      "pages": 51,
+      "method": "bookmarks",
+      "nodes": [
+        {
+          "title": "1. Introduction",
+          "level": 1,
+          "page": 6,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 6,
+          "out_of_order": false
+        },
+        {
+          "title": "2. Defining future-oriented occupations and occupations of interest",
+          "level": 1,
+          "page": 7,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 16,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1 Occupations of interest",
+          "level": 2,
+          "page": 8,
+          "source_level": 2,
+          "id": "n0002",
+          "end_page": 11,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1.1 Digital occupations: digital skills intensity by occupation",
+          "level": 3,
+          "page": 9,
+          "source_level": 3,
+          "id": "n0003",
+          "end_page": 9,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1.2 Green occupations: new and emerging, enhanced, and increased demand6F",
+          "level": 3,
+          "page": 10,
+          "source_level": 3,
+          "id": "n0004",
+          "end_page": 11,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1.3 Critical labour shortages today and tomorrow",
+          "level": 3,
+          "page": 12,
+          "source_level": 3,
+          "id": "n0005",
+          "end_page": 12,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2 From occupations of interest to future-oriented occupations",
+          "level": 2,
+          "page": 12,
+          "source_level": 2,
+          "id": "n0006",
+          "end_page": 16,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Workforce characteristics across identified occupations",
+          "level": 1,
+          "page": 17,
+          "source_level": 1,
+          "id": "n0007",
+          "end_page": 22,
+          "out_of_order": false
+        },
+        {
+          "title": "3.1 Gender segregation concerns most future-oriented occupations and (residual) occupations of interest",
+          "level": 2,
+          "page": 17,
+          "source_level": 2,
+          "id": "n0008",
+          "end_page": 20,
+          "out_of_order": false
+        },
+        {
+          "title": "3.2 Core age groups workers (25-55) are more involved in future-oriented occupations",
+          "level": 2,
+          "page": 21,
+          "source_level": 2,
+          "id": "n0009",
+          "end_page": 22,
+          "out_of_order": false
+        },
+        {
+          "title": "4. Employment and working conditions in future-oriented occupations",
+          "level": 1,
+          "page": 23,
+          "source_level": 1,
+          "id": "n0010",
+          "end_page": 26,
+          "out_of_order": false
+        },
+        {
+          "title": "4.1 Employment conditions in future-oriented occupations",
+          "level": 2,
+          "page": 23,
+          "source_level": 2,
+          "id": "n0011",
+          "end_page": 24,
+          "out_of_order": false
+        },
+        {
+          "title": "4.2 Predictability of earnings in the next 3 months in future-oriented occupations",
+          "level": 2,
+          "page": 25,
+          "source_level": 2,
+          "id": "n0012",
+          "end_page": 25,
+          "out_of_order": false
+        },
+        {
+          "title": "4.3 Teleworkability of future-oriented occupations and occupations of interest",
+          "level": 2,
+          "page": 26,
+          "source_level": 2,
+          "id": "n0013",
+          "end_page": 26,
+          "out_of_order": false
+        },
+        {
+          "title": "5. Job quality dimensions of future-oriented occupations",
+          "level": 1,
+          "page": 27,
+          "source_level": 1,
+          "id": "n0014",
+          "end_page": 42,
+          "out_of_order": false
+        },
+        {
+          "title": "5.1 Job strain in future-oriented occupations and occupations of interest",
+          "level": 2,
+          "page": 29,
+          "source_level": 2,
+          "id": "n0015",
+          "end_page": 39,
+          "out_of_order": false
+        },
+        {
+          "title": "In the following sub-sections, aspects of the six dimensions of Eurofound’s job quality index are examined in relation to future-oriented occupations and (residual) occupations of interest. Next, other dimensions relevant to job quality and practices ...",
+          "level": 3,
+          "page": 31,
+          "source_level": 3,
+          "id": "n0016",
+          "end_page": 31,
+          "out_of_order": false
+        },
+        {
+          "title": "5.2.1 Physical and social environment",
+          "level": 3,
+          "page": 32,
+          "source_level": 3,
+          "id": "n0017",
+          "end_page": 32,
+          "out_of_order": false
+        },
+        {
+          "title": "5.2.2 Job Tasks",
+          "level": 3,
+          "page": 33,
+          "source_level": 3,
+          "id": "n0018",
+          "end_page": 34,
+          "out_of_order": false
+        },
+        {
+          "title": "5.2.3 Organisational characteristics",
+          "level": 3,
+          "page": 35,
+          "source_level": 3,
+          "id": "n0019",
+          "end_page": 35,
+          "out_of_order": false
+        },
+        {
+          "title": "5.2.4 Working time arrangements",
+          "level": 3,
+          "page": 36,
+          "source_level": 3,
+          "id": "n0020",
+          "end_page": 36,
+          "out_of_order": false
+        },
+        {
+          "title": "5.2.5 Job prospects",
+          "level": 3,
+          "page": 37,
+          "source_level": 3,
+          "id": "n0021",
+          "end_page": 37,
+          "out_of_order": false
+        },
+        {
+          "title": "5.2.6 Intrinsic job features",
+          "level": 3,
+          "page": 38,
+          "source_level": 3,
+          "id": "n0022",
+          "end_page": 39,
+          "out_of_order": false
+        },
+        {
+          "title": "5.4 Engagement in future-oriented occupations",
+          "level": 2,
+          "page": 40,
+          "source_level": 2,
+          "id": "n0023",
+          "end_page": 40,
+          "out_of_order": false
+        },
+        {
+          "title": "5.5 Work organisation practices that support job quality and learning",
+          "level": 2,
+          "page": 41,
+          "source_level": 2,
+          "id": "n0024",
+          "end_page": 41,
+          "out_of_order": false
+        },
+        {
+          "title": "5.6 Access to and participation in training within future-oriented occupations and occupations of interest",
+          "level": 2,
+          "page": 42,
+          "source_level": 2,
+          "id": "n0025",
+          "end_page": 42,
+          "out_of_order": false
+        },
+        {
+          "title": "6. Summary of the findings",
+          "level": 1,
+          "page": 43,
+          "source_level": 1,
+          "id": "n0026",
+          "end_page": 45,
+          "out_of_order": false
+        },
+        {
+          "title": "6.1 Strengths and limits of the work",
+          "level": 2,
+          "page": 43,
+          "source_level": 1,
+          "id": "n0027",
+          "end_page": 43,
+          "out_of_order": false
+        },
+        {
+          "title": "6.2 Conclusions",
+          "level": 2,
+          "page": 44,
+          "source_level": 1,
+          "id": "n0028",
+          "end_page": 45,
+          "out_of_order": false
+        },
+        {
+          "title": "7. References",
+          "level": 1,
+          "page": 46,
+          "source_level": 1,
+          "id": "n0029",
+          "end_page": 51,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "joint_employment_report_2025-KE0125018ENN": {
+      "path": "vidore3-hr-en/corpus/joint_employment_report_2025-KE0125018ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "Proposal for a Joint Employment Report 2025",
+      "pages": 174,
+      "method": "bookmarks",
+      "nodes": [
+        {
+          "title": "Key Messages",
+          "level": 1,
+          "page": 7,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 22,
+          "out_of_order": false
+        },
+        {
+          "title": "OVERVIEW OF LABOUR MARKET AND SOCIAL TRENDS, PROGRESS ON 2030 TARGETS, AND KEY HORIZONTAL FINDINGS ON SOCIAL CONVERGENCE",
+          "level": 1,
+          "page": 23,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 36,
+          "out_of_order": false
+        },
+        {
+          "title": "1.1. Key labour market trends",
+          "level": 2,
+          "page": 23,
+          "source_level": 2,
+          "id": "n0002",
+          "end_page": 24,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2. Key social trends",
+          "level": 2,
+          "page": 25,
+          "source_level": 2,
+          "id": "n0003",
+          "end_page": 26,
+          "out_of_order": false
+        },
+        {
+          "title": "1.3. Progress on the 2030 EU headline and national targets",
+          "level": 2,
+          "page": 27,
+          "source_level": 2,
+          "id": "n0004",
+          "end_page": 30,
+          "out_of_order": false
+        },
+        {
+          "title": "1.4. Key horizontal findings from the first-stage country analysis on social convergence",
+          "level": 2,
+          "page": 31,
+          "source_level": 2,
+          "id": "n0005",
+          "end_page": 36,
+          "out_of_order": false
+        },
+        {
+          "title": "Employment and social reforms – Member States’ performance and action",
+          "level": 1,
+          "page": 37,
+          "source_level": 1,
+          "id": "n0006",
+          "end_page": 114,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1. Guideline 5 - Boosting the demand for labour",
+          "level": 2,
+          "page": 37,
+          "source_level": 2,
+          "id": "n0007",
+          "end_page": 48,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1.1. Key indicators",
+          "level": 3,
+          "page": 37,
+          "source_level": 3,
+          "id": "n0008",
+          "end_page": 45,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1.2. Measures taken by Member States",
+          "level": 3,
+          "page": 46,
+          "source_level": 3,
+          "id": "n0009",
+          "end_page": 48,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2. Guideline 6 - Enhancing labour supply and improving access to employment, lifelong acquisition of skills and competences",
+          "level": 2,
+          "page": 49,
+          "source_level": 2,
+          "id": "n0010",
+          "end_page": 73,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.1. Key indicators",
+          "level": 3,
+          "page": 49,
+          "source_level": 3,
+          "id": "n0011",
+          "end_page": 67,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2.2. Measures taken by Member States",
+          "level": 3,
+          "page": 68,
+          "source_level": 3,
+          "id": "n0012",
+          "end_page": 73,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3. Guideline 7 - Enhancing the functioning of labour markets and the effectiveness of social dialogue",
+          "level": 2,
+          "page": 74,
+          "source_level": 2,
+          "id": "n0013",
+          "end_page": 88,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3.1. Key indicators",
+          "level": 3,
+          "page": 74,
+          "source_level": 3,
+          "id": "n0014",
+          "end_page": 84,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3.2. Measures taken by Member States",
+          "level": 3,
+          "page": 85,
+          "source_level": 3,
+          "id": "n0015",
+          "end_page": 88,
+          "out_of_order": false
+        },
+        {
+          "title": "2.4. Guideline 8 - Promoting equal opportunities for all, fostering social inclusion and fighting poverty",
+          "level": 2,
+          "page": 89,
+          "source_level": 2,
+          "id": "n0016",
+          "end_page": 114,
+          "out_of_order": false
+        },
+        {
+          "title": "2.4.1. Key indicators",
+          "level": 3,
+          "page": 89,
+          "source_level": 3,
+          "id": "n0017",
+          "end_page": 108,
+          "out_of_order": false
+        },
+        {
+          "title": "2.4.2. Measures taken by Member States",
+          "level": 3,
+          "page": 109,
+          "source_level": 3,
+          "id": "n0018",
+          "end_page": 114,
+          "out_of_order": false
+        },
+        {
+          "title": "First-stage country analysis",
+          "level": 1,
+          "page": 115,
+          "source_level": 1,
+          "id": "n0019",
+          "end_page": 142,
+          "out_of_order": false
+        },
+        {
+          "title": "Annexes",
+          "level": 1,
+          "page": 143,
+          "source_level": 1,
+          "id": "n0020",
+          "end_page": 174,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "labour_market_and_wage_developments_in_europe-KEBN24001ENN": {
+      "path": "vidore3-hr-en/corpus/labour_market_and_wage_developments_in_europe-KEBN24001ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "Labour Market and Wage Developments in Europe : Annual review 2024",
+      "pages": 140,
+      "method": "bookmarks",
+      "nodes": [
+        {
+          "title": "Acknowledgements",
+          "level": 1,
+          "page": 5,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 5,
+          "out_of_order": false
+        },
+        {
+          "title": "Foreword",
+          "level": 1,
+          "page": 6,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 10,
+          "out_of_order": false
+        },
+        {
+          "title": "Summary and main findings",
+          "level": 1,
+          "page": 11,
+          "source_level": 1,
+          "id": "n0002",
+          "end_page": 14,
+          "out_of_order": false
+        },
+        {
+          "title": "1. General labour market conditions in the EU and its Member States",
+          "level": 1,
+          "page": 15,
+          "source_level": 1,
+          "id": "n0003",
+          "end_page": 42,
+          "out_of_order": false
+        },
+        {
+          "title": "1.1 Introduction",
+          "level": 2,
+          "page": 15,
+          "source_level": 2,
+          "id": "n0004",
+          "end_page": 15,
+          "out_of_order": false
+        },
+        {
+          "title": "1.2 Labour market developments in the EU and its Member States",
+          "level": 2,
+          "page": 15,
+          "source_level": 2,
+          "id": "n0005",
+          "end_page": 29,
+          "out_of_order": false
+        },
+        {
+          "title": "1.4 Outlook and Major Challenges for the labour market",
+          "level": 2,
+          "page": 30,
+          "source_level": 2,
+          "id": "n0006",
+          "end_page": 34,
+          "out_of_order": false
+        },
+        {
+          "title": "1.5 Policy Implications",
+          "level": 2,
+          "page": 35,
+          "source_level": 2,
+          "id": "n0007",
+          "end_page": 36,
+          "out_of_order": false
+        },
+        {
+          "title": "1.6 Conclusions",
+          "level": 2,
+          "page": 37,
+          "source_level": 2,
+          "id": "n0008",
+          "end_page": 42,
+          "out_of_order": false
+        },
+        {
+          "title": "References",
+          "level": 3,
+          "page": 38,
+          "source_level": 3,
+          "id": "n0009",
+          "end_page": 42,
+          "out_of_order": false
+        },
+        {
+          "title": "Annex 1.1: Further analysis and selected graphs",
+          "level": 1,
+          "page": 43,
+          "source_level": 3,
+          "id": "n0010",
+          "end_page": 48,
+          "out_of_order": false
+        },
+        {
+          "title": "1.3 Main drivers of recent labour market developments",
+          "level": 2,
+          "page": 19,
+          "source_level": 2,
+          "id": "n0011",
+          "end_page": 48,
+          "out_of_order": true
+        },
+        {
+          "title": "2. Wages and labour costs developments in the EU and its Member States",
+          "level": 1,
+          "page": 49,
+          "source_level": 1,
+          "id": "n0012",
+          "end_page": 75,
+          "out_of_order": false
+        },
+        {
+          "title": "2.1 Introduction",
+          "level": 2,
+          "page": 49,
+          "source_level": 2,
+          "id": "n0013",
+          "end_page": 49,
+          "out_of_order": false
+        },
+        {
+          "title": "2.2 Wage developments and outlook",
+          "level": 2,
+          "page": 49,
+          "source_level": 2,
+          "id": "n0014",
+          "end_page": 54,
+          "out_of_order": false
+        },
+        {
+          "title": "2.3 The lasting social effects of the high inflation period and fairness issues",
+          "level": 2,
+          "page": 55,
+          "source_level": 2,
+          "id": "n0015",
+          "end_page": 61,
+          "out_of_order": false
+        },
+        {
+          "title": "2.4 Drivers of and scope for sustainable wage growth",
+          "level": 2,
+          "page": 62,
+          "source_level": 2,
+          "id": "n0016",
+          "end_page": 66,
+          "out_of_order": false
+        },
+        {
+          "title": "2.5 Policy response",
+          "level": 2,
+          "page": 67,
+          "source_level": 2,
+          "id": "n0017",
+          "end_page": 69,
+          "out_of_order": false
+        },
+        {
+          "title": "2.6 Conclusions",
+          "level": 2,
+          "page": 70,
+          "source_level": 2,
+          "id": "n0018",
+          "end_page": 75,
+          "out_of_order": false
+        },
+        {
+          "title": "References",
+          "level": 3,
+          "page": 71,
+          "source_level": 3,
+          "id": "n0019",
+          "end_page": 75,
+          "out_of_order": false
+        },
+        {
+          "title": "Annex 2.1: Selected graphs",
+          "level": 1,
+          "page": 76,
+          "source_level": 3,
+          "id": "n0020",
+          "end_page": 78,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Promoting the labour force participation and employment of older people in the EU",
+          "level": 1,
+          "page": 79,
+          "source_level": 1,
+          "id": "n0021",
+          "end_page": 104,
+          "out_of_order": false
+        },
+        {
+          "title": "3.1 Introduction",
+          "level": 2,
+          "page": 79,
+          "source_level": 2,
+          "id": "n0022",
+          "end_page": 79,
+          "out_of_order": false
+        },
+        {
+          "title": "3.2 The labour force participation and employment of older people across the EU",
+          "level": 2,
+          "page": 80,
+          "source_level": 2,
+          "id": "n0023",
+          "end_page": 86,
+          "out_of_order": false
+        },
+        {
+          "title": "3.3 Participation of older individuals in training across the EU",
+          "level": 2,
+          "page": 87,
+          "source_level": 2,
+          "id": "n0024",
+          "end_page": 88,
+          "out_of_order": false
+        },
+        {
+          "title": "3.4 Projection of future labour market activity and potential of older people",
+          "level": 2,
+          "page": 89,
+          "source_level": 2,
+          "id": "n0025",
+          "end_page": 93,
+          "out_of_order": false
+        },
+        {
+          "title": "3.5 Policies to facilitate the employment of older people",
+          "level": 2,
+          "page": 94,
+          "source_level": 2,
+          "id": "n0026",
+          "end_page": 97,
+          "out_of_order": false
+        },
+        {
+          "title": "3.6 Conclusion",
+          "level": 2,
+          "page": 98,
+          "source_level": 2,
+          "id": "n0027",
+          "end_page": 104,
+          "out_of_order": false
+        },
+        {
+          "title": "References",
+          "level": 3,
+          "page": 100,
+          "source_level": 3,
+          "id": "n0028",
+          "end_page": 104,
+          "out_of_order": false
+        },
+        {
+          "title": "Annex 3.1: Selected graphs",
+          "level": 1,
+          "page": 105,
+          "source_level": 3,
+          "id": "n0029",
+          "end_page": 107,
+          "out_of_order": false
+        },
+        {
+          "title": "Annex 3.2: Multistage retirement projection model",
+          "level": 1,
+          "page": 108,
+          "source_level": 3,
+          "id": "n0030",
+          "end_page": 109,
+          "out_of_order": false
+        },
+        {
+          "title": "Appendix: Statistical annex",
+          "level": 1,
+          "page": 110,
+          "source_level": 1,
+          "id": "n0031",
+          "end_page": 140,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 1
+    },
+    "posting_of_workers-KE0224850ENN": {
+      "path": "vidore3-hr-en/corpus/posting_of_workers-KE0224850ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "Posting of workers",
+      "pages": 53,
+      "method": "bookmarks",
+      "nodes": [
+        {
+          "title": "List of Tables",
+          "level": 1,
+          "page": 6,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 6,
+          "out_of_order": false
+        },
+        {
+          "title": "List of Figures",
+          "level": 1,
+          "page": 7,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 7,
+          "out_of_order": false
+        },
+        {
+          "title": "Glossary",
+          "level": 1,
+          "page": 8,
+          "source_level": 1,
+          "id": "n0002",
+          "end_page": 8,
+          "out_of_order": false
+        },
+        {
+          "title": "Summary of main findings",
+          "level": 1,
+          "page": 9,
+          "source_level": 1,
+          "id": "n0003",
+          "end_page": 11,
+          "out_of_order": false
+        },
+        {
+          "title": "Main findings by Member State",
+          "level": 1,
+          "page": 12,
+          "source_level": 1,
+          "id": "n0004",
+          "end_page": 13,
+          "out_of_order": false
+        },
+        {
+          "title": "1. Introduction",
+          "level": 1,
+          "page": 14,
+          "source_level": 1,
+          "id": "n0005",
+          "end_page": 14,
+          "out_of_order": false
+        },
+        {
+          "title": "2. Overview of the prior declaration tools",
+          "level": 1,
+          "page": 15,
+          "source_level": 1,
+          "id": "n0006",
+          "end_page": 19,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Overview of the data collected by the prior declaration tools",
+          "level": 1,
+          "page": 20,
+          "source_level": 1,
+          "id": "n0007",
+          "end_page": 35,
+          "out_of_order": false
+        },
+        {
+          "title": "3.1. Number of posted workers in 2022",
+          "level": 2,
+          "page": 21,
+          "source_level": 2,
+          "id": "n0008",
+          "end_page": 23,
+          "out_of_order": false
+        },
+        {
+          "title": "3.2. Breakdown by sending Member State",
+          "level": 2,
+          "page": 24,
+          "source_level": 2,
+          "id": "n0009",
+          "end_page": 24,
+          "out_of_order": false
+        },
+        {
+          "title": "3.3. Breakdown by nationality",
+          "level": 2,
+          "page": 25,
+          "source_level": 2,
+          "id": "n0010",
+          "end_page": 25,
+          "out_of_order": false
+        },
+        {
+          "title": "3.4. Breakdown between workers and self-employed persons",
+          "level": 2,
+          "page": 26,
+          "source_level": 2,
+          "id": "n0011",
+          "end_page": 26,
+          "out_of_order": false
+        },
+        {
+          "title": "3.5. Breakdown by type of posting",
+          "level": 2,
+          "page": 27,
+          "source_level": 2,
+          "id": "n0012",
+          "end_page": 27,
+          "out_of_order": false
+        },
+        {
+          "title": "3.6. Breakdown by sector of activity",
+          "level": 2,
+          "page": 28,
+          "source_level": 2,
+          "id": "n0013",
+          "end_page": 29,
+          "out_of_order": false
+        },
+        {
+          "title": "3.7. Average duration of the posting period",
+          "level": 2,
+          "page": 30,
+          "source_level": 2,
+          "id": "n0014",
+          "end_page": 31,
+          "out_of_order": false
+        },
+        {
+          "title": "3.8. Share of incoming posted workers in national workforce",
+          "level": 2,
+          "page": 32,
+          "source_level": 2,
+          "id": "n0015",
+          "end_page": 35,
+          "out_of_order": false
+        },
+        {
+          "title": "Annex I Data",
+          "level": 1,
+          "page": 36,
+          "source_level": 1,
+          "id": "n0016",
+          "end_page": 53,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "recruitment_working_conditions_career_development-KI0124000ENN": {
+      "path": "vidore3-hr-en/corpus/recruitment_working_conditions_career_development-KI0124000ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "Recruitment working conditions career development",
+      "pages": 50,
+      "method": "headings",
+      "nodes": [
+        {
+          "title": "2024 Horizon Europe Policy Support Facility",
+          "level": 1,
+          "page": 3,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 6,
+          "out_of_order": false
+        },
+        {
+          "title": "1. Introduction",
+          "level": 1,
+          "page": 7,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 7,
+          "out_of_order": false
+        },
+        {
+          "title": "2. Recruitment, working conditions, career development and",
+          "level": 1,
+          "page": 7,
+          "source_level": 1,
+          "id": "n0002",
+          "end_page": 8,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Attracting",
+          "level": 1,
+          "page": 9,
+          "source_level": 1,
+          "id": "n0003",
+          "end_page": 13,
+          "out_of_order": false
+        },
+        {
+          "title": "4. Retaining",
+          "level": 1,
+          "page": 14,
+          "source_level": 1,
+          "id": "n0004",
+          "end_page": 18,
+          "out_of_order": false
+        },
+        {
+          "title": "5. Developing",
+          "level": 1,
+          "page": 19,
+          "source_level": 1,
+          "id": "n0005",
+          "end_page": 23,
+          "out_of_order": false
+        },
+        {
+          "title": "6. Rewarding",
+          "level": 1,
+          "page": 24,
+          "source_level": 1,
+          "id": "n0006",
+          "end_page": 26,
+          "out_of_order": false
+        },
+        {
+          "title": "7. Leave-Taking",
+          "level": 1,
+          "page": 27,
+          "source_level": 1,
+          "id": "n0007",
+          "end_page": 29,
+          "out_of_order": false
+        },
+        {
+          "title": "8. Conclusions",
+          "level": 1,
+          "page": 30,
+          "source_level": 1,
+          "id": "n0008",
+          "end_page": 31,
+          "out_of_order": false
+        },
+        {
+          "title": "9. Annex 1: A selection of inspiring good practices",
+          "level": 1,
+          "page": 32,
+          "source_level": 1,
+          "id": "n0009",
+          "end_page": 35,
+          "out_of_order": false
+        },
+        {
+          "title": "1. There is a shortage of people in Estonia with the skills and willingness to",
+          "level": 1,
+          "page": 36,
+          "source_level": 1,
+          "id": "n0010",
+          "end_page": 36,
+          "out_of_order": false
+        },
+        {
+          "title": "2. Project-based approaches and a high level of competitive pressure lead",
+          "level": 1,
+          "page": 36,
+          "source_level": 1,
+          "id": "n0011",
+          "end_page": 36,
+          "out_of_order": false
+        },
+        {
+          "title": "1. To continue to increase the efficiency and attractiveness of doctoral",
+          "level": 1,
+          "page": 36,
+          "source_level": 1,
+          "id": "n0012",
+          "end_page": 36,
+          "out_of_order": false
+        },
+        {
+          "title": "2. To support post-doctoral studies as well as to attract incoming / returning",
+          "level": 1,
+          "page": 36,
+          "source_level": 1,
+          "id": "n0013",
+          "end_page": 44,
+          "out_of_order": false
+        },
+        {
+          "title": "10. Annex 2: Meeting Agenda",
+          "level": 1,
+          "page": 45,
+          "source_level": 1,
+          "id": "n0014",
+          "end_page": 45,
+          "out_of_order": false
+        },
+        {
+          "title": "27 June 2024 Agenda",
+          "level": 1,
+          "page": 45,
+          "source_level": 1,
+          "id": "n0015",
+          "end_page": 46,
+          "out_of_order": false
+        },
+        {
+          "title": "19.00 Optional dinner at Kitchen151, Chaussée de Wavre 145, 1050 Ixelles",
+          "level": 2,
+          "page": 47,
+          "source_level": 2,
+          "id": "n0016",
+          "end_page": 47,
+          "out_of_order": false
+        },
+        {
+          "title": "28 June 2024 Agenda",
+          "level": 1,
+          "page": 47,
+          "source_level": 1,
+          "id": "n0017",
+          "end_page": 50,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "research_perspectives_on_the_future_of_work-KI0124087ENN": {
+      "path": "vidore3-hr-en/corpus/research_perspectives_on_the_future_of_work-KI0124087ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "Research perspectives on the future of work",
+      "pages": 38,
+      "method": "headings",
+      "nodes": [
+        {
+          "title": "2025 Directorate-General for Research and Innovation",
+          "level": 1,
+          "page": 3,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 5,
+          "out_of_order": false
+        },
+        {
+          "title": "1. Introduction",
+          "level": 1,
+          "page": 6,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 6,
+          "out_of_order": false
+        },
+        {
+          "title": "2. ERA4FutureWork",
+          "level": 1,
+          "page": 7,
+          "source_level": 1,
+          "id": "n0002",
+          "end_page": 7,
+          "out_of_order": false
+        },
+        {
+          "title": "3. Scope and vision",
+          "level": 1,
+          "page": 8,
+          "source_level": 1,
+          "id": "n0003",
+          "end_page": 8,
+          "out_of_order": false
+        },
+        {
+          "title": "4. The green transition and working life",
+          "level": 1,
+          "page": 9,
+          "source_level": 1,
+          "id": "n0004",
+          "end_page": 9,
+          "out_of_order": false
+        },
+        {
+          "title": "5. Balancing social and employment objectives within the",
+          "level": 1,
+          "page": 10,
+          "source_level": 1,
+          "id": "n0005",
+          "end_page": 11,
+          "out_of_order": false
+        },
+        {
+          "title": "6. Skills for a successful and fair green transition",
+          "level": 1,
+          "page": 12,
+          "source_level": 1,
+          "id": "n0006",
+          "end_page": 13,
+          "out_of_order": false
+        },
+        {
+          "title": "7. Facing an increasingly digital world of work",
+          "level": 1,
+          "page": 14,
+          "source_level": 1,
+          "id": "n0007",
+          "end_page": 16,
+          "out_of_order": false
+        },
+        {
+          "title": "8. The twin transitions and vulnerable groups: research and",
+          "level": 1,
+          "page": 17,
+          "source_level": 1,
+          "id": "n0008",
+          "end_page": 23,
+          "out_of_order": false
+        },
+        {
+          "title": "8.1. Disability",
+          "level": 2,
+          "page": 19,
+          "source_level": 2,
+          "id": "n0009",
+          "end_page": 19,
+          "out_of_order": false
+        },
+        {
+          "title": "8.2. Unpaid care work",
+          "level": 2,
+          "page": 20,
+          "source_level": 2,
+          "id": "n0010",
+          "end_page": 21,
+          "out_of_order": false
+        },
+        {
+          "title": "8.3. Regional vulnerability",
+          "level": 2,
+          "page": 22,
+          "source_level": 2,
+          "id": "n0011",
+          "end_page": 22,
+          "out_of_order": false
+        },
+        {
+          "title": "8.4. Lack of data",
+          "level": 2,
+          "page": 23,
+          "source_level": 2,
+          "id": "n0012",
+          "end_page": 23,
+          "out_of_order": false
+        },
+        {
+          "title": "8.5. Strengthening social protection",
+          "level": 2,
+          "page": 23,
+          "source_level": 2,
+          "id": "n0013",
+          "end_page": 23,
+          "out_of_order": false
+        },
+        {
+          "title": "9. The future of work in EU public administrations: research",
+          "level": 1,
+          "page": 24,
+          "source_level": 1,
+          "id": "n0014",
+          "end_page": 25,
+          "out_of_order": false
+        },
+        {
+          "title": "10. The future of work: research gaps and opportunities",
+          "level": 1,
+          "page": 26,
+          "source_level": 1,
+          "id": "n0015",
+          "end_page": 26,
+          "out_of_order": false
+        },
+        {
+          "title": "11. Opportunities for innovation action",
+          "level": 1,
+          "page": 27,
+          "source_level": 1,
+          "id": "n0016",
+          "end_page": 27,
+          "out_of_order": false
+        },
+        {
+          "title": "12. Portfolio of proposed actions",
+          "level": 1,
+          "page": 28,
+          "source_level": 1,
+          "id": "n0017",
+          "end_page": 34,
+          "out_of_order": false
+        },
+        {
+          "title": "12.1. Providing adequate, innovative and accessible upskilling and",
+          "level": 2,
+          "page": 28,
+          "source_level": 2,
+          "id": "n0018",
+          "end_page": 29,
+          "out_of_order": false
+        },
+        {
+          "title": "12.2. Promoting innovative and inclusive educational pathways",
+          "level": 2,
+          "page": 30,
+          "source_level": 2,
+          "id": "n0019",
+          "end_page": 30,
+          "out_of_order": false
+        },
+        {
+          "title": "12.3. Understanding labour mobility patterns and the impacts of",
+          "level": 2,
+          "page": 30,
+          "source_level": 2,
+          "id": "n0020",
+          "end_page": 30,
+          "out_of_order": false
+        },
+        {
+          "title": "12.4. Understanding the development of remote work",
+          "level": 2,
+          "page": 31,
+          "source_level": 2,
+          "id": "n0021",
+          "end_page": 32,
+          "out_of_order": false
+        },
+        {
+          "title": "12.5. Understanding the trajectory of work platformisation",
+          "level": 2,
+          "page": 33,
+          "source_level": 2,
+          "id": "n0022",
+          "end_page": 33,
+          "out_of_order": false
+        },
+        {
+          "title": "12.6. Development of inequalities in relation to the labour market",
+          "level": 2,
+          "page": 33,
+          "source_level": 2,
+          "id": "n0023",
+          "end_page": 34,
+          "out_of_order": false
+        },
+        {
+          "title": "13. Conclusions and future outlook",
+          "level": 1,
+          "page": 35,
+          "source_level": 1,
+          "id": "n0024",
+          "end_page": 38,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    },
+    "undeclared_care_work_in_the_eu-TJ0125004ENN": {
+      "path": "vidore3-hr-en/corpus/undeclared_care_work_in_the_eu-TJ0125004ENN.pdf",
+      "dataset": "vidore3-hr-en",
+      "title": "Undeclared care work in the EU: Policy approaches to a complex socioeconomic challenge",
+      "pages": 52,
+      "method": "bookmarks",
+      "nodes": [
+        {
+          "title": "Contents",
+          "level": 1,
+          "page": 5,
+          "source_level": 1,
+          "id": "n0000",
+          "end_page": 8,
+          "out_of_order": false
+        },
+        {
+          "title": "Introduction",
+          "level": 1,
+          "page": 9,
+          "source_level": 1,
+          "id": "n0001",
+          "end_page": 9,
+          "out_of_order": false
+        },
+        {
+          "title": "A definition of undeclared care work",
+          "level": 1,
+          "page": 10,
+          "source_level": 1,
+          "id": "n0002",
+          "end_page": 10,
+          "out_of_order": false
+        },
+        {
+          "title": "Forms of undeclared care work",
+          "level": 1,
+          "page": 11,
+          "source_level": 1,
+          "id": "n0003",
+          "end_page": 11,
+          "out_of_order": false
+        },
+        {
+          "title": "Policy challenges and outlook",
+          "level": 1,
+          "page": 11,
+          "source_level": 1,
+          "id": "n0004",
+          "end_page": 11,
+          "out_of_order": false
+        },
+        {
+          "title": "Action taken at EU and national levels",
+          "level": 1,
+          "page": 12,
+          "source_level": 1,
+          "id": "n0005",
+          "end_page": 12,
+          "out_of_order": false
+        },
+        {
+          "title": "Scope, methodology and limitations",
+          "level": 1,
+          "page": 13,
+          "source_level": 1,
+          "id": "n0006",
+          "end_page": 14,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 1: Characterising undeclared care work",
+          "level": 1,
+          "page": 15,
+          "source_level": 1,
+          "id": "n0007",
+          "end_page": 26,
+          "out_of_order": false
+        },
+        {
+          "title": "Scale of undeclared care work",
+          "level": 1,
+          "page": 15,
+          "source_level": 1,
+          "id": "n0008",
+          "end_page": 15,
+          "out_of_order": false
+        },
+        {
+          "title": "Scale at EU level",
+          "level": 1,
+          "page": 15,
+          "source_level": 1,
+          "id": "n0009",
+          "end_page": 15,
+          "out_of_order": false
+        },
+        {
+          "title": "Scale at Member State level",
+          "level": 1,
+          "page": 16,
+          "source_level": 1,
+          "id": "n0010",
+          "end_page": 16,
+          "out_of_order": false
+        },
+        {
+          "title": "Profile of workers",
+          "level": 1,
+          "page": 17,
+          "source_level": 1,
+          "id": "n0011",
+          "end_page": 17,
+          "out_of_order": false
+        },
+        {
+          "title": "Mostly migrant women",
+          "level": 1,
+          "page": 17,
+          "source_level": 1,
+          "id": "n0012",
+          "end_page": 18,
+          "out_of_order": false
+        },
+        {
+          "title": "Friends and family",
+          "level": 1,
+          "page": 19,
+          "source_level": 1,
+          "id": "n0013",
+          "end_page": 19,
+          "out_of_order": false
+        },
+        {
+          "title": "Drivers of undeclared care work",
+          "level": 1,
+          "page": 19,
+          "source_level": 1,
+          "id": "n0014",
+          "end_page": 21,
+          "out_of_order": false
+        },
+        {
+          "title": "Role of social media and online platforms",
+          "level": 1,
+          "page": 22,
+          "source_level": 1,
+          "id": "n0015",
+          "end_page": 22,
+          "out_of_order": false
+        },
+        {
+          "title": "Nature of undeclared care work",
+          "level": 1,
+          "page": 23,
+          "source_level": 1,
+          "id": "n0016",
+          "end_page": 23,
+          "out_of_order": false
+        },
+        {
+          "title": "Working conditions",
+          "level": 1,
+          "page": 23,
+          "source_level": 1,
+          "id": "n0017",
+          "end_page": 23,
+          "out_of_order": false
+        },
+        {
+          "title": "Remuneration",
+          "level": 1,
+          "page": 24,
+          "source_level": 1,
+          "id": "n0018",
+          "end_page": 26,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 2: Consequences of undeclared care work",
+          "level": 1,
+          "page": 27,
+          "source_level": 1,
+          "id": "n0019",
+          "end_page": 30,
+          "out_of_order": false
+        },
+        {
+          "title": "Lack of legal protection",
+          "level": 1,
+          "page": 27,
+          "source_level": 1,
+          "id": "n0020",
+          "end_page": 27,
+          "out_of_order": false
+        },
+        {
+          "title": "Financial unsustainability",
+          "level": 1,
+          "page": 28,
+          "source_level": 1,
+          "id": "n0021",
+          "end_page": 28,
+          "out_of_order": false
+        },
+        {
+          "title": "Physical and mental health challenges",
+          "level": 1,
+          "page": 28,
+          "source_level": 1,
+          "id": "n0022",
+          "end_page": 28,
+          "out_of_order": false
+        },
+        {
+          "title": "Lack of opportunities for training and professional development",
+          "level": 1,
+          "page": 28,
+          "source_level": 1,
+          "id": "n0023",
+          "end_page": 28,
+          "out_of_order": false
+        },
+        {
+          "title": "High risk of exploitation and exposure to adverse social behaviour",
+          "level": 1,
+          "page": 28,
+          "source_level": 1,
+          "id": "n0024",
+          "end_page": 28,
+          "out_of_order": false
+        },
+        {
+          "title": "Lack of access to workers’ representation",
+          "level": 1,
+          "page": 29,
+          "source_level": 1,
+          "id": "n0025",
+          "end_page": 29,
+          "out_of_order": false
+        },
+        {
+          "title": "Social isolation and exclusion",
+          "level": 1,
+          "page": 29,
+          "source_level": 1,
+          "id": "n0026",
+          "end_page": 30,
+          "out_of_order": false
+        },
+        {
+          "title": "Chapter 3: Preventing and formalising undeclared care work",
+          "level": 1,
+          "page": 31,
+          "source_level": 1,
+          "id": "n0027",
+          "end_page": 32,
+          "out_of_order": false
+        },
+        {
+          "title": "Direct measures to improve detection",
+          "level": 1,
+          "page": 33,
+          "source_level": 1,
+          "id": "n0028",
+          "end_page": 33,
+          "out_of_order": false
+        },
+        {
+          "title": "Direct measures to enable compliance",
+          "level": 1,
+          "page": 33,
+          "source_level": 1,
+          "id": "n0029",
+          "end_page": 33,
+          "out_of_order": false
+        },
+        {
+          "title": "Preventative measures",
+          "level": 1,
+          "page": 33,
+          "source_level": 1,
+          "id": "n0030",
+          "end_page": 33,
+          "out_of_order": false
+        },
+        {
+          "title": "Legitimising measures",
+          "level": 1,
+          "page": 34,
+          "source_level": 1,
+          "id": "n0031",
+          "end_page": 38,
+          "out_of_order": false
+        },
+        {
+          "title": "Curative measures",
+          "level": 1,
+          "page": 39,
+          "source_level": 1,
+          "id": "n0032",
+          "end_page": 39,
+          "out_of_order": false
+        },
+        {
+          "title": "Indirect measures to change norms and beliefs",
+          "level": 1,
+          "page": 39,
+          "source_level": 1,
+          "id": "n0033",
+          "end_page": 40,
+          "out_of_order": false
+        },
+        {
+          "title": "Conclusion and policy pointers",
+          "level": 1,
+          "page": 41,
+          "source_level": 1,
+          "id": "n0034",
+          "end_page": 41,
+          "out_of_order": false
+        },
+        {
+          "title": "Policy pointers",
+          "level": 1,
+          "page": 42,
+          "source_level": 1,
+          "id": "n0035",
+          "end_page": 44,
+          "out_of_order": false
+        },
+        {
+          "title": "References",
+          "level": 1,
+          "page": 45,
+          "source_level": 1,
+          "id": "n0036",
+          "end_page": 48,
+          "out_of_order": false
+        },
+        {
+          "title": "Annexes",
+          "level": 1,
+          "page": 49,
+          "source_level": 1,
+          "id": "n0037",
+          "end_page": 49,
+          "out_of_order": false
+        },
+        {
+          "title": "Annex 1: Network of Eurofound Correspondents",
+          "level": 1,
+          "page": 49,
+          "source_level": 1,
+          "id": "n0038",
+          "end_page": 49,
+          "out_of_order": false
+        },
+        {
+          "title": "Annex 2: Questionnaire",
+          "level": 1,
+          "page": 50,
+          "source_level": 1,
+          "id": "n0039",
+          "end_page": 52,
+          "out_of_order": false
+        }
+      ],
+      "out_of_order_nodes": 0
+    }
+  }
+}

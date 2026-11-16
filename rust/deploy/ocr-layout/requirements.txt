@@ -1,0 +1,13 @@
+# The layout detector: PP-DocLayoutV3 (a PaddleOCR model) through transformers.
+# The weights are not here: LAYOUT_MODEL_DIR points at a local checkpoint.
+transformers==5.17.0
+# torch and torchvision: CPU wheels by default (the Dockerfile's TORCH_INDEX);
+# a CUDA index gives the GPU build:
+#   pip install --extra-index-url https://download.pytorch.org/whl/cu130 \
+#       torch==2.14.0 torchvision==0.29.0
+torch==2.14.0
+torchvision==0.29.0
+# OpenCV: PP-DocLayoutV3's image processor draws its polygon masks with it.
+opencv-python-headless==4.10.0.84
+numpy<3
+Pillow

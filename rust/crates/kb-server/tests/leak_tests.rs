@@ -17,7 +17,12 @@
 //!   fetch that ignores it too — the page row must report LEAK;
 //! * a page index that ignores the scope while the chunk fetch still honours
 //!   it — contained, and the test pins that down, because it is what the black
-//!   box can and cannot see.
+//!   box can and cannot see;
+//! * the **global community arm** (`DEC-5`), on, with an honest community
+//!   store: the row must find its own target and leak nothing;
+//! * a community store that ignores the scope — contained by the arm's own
+//!   document/chunk narrowing and the scoped chunk fetch, which is the second
+//!   fence a summary written from an invisible document would have to cross.
 //!
 //! The leaking runs are the ones that matter: an instrument that cannot fail is
 //! not an instrument.
@@ -25,21 +30,25 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use kb_engine::EngineSettings;
 use kb_engine::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityStore, FakeJobStore,
-    FakeReranker,
+    FakeReranker, FakeTableStore,
 };
-use kb_engine::{InMemoryIndex, PageArm, PageArmConfig};
+use kb_engine::{
+    GlobalArm, GlobalArmConfig, InMemoryIndex, PageArm, PageArmConfig, TreeArm, TreeArmConfig,
+};
 use kb_eval::leak::{Arm, LeakMatrix, ScopeKind, SeedDocument, Status, plan};
 use kb_eval::leak_http::{LeakConfig, canaries_for, probe};
+use kb_ports::tables::{TableId, TableRecord};
 use kb_ports::{
     ArmRanks, ArmScores, Candidate, Chunk, ChunkId, ChunkMetadata, ChunkToStore, ChunkType,
-    DocumentId, DocumentMeta, DocumentScope, HybridQuery, IndexCapabilities, IndexUnit,
-    PageEmbedder, PageImage, PortError, RetrievalIndex, SearchHit, TenantId,
+    CommunityRecord, CommunityStore, DocumentId, DocumentMeta, DocumentScope, HybridQuery,
+    IndexCapabilities, IndexUnit, NewCommunity, PageEmbedder, PageImage, PortError, RetrievalIndex,
+    SearchHit, TenantId,
 };
 use kb_server::events::EventBus;
 use kb_server::state::{AppState, StateParts};
@@ -54,6 +63,7 @@ fn engine_settings() -> EngineSettings {
         rerank_final_k: 10,
         max_chunks: 10,
         min_similarity: 0.30,
+        min_score: None,
         // Both weave and figures on, so those arms have something to return.
         neighbour_window: 1,
         figure_limit: 3,
@@ -61,6 +71,7 @@ fn engine_settings() -> EngineSettings {
         expansion_paraphrases: 3,
         hybrid_bm25_enabled: true,
         rerank_enabled: false,
+        adaptive_arms: false,
     }
 }
 
@@ -72,7 +83,7 @@ fn doc(id: &str, title: &str, kb: &str, category: &str) -> DocumentMeta {
         categories: vec![category.to_string()],
         subcategory: None,
         status: "ready".to_string(),
-        external_ref: None,
+        external_ref: Some(format!("ref-{id}")),
         chunk_count: 2,
         file_type: Some("text/markdown".to_string()),
         file_size: Some(1024),
@@ -106,6 +117,8 @@ fn hit(id: &str, doc_id: &str, content: &str, chunk_index: u32, similarity: f32)
         rank: 0,
         is_bm25: false,
         retrieval: None,
+        dense_score: Some(similarity),
+        rerank_score: None,
     }
 }
 
@@ -128,14 +141,36 @@ fn seed_documents() -> Vec<SeedDocument> {
                     tenant: tenant.to_string(),
                     knowledge_base_id: format!("{tenant}-kb{kb}"),
                     category_id: format!("{tenant}-cat{category}"),
+                    external_ref: format!("ref-{id}"),
                     canaries: canaries_for(0xC0FFEE, index),
                     n_chunks: 2,
                     has_figures: true,
                     figure_asset_key: Some(format!("documents/{tenant}/{id}/assets/1.png")),
+                    table_ids: Vec::new(),
                 });
                 index += 1;
             }
         }
+    }
+    // One table-bearing document per cell (`TBL-1`): the table row lists, gets
+    // and counts a document's tables, so every scope needs a document whose
+    // ingest stored one. Every other arm skips these documents, because a
+    // table-only document cannot answer their canary.
+    let normal = out.clone();
+    for (offset, document) in normal.into_iter().enumerate() {
+        let id = format!("{}-table", document.id);
+        out.push(SeedDocument {
+            id: id.clone(),
+            tenant: document.tenant,
+            knowledge_base_id: document.knowledge_base_id,
+            category_id: document.category_id,
+            external_ref: format!("ref-{id}"),
+            canaries: canaries_for(0xC0FFEE, 1000 + offset),
+            n_chunks: 1,
+            has_figures: false,
+            figure_asset_key: None,
+            table_ids: vec![format!("{id}_t0")],
+        });
     }
     out
 }
@@ -145,6 +180,13 @@ fn seed_documents() -> Vec<SeedDocument> {
 enum Mode {
     /// Every arm filters by scope.
     Honest,
+    /// Every arm filters by scope, and the global community arm is on with an
+    /// honest community store.
+    HonestGlobal,
+    /// The global arm is on with a community store that returns every
+    /// tenant's communities. The arm's narrowing and the scoped chunk fetch
+    /// must contain it.
+    LeakingGlobalStore,
     /// The text index's vector arm answers with everything it has.
     LeakingVector,
     /// The page index ignores the scope, and so does the chunk fetch that turns
@@ -152,16 +194,99 @@ enum Mode {
     LeakingPagePath,
     /// Only the page index ignores the scope; the chunk fetch is still scoped.
     LeakingPageIndexOnly,
+    /// The document store returns every outline regardless of scope; the page
+    /// fetch that turns a tree node into chunks is still scoped.
+    LeakingTreeOutlines,
 }
 
 impl Mode {
+    /// Whether this run turns the global community arm on.
+    fn uses_global(self) -> bool {
+        matches!(self, Self::HonestGlobal | Self::LeakingGlobalStore)
+    }
+
     fn label(self) -> &'static str {
         match self {
             Self::Honest => "honest",
+            Self::HonestGlobal => "honest-global",
+            Self::LeakingGlobalStore => "leaking-global-store",
             Self::LeakingVector => "leaking-vector",
             Self::LeakingPagePath => "leaking-page-path",
             Self::LeakingPageIndexOnly => "leaking-page-index",
+            Self::LeakingTreeOutlines => "leaking-tree-outlines",
         }
+    }
+}
+
+/// The community store the global arm reads in the leak run.
+///
+/// `leak` is the scope hole: a store that returns every tenant's communities,
+/// summaries and chunk ids included. The arm must contain it on its own — by
+/// narrowing the members to the scope and by fetching the chunks through the
+/// scoped index — because a summary written from an invisible document must
+/// never be able to choose a caller's chunks.
+struct LeakCommunityStore {
+    communities: Mutex<Vec<CommunityRecord>>,
+    leak: bool,
+}
+
+impl LeakCommunityStore {
+    fn new(leak: bool) -> Self {
+        Self {
+            communities: Mutex::new(Vec::new()),
+            leak,
+        }
+    }
+
+    fn push(&self, id: &str, summary: String, chunk_ids: Vec<String>) {
+        self.communities.lock().unwrap().push(CommunityRecord {
+            id: format!("community-{id}"),
+            version: 1,
+            summary,
+            entity_keys: vec![format!("entity-{id}")],
+            document_ids: vec![DocumentId::new_unchecked(id)],
+            chunk_ids: chunk_ids.into_iter().map(ChunkId::new_unchecked).collect(),
+            model: "leak-test/model".to_string(),
+        });
+    }
+}
+
+#[async_trait]
+impl CommunityStore for LeakCommunityStore {
+    async fn load_communities(
+        &self,
+        scope: &DocumentScope,
+    ) -> Result<Vec<CommunityRecord>, PortError> {
+        let all = self.communities.lock().unwrap().clone();
+        if self.leak {
+            return Ok(all);
+        }
+        let visible: std::collections::HashSet<&str> = scope
+            .document_ids()
+            .iter()
+            .map(DocumentId::as_str)
+            .collect();
+        Ok(all
+            .into_iter()
+            .filter(|community| {
+                community
+                    .document_ids
+                    .iter()
+                    .any(|document| visible.contains(document.as_str()))
+            })
+            .collect())
+    }
+
+    async fn replace_communities(
+        &self,
+        _tenant: &TenantId,
+        _communities: Vec<NewCommunity>,
+    ) -> Result<u64, PortError> {
+        Ok(0)
+    }
+
+    async fn community_version(&self, _tenant: &TenantId) -> Result<u64, PortError> {
+        Ok(1)
     }
 }
 
@@ -218,6 +343,7 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
     let events = EventBus::new();
 
     let pages = InMemoryIndex::new(3);
+    let communities = LeakCommunityStore::new(mode == Mode::LeakingGlobalStore);
     let mut keys = BTreeMap::new();
     for (tenant, key) in [("tenant-a", "leak-key-a"), ("tenant-b", "leak-key-b")] {
         documents.insert_api_key(key, TenantId(tenant.to_string()));
@@ -291,13 +417,50 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
                         })
                         .collect(),
                 );
+                // The outline the tree arm scores. Its node title carries this
+                // document's vector canary, so the tree probe has a target only
+                // this document can hit.
+                documents.insert_outline(
+                    DocumentId(id.clone()),
+                    kb_core::tree::Outline {
+                        document_title: Some(id.clone()),
+                        method: kb_core::tree::OutlineMethod::Bookmarks,
+                        nodes: vec![kb_core::tree::OutlineNode {
+                            title: format!("1.1 {}", canaries.vector),
+                            level: 2,
+                            start_page: 0,
+                            end_page: 1,
+                        }],
+                    },
+                );
+                // One community per document: its summary carries the
+                // document's canaries, so the global probe's aggregative query
+                // has a summary to match, and its members are the chunks the
+                // scoped fetch can read back.
+                communities.push(
+                    &id,
+                    format!(
+                        "{} {} {} {}",
+                        canaries.vector, canaries.bm25, canaries.entity, canaries.community
+                    ),
+                    vec![format!("{id}_0"), format!("{id}_1")],
+                );
                 pages.upsert(page_units(tenant, &id)).await.unwrap();
             }
         }
     }
 
+    if mode == Mode::LeakingTreeOutlines {
+        documents
+            .outline_scope_hole
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let index: Arc<dyn RetrievalIndex> = match mode {
-        Mode::Honest | Mode::LeakingPageIndexOnly => Arc::new(chunks.clone()),
+        Mode::Honest
+        | Mode::HonestGlobal
+        | Mode::LeakingGlobalStore
+        | Mode::LeakingPageIndexOnly
+        | Mode::LeakingTreeOutlines => Arc::new(chunks.clone()),
         Mode::LeakingVector => Arc::new(LeakingChunkStore {
             inner: chunks.clone(),
             leak_search: true,
@@ -313,12 +476,62 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
     // was: with the arm on, in-scope pages outrank the leaked text hits and push
     // them below `maxChunks`, which would blunt the very leak it exists to show.
     let page_index: Option<Arc<dyn RetrievalIndex>> = match mode {
-        Mode::Honest => Some(Arc::new(pages)),
+        Mode::Honest | Mode::HonestGlobal | Mode::LeakingGlobalStore => Some(Arc::new(pages)),
         Mode::LeakingVector => None,
         Mode::LeakingPagePath | Mode::LeakingPageIndexOnly => {
             Some(Arc::new(UnscopedPageIndex { inner: pages }))
         }
+        Mode::LeakingTreeOutlines => Some(Arc::new(pages)),
     };
+
+    // The table store (`TBL-1`): one record per seeded table document, in the
+    // tenant that owns it. The routes look the document up before answering, so
+    // each table document is a document row too.
+    let tables = FakeTableStore::default();
+    for document in seed_documents()
+        .into_iter()
+        .filter(|d| !d.table_ids.is_empty())
+    {
+        documents.insert_doc(
+            TenantId(document.tenant.clone()),
+            doc(
+                &document.id,
+                &document.id,
+                &document.knowledge_base_id,
+                &document.category_id,
+            ),
+        );
+        for table_id in &document.table_ids {
+            tables.seed(TableRecord {
+                id: TableId(table_id.clone()),
+                tenant_id: TenantId(document.tenant.clone()),
+                document_id: DocumentId(document.id.clone()),
+                index: 0,
+                version: 1,
+                source: kb_core::tables::TableSource::Csv,
+                sheet: None,
+                page_span: None,
+                title: Some(format!("Table of {}", document.id)),
+                caption: None,
+                header: vec!["Region".to_string(), "Revenue".to_string()],
+                manifest: kb_core::tables::TableManifest {
+                    columns: Vec::new(),
+                    derived_rows: Vec::new(),
+                    formulas_known: false,
+                    confidence: kb_core::tables::Confidence::Low,
+                    n_rows: 4,
+                    n_cols: 2,
+                    truncated: false,
+                    notes: Vec::new(),
+                },
+                grid_key: format!(
+                    "tables/{}/{}/{table_id}/v1.parquet",
+                    document.tenant, document.id
+                ),
+                created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            });
+        }
+    }
 
     let mut state = AppState::from_parts(
         StateParts {
@@ -331,6 +544,7 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
             embedder: Arc::new(embedder),
             jobs: Arc::new(jobs),
             events: Arc::clone(&events),
+            tables: Some(Arc::new(tables)),
             version: "leak-test".to_string(),
         },
         Arc::new(FakeReranker::default()),
@@ -338,6 +552,10 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
     );
     // `StateParts` has no page arm (it predates it); the engine reads it from
     // its inputs per request, so it is installed there.
+    // The tree arm is on for every mode, so the matrix's tree row has a
+    // positive control; the leaking-outline mode is what proves the probe can
+    // see a hole.
+    state.engine.inputs.tree_arm = Some(Arc::new(TreeArm::new(TreeArmConfig::default())));
     state.engine.inputs.page_arm = page_index.map(|index| {
         Arc::new(PageArm {
             embedder: Arc::new(SameVectorPageEmbedder),
@@ -346,6 +564,12 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
             config: PageArmConfig::default(),
         })
     });
+    if mode.uses_global() {
+        state.engine.inputs.global_arm = Some(Arc::new(GlobalArm::new(
+            Arc::new(communities),
+            GlobalArmConfig::default(),
+        )));
+    }
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -368,7 +592,12 @@ async fn run_matrix(mode: Mode) -> (LeakMatrix, kb_eval::SeedPlan) {
     let mut config = LeakConfig::new(&base_url, "leak-key-a");
     config.out_dir =
         std::env::temp_dir().join(format!("kb-leak-{}-{}", std::process::id(), mode.label()));
-    config.max_chunks = 10;
+    // The global arm's chunk is a new candidate (the seeded baseline hits use
+    // different ids), so it fuses in after the baseline. A 40-chunk answer is
+    // what lets the row see it at all; with 10 it would be truncated and the
+    // positive control would miss for a reason that is the test's, not the
+    // arm's.
+    config.max_chunks = if mode.uses_global() { 40 } else { 10 };
     let matrix = probe(&client(), &config, &plan, &keys, LeakMatrix::new(&base_url)).await;
     (matrix, plan)
 }
@@ -392,13 +621,15 @@ async fn the_matrix_passes_against_a_server_that_scopes_every_arm() {
             .iter()
             .find(|a| a.arm == arm)
             .unwrap_or_else(|| panic!("{arm:?} was never probed"));
-        // The graph arm is off in this server (`KB_GRAPH_ARM` unset), so it has
-        // nothing to find. Every other arm must still prove it can find its target.
-        if arm == Arm::Graph {
+        // The graph and global arms are off in this server (`KB_GRAPH_ARM` and
+        // `KB_GLOBAL_ARM` unset), so they have nothing to find. Every other arm
+        // must still prove it can find its target. The global arm is exercised
+        // by `the_global_arm_row_finds_its_target_and_leaks_nothing` below.
+        if arm == Arm::Graph || arm == Arm::Global {
             assert_eq!(
                 report.status,
                 Status::Untested,
-                "the graph arm is off here, so it must report UNTESTED, not {:?}",
+                "an arm that is off here must report UNTESTED, not {:?}",
                 report.status
             );
             continue;
@@ -473,6 +704,7 @@ async fn the_matrix_passes_against_a_server_that_scopes_every_arm() {
         ScopeKind::Tenant,
         ScopeKind::KnowledgeBase,
         ScopeKind::Category,
+        ScopeKind::ExternalRef,
     ] {
         let cell = page.cells.iter().find(|c| c.scope == kind).unwrap();
         assert_eq!(cell.status, Status::Pass, "page × {kind:?}: {cell:?}");
@@ -497,6 +729,75 @@ async fn the_matrix_passes_against_a_server_that_scopes_every_arm() {
         by_ids.reason
     );
     assert!(md.contains("`page` × `document_ids`"), "{md}");
+}
+
+/// The global (community) row must be able to find its own target, and must not
+/// leak. Without the positive control, "zero leaks" from an arm that never ran
+/// would prove nothing.
+#[tokio::test]
+async fn the_global_arm_row_finds_its_target_and_leaks_nothing() {
+    let (matrix, _plan) = run_matrix(Mode::HonestGlobal).await;
+    assert!(
+        !matrix.any_leak(),
+        "an honest community store must not leak: {matrix:?}"
+    );
+    let global = matrix
+        .arms
+        .iter()
+        .find(|a| a.arm == Arm::Global)
+        .expect("the global arm was probed");
+    assert_eq!(global.leaks, 0, "{:?}", global.leak_examples);
+    for kind in [
+        ScopeKind::Tenant,
+        ScopeKind::KnowledgeBase,
+        ScopeKind::Category,
+        ScopeKind::ExternalRef,
+    ] {
+        let cell = global.cells.iter().find(|c| c.scope == kind).unwrap();
+        assert_eq!(cell.status, Status::Pass, "global × {kind:?}: {cell:?}");
+        assert_eq!(
+            cell.positive_hits, cell.positive_probes,
+            "global × {kind:?} could not find its own target"
+        );
+        assert!(
+            cell.probes > cell.positive_probes,
+            "global × {kind:?} had no leak probe"
+        );
+    }
+    let by_ids = global
+        .cells
+        .iter()
+        .find(|c| c.scope == ScopeKind::DocumentIds)
+        .unwrap();
+    assert_eq!(by_ids.status, Status::Untested);
+    assert!(
+        by_ids
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("never reaches the global")),
+        "{:?}",
+        by_ids.reason
+    );
+}
+
+/// A community store that ignores the scope is contained by the arm, not by the
+/// store: the arm narrows the community's documents and chunk ids to the scope
+/// and the chunk fetch is scoped again. If this ever reports a leak, one of
+/// those two fences stopped working.
+#[tokio::test]
+async fn a_community_store_that_ignores_scope_is_contained_by_the_arm() {
+    let (matrix, _plan) = run_matrix(Mode::LeakingGlobalStore).await;
+    let global = matrix
+        .arms
+        .iter()
+        .find(|a| a.arm == Arm::Global)
+        .expect("the global arm was probed");
+    assert_eq!(global.leaks, 0, "{:?}", global.leak_examples);
+    assert!(
+        global.positive_hits > 0,
+        "the contained run still has to prove the arm can hit: {global:?}"
+    );
+    assert!(!matrix.any_leak(), "{matrix:?}");
 }
 
 /// The page row must be able to fail. A page index that ignores the scope, with
@@ -538,6 +839,23 @@ async fn a_page_index_hole_alone_is_contained_by_the_scoped_chunk_fetch() {
     let (matrix, _plan) = run_matrix(Mode::LeakingPageIndexOnly).await;
     let page = matrix.arms.iter().find(|a| a.arm == Arm::Page).unwrap();
     assert_eq!(page.leaks, 0, "{:?}", page.leak_examples);
+    assert!(!matrix.any_leak(), "{matrix:?}");
+}
+
+/// The tree arm has two reads, and the matrix must see it work. The outline read
+/// is fenced by scope, and so is the page fetch that turns a node into chunks;
+/// this run opens the outline read only, and the second fence contains it. If
+/// this ever reports a leak, the tree arm gained a path that bypasses the
+/// scoped page read.
+#[tokio::test]
+async fn an_outline_read_that_ignores_scope_is_contained_by_the_scoped_page_fetch() {
+    let (matrix, _plan) = run_matrix(Mode::LeakingTreeOutlines).await;
+    let tree = matrix.arms.iter().find(|a| a.arm == Arm::Tree).unwrap();
+    assert_eq!(tree.leaks, 0, "{:?}", tree.leak_examples);
+    assert!(
+        tree.positive_hits > 0,
+        "the tree row never reached its own target: {tree:?}"
+    );
     assert!(!matrix.any_leak(), "{matrix:?}");
 }
 

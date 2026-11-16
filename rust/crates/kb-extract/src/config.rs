@@ -8,6 +8,144 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+/// How PDF pages reach OCR (`KB_OCR_MODE`, ING-6).
+///
+/// `Auto` is the default: the effective mode is `Hybrid` when an OCR provider
+/// is configured and `Off` otherwise, so an installation with no OCR endpoint
+/// behaves exactly as it did before the router existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OcrMode {
+    /// No page goes to OCR; the local text layer is used and reported.
+    Off,
+    /// `Auto` sentinel: `Hybrid` when a provider is configured, else `Off`.
+    #[default]
+    Auto,
+    /// Per page: a scan goes to OCR, a text page keeps its local text.
+    Hybrid,
+    /// Every PDF page goes to OCR; local text is that page's fallback.
+    Full,
+}
+
+impl OcrMode {
+    /// Parse the `KB_OCR_MODE` value. Unknown text is a configuration error,
+    /// not a silent fallback: an operator who typed `ful` should hear about it.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Self::Off),
+            "hybrid" => Some(Self::Hybrid),
+            "full" => Some(Self::Full),
+            "auto" | "" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    /// The name written into `metadata.ocr.mode`.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Hybrid | Self::Auto => "hybrid",
+            Self::Full => "full",
+        }
+    }
+}
+
+/// Which OCR recipe the local chat endpoint is served with.
+///
+/// The two recipes are different shapes, not different prompts: PaddleOCR-VL
+/// answers one page with the task prefix (`OCR:`) and no postprocessing,
+/// while Xiaomi-OCR-0 answers with markdown plus OTSL table markup that has to
+/// be turned into text before it is worth indexing. Which one is in use is a
+/// property of the model behind `KB_OCR_BASE_URL`, so it is configuration, not
+/// a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OcrRecipe {
+    /// PaddleOCR-VL (and PP-OCRv6): one page, one prompt, the answer is the
+    /// text.
+    #[default]
+    Paddle,
+    /// Xiaomi-OCR-0: one page, the document prompt, and an answer that needs
+    /// the vendor's postprocessing.
+    Xiaomi,
+}
+
+impl OcrRecipe {
+    /// Parse the `KB_OCR_RECIPE` value. Unknown text is a configuration error
+    /// rather than a silent fallback: an operator who typed `xiaomi-o` should
+    /// hear about it.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "paddle" | "paddleocr" | "paddleocr-vl" => Some(Self::Paddle),
+            "xiaomi" | "xiaomi-ocr" | "xiaomi-ocr-0" => Some(Self::Xiaomi),
+            _ => None,
+        }
+    }
+
+    /// The name written into the cache fingerprint and the startup log.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Paddle => "paddle",
+            Self::Xiaomi => "xiaomi",
+        }
+    }
+}
+
+/// How a table is written into the page's markdown.
+///
+/// `Markdown` is a pipe table, which the table parser reads; `Html` is the
+/// vendor's own rendering, which keeps a cell's row and column spans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum OcrTableFormat {
+    /// A markdown pipe table; a spanning cell is repeated in each position.
+    #[default]
+    Markdown,
+    /// An HTML `<table>`, with `rowspan` and `colspan`.
+    Html,
+}
+
+impl OcrTableFormat {
+    /// Parse the `KB_OCR_TABLE_FORMAT` value. Unknown text is a configuration
+    /// error rather than a silent fallback.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "markdown" | "md" => Some(Self::Markdown),
+            "html" => Some(Self::Html),
+            _ => None,
+        }
+    }
+
+    /// The name written into the cache fingerprint and the startup log.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Markdown => "markdown",
+            Self::Html => "html",
+        }
+    }
+}
+
+/// Default for `KB_OCR_SCAN_AREA`: the share of a page raster images must
+/// cover before a page is a scan candidate.
+pub const DEFAULT_OCR_SCAN_AREA: f32 = 0.90;
+/// Default for `KB_OCR_SCAN_TEXT`: visible characters a page may carry and
+/// still count as a scan.
+pub const DEFAULT_OCR_SCAN_TEXT: u32 = 50;
+/// Default for `KB_OCR_BATCH`: pages per sub-PDF request to a PDF OCR provider.
+pub const DEFAULT_OCR_BATCH: u32 = 8;
+/// Default for `KB_OCR_MAX_PAGES`: pages per document that may go to OCR.
+pub const DEFAULT_OCR_MAX_PAGES: u32 = 300;
+/// Default for `KB_OCR_BREAKER`: consecutive provider failures that open it.
+pub const DEFAULT_OCR_BREAKER: u32 = 3;
+/// Default for `KB_OCR_BREAKER_COOLDOWN_S`: how long the breaker stays open.
+pub const DEFAULT_OCR_BREAKER_COOLDOWN_S: u64 = 60;
+
 /// Configuration for document text extraction, layout parsing, and vision OCR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractConfig {
@@ -56,6 +194,18 @@ pub struct ExtractConfig {
     pub ocr_api_key: String,
     /// Task prefix sent as the text part (default "OCR:", PaddleOCR-VL's task selector).
     pub ocr_prompt: String,
+    /// Which recipe the endpoint behind `KB_OCR_BASE_URL` speaks (`KB_OCR_RECIPE`).
+    pub ocr_recipe: OcrRecipe,
+    /// How a table is written into the page's markdown (`KB_OCR_TABLE_FORMAT`).
+    pub ocr_table_format: OcrTableFormat,
+    /// Full URL of the layout sidecar (`KB_OCR_LAYOUT_URL`). Empty turns the
+    /// layout path off, which is the default: a page is read whole.
+    pub ocr_layout_url: String,
+    /// How long one layout request may take before the page keeps its
+    /// whole-page answer (`KB_OCR_LAYOUT_TIMEOUT_MS`, default 60 s). A
+    /// detector on CPU serves one page at a time, so a full batch queues
+    /// behind it: raise this there.
+    pub ocr_layout_timeout: Duration,
     /// Rendering resolution for OCR page images (default 150).
     pub ocr_dpi: u32,
     /// Page requests in flight (default 2).
@@ -64,12 +214,31 @@ pub struct ExtractConfig {
     pub ocr_timeout: Duration,
     /// `max_tokens` for one page response (default 4096).
     pub ocr_max_tokens: u32,
+    /// How PDF pages reach OCR (`KB_OCR_MODE`). `Auto` = hybrid when a provider
+    /// is configured, off otherwise (ING-6).
+    pub ocr_mode: OcrMode,
+    /// Share of a page raster images must cover for it to be a scan (0.90).
+    pub ocr_scan_area: f32,
+    /// Visible characters a page may carry and still count as a scan (50).
+    pub ocr_scan_text: u32,
+    /// Pages per sub-PDF request to a PDF OCR provider (8).
+    pub ocr_batch: u32,
+    /// Pages per document that may go to OCR (300).
+    pub ocr_max_pages: u32,
+    /// Consecutive provider failures that open the process-wide breaker (3).
+    pub ocr_breaker: u32,
+    /// How long the breaker stays open (60 s).
+    pub ocr_breaker_cooldown: Duration,
     /// Path to libpdfium.so dynamic library.
     pub pdfium_dynamic_lib_path: Option<String>,
 }
 
 /// Bump when a change to this crate alters extraction output for the same
 /// file and configuration, so `KB_CACHE_DIR` entries from before are not reused.
+///
+/// Not bumped for the DEC-4 outline: a bump would discard cached OCR, some of
+/// it paid. An entry without an outline gets one at ingest through
+/// `Extractor::outline`, a free bookmark/heading read.
 pub const EXTRACT_CACHE_EPOCH: u32 = 2;
 
 impl ExtractConfig {
@@ -83,7 +252,7 @@ impl ExtractConfig {
         format!(
             "epoch={EXTRACT_CACHE_EPOCH}|ver={}|primary={}|fallback={}|smart={}|\
              mineru_url={}|mineru_api={}:{}:{}|mistral={}:{}|order={}|vision={}:{}:{}|ocr={}|\
-             local_ocr={}:{}:{}:{}:{}:{}:{}",
+             local_ocr={}:{}:{}:{}:{}:{}:{}|mode={}:{}:{}:{}:{}:{}|recipe={}:{}|layout={}",
             env!("CARGO_PKG_VERSION"),
             self.primary,
             self.fallback,
@@ -106,6 +275,15 @@ impl ExtractConfig {
             self.ocr_dpi,
             self.ocr_concurrency,
             self.ocr_max_tokens,
+            self.ocr_mode.as_str(),
+            self.ocr_scan_area,
+            self.ocr_scan_text,
+            self.ocr_batch,
+            self.ocr_max_pages,
+            self.ocr_breaker,
+            self.ocr_recipe.as_str(),
+            self.ocr_table_format.as_str(),
+            self.ocr_layout_url.trim(),
         )
     }
 }
@@ -138,10 +316,21 @@ impl Default for ExtractConfig {
             ocr_model: "PaddlePaddle/PaddleOCR-VL-1.6".to_string(),
             ocr_api_key: String::new(),
             ocr_prompt: "OCR:".to_string(),
+            ocr_recipe: OcrRecipe::Paddle,
+            ocr_table_format: OcrTableFormat::Markdown,
+            ocr_layout_url: String::new(),
+            ocr_layout_timeout: Duration::from_secs(60),
             ocr_dpi: 150,
             ocr_concurrency: 2,
             ocr_timeout: Duration::from_secs(120),
             ocr_max_tokens: 4096,
+            ocr_mode: OcrMode::Auto,
+            ocr_scan_area: DEFAULT_OCR_SCAN_AREA,
+            ocr_scan_text: DEFAULT_OCR_SCAN_TEXT,
+            ocr_batch: DEFAULT_OCR_BATCH,
+            ocr_max_pages: DEFAULT_OCR_MAX_PAGES,
+            ocr_breaker: DEFAULT_OCR_BREAKER,
+            ocr_breaker_cooldown: Duration::from_secs(DEFAULT_OCR_BREAKER_COOLDOWN_S),
             pdfium_dynamic_lib_path: None,
         }
     }
@@ -178,12 +367,44 @@ impl ExtractConfig {
             })
             .unwrap_or(default.layout_extractor_order);
 
-        let ocr_timeout = lookup("KB_OCR_TIMEOUT_MS")
-            .and_then(|s| s.parse::<u64>().ok())
-            .map_or(default.ocr_timeout, Duration::from_millis);
-
         let ocr_base_url = lookup("KB_OCR_BASE_URL").unwrap_or(default.ocr_base_url);
         let ocr_api_key = lookup("KB_OCR_API_KEY").unwrap_or(default.ocr_api_key);
+
+        // An unknown mode is a mistake worth hearing about, but it must not
+        // stop the server from starting: `Auto` is the safe reading.
+        let ocr_mode = match lookup("KB_OCR_MODE") {
+            Some(raw) => OcrMode::parse(&raw).unwrap_or_else(|| {
+                tracing::warn!(
+                    value = %raw,
+                    "KB_OCR_MODE must be off, hybrid or full; using the default"
+                );
+                default.ocr_mode
+            }),
+            None => default.ocr_mode,
+        };
+
+        // The recipe and the table format are the same kind of mistake: a
+        // value nobody serves must not silently become the default.
+        let ocr_recipe = match lookup("KB_OCR_RECIPE") {
+            Some(raw) => OcrRecipe::parse(&raw).unwrap_or_else(|| {
+                tracing::warn!(
+                    value = %raw,
+                    "KB_OCR_RECIPE must be paddle or xiaomi; using the default"
+                );
+                default.ocr_recipe
+            }),
+            None => default.ocr_recipe,
+        };
+        let ocr_table_format = match lookup("KB_OCR_TABLE_FORMAT") {
+            Some(raw) => OcrTableFormat::parse(&raw).unwrap_or_else(|| {
+                tracing::warn!(
+                    value = %raw,
+                    "KB_OCR_TABLE_FORMAT must be markdown or html; using the default"
+                );
+                default.ocr_table_format
+            }),
+            None => default.ocr_table_format,
+        };
 
         // An empty value the operator wrote by hand means "use the default",
         // not "send an empty model name" — except for the two that switch the
@@ -216,6 +437,16 @@ impl ExtractConfig {
             ocr_model: non_empty_or(lookup("KB_OCR_MODEL"), default.ocr_model),
             ocr_api_key: ocr_api_key.trim().to_string(),
             ocr_prompt: non_empty_or(lookup("KB_OCR_PROMPT"), default.ocr_prompt),
+            ocr_recipe,
+            ocr_table_format,
+            ocr_layout_url: lookup("KB_OCR_LAYOUT_URL")
+                .unwrap_or(default.ocr_layout_url)
+                .trim()
+                .to_string(),
+            ocr_layout_timeout: lookup("KB_OCR_LAYOUT_TIMEOUT_MS")
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|ms| *ms > 0)
+                .map_or(default.ocr_layout_timeout, Duration::from_millis),
             ocr_dpi: lookup("KB_OCR_DPI")
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|dpi| *dpi > 0)
@@ -224,11 +455,52 @@ impl ExtractConfig {
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|n| *n > 0)
                 .unwrap_or(default.ocr_concurrency),
-            ocr_timeout,
+            // A dense page under a full batch takes minutes on Xiaomi-OCR-0;
+            // the vendor waits 600 s. Timing out earlier turns a slow page into
+            // retries, an open breaker and lost pages.
+            ocr_timeout: lookup("KB_OCR_TIMEOUT_MS")
+                .and_then(|s| s.parse::<u64>().ok())
+                .map_or(
+                    match ocr_recipe {
+                        OcrRecipe::Xiaomi => Duration::from_secs(600),
+                        _ => default.ocr_timeout,
+                    },
+                    Duration::from_millis,
+                ),
             ocr_max_tokens: lookup("KB_OCR_MAX_TOKENS")
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|n| *n > 0)
-                .unwrap_or(default.ocr_max_tokens),
+                // Xiaomi-OCR-0 writes a dense page as one answer; at 4096 tokens
+                // a long table page is cut off. Its own default applies unless
+                // the operator set one.
+                .unwrap_or(match ocr_recipe {
+                    OcrRecipe::Xiaomi => crate::xiaomi_ocr::DEFAULT_XIAOMI_MAX_TOKENS,
+                    _ => default.ocr_max_tokens,
+                }),
+            ocr_mode,
+            // A share below 1 % or above 100 % is an operator typo; clamp it
+            // rather than making every page a scan or none.
+            ocr_scan_area: lookup("KB_OCR_SCAN_AREA")
+                .and_then(|s| s.parse::<f32>().ok())
+                .filter(|a| a.is_finite())
+                .map_or(default.ocr_scan_area, |a| a.clamp(0.01, 1.0)),
+            ocr_scan_text: lookup("KB_OCR_SCAN_TEXT")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(default.ocr_scan_text),
+            ocr_batch: lookup("KB_OCR_BATCH")
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(default.ocr_batch),
+            ocr_max_pages: lookup("KB_OCR_MAX_PAGES")
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(default.ocr_max_pages),
+            ocr_breaker: lookup("KB_OCR_BREAKER")
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(default.ocr_breaker),
+            ocr_breaker_cooldown: lookup("KB_OCR_BREAKER_COOLDOWN_S")
+                .and_then(|s| s.parse::<u64>().ok())
+                .map_or(default.ocr_breaker_cooldown, Duration::from_secs),
             pdfium_dynamic_lib_path: lookup("PDFIUM_DYNAMIC_LIB_PATH")
                 .or(default.pdfium_dynamic_lib_path),
         }
@@ -238,6 +510,25 @@ impl ExtractConfig {
     #[must_use]
     pub fn from_env() -> Self {
         Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    /// Whether any OCR provider is configured: the local chat adapter
+    /// (`KB_OCR_BASE_URL`) or Mistral (`KB_MISTRAL_OCR_KEY`).
+    #[must_use]
+    pub fn has_ocr_provider(&self) -> bool {
+        !self.ocr_base_url.trim().is_empty() || !self.mistral_ocr_key.trim().is_empty()
+    }
+
+    /// The mode that actually runs: `Auto` reads as `Hybrid` when a provider is
+    /// configured and `Off` otherwise, so the default changes nothing for an
+    /// installation that never set one up.
+    #[must_use]
+    pub fn resolved_ocr_mode(&self) -> OcrMode {
+        match self.ocr_mode {
+            OcrMode::Auto if self.has_ocr_provider() => OcrMode::Hybrid,
+            OcrMode::Auto => OcrMode::Off,
+            explicit => explicit,
+        }
     }
 
     /// Effective API key for vision calls (falls back to OpenRouter API key).
@@ -286,6 +577,7 @@ mod tests {
             ("KB_OCR_DPI", "200"),
             ("KB_OCR_CONCURRENCY", "4"),
             ("KB_OCR_TIMEOUT_MS", "30000"),
+            ("KB_OCR_LAYOUT_TIMEOUT_MS", "900000"),
             ("KB_OCR_MAX_TOKENS", "2048"),
         ];
         let cfg = ExtractConfig::from_lookup(|name| {
@@ -303,7 +595,27 @@ mod tests {
         assert_eq!(cfg.ocr_dpi, 200);
         assert_eq!(cfg.ocr_concurrency, 4);
         assert_eq!(cfg.ocr_timeout, Duration::from_millis(30_000));
+        assert_eq!(cfg.ocr_layout_timeout, Duration::from_millis(900_000));
         assert_eq!(cfg.ocr_max_tokens, 2048);
+    }
+
+    #[test]
+    fn the_xiaomi_recipe_has_its_own_token_budget_unless_one_is_set() {
+        let unset = ExtractConfig::from_lookup(|name| match name {
+            "KB_OCR_RECIPE" => Some("xiaomi".to_string()),
+            _ => None,
+        });
+        assert_eq!(
+            unset.ocr_max_tokens,
+            crate::xiaomi_ocr::DEFAULT_XIAOMI_MAX_TOKENS
+        );
+        let set = ExtractConfig::from_lookup(|name| match name {
+            "KB_OCR_RECIPE" => Some("xiaomi".to_string()),
+            "KB_OCR_MAX_TOKENS" => Some("2048".to_string()),
+            _ => None,
+        });
+        assert_eq!(set.ocr_max_tokens, 2048);
+        assert_eq!(unset.ocr_timeout, Duration::from_secs(600));
     }
 
     #[test]
@@ -335,5 +647,85 @@ mod tests {
         let mut dpi = base.clone();
         dpi.ocr_dpi = 200;
         assert_ne!(base.cache_fingerprint(), dpi.cache_fingerprint());
+    }
+
+    #[test]
+    fn the_ocr_offload_settings_read_their_documented_names() {
+        let vars = [
+            ("KB_OCR_MODE", "full"),
+            ("KB_OCR_SCAN_AREA", "0.75"),
+            ("KB_OCR_SCAN_TEXT", "12"),
+            ("KB_OCR_BATCH", "4"),
+            ("KB_OCR_MAX_PAGES", "40"),
+            ("KB_OCR_BREAKER", "5"),
+            ("KB_OCR_BREAKER_COOLDOWN_S", "15"),
+        ];
+        let cfg = ExtractConfig::from_lookup(|name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| (*value).to_string())
+        });
+        assert_eq!(cfg.ocr_mode, OcrMode::Full);
+        assert!((cfg.ocr_scan_area - 0.75).abs() < 1e-6);
+        assert_eq!(cfg.ocr_scan_text, 12);
+        assert_eq!(cfg.ocr_batch, 4);
+        assert_eq!(cfg.ocr_max_pages, 40);
+        assert_eq!(cfg.ocr_breaker, 5);
+        assert_eq!(cfg.ocr_breaker_cooldown, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn the_ocr_offload_defaults_are_the_documented_ones() {
+        let cfg = ExtractConfig::from_lookup(|_| None);
+        assert_eq!(cfg.ocr_mode, OcrMode::Auto);
+        assert!((cfg.ocr_scan_area - 0.90).abs() < 1e-6);
+        assert_eq!(cfg.ocr_scan_text, 50);
+        assert_eq!(cfg.ocr_batch, 8);
+        assert_eq!(cfg.ocr_max_pages, 300);
+        assert_eq!(cfg.ocr_breaker, 3);
+        assert_eq!(cfg.ocr_breaker_cooldown, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn auto_is_off_without_a_provider_and_hybrid_with_one() {
+        let mut cfg = ExtractConfig::default();
+        assert_eq!(cfg.resolved_ocr_mode(), OcrMode::Off);
+        cfg.ocr_base_url = "http://127.0.0.1:8000/v1/chat/completions".to_string();
+        assert_eq!(cfg.resolved_ocr_mode(), OcrMode::Hybrid);
+        cfg.ocr_base_url.clear();
+        cfg.mistral_ocr_key = "k".to_string();
+        assert_eq!(cfg.resolved_ocr_mode(), OcrMode::Hybrid);
+        // An explicit mode is never overridden by Auto's rule.
+        cfg.ocr_mode = OcrMode::Off;
+        assert_eq!(cfg.resolved_ocr_mode(), OcrMode::Off);
+    }
+
+    #[test]
+    fn an_unknown_mode_falls_back_to_auto_instead_of_stopping_the_server() {
+        let cfg = ExtractConfig::from_lookup(|name| match name {
+            "KB_OCR_MODE" => Some("ful".to_string()),
+            _ => None,
+        });
+        assert_eq!(cfg.ocr_mode, OcrMode::Auto);
+        assert_eq!(OcrMode::parse("FULL"), Some(OcrMode::Full));
+        assert_eq!(OcrMode::parse(" hybrid "), Some(OcrMode::Hybrid));
+        assert_eq!(OcrMode::parse("maybe"), None);
+    }
+
+    #[test]
+    fn the_offload_tunables_move_the_cache_fingerprint() {
+        let base = ExtractConfig::default();
+        for mutate in [
+            |c: &mut ExtractConfig| c.ocr_mode = OcrMode::Full,
+            |c: &mut ExtractConfig| c.ocr_scan_area = 0.5,
+            |c: &mut ExtractConfig| c.ocr_scan_text = 5,
+            |c: &mut ExtractConfig| c.ocr_batch = 2,
+            |c: &mut ExtractConfig| c.ocr_max_pages = 10,
+            |c: &mut ExtractConfig| c.ocr_breaker = 9,
+        ] {
+            let mut changed = base.clone();
+            mutate(&mut changed);
+            assert_ne!(base.cache_fingerprint(), changed.cache_fingerprint());
+        }
     }
 }

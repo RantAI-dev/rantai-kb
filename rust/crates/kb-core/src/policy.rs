@@ -69,7 +69,9 @@ const CODE: &[&str] = &[
     ".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".rb", ".php",
     ".sh", ".sql", ".r", ".swift", ".kt", ".yaml", ".yml", ".toml", ".ini", ".env", ".log",
 ];
-const IMAGE: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"];
+const IMAGE: &[&str] = &[
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".tif", ".tiff",
+];
 const MODEL_3D: &[&str] = &[".gltf", ".glb"];
 
 /// Per-file-type ingest policy. PDF is the only type where `figureMode` matters;
@@ -131,6 +133,8 @@ const EXT_TO_MIME: &[(&str, &str)] = &[
     (".gif", "image/gif"),
     (".webp", "image/webp"),
     (".heic", "image/heic"),
+    (".tif", "image/tiff"),
+    (".tiff", "image/tiff"),
     (".md", "text/markdown"),
     (".markdown", "text/markdown"),
     (".txt", "text/plain"),
@@ -196,6 +200,8 @@ const EXTENSIONS: &[&str] = &[
     ".gif",
     ".webp",
     ".heic",
+    ".tif",
+    ".tiff",
     ".md",
     ".markdown",
     ".txt",

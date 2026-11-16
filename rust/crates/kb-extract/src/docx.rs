@@ -1,27 +1,23 @@
-//! `.docx` → text, matching what mammoth's `extractRawText` produces.
+//! `.docx` → text with its tables in place (`TBL-1`).
 //!
-//! mammoth's raw-text conversion (`node_modules/mammoth/lib/raw-text.js`) is
-//! three lines of logic over the document tree: text nodes emit their value, a
-//! tab emits a tab, and every other element emits its children — plus two
-//! newlines when the element is a paragraph. Everything else about mammoth
-//! (styles, headings, numbering, images, tables-as-grids) exists to serve the
-//! HTML writer and produces no raw text, so it is not ported here.
+//! Body paragraphs still become text separated by a blank line, exactly as
+//! mammoth's `extractRawText` did. A table is no longer flattened into loose
+//! cell paragraphs: it becomes a markdown table at its own position in the
+//! document and a [`TableGrid`] in `ExtractionResult.tables`.
 //!
-//! What that reduces to, and what this module walks: every `w:p` in document
-//! order contributes its text followed by `\n\n`. Paragraphs inside table cells
-//! are paragraphs too, so a table comes out as its cell texts one after another
-//! with the same `\n\n` between them.
+//! Table rules from `docs/core/specs/tbl-1.md`:
 //!
-//! Elements mammoth reads without keeping text are listed in [`SKIP`]: field
-//! codes, symbol runs (they need mammoth's dingbat table), note and comment
-//! references, and the DrawingML picture containers, whose only content is an
-//! image. Their subtrees are dropped so their text cannot leak in. Property
-//! elements are not in the list — they hold attributes only — but they are
-//! counted, because two of them decide what happens next: `w:pPr/w:rPr/w:del`
-//! marks a tracked deletion, and `w:tcPr/w:vMerge` marks a merged cell whose
-//! text belongs to the cell above it.
+//! - empty cells are **kept**, so a column stays aligned (paragon dropped them
+//!   and shifted every later cell left);
+//! - `w:gridSpan` repeats a cell across its columns, and a `w:vMerge` continue
+//!   takes the value from the cell above;
+//! - the title is the paragraph just above the table.
 
-use quick_xml::events::Event;
+use kb_core::tables::{
+    Cell, TableGrid, TableSource, cell_from_text, is_placeholder, normalize_header_name,
+    placeholder_note, render_table_markdown, take_title_rows, unique_header_names,
+};
+use quick_xml::events::{BytesStart, Event};
 
 use crate::ExtractError;
 use crate::xml;
@@ -30,30 +26,52 @@ use crate::zip_read;
 /// Where the body lives inside the package.
 const DOCUMENT_XML: &str = "word/document.xml";
 
-/// Text of a `.docx`: paragraphs separated by a blank line.
+/// Text of a `.docx`: paragraphs separated by a blank line, tables in place.
 pub fn parse(bytes: &[u8]) -> Result<String, ExtractError> {
+    Ok(parse_with_tables(bytes)?.0)
+}
+
+/// Text and grids of a `.docx`.
+pub fn parse_with_tables(bytes: &[u8]) -> Result<(String, Vec<TableGrid>), ExtractError> {
     let mut archive = zip_read::open(bytes)?;
     let document = zip_read::read_text(&mut archive, DOCUMENT_XML)?;
-    render(&document)
+    render_with_tables(&document)
 }
 
 /// The paragraph walk, separated from the container so it can be tested on XML.
+#[cfg(test)]
 pub fn render(document: &str) -> Result<String, ExtractError> {
+    Ok(render_with_tables(document)?.0)
+}
+
+/// Text and tables of one document XML part.
+pub fn render_with_tables(document: &str) -> Result<(String, Vec<TableGrid>), ExtractError> {
     let mut reader = xml::reader_from_str(document);
     let mut buffer = Vec::new();
     let mut out = String::new();
-    // Depth of elements whose subtree is dropped.
+    let mut tables: Vec<TableGrid> = Vec::new();
     let mut skip_depth = 0usize;
-    // Skip depth to restore when a `w:tc` closes, one entry per skipped cell.
     let mut skipped_cells: Vec<usize> = Vec::new();
     let mut deleted_paragraph = false;
-    // Text outside a paragraph is layout, not content: a pretty-printed package
-    // is indented, and mammoth's reader never sees those text nodes.
     let mut paragraph_depth = 0usize;
     let mut in_paragraph_properties = 0usize;
     let mut in_run_properties = 0usize;
     let mut in_cell_properties = 0usize;
     let mut in_text = false;
+
+    // Body text of the paragraph being read, outside any table.
+    let mut body_text = String::new();
+    let mut last_paragraph: Option<String> = None;
+
+    // Table state.
+    let mut in_table = false;
+    let mut nested_tables = 0usize;
+    let mut table_title: Option<String> = None;
+    let mut row: Vec<RawCell> = Vec::new();
+    let mut rows: Vec<Vec<RawCell>> = Vec::new();
+    let mut cell: Option<CellAcc> = None;
+    // The value still open above each column for a vertical merge.
+    let mut vertical_open: Vec<Option<String>> = Vec::new();
 
     while let Some(event) = xml::next_event(&mut reader, &mut buffer)? {
         match event {
@@ -69,13 +87,49 @@ pub fn render(document: &str) -> Result<String, ExtractError> {
                     b"rPr" if in_paragraph_properties > 0 => in_run_properties += 1,
                     b"tcPr" => in_cell_properties += 1,
                     b"del" if in_run_properties > 0 => deleted_paragraph = true,
-                    b"vMerge" if in_cell_properties > 0 && continues_vertical_merge(&element) => {
-                        skip_depth += 1;
-                        skipped_cells.push(skip_depth);
+                    b"vMerge" if in_cell_properties > 0 => {
+                        if continues_vertical_merge(&element) {
+                            if let Some(cell) = cell.as_mut() {
+                                cell.vmerge = VMerge::Continue;
+                            }
+                            // The cell's text belongs to the cell above it.
+                            skip_depth += 1;
+                            skipped_cells.push(skip_depth);
+                        } else if let Some(cell) = cell.as_mut() {
+                            cell.vmerge = VMerge::Restart;
+                        }
                     }
-                    b"tab" if skip_depth == 0 => out.push('\t'),
-                    b"noBreakHyphen" if skip_depth == 0 => out.push('\u{2011}'),
-                    b"softHyphen" if skip_depth == 0 => out.push('\u{00ad}'),
+                    b"gridSpan" if in_cell_properties > 0 => {
+                        if let (Some(cell), Some(value)) =
+                            (cell.as_mut(), xml::local_attribute(&element, "val"))
+                        {
+                            cell.span = value.trim().parse::<usize>().unwrap_or(1).clamp(1, 100);
+                        }
+                    }
+                    b"tab" if skip_depth == 0 => {
+                        push_char('\t', &mut cell, &mut body_text, in_table)
+                    }
+                    b"noBreakHyphen" if skip_depth == 0 => {
+                        push_char('\u{2011}', &mut cell, &mut body_text, in_table);
+                    }
+                    b"softHyphen" if skip_depth == 0 => {
+                        push_char('\u{00ad}', &mut cell, &mut body_text, in_table);
+                    }
+                    b"tbl" => {
+                        if in_table {
+                            nested_tables += 1;
+                        } else {
+                            in_table = true;
+                            table_title = last_paragraph.take();
+                            row.clear();
+                            rows.clear();
+                            vertical_open.clear();
+                        }
+                    }
+                    b"tr" if in_table && nested_tables == 0 => row.clear(),
+                    b"tc" if in_table && nested_tables == 0 => {
+                        cell = Some(CellAcc::default());
+                    }
                     _ => {}
                 }
                 if SKIP.contains(&name.as_ref()) {
@@ -84,23 +138,46 @@ pub fn render(document: &str) -> Result<String, ExtractError> {
             }
             Event::Empty(element) => match element.local_name().as_ref() {
                 b"del" if in_run_properties > 0 => deleted_paragraph = true,
-                b"vMerge" if in_cell_properties > 0 && continues_vertical_merge(&element) => {
-                    skip_depth += 1;
-                    skipped_cells.push(skip_depth);
+                b"vMerge" if in_cell_properties > 0 => {
+                    if continues_vertical_merge(&element) {
+                        if let Some(cell) = cell.as_mut() {
+                            cell.vmerge = VMerge::Continue;
+                        }
+                        skip_depth += 1;
+                        skipped_cells.push(skip_depth);
+                    } else if let Some(cell) = cell.as_mut() {
+                        cell.vmerge = VMerge::Restart;
+                    }
                 }
-                b"tab" if skip_depth == 0 => out.push('\t'),
-                b"noBreakHyphen" if skip_depth == 0 => out.push('\u{2011}'),
-                b"softHyphen" if skip_depth == 0 => out.push('\u{00ad}'),
+                b"gridSpan" if in_cell_properties > 0 => {
+                    if let (Some(cell), Some(value)) =
+                        (cell.as_mut(), xml::local_attribute(&element, "val"))
+                    {
+                        cell.span = value.trim().parse::<usize>().unwrap_or(1).clamp(1, 100);
+                    }
+                }
+                b"tab" if skip_depth == 0 => push_char('\t', &mut cell, &mut body_text, in_table),
+                b"noBreakHyphen" if skip_depth == 0 => {
+                    push_char('\u{2011}', &mut cell, &mut body_text, in_table);
+                }
+                b"softHyphen" if skip_depth == 0 => {
+                    push_char('\u{00ad}', &mut cell, &mut body_text, in_table);
+                }
                 _ => {}
             },
             Event::Text(text) => {
                 if in_text && skip_depth == 0 && paragraph_depth > 0 {
-                    out.push_str(&xml::text_of(&text));
+                    push_str(&xml::text_of(&text), &mut cell, &mut body_text, in_table);
                 }
             }
             Event::GeneralRef(reference) => {
                 if in_text && skip_depth == 0 && paragraph_depth > 0 {
-                    out.push_str(&xml::reference_of(&String::from_utf8_lossy(&reference)));
+                    push_str(
+                        &xml::reference_of(&String::from_utf8_lossy(&reference)),
+                        &mut cell,
+                        &mut body_text,
+                        in_table,
+                    );
                 }
             }
             Event::End(element) => {
@@ -109,8 +186,18 @@ pub fn render(document: &str) -> Result<String, ExtractError> {
                     b"t" => in_text = false,
                     b"p" => {
                         paragraph_depth = paragraph_depth.saturating_sub(1);
-                        if skip_depth == 0 && !deleted_paragraph {
+                        if let Some(active) = cell.as_mut() {
+                            if !active.text.is_empty() && !active.text.ends_with([' ', '\t']) {
+                                active.text.push(' ');
+                            }
+                        } else if skip_depth == 0 && !deleted_paragraph {
+                            out.push_str(&body_text);
                             out.push_str("\n\n");
+                            let trimmed = body_text.trim();
+                            if !trimmed.is_empty() {
+                                last_paragraph = Some(trimmed.to_string());
+                            }
+                            body_text.clear();
                         }
                     }
                     b"pPr" => in_paragraph_properties = in_paragraph_properties.saturating_sub(1),
@@ -119,6 +206,41 @@ pub fn render(document: &str) -> Result<String, ExtractError> {
                     b"tc" if skipped_cells.last() == Some(&skip_depth) && skip_depth > 0 => {
                         skipped_cells.pop();
                         skip_depth -= 1;
+                        if let Some(finished) = cell.take() {
+                            row.push(finished.into_raw());
+                        }
+                    }
+                    b"tc" if in_table && nested_tables == 0 => {
+                        if let Some(finished) = cell.take() {
+                            row.push(finished.into_raw());
+                        }
+                    }
+                    b"tr" if in_table && nested_tables == 0 => {
+                        if let Some(cell) = cell.take() {
+                            row.push(cell.into_raw());
+                        }
+                        let finished_row = finish_row(std::mem::take(&mut row), &mut vertical_open);
+                        if !finished_row.is_empty() {
+                            rows.push(finished_row);
+                        }
+                    }
+                    b"tbl" => {
+                        if nested_tables > 0 {
+                            nested_tables -= 1;
+                        } else if in_table {
+                            in_table = false;
+                            if let Some(grid) =
+                                finish_table(std::mem::take(&mut rows), table_title.take())
+                            {
+                                for piece in render_table_markdown(&grid, usize::MAX) {
+                                    out.push_str(&piece);
+                                    out.push('\n');
+                                }
+                                out.push('\n');
+                                tables.push(grid);
+                            }
+                            vertical_open.clear();
+                        }
                     }
                     _ => {}
                 }
@@ -129,23 +251,184 @@ pub fn render(document: &str) -> Result<String, ExtractError> {
             _ => {}
         }
     }
-    Ok(out)
+    Ok((out, tables))
+}
+
+fn push_str(text: &str, cell: &mut Option<CellAcc>, body: &mut String, in_table: bool) {
+    if in_table {
+        if let Some(active) = cell.as_mut() {
+            active.text.push_str(text);
+        }
+    } else {
+        body.push_str(text);
+    }
+}
+
+fn push_char(ch: char, cell: &mut Option<CellAcc>, body: &mut String, in_table: bool) {
+    if in_table {
+        if let Some(active) = cell.as_mut() {
+            active.text.push(ch);
+        }
+    } else {
+        body.push(ch);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum VMerge {
+    #[default]
+    None,
+    Restart,
+    Continue,
+}
+
+#[derive(Debug, Default)]
+struct CellAcc {
+    text: String,
+    span: usize,
+    vmerge: VMerge,
+}
+
+impl CellAcc {
+    fn into_raw(self) -> RawCell {
+        RawCell {
+            text: self.text.trim().to_string(),
+            span: self.span.max(1),
+            vmerge: self.vmerge,
+        }
+    }
+}
+
+struct RawCell {
+    text: String,
+    span: usize,
+    vmerge: VMerge,
+}
+
+/// Complete a row, resolving `vMerge` continue cells from the row above and
+/// repeating a `gridSpan` cell across its columns.
+fn finish_row(raw: Vec<RawCell>, vertical_open: &mut Vec<Option<String>>) -> Vec<RawCell> {
+    let mut row: Vec<RawCell> = Vec::new();
+    let mut column = 0usize;
+    for cell in raw {
+        let span = cell.span.max(1);
+        let value = match cell.vmerge {
+            VMerge::Continue => vertical_open
+                .get(column)
+                .and_then(Clone::clone)
+                .unwrap_or_default(),
+            VMerge::Restart | VMerge::None => cell.text.clone(),
+        };
+        for _ in 0..span {
+            if column >= vertical_open.len() {
+                vertical_open.push(None);
+            }
+            match cell.vmerge {
+                VMerge::Continue => {}
+                VMerge::Restart => vertical_open[column] = Some(value.clone()),
+                VMerge::None => vertical_open[column] = None,
+            }
+            row.push(RawCell {
+                text: value.clone(),
+                span: 1,
+                vmerge: VMerge::None,
+            });
+            column += 1;
+        }
+    }
+    row
+}
+
+fn finish_table(raw_rows: Vec<Vec<RawCell>>, title: Option<String>) -> Option<TableGrid> {
+    if raw_rows.is_empty() {
+        return None;
+    }
+    let width = raw_rows.iter().map(Vec::len).max().unwrap_or(0);
+    if width == 0 {
+        return None;
+    }
+    let mut rows: Vec<Vec<Cell>> = raw_rows
+        .iter()
+        .map(|row| {
+            let mut cells: Vec<Cell> = row.iter().map(|cell| cell_from_text(&cell.text)).collect();
+            cells.resize(width, Cell::Empty);
+            cells
+        })
+        .collect();
+    // A title row inside the table (a merged caption above the header) is not
+    // data; the paragraph above stays the title and the row is appended to it.
+    let taken = take_title_rows(&mut rows);
+    if rows.is_empty() {
+        return None;
+    }
+    let title_rows = taken.len();
+    let header_row = rows.remove(0);
+    let names: Vec<String> = header_row.iter().map(cell_text).collect();
+    let header = unique_header_names(&names);
+    let mut title_parts: Vec<String> = title
+        .map(|value| normalize_header_name(&value))
+        .filter(|value| !value.is_empty())
+        .into_iter()
+        .collect();
+    for part in taken {
+        if !title_parts.contains(&part) {
+            title_parts.push(part);
+        }
+    }
+    let placeholders = raw_rows
+        .iter()
+        .skip(title_rows + 1)
+        .flatten()
+        .filter(|cell| is_placeholder(&cell.text))
+        .count();
+    Some(TableGrid {
+        source: Some(TableSource::Docx),
+        sheet: None,
+        page_span: None,
+        title: if title_parts.is_empty() {
+            None
+        } else {
+            Some(title_parts.join(" — "))
+        },
+        caption: None,
+        header,
+        header_rows: 1,
+        rows,
+        formula_rows: Vec::new(),
+        notes: placeholder_note(placeholders).into_iter().collect(),
+        truncated: false,
+    })
+}
+
+fn cell_text(cell: &Cell) -> String {
+    match cell {
+        Cell::Empty => String::new(),
+        Cell::Text(text) => text.clone(),
+        Cell::Number(number) => {
+            if number.fract() == 0.0 && number.abs() < 1e15 {
+                format!("{}", *number as i64)
+            } else {
+                format!("{number}")
+            }
+        }
+        Cell::Bool(value) => if *value { "true" } else { "false" }.to_string(),
+        Cell::Date(date) => date.clone(),
+    }
 }
 
 /// A `w:vMerge` with no `w:val`, or `w:val="continue"`, means this cell shares
-/// the cell above it; mammoth drops it (`calculateRowSpans`), so its duplicate
-/// text is dropped here too.
-fn continues_vertical_merge(element: &quick_xml::events::BytesStart<'_>) -> bool {
-    match xml::attribute(element, "val") {
+/// the cell above it.
+fn continues_vertical_merge(element: &BytesStart<'_>) -> bool {
+    match xml::local_attribute(element, "val") {
         Some(val) => val == "continue",
         None => true,
     }
 }
 
-/// Elements whose text mammoth does not read. From its `ignoreElements` list
-/// (`body-reader.js`) plus the readers that return non-text elements: field
-/// codes, symbol runs, note and comment references, bookmarks, and the
-/// DrawingML picture containers.
+/// Elements whose text the paragraph walk does not read. From mammoth's
+/// `ignoreElements` list plus readers that return non-text elements: field
+/// codes, symbols, note and comment references, drawings and section
+/// properties.
 const SKIP: &[&[u8]] = &[
     b"del",
     b"instrText",
@@ -194,8 +477,6 @@ mod tests {
 
     #[test]
     fn headings_are_plain_paragraphs_in_raw_text() {
-        // mammoth has no heading element: a heading is a paragraph with a
-        // style, so raw text carries no marker.
         let text = render(
             r#"<w:document xmlns:w="urn:w"><w:body><w:p><w:pPr>
                  <w:pStyle w:val="Heading1"/></w:pPr>
@@ -232,33 +513,98 @@ mod tests {
     }
 
     #[test]
-    fn table_cells_are_paragraphs_in_document_order() {
-        let text = render(
-            r#"<w:document xmlns:w="urn:w"><w:body>
-                 <w:tbl>
-                   <w:tr><w:tc><w:p><w:r><w:t>A1</w:t></w:r></w:p></w:tc>
-                         <w:tc><w:p><w:r><w:t>B1</w:t></w:r></w:p></w:tc></w:tr>
-                   <w:tr><w:tc><w:p><w:r><w:t>A2</w:t></w:r></w:p></w:tc>
-                         <w:tc><w:p><w:r><w:t>B2</w:t></w:r></w:p></w:tc></w:tr>
-                 </w:tbl></w:body></w:document>"#,
-        )
-        .unwrap();
-        assert_eq!(text, "A1\n\nB1\n\nA2\n\nB2\n\n");
+    fn a_table_renders_in_place_as_markdown() {
+        let document = r#"<w:document xmlns:w="urn:w"><w:body>
+             <w:p><w:r><w:t>Revenue by region</w:t></w:r></w:p>
+             <w:tbl>
+               <w:tr><w:tc><w:p><w:r><w:t>Region</w:t></w:r></w:p></w:tc>
+                     <w:tc><w:p><w:r><w:t>Value</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>Jawa Timur</w:t></w:r></w:p></w:tc>
+                     <w:tc><w:p><w:r><w:t>120</w:t></w:r></w:p></w:tc></w:tr>
+             </w:tbl>
+             <w:p><w:r><w:t>After the table.</w:t></w:r></w:p>
+           </w:body></w:document>"#;
+        let (text, tables) = render_with_tables(document).unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].header, vec!["Region", "Value"]);
+        assert_eq!(tables[0].title.as_deref(), Some("Revenue by region"));
+        assert_eq!(tables[0].rows[0][1], Cell::Number(120.0));
+        assert!(
+            text.contains("Revenue by region\n\n| Region | Value |"),
+            "{text}"
+        );
+        assert!(
+            text.contains("| Jawa Timur | 120 |\n\nAfter the table.\n\n"),
+            "{text}"
+        );
     }
 
     #[test]
-    fn a_merged_cell_does_not_repeat_the_cell_above_it() {
-        let text = render(
-            r#"<w:document xmlns:w="urn:w"><w:body><w:tbl>
-                 <w:tr><w:tc><w:p><w:r><w:t>merged</w:t></w:r></w:p></w:tc>
-                     <w:tc><w:p><w:r><w:t>side</w:t></w:r></w:p></w:tc></w:tr>
-                 <w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr>
-                         <w:p><w:r><w:t>merged again</w:t></w:r></w:p></w:tc>
-                     <w:tc><w:p><w:r><w:t>side again</w:t></w:r></w:p></w:tc></w:tr>
-               </w:tbl></w:body></w:document>"#,
-        )
-        .unwrap();
-        assert_eq!(text, "merged\n\nside\n\nside again\n\n");
+    fn an_empty_cell_keeps_its_column() {
+        let document = r#"<w:document xmlns:w="urn:w"><w:body><w:tbl>
+             <w:tr><w:tc><w:p><w:r><w:t>A</w:t></w:r></w:p></w:tc>
+                   <w:tc><w:p><w:r><w:t>B</w:t></w:r></w:p></w:tc>
+                   <w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc></w:tr>
+             <w:tr><w:tc><w:p><w:r><w:t>1</w:t></w:r></w:p></w:tc>
+                   <w:tc><w:p/></w:tc>
+                   <w:tc><w:p><w:r><w:t>3</w:t></w:r></w:p></w:tc></w:tr>
+           </w:tbl></w:body></w:document>"#;
+        let (_, tables) = render_with_tables(document).unwrap();
+        let grid = &tables[0];
+        assert_eq!(grid.rows[0][0], Cell::Number(1.0));
+        assert_eq!(grid.rows[0][1], Cell::Empty);
+        assert_eq!(grid.rows[0][2], Cell::Number(3.0));
+    }
+
+    #[test]
+    fn a_grid_span_repeats_and_a_vertical_merge_continues() {
+        let document = r#"<w:document xmlns:w="urn:w"><w:body><w:tbl>
+             <w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr><w:p><w:r><w:t>Group</w:t></w:r></w:p></w:tc>
+                   <w:tc><w:p><w:r><w:t>C</w:t></w:r></w:p></w:tc></w:tr>
+             <w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>merged</w:t></w:r></w:p></w:tc>
+                   <w:tc><w:p><w:r><w:t>side</w:t></w:r></w:p></w:tc>
+                   <w:tc><w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr>
+             <w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>
+                   <w:tc><w:p><w:r><w:t>side again</w:t></w:r></w:p></w:tc>
+                   <w:tc><w:p><w:r><w:t>y</w:t></w:r></w:p></w:tc></w:tr>
+           </w:tbl></w:body></w:document>"#;
+        let (_, tables) = render_with_tables(document).unwrap();
+        let grid = &tables[0];
+        assert_eq!(grid.header, vec!["Group", "Group (2)", "C"]);
+        assert_eq!(grid.rows[0][0], Cell::Text("merged".to_string()));
+        assert_eq!(grid.rows[1][0], Cell::Text("merged".to_string()));
+    }
+
+    #[test]
+    fn a_header_with_a_tab_is_normalised_and_a_caption_row_becomes_the_title() {
+        let document = r#"<w:document xmlns:w="urn:w"><w:body>
+             <w:p><w:r><w:t>Tabel 25.8</w:t></w:r></w:p>
+             <w:tbl>
+               <w:tr><w:tc><w:tcPr><w:gridSpan w:val="3"/></w:tcPr>
+                     <w:p><w:r><w:t>Data Uji Kendaraan</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>Kode</w:t></w:r><w:tab/><w:r><w:t>Code</w:t></w:r></w:p></w:tc>
+                     <w:tc><w:p><w:r><w:t>Kecamatan</w:t></w:r><w:tab/><w:r><w:t>District</w:t></w:r></w:p></w:tc>
+                     <w:tc><w:p><w:r><w:t>2018</w:t></w:r></w:p></w:tc></w:tr>
+               <w:tr><w:tc><w:p><w:r><w:t>331001</w:t></w:r></w:p></w:tc>
+                     <w:tc><w:p><w:r><w:t>Klaten Utara</w:t></w:r></w:p></w:tc>
+                     <w:tc><w:p><w:r><w:t>-</w:t></w:r></w:p></w:tc></w:tr>
+             </w:tbl></w:body></w:document>"#;
+        let (_, tables) = render_with_tables(document).unwrap();
+        let grid = &tables[0];
+        assert_eq!(
+            grid.title.as_deref(),
+            Some("Tabel 25.8 — Data Uji Kendaraan")
+        );
+        assert_eq!(grid.header, vec!["Kode Code", "Kecamatan District", "2018"]);
+        assert_eq!(grid.rows.len(), 1);
+        assert_eq!(grid.rows[0][2], Cell::Empty);
+        assert!(
+            grid.notes
+                .iter()
+                .any(|note| note == "1 placeholder cells treated as empty"),
+            "{:?}",
+            grid.notes
+        );
     }
 
     #[test]

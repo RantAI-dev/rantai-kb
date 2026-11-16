@@ -1,0 +1,126 @@
+{
+ "regions": [
+  {
+   "index": 0,
+   "label": "header",
+   "bbox_2d": [
+    644,
+    42,
+    899,
+    55
+   ],
+   "merged": "Certificate in Gender and Sexuality Studies"
+  },
+  {
+   "index": 1,
+   "label": "number",
+   "bbox_2d": [
+    931,
+    43,
+    941,
+    53
+   ],
+   "merged": "1"
+  },
+  {
+   "index": 2,
+   "label": "doc_title",
+   "bbox_2d": [
+    55,
+    88,
+    487,
+    147
+   ],
+   "merged": "# Certificate in Gender and Sexuality Studies"
+  },
+  {
+   "index": 3,
+   "label": "text",
+   "bbox_2d": [
+    54,
+    165,
+    480,
+    277
+   ],
+   "merged": "The Gender and Sexuality Studies certificate program allows students to examine how gender and sexuality as social constructs shape individual lives, groups, institutions, and social structures. Students will have the opportunity to examine individual development, couples, families, small groups, and organizations as well as the media, arts, and economic and political systems. The courses explore how gender and sexuality intersect with race, culture, ethnicity, and social class in the interest of social justice."
+  },
+  {
+   "index": 4,
+   "label": "text",
+   "bbox_2d": [
+    54,
+    287,
+    485,
+    329
+   ],
+   "merged": "Certificates may be earned by regularly matriculated or extended learning students and denote successful completion of a prescribed program of study designed to:"
+  },
+  {
+   "index": 5,
+   "label": "text",
+   "bbox_2d": [
+    60,
+    338,
+    458,
+    352
+   ],
+   "merged": "1. impart specified professional/vocational/career competencies; or"
+  },
+  {
+   "index": 6,
+   "label": "text",
+   "bbox_2d": [
+    60,
+    355,
+    472,
+    383
+   ],
+   "merged": "2. produce mastery of the content of a sub-field of an academic major (discipline); or"
+  },
+  {
+   "index": 7,
+   "label": "text",
+   "bbox_2d": [
+    60,
+    386,
+    486,
+    413
+   ],
+   "merged": "3. provide exposure to the range of materials in a traditional or emerging interdisciplinary field."
+  },
+  {
+   "index": 8,
+   "label": "text",
+   "bbox_2d": [
+    54,
+    423,
+    478,
+    507
+   ],
+   "merged": "Certain certificate programs contain 6000-level courses as requirements and/or electives. These 6000-level courses may not be taken by undergraduate students. Candidates must receive two-thirds of their certificate-applicable credit from the university. The transferring of credit or the substitution of courses may occur only after application to the appropriate campus authority."
+  },
+  {
+   "index": 9,
+   "label": "figure_title",
+   "bbox_2d": [
+    56,
+    516,
+    404,
+    535
+   ],
+   "merged": "## Certificate requirements (18 units)"
+  },
+  {
+   "index": 10,
+   "label": "table",
+   "bbox_2d": [
+    56,
+    542,
+    489,
+    749
+   ],
+   "merged": "<table><tr><td colspan=\"2\">Six courses (18 units) selected from the following:</td><td>18</td></tr><tr><td>GSS 1000</td><td>Introduction to Women's Studies</td><td>3</td></tr><tr><td>GSS 1010</td><td>Introduction to Masculinity Studies</td><td>3</td></tr><tr><td>GSS 1020</td><td>Introduction to Transgender Studies</td><td>3</td></tr><tr><td>GSS 1030</td><td>Introduction to Lesbian, Gay, Bisexual, Transgender, and Queer Studies</td><td>3</td></tr><tr><td>GSS 3901</td><td>Special Topics in Gender and Sexuality Studies</td><td>3</td></tr><tr><td>GSS 4200</td><td>Feminist Theory</td><td>3</td></tr><tr><td>GSS 4250</td><td>Women as Agents of Social Change</td><td>3</td></tr><tr><td>GSS 4500</td><td>Queer Theory</td><td>3</td></tr><tr><td>GSS 5953</td><td>Independent Study</td><td>3</td></tr><tr><td colspan=\"2\">Total Units</td><td>45</td></tr></table>"
+  }
+ ],
+ "expected": "# Certificate in Gender and Sexuality Studies\n\nThe Gender and Sexuality Studies certificate program allows students to examine how gender and sexuality as social constructs shape individual lives, groups, institutions, and social structures. Students will have the opportunity to examine individual development, couples, families, small groups, and organizations as well as the media, arts, and economic and political systems. The courses explore how gender and sexuality intersect with race, culture, ethnicity, and social class in the interest of social justice.\n\nCertificates may be earned by regularly matriculated or extended learning students and denote successful completion of a prescribed program of study designed to:\n\n1. impart specified professional/vocational/career competencies; or\n\n2. produce mastery of the content of a sub-field of an academic major (discipline); or\n\n3. provide exposure to the range of materials in a traditional or emerging interdisciplinary field.\n\nCertain certificate programs contain 6000-level courses as requirements and/or electives. These 6000-level courses may not be taken by undergraduate students. Candidates must receive two-thirds of their certificate-applicable credit from the university. The transferring of credit or the substitution of courses may occur only after application to the appropriate campus authority.\n\n## Certificate requirements (18 units)\n\n<table><tr><td colspan=\"2\">Six courses (18 units) selected from the following:</td><td>18</td></tr><tr><td>GSS 1000</td><td>Introduction to Women's Studies</td><td>3</td></tr><tr><td>GSS 1010</td><td>Introduction to Masculinity Studies</td><td>3</td></tr><tr><td>GSS 1020</td><td>Introduction to Transgender Studies</td><td>3</td></tr><tr><td>GSS 1030</td><td>Introduction to Lesbian, Gay, Bisexual, Transgender, and Queer Studies</td><td>3</td></tr><tr><td>GSS 3901</td><td>Special Topics in Gender and Sexuality Studies</td><td>3</td></tr><tr><td>GSS 4200</td><td>Feminist Theory</td><td>3</td></tr><tr><td>GSS 4250</td><td>Women as Agents of Social Change</td><td>3</td></tr><tr><td>GSS 4500</td><td>Queer Theory</td><td>3</td></tr><tr><td>GSS 5953</td><td>Independent Study</td><td>3</td></tr><tr><td colspan=\"2\">Total Units</td><td>45</td></tr></table>"
+}

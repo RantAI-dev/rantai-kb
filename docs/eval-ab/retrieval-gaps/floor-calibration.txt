@@ -1,0 +1,40 @@
+## MIRACL-id-200 (document level), off-topic miracl-id.tsv (55)
+level: document
+in-domain responses: 200 ({'rerank': 200})
+off-topic responses: 55 ({'rerank': 55})
+evaluable in-domain queries: 200; qrels without a response: 0; responses without usable qrels: 0
+
+  minScore   off-topic empty     nDCG@10   in-domain empty
+------------------------------------------------------------
+    0.0000             0.0%      0.8380             0.0%
+    0.2000             0.0%      0.8380             0.0%
+    0.2500             5.5%      0.8380             0.0%
+    0.3000            25.5%      0.8380             0.0%
+    0.3500            61.8%      0.8381             0.0%
+    0.4000            80.0%      0.8381             0.0%
+    0.4200            90.9%      0.8381             0.0%
+    0.4500            90.9%      0.8373             0.0%
+    0.4800            94.5%      0.8348             0.0%
+    0.5000            98.2%      0.8288             0.0%
+    0.5500           100.0%      0.8084             0.0%
+    0.6000           100.0%      0.7811             0.5%
+
+Recommendation at off-topic empty >= 90%: minScore=0.4200 (off-topic empty 90.9%, nDCG@10 0.8381). Check the in-domain drop against the no-floor row (the lowest threshold).
+
+## ViDoRe v3 HR (page level), off-topic vidore-en.tsv (54 of 55; q047 excluded: rerank_unavailable)
+level: page
+in-domain responses: 318 ({'rerank': 318})
+off-topic responses: 54 ({'rerank': 54})
+evaluable in-domain queries: 318; qrels without a response: 0; responses without usable qrels: 0
+
+  minScore   off-topic empty     nDCG@10   in-domain empty
+------------------------------------------------------------
+    0.0000             0.0%      0.6398             0.0%
+    0.3000            92.6%      0.6398             0.0%
+    0.3500            96.3%      0.6398             0.0%
+    0.4000            98.1%      0.6398             0.0%
+    0.4200            98.1%      0.6399             0.0%
+    0.4500           100.0%      0.6398             0.0%
+    0.5000           100.0%      0.6358             0.6%
+
+Recommendation at off-topic empty >= 90%: minScore=0.4200 (off-topic empty 98.1%, nDCG@10 0.6399). Check the in-domain drop against the no-floor row (the lowest threshold).

@@ -37,11 +37,12 @@ const MINILM_EMBEDDING: &str = "sentence-transformers/all-MiniLM-L6-v2";
 const BGE_RERANKER: &str = "BAAI/bge-reranker-v2-m3";
 const VOYAGE_EMBEDDING: &str = "voyageai/voyage-multimodal-3.5";
 const VOYAGE_RERANKER: &str = "voyageai/rerank-2.5";
-const PADDLE_OCR_VL: &str = "PaddlePaddle/PaddleOCR-VL-1.6";
-/// PP-OCRv6, by the id the licence table uses. The sidecar
-/// (`rust/deploy/ocr-ppocr`) ignores the model name; it only keys the
-/// extraction cache.
-const PP_OCR: &str = "PaddlePaddle/PP-OCRv6";
+/// Xiaomi-OCR-0 under vLLM, by the id vLLM serves it as (its Hugging Face repo).
+const XIAOMI_OCR: &str = "xiaomi-research/Xiaomi-OCR-0";
+/// The CPU document-OCR sidecar (`rust/deploy/ocr-cpu`: PP-Layout CDLA,
+/// PP-OCRv6 tiny, SLANet-plus), by the id the licence table uses. The sidecar
+/// ignores the model name; it only keys the extraction cache.
+const CPU_DOC_OCR: &str = "rantai-kb/ocr-cpu";
 const QWEN3_VL_EMBEDDING_2B: &str = "Qwen/Qwen3-VL-Embedding-2B";
 const QWEN3_VL_EMBEDDING_8B: &str = "Qwen/Qwen3-VL-Embedding-8B";
 const QWEN3_VL_RERANKER_2B: &str = "Qwen/Qwen3-VL-Reranker-2B";
@@ -52,9 +53,17 @@ const QWEN3_VL_RERANKER_8B: &str = "Qwen/Qwen3-VL-Reranker-8B";
 const LOCAL_EMBEDDINGS: &str = "http://127.0.0.1:8081/v1/embeddings";
 /// The local `/rerank` base; the TEI adapter appends `/rerank`.
 const LOCAL_RERANK_URL: &str = "http://127.0.0.1:8082";
-/// The local OCR server's chat endpoint: the PP-OCRv6 sidecar on Lite,
-/// PaddleOCR-VL-1.6 (llama.cpp or vLLM) from Desk up.
+/// The local OCR server's chat endpoint: the CPU document sidecar on Lite,
+/// Xiaomi-OCR-0 on vLLM from Desk up.
 const LOCAL_OCR_URL: &str = "http://127.0.0.1:8083/v1/chat/completions";
+/// The local vision-language model that reads pictures at ingest (`ING-5`):
+/// llama.cpp's server, on the CPU on Lite and on the GPU from Desk up.
+const LOCAL_VLM_URL: &str = "http://127.0.0.1:8085/v1/chat/completions";
+/// Qwen3-VL-2B-Instruct: measured on `images-v1` on a CPU (see
+/// `docs/eval-ab/images/README.md`).
+const QWEN3_VL_2B_INSTRUCT: &str = "Qwen/Qwen3-VL-2B-Instruct";
+/// The cloud describer: the paid twin of the model measured free.
+const NEMOTRON_VL: &str = "nvidia/nemotron-3.5-super-vl";
 /// The local vLLM page embedder (Chat Embeddings API).
 const LOCAL_PAGE_EMBEDDINGS: &str = "http://127.0.0.1:8084/v1/embeddings";
 /// OpenRouter's rerank router, which takes the Cohere request shape.
@@ -157,22 +166,31 @@ const VL_RERANK_8B: &[(&str, &str)] = &[
     ("KB_RERANK_MODEL", QWEN3_VL_RERANKER_8B),
 ];
 
-/// Lite's scanned-page OCR: PP-OCRv6 on the CPU through the sidecar, one page
-/// at a time so it never competes with the embedder for both cores.
-/// Digital pages still come from the pdfium text layer; only pages without
-/// one reach this. Without the sidecar running, a scanned page fails its
-/// extraction with the page number (it never silently goes missing).
-const PP_OCR_PAGES: &[(&str, &str)] = &[
+/// Lite's scanned-page OCR: the CPU document sidecar (layout regions, PP-OCRv6
+/// tiny text in reading order, SLANet-plus tables, figure boxes), two pages at a
+/// time over two worker threads. Pages render at 110 dpi: measured on two cores,
+/// 0.84 pages/s against 0.67 at 150 dpi, with the same score
+/// (docs/eval-ab/ocr-tiers). Digital pages still come from the pdfium text
+/// layer; only pages without one reach this. Without the sidecar running, a
+/// scanned page fails its extraction with the page number (it never silently
+/// goes missing).
+const CPU_OCR_PAGES: &[(&str, &str)] = &[
     ("KB_OCR_BASE_URL", LOCAL_OCR_URL),
-    ("KB_OCR_MODEL", PP_OCR),
-    ("KB_OCR_CONCURRENCY", "1"),
+    ("KB_OCR_MODEL", CPU_DOC_OCR),
+    ("KB_OCR_CONCURRENCY", "2"),
+    ("KB_OCR_DPI", "110"),
 ];
 
-/// Desk and up: PaddleOCR-VL-1.6 for scanned and complex pages, on the GPU
-/// (vLLM) or llama.cpp. `OCR:` is the adapter's default task prefix.
-const PADDLE_OCR_PAGES: &[(&str, &str)] = &[
+/// Desk and up: Xiaomi-OCR-0 with the vendor's recipe (document prompt, OTSL
+/// tables, repetition guard), the best local OCR measured on olmOCR-bench. The
+/// layout timeout is for the optional table pass, whose detector runs on the
+/// CPU and serves one page at a time; `KB_OCR_LAYOUT_URL` stays unset (off)
+/// unless `setup --ocr-tables accurate` turns it on.
+const XIAOMI_OCR_PAGES: &[(&str, &str)] = &[
     ("KB_OCR_BASE_URL", LOCAL_OCR_URL),
-    ("KB_OCR_MODEL", PADDLE_OCR_VL),
+    ("KB_OCR_MODEL", XIAOMI_OCR),
+    ("KB_OCR_RECIPE", "xiaomi"),
+    ("KB_OCR_LAYOUT_TIMEOUT_MS", "900000"),
 ];
 
 /// Studio's page-image arm: Qwen3-VL-Embedding-2B on vLLM, 2048 wide (the
@@ -193,34 +211,62 @@ const VL_PAGES_8B: &[(&str, &str)] = &[
     ("KB_PAGE_EMBEDDING_DIM", "4096"),
 ];
 
+/// Lite and Lite-en: pictures read by Qwen3-VL-2B on the CPU, one at a time
+/// and with a long timeout: a picture takes tens of seconds there, and ingest
+/// is a background job.
+const CPU_DESCRIBE: &[(&str, &str)] = &[
+    ("KB_IMAGE_DESCRIBE_MODEL", QWEN3_VL_2B_INSTRUCT),
+    ("KB_IMAGE_DESCRIBE_BASE_URL", LOCAL_VLM_URL),
+    ("KB_IMAGE_DESCRIBE_CONCURRENCY", "1"),
+    ("KB_IMAGE_DESCRIBE_TIMEOUT_MS", "300000"),
+];
+
+/// Desk and up: the same model on the GPU.
+const GPU_DESCRIBE: &[(&str, &str)] = &[
+    ("KB_IMAGE_DESCRIBE_MODEL", QWEN3_VL_2B_INSTRUCT),
+    ("KB_IMAGE_DESCRIBE_BASE_URL", LOCAL_VLM_URL),
+    ("KB_IMAGE_DESCRIBE_CONCURRENCY", "4"),
+    ("KB_IMAGE_DESCRIBE_TIMEOUT_MS", "60000"),
+];
+
 /// Lite: no reranker, one embedding at a time.
 ///
 /// Embedding concurrency is filled as `KB_EMBED_CONCURRENCY`, the name Bun
 /// reads, which the Rust config honours when `KB_EMBEDDING_CONCURRENCY` is
 /// unset. Filling the Rust name instead would shadow an operator's Bun-name
 /// setting; this way neither name can be shadowed by the preset.
+///
+/// The ingest worker runs two documents at a time on Lite (`ING-6`): the
+/// preset fills the alias `KB_INGEST_CONCURRENCY`, not the new name
+/// `KB_JOB_WORKERS`, so an operator who set either name explicitly still
+/// wins — the new name wins when both are set, and the alias is what the
+/// preset fills, so it never shadows an explicit value. The other tiers leave
+/// it unset and take the default of 6.
 const LITE: &[(&str, &str)] = &[
     ("KB_EMBED_CONCURRENCY", "1"),
     ("KB_EMBEDDING_BATCH_SIZE", "16"),
-    ("KB_INGEST_CONCURRENCY", "1"),
+    ("KB_INGEST_CONCURRENCY", "2"),
     ("KB_RERANK_ENABLED", "false"),
 ];
 
+/// Desk runs 16 OCR pages at a time: 1.08 pages/s at a Desk-sized share
+/// (docs/eval-ab/ocr-tiers). It must match the server's `--max-num-seqs`.
 const DESK: &[(&str, &str)] = &[
     ("KB_EMBED_CONCURRENCY", "2"),
     ("KB_RERANK_CANDIDATE_LIMIT", "10"),
+    ("KB_OCR_CONCURRENCY", "16"),
 ];
 
 const STUDIO: &[(&str, &str)] = &[
     ("KB_EMBED_CONCURRENCY", "4"),
     ("KB_RERANK_CANDIDATE_LIMIT", "20"),
-    ("KB_OCR_CONCURRENCY", "4"),
+    ("KB_OCR_CONCURRENCY", "32"),
 ];
 
 const STATION: &[(&str, &str)] = &[
     ("KB_EMBED_CONCURRENCY", "8"),
     ("KB_RERANK_CANDIDATE_LIMIT", "30"),
-    ("KB_OCR_CONCURRENCY", "8"),
+    ("KB_OCR_CONCURRENCY", "32"),
 ];
 
 /// Cloud: one hosted embedder for text and pages, voyage's reranker over the
@@ -240,6 +286,11 @@ const CLOUD: &[(&str, &str)] = &[
     ("KB_RERANK_BASE_URL", OPENROUTER_RERANK),
     ("KB_RERANK_MODEL", VOYAGE_RERANKER),
     ("KB_RERANK_CANDIDATE_LIMIT", "20"),
+    // Pictures read over the same OpenRouter key: about $0.22 per 1,000
+    // images at the listed price (~1,000 tokens in, ~150 out each).
+    ("KB_IMAGE_DESCRIBE_MODEL", NEMOTRON_VL),
+    ("KB_IMAGE_DESCRIBE_NO_REASONING", "true"),
+    ("KB_IMAGE_DESCRIBE_CONCURRENCY", "4"),
     // Entity extraction is an LLM call per document (OpenRouter) whose output
     // goes only to the Postgres graph when `KB_GRAPH_STORE=pg`: pure spend
     // otherwise.
@@ -313,23 +364,32 @@ impl Tier {
     /// The preset tables that apply to this tier, most general first.
     fn tables(self) -> &'static [&'static [(&'static str, &'static str)]] {
         match self {
-            Self::Lite => &[LOCAL, E5_SMALL_TEXT, PP_OCR_PAGES, LITE],
-            Self::LiteEn => &[LOCAL, MINILM_TEXT, PP_OCR_PAGES, LITE],
-            Self::Desk => &[LOCAL, QWEN3_TEXT, LOCAL_RERANK, PADDLE_OCR_PAGES, DESK],
+            Self::Lite => &[LOCAL, E5_SMALL_TEXT, CPU_OCR_PAGES, CPU_DESCRIBE, LITE],
+            Self::LiteEn => &[LOCAL, MINILM_TEXT, CPU_OCR_PAGES, CPU_DESCRIBE, LITE],
+            Self::Desk => &[
+                LOCAL,
+                QWEN3_TEXT,
+                LOCAL_RERANK,
+                XIAOMI_OCR_PAGES,
+                GPU_DESCRIBE,
+                DESK,
+            ],
             Self::Studio => &[
                 LOCAL,
                 QWEN3_TEXT,
                 VL_RERANK_2B,
-                PADDLE_OCR_PAGES,
+                XIAOMI_OCR_PAGES,
                 VL_PAGES_2B,
+                GPU_DESCRIBE,
                 STUDIO,
             ],
             Self::Station => &[
                 LOCAL,
                 QWEN3_TEXT,
                 VL_RERANK_8B,
-                PADDLE_OCR_PAGES,
+                XIAOMI_OCR_PAGES,
                 VL_PAGES_8B,
+                GPU_DESCRIBE,
                 STATION,
             ],
             Self::Cloud => &[CLOUD],
@@ -423,6 +483,12 @@ impl TierPlan {
 }
 
 /// A variable whose value must never reach a log line.
+/// Whether a variable name holds a secret (its value is never printed).
+#[must_use]
+pub fn is_secret_name(name: &str) -> bool {
+    is_secret(name)
+}
+
 fn is_secret(name: &str) -> bool {
     ["KEY", "SECRET", "TOKEN", "PASSWORD"]
         .iter()
@@ -607,11 +673,11 @@ mod tests {
     fn every_local_tier_ocrs_scans_locally_and_cloud_fills_no_ocr() {
         let none = |_: &str| None;
         for (name, model) in [
-            ("lite", "PaddlePaddle/PP-OCRv6"),
-            ("lite-en", "PaddlePaddle/PP-OCRv6"),
-            ("desk", "PaddlePaddle/PaddleOCR-VL-1.6"),
-            ("studio", "PaddlePaddle/PaddleOCR-VL-1.6"),
-            ("station", "PaddlePaddle/PaddleOCR-VL-1.6"),
+            ("lite", "rantai-kb/ocr-cpu"),
+            ("lite-en", "rantai-kb/ocr-cpu"),
+            ("desk", "xiaomi-research/Xiaomi-OCR-0"),
+            ("studio", "xiaomi-research/Xiaomi-OCR-0"),
+            ("station", "xiaomi-research/Xiaomi-OCR-0"),
         ] {
             let tier = with_preset(Tier::parse(name), &none);
             assert_eq!(

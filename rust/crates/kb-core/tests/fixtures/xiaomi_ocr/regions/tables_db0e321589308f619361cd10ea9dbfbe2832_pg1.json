@@ -1,0 +1,137 @@
+{
+ "regions": [
+  {
+   "index": 0,
+   "label": "header_image",
+   "bbox_2d": [
+    323,
+    54,
+    419,
+    97
+   ],
+   "merged": ""
+  },
+  {
+   "index": 1,
+   "label": "header",
+   "bbox_2d": [
+    440,
+    54,
+    675,
+    99
+   ],
+   "merged": "THE Compassionate Mind FOUNDATION"
+  },
+  {
+   "index": 2,
+   "label": "doc_title",
+   "bbox_2d": [
+    348,
+    133,
+    648,
+    151
+   ],
+   "merged": "SOCIAL COMPARISON SCALE"
+  },
+  {
+   "index": 3,
+   "label": "text",
+   "bbox_2d": [
+    90,
+    183,
+    907,
+    221
+   ],
+   "merged": "Please circle a number at a point which best describes the way in which you see yourself in comparison to others."
+  },
+  {
+   "index": 4,
+   "label": "text",
+   "bbox_2d": [
+    91,
+    240,
+    215,
+    258
+   ],
+   "merged": "For example:"
+  },
+  {
+   "index": 5,
+   "label": "table",
+   "bbox_2d": [
+    211,
+    281,
+    771,
+    299
+   ],
+   "merged": "<table><tr><td>Short</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>Tall</td></tr></table>"
+  },
+  {
+   "index": 6,
+   "label": "text",
+   "bbox_2d": [
+    90,
+    323,
+    907,
+    360
+   ],
+   "merged": "If you put a mark at 3 this means you see yourself as shorter than others; if you put a mark at 5 (middle) about average; and a mark at 7 somewhat taller."
+  },
+  {
+   "index": 7,
+   "label": "text",
+   "bbox_2d": [
+    90,
+    379,
+    907,
+    417
+   ],
+   "merged": "If you understand the above instructions, please proceed. Circle one number on each line according to how you see yourself in relationship to others."
+  },
+  {
+   "index": 8,
+   "label": "paragraph_title",
+   "bbox_2d": [
+    90,
+    468,
+    386,
+    487
+   ],
+   "merged": "In relationship to others I feel:"
+  },
+  {
+   "index": 9,
+   "label": "table",
+   "bbox_2d": [
+    147,
+    503,
+    883,
+    759
+   ],
+   "merged": "<table><tr><td>Inferior</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>Superior</td></tr><tr><td>Incompetent</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>More competent</td></tr><tr><td>Unlikeable</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>More likeable</td></tr><tr><td>Left out</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>Accepted</td></tr><tr><td>Different</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>Same</td></tr><tr><td>Untalented</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>More talented</td></tr><tr><td>Weaker</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>Stronger</td></tr><tr><td>Unconfident</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>More confident</td></tr><tr><td>Undesirable</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>More desirable</td></tr><tr><td>Unattractive</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>More attractive</td></tr><tr><td>An outsider</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>An insider</td></tr></table>"
+  },
+  {
+   "index": 10,
+   "label": "footer",
+   "bbox_2d": [
+    414,
+    937,
+    584,
+    949
+   ],
+   "merged": "© Allan & Gilbert, 1995"
+  },
+  {
+   "index": 11,
+   "label": "number",
+   "bbox_2d": [
+    892,
+    922,
+    904,
+    934
+   ],
+   "merged": "1"
+  }
+ ],
+ "expected": "# SOCIAL COMPARISON SCALE\n\nPlease circle a number at a point which best describes the way in which you see yourself in comparison to others.\n\nFor example:\n\n<table><tr><td>Short</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>Tall</td></tr></table>\n\nIf you put a mark at 3 this means you see yourself as shorter than others; if you put a mark at 5 (middle) about average; and a mark at 7 somewhat taller.\n\nIf you understand the above instructions, please proceed. Circle one number on each line according to how you see yourself in relationship to others.\n\n## In relationship to others I feel:\n\n<table><tr><td>Inferior</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>Superior</td></tr><tr><td>Incompetent</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>More competent</td></tr><tr><td>Unlikeable</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>More likeable</td></tr><tr><td>Left out</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>Accepted</td></tr><tr><td>Different</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>Same</td></tr><tr><td>Untalented</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>More talented</td></tr><tr><td>Weaker</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>Stronger</td></tr><tr><td>Unconfident</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>More confident</td></tr><tr><td>Undesirable</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>More desirable</td></tr><tr><td>Unattractive</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>More attractive</td></tr><tr><td>An outsider</td><td>1</td><td>2</td><td>3</td><td>4</td><td>5</td><td>6</td><td>7</td><td>8</td><td>9</td><td>10</td><td>An insider</td></tr></table>"
+}

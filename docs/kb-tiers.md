@@ -34,8 +34,8 @@ Metal); that is accepted for the chat model only.
 | Embedding (text + page images, one space) | multilingual-e5-small on CPU (measured: `docs/eval-ab/lite-2core`) | Qwen3-Embedding-0.6B, text only (decided 2026-10-26) | Qwen3-VL-Embedding-2B, full precision | Qwen3-VL-Embedding-8B | voyage-multimodal-3.5 or gemini-embedding-2 |
 | Reranker | tiny text reranker, or none | bge-reranker-v2-m3 (text) | Qwen3-VL-Reranker-2B, full precision | Qwen3-VL-Reranker-8B | voyage rerank-2.5 / cohere rerank-4 / qwen3-reranker-8b |
 | Digital PDF text | pdfium text layer | text layer | text layer | text layer | text layer |
-| Scans / complex pages | PP-OCRv6 (ONNX, CPU) | PaddleOCR-VL-1.6, loaded during ingest | PaddleOCR-VL-1.6, resident | MinerU2.5-Pro / PaddleOCR-VL | Mistral OCR |
-| Charts / figures | small VLM on figure crops, background queue | chat LLM's vision, idle time | chat LLM's vision | chat LLM's vision | Gemini Flash |
+| Scans / complex pages | CPU document OCR sidecar: PP-Layout + PP-OCRv6 tiny + SLANet-plus tables (0.69 pages/s on 2 cores) | Xiaomi-OCR-0, vLLM fp8 (1.35 pages/s, 4.4 GB peak) | Xiaomi-OCR-0 (1.5 pages/s), table pass optional | Xiaomi-OCR-0 + layout table pass | Mistral OCR |
+| Pictures (photos, charts, diagrams, embedded images; `ING-5`) | Qwen3-VL-2B-Instruct Q4 on CPU (llama.cpp sidecar `vlm-cpu`) | Qwen3-VL-2B-Instruct on GPU (`vlm-gpu`, ~2.5 GB) | same | same | nemotron-3.5-super-vl (API) |
 | Page-image search | optional tiny model (colSmol-256M), off by default | off (text-only embedder) | yes | yes | yes |
 | Est. VRAM chat / KB | — | ~3.5 / ~4.5 GB (tight) | ~9 / ~10 GB | ~26 / ~20 GB on 48 GB | — |
 
@@ -44,7 +44,8 @@ Metal); that is accepted for the chat model only.
 On 1–2 cores no model is fast enough to run on every page, so ingest routes **each page**:
 
 1. Text layer present → pdfium text. Free.
-2. No text layer (scan) → PP-OCRv6 (1.5–34.5M params; vendor: 0.20–1.40 s per image on Xeon).
+2. No text layer (scan) → the CPU document OCR sidecar (layout regions, PP-OCRv6 tiny text,
+   SLANet-plus tables; 0.69 pages/s on 2 cores, measured in `docs/eval-ab/ocr-tiers`).
 3. Tables in digital PDFs → rebuilt from the text layer's word positions. No model.
 4. Figures → a small VLM on the crop, in a low-priority background queue, capped per
    document. The document is searchable before its captions arrive.
@@ -107,54 +108,296 @@ GPU, so the request shape and ordering are covered by unit tests in
 throughput with Qwen3-VL-Embedding-2B on vLLM are unverified. Do not quote a local-tier
 page-retrieval number from this path until it has run on Desk/Studio hardware.
 
-## Local OCR (PaddleOCR-VL / PP-OCRv6)
+## Local OCR per tier
 
-Scanned and complex pages are OCRed by a **local** model on every local tier: PaddleOCR-VL-1.6
-under vLLM (Desk/Studio/Station) or `llama.cpp` (Apple, CPU), and PP-OCRv6 on Lite through a
-sidecar that speaks the same shape. The adapter (`kb_extract::PageOcrExtractor`) renders each
-PDF page with pdfium at `KB_OCR_DPI`, sends **one chat request per page** (image part first,
-then the task prefix, `temperature: 0`) and keeps page order into the chunker's page map. Image
+Scanned pages are OCRed by a **local** model on every local tier, chosen by measurement
+(`docs/eval-ab/ocr-tiers`, olmOCR-bench, official scorer):
+
+| Tier | Engine | Speed | Text-layer / tables / scans / image-only |
+|---|---|---|---|
+| Lite, lite-en | `rust/deploy/ocr-cpu`: PP-Layout CDLA regions, PP-OCRv6 tiny text in XY-cut reading order, SLANet-plus tables as HTML, figure boxes; headers and footers dropped | 0.69 pages/s end to end on 2 cores of a 2016 Xeon | — / 38.8 (image-only tables) / 31.4 / 52.5 |
+| Desk, Studio, Station | Xiaomi-OCR-0 under vLLM (fp8 weights and cache, 1 GiB fixed cache on Desk), the `xiaomi` recipe below | Desk config: 1.35 pages/s at 16 in flight, 4.4 GB peak; 1.50 at 32 (GB10) | 87.0 / 77.9 / 73.7 / 77.4 |
+| … with `--ocr-tables accurate` | + PP-DocLayoutV3 table pass, detector on the CPU | 0.90 pages/s (detector-bound) | 89.0 / 87.9 / 73.1 / 78.2 |
+| Cloud (or `--ocr mistral` anywhere) | Mistral OCR, hosted, billed per page | — | 77.4 / 85.5 / 70.8 / 75.3 |
+
+Lite cannot read formulas into LaTeX or read handwriting inside its CPU budget; a Lite box that
+needs them can send scans to a shared Xiaomi server (`rantai-kb setup lite --ocr <url>`).
+
+Every OCR server speaks one shape: kb-server renders each PDF page with pdfium at `KB_OCR_DPI`
+and sends **one chat request per page** (`kb_extract::PageOcrExtractor` for the `paddle`
+recipe, `XiaomiOcrProvider` for `xiaomi`), keeping page order into the chunker's page map. Image
 uploads (`png`, `jpg`, `tif`) are a document of one page.
-
-```sh
-# Desk / Studio / Station (vLLM; PaddleOCR-VL selects its task with the prompt prefix)
-vllm serve PaddlePaddle/PaddleOCR-VL-1.6 --trust-remote-code
-
-# Apple / CPU (llama.cpp, the GGUF build)
-llama-server -m PaddleOCR-VL-1.6-Q8_0.gguf --host 127.0.0.1 --port 8000
-
-# point kb-server at either one; `ocr` also works as a name in
-# KB_LAYOUT_EXTRACTOR_ORDER when you want OCR ahead of another parser
-KB_OCR_BASE_URL=http://127.0.0.1:8000/v1/chat/completions
-KB_OCR_MODEL=PaddlePaddle/PaddleOCR-VL-1.6
-```
 
 | Setting | Meaning | Default |
 |---|---|---|
-| `KB_OCR_BASE_URL` | full URL of `/v1/chat/completions`; empty turns the adapter off | empty (off) |
-| `KB_OCR_MODEL` | model name the server serves | `PaddlePaddle/PaddleOCR-VL-1.6` |
+| `KB_OCR_BASE_URL` | full URL of `/v1/chat/completions`; empty turns the adapter off | empty (off); the tier preset fills it |
+| `KB_OCR_MODEL` | model name the server serves | tier preset |
 | `KB_OCR_API_KEY` | optional bearer token; never filled from `OPENROUTER_API_KEY` | empty (no header) |
-| `KB_OCR_PROMPT` | task prefix (PaddleOCR-VL: `OCR:`, `Table Recognition:`, …) | `OCR:` |
-| `KB_OCR_DPI` | page render resolution | `150` |
-| `KB_OCR_CONCURRENCY` | page requests in flight | `2` |
-| `KB_OCR_TIMEOUT_MS` | timeout per page request | `120000` |
-| `KB_OCR_MAX_TOKENS` | `max_tokens` per page | `4096` |
+| `KB_OCR_PROMPT` | task prefix for the `paddle` recipe | `OCR:` |
+| `KB_OCR_DPI` | page render resolution | `150` (Lite preset: `110`) |
+| `KB_OCR_CONCURRENCY` | page requests in flight | `2` (presets: Lite 2, Desk 16, Studio/Station 32) |
+| `KB_OCR_TIMEOUT_MS` | timeout per page request | `120000` (`xiaomi`: `600000`) |
+| `KB_OCR_MAX_TOKENS` | `max_tokens` per page | `4096` (`xiaomi`: `12288`) |
 
 When `KB_OCR_BASE_URL` is set it also replaces OpenRouter vision as the OCR path for image
-uploads and as the layout chain's final fallback, so no page leaves the host. Unset, everything
-resolves exactly as before. A page that still fails after its retries fails the extraction with
-its page number rather than producing a document with a silently missing page. Answers are
-cached under `KB_CACHE_DIR` with the rest of the extraction, keyed by model, prompt, DPI and
-endpoint.
+uploads and as the layout chain's final fallback, so no page leaves the host. A page that still
+fails after its retries fails the extraction with its page number rather than producing a
+document with a silently missing page. Answers are cached under `KB_CACHE_DIR` with the rest of
+the extraction, keyed by model, prompt, DPI and endpoint.
 
-**Status: mock-tested.** The request shape, ordering, retries, `Authorization` rule and the
-`ocr`/OpenRouter precedence are covered by tests in
-`rust/crates/kb-extract/src/page_ocr.rs` and `builder.rs`; end-to-end OCR quality and
-throughput with PaddleOCR-VL-1.6 on real hardware are not measured yet. PaddleOCR-VL-1.6's GGUF
-did run end to end under llama.cpp on this CPU (102.5 s per page, text identical to the PDF text
-layer: `docs/tier-readiness-plan.md`). PP-OCRv6 on Lite runs in `rust/deploy/ocr-ppocr`
-(RapidOCR 3.10, ONNX Runtime, CPU), a sidecar that answers the same chat shape; it is
-**built but not yet run** (the image has not been built on this machine).
+## OCR recipes (`KB_OCR_RECIPE`)
+
+The local chat endpoint is served with one of two **recipes**, and they are not the same thing
+with a different prompt.
+
+| Recipe | Model | What it answers | Postprocessing |
+|---|---|---|---|
+| `paddle` (default) | the CPU sidecar, PaddleOCR-VL-1.6, any OCR server answering text | one page, with the task prefix (`OCR:`, `Table Recognition:`, …) | none — the answer is the text |
+| `xiaomi` | Xiaomi-OCR-0 (0.8B, Apache-2.0) | one page, as markdown with OTSL tables | the vendor's: repetition retry, truncated-tail cut, math delimiters, OTSL → table |
+
+`KB_OCR_RECIPE` picks one. An unknown value is a configuration error, exactly like
+`KB_OCR_MODE`: the value is logged and the default is used, never a silent guess. The recipe,
+the table format and the layout path are all part of the OCR page cache key and of the
+extraction fingerprint, so a cache entry written under one recipe is never served under
+another.
+
+**The Xiaomi recipe** (`kb_extract::XiaomiOcrProvider`) is the vendor's
+`evaluation_pipeline/e2e_img2md.py`, step for step:
+
+1. the page is rendered at `KB_OCR_DPI` (150) as a **PNG**, scaled so its longest edge is at
+   most 2048 px — the model's input bound;
+2. the **prompt comes before the image** (the other order makes the model answer in prose):
+   the document prompt, at `temperature 0`, `top_p 0.8`, `repetition_penalty 1.0`,
+   `max_tokens 12288`, thinking off;
+3. if the answer looks like a loop, the page is asked again with `presence_penalty 1.5`, and
+   the second answer is adopted only when it is not a loop either;
+4. the answer is cut (a truncated repeated tail), the math delimiters are normalised, and the
+   tables are rendered.
+
+The postprocessing is ported to `kb-core` (`kb_core::xiaomi_ocr`) and is **byte-for-byte** the
+vendor's: over the 1,403 pages of the olmOCR benchmark, with the vendor's own output as the
+fixture, 1,403/1,403 pages come out byte-identical. The region path (below) is 71/71.
+
+**Tables.** `KB_OCR_TABLE_FORMAT` picks how a table is written: `markdown` (the default, a pipe
+table) or `html` (a `<table>` with row and column spans — the vendor's own rendering). Both are
+read by the table parser, and the format is part of the cache key.
+
+**Layout fallback.** A whole-page answer sometimes misses a table the page clearly has. With
+`KB_OCR_LAYOUT_URL` set, the provider asks a layout detector where the page's regions are and
+re-reads the page region by region **only when the two disagree**: the detector says the page
+has a table and the whole-page answer has none. That is the reference pipeline's rule, and it
+fires on 71 of the 1,403 benchmark pages.
+
+The detector is a sidecar (`rust/deploy/ocr-layout`): PP-DocLayoutV3 at a 0.3 threshold,
+`POST /v1/layout` with a base64 PNG, `GET /health`. The sidecar's own postprocessing —
+non-maximum suppression, unclipping, containment merge, reading order — is the vendor's
+`apply_layout_postprocess`, ported there. The **application logic is Rust**: the rule above,
+the region prompts (text, table, formula), the crops and the merge into one page of markdown.
+
+A layout detector that is down does not fail the page: the whole-page answer is kept and the
+page is reported as degraded — `metadata.ocr.layoutFailed` — and it is **not cached**, so the
+next run, with the detector back, reads it properly.
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `KB_OCR_RECIPE` | `paddle` or `xiaomi`; anything else is a configuration error | `paddle` |
+| `KB_OCR_TABLE_FORMAT` | `markdown` or `html` — how a table is written | `markdown` |
+| `KB_OCR_LAYOUT_URL` | base URL of the layout sidecar; empty turns the layout path off | empty (off) |
+| `KB_OCR_LAYOUT_TIMEOUT_MS` | how long one layout request may take before the page keeps its whole-page answer | 60000 |
+| `KB_OCR_TIMEOUT_MS` | one page request; Xiaomi's dense pages take minutes under a full batch | 600000 for `xiaomi`, else 120000 |
+| `KB_OCR_MAX_TOKENS` | `max_tokens` for one page | 12288 for `xiaomi`, else 4096 |
+
+**Measured (2026-11-16, NVIDIA GB10, Xiaomi-OCR-0 under vLLM 0.33 with `--quantization fp8
+--kv-cache-dtype fp8 --mamba-ssm-cache-dtype bfloat16`).** All 1,403 pages of olmOCR-bench, read
+through the router with `kb-server eval ocr` (64 concurrent requests), scored with the
+benchmark's official scorer. Only pages the model read are scored: a page that fell back to the
+text layer counts as failed. Every run: 1,403/1,403 read by the model, 0 failed.
+
+| Track (score %) | This service, whole page | Vendor pipeline, whole page | This service, with layout fallback | Vendor pipeline, with layout fallback | Mistral OCR |
+|---|---|---|---|---|---|
+| text-layer PDFs (1,188 PDFs, 5,638 tests) | **87.0** | 87.0 | **89.0** | 88.9 | 77.4 |
+| — tables in those (922 tests) | **77.9** | 76.1 | **87.9** | 87.6 | 85.5 |
+| scans (134 PDFs, 984 tests) | **73.7** | 73.3 | **73.1** | 73.3 | 70.8 |
+| image-only PDFs (81 PDFs, 397 tests) | **77.4** | 77.7 | **78.2** | 78.5 | 75.3 |
+
+Every difference is inside the scorer's ±1–3.7 interval: the model is not deterministic under
+a full batch, and the pages are rasterised by different engines (`pdftoppm` there, `pdfium`
+here).
+
+Speed: **1.89 pages/s** for a whole page (the vendor pipeline: 2.2). With the fallback the
+detector is asked about every page whose answer has no table (1,210 of 1,403); with the
+detector on CPU (see below) the run took 0.90 pages/s, bound by the detector, which serves one
+page at a time.
+
+**Operating the model server.** Two faults appeared under a full batch, and both need handling
+outside this service:
+
+- **Do not share the GPU with the layout detector.** With PP-DocLayoutV3 on the same GPU as
+  vLLM, the engine died within minutes of a full batch, twice with `CUDA error: an illegal
+  memory access`, and twice hung. With the detector on CPU (`LAYOUT_DEVICE=cpu`), the same
+  1,403 pages ran with no fault. On CPU, raise `KB_OCR_LAYOUT_TIMEOUT_MS`: requests queue
+  behind the one-at-a-time detector, and at the 60 s default 714 of 1,204 timed out.
+- **A hung engine still answers `/health`.** vLLM's engine stopped generating with 35 requests
+  in flight while `/health` returned 200, so a restart policy never fired and every request
+  waited out its timeout. Watch progress, not health: restart the server when
+  `vllm:num_requests_running` is above zero and `vllm:generation_tokens_total` has not moved
+  for 90 s.
+
+## OCR offload (`ING-6`)
+
+The document-level "is this PDF scanned?" test is replaced, when a provider is configured, by a
+page router (`kb_extract::OcrRouter`). Each PDF page is decided on its own:
+
+| `KB_OCR_MODE` | What happens |
+|---|---|
+| `off` | Nothing is sent. Each page keeps its local text layer; the report says so. |
+| `hybrid` (default when a provider is configured) | A page is a scan when raster images cover ≥ `KB_OCR_SCAN_AREA` of it **and** it carries ≤ `KB_OCR_SCAN_TEXT` visible characters. Scan pages go to OCR; text pages keep their layer. |
+| `full` | Every page goes to OCR; the page's local text is its fallback. |
+
+`KB_OCR_MODE` unset means `Auto`: `hybrid` when an OCR provider is configured, `off` otherwise,
+which is byte-for-byte the behaviour before this feature (the layout chain and its whole-document
+fallback still handle the no-provider case). The scan test is per page and excludes text in the
+`invisible` render mode — an existing OCR layer does not make a scan look digital — because
+pdfium-render exposes `PdfPageTextObject::render_mode()`/`is_visible()`.
+
+**Providers.** The local chat adapter (`KB_OCR_BASE_URL`, `PageOcrExtractor`) reads **one
+rendered page image per request**. Mistral OCR (`KB_MISTRAL_OCR_KEY`, listed as `mistral` in
+`KB_LAYOUT_EXTRACTOR_ORDER`) reads **sub-PDFs of `KB_OCR_BATCH` pages**, built by pdfium copying
+pages into a new document; its figures are kept and re-homed to the document page. The local
+adapter wins when both are configured, so a local tier never sends a page to a paid service.
+
+**One page cache, one pool, one breaker.** Page results are cached in kb-cache namespace
+`ocr-page-v1`, keyed by SHA-256 over provider id, model, prompt, DPI and the page. For the image
+adapter the page's bytes are the rendered image; for a document adapter the page is identified by
+the **source document's SHA-256 and the page index**, because pdfium writes a random `/ID` into a
+saved sub-PDF and hashing that serialisation would miss on every run. Only successful, non-empty
+reads are stored, together with any figure crops the provider returned, so a re-upload does not
+lose a figure it already paid for. `KB_OCR_CONCURRENCY` is one semaphore shared by every document in the process.
+After `KB_OCR_BREAKER` consecutive *transient* failures (connection error, 429, 5xx after
+retries) the breaker stops sending for `KB_OCR_BREAKER_COOLDOWN_S`; pages in that window take
+their fallback. A 4xx does not open the breaker — it is a configuration mistake, not an outage.
+
+**What a lost page costs.** At most `KB_OCR_MAX_PAGES` pages per document go to OCR; the rest are
+listed in `skippedPages` and use the local text or a marker. A page that still fails after its
+retries keeps any local text it has (a `full` page usually does; a scan usually does not) or
+becomes `[page N could not be read]` in the content, and is listed in `failedPages`; the
+document is `ready`. If **no** page produced any text at all, the extraction fails with the
+provider's error, because indexing an empty document is worse than retrying it.
+`metadata.ocr` records `{mode, provider, pages, ocrPages, cachedPages, localPages, failedPages,
+skippedPages, breakerOpened}`, plus `layoutPages` and `layoutFailed` when the layout fallback is
+configured: the pages the detector answered for, and the pages it failed on. A degraded page is
+never cached.
+
+**Images and TIFF** take the same cache, pool and breaker when the provider is the image adapter
+(a TIFF is one page per image). With Mistral configured, image uploads keep the pre-existing
+vision path, because that client takes documents, not pictures.
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `KB_OCR_MODE` | `off`, `hybrid` or `full`; unset = auto | auto |
+| `KB_OCR_SCAN_AREA` | share of a page raster images must cover to be a scan | `0.90` |
+| `KB_OCR_SCAN_TEXT` | visible characters a scan page may carry | `50` |
+| `KB_OCR_BATCH` | pages per sub-PDF request to a document provider | `8` |
+| `KB_OCR_MAX_PAGES` | pages per document that may go to OCR | `300` |
+| `KB_OCR_BREAKER` | consecutive transient failures that open the breaker | `3` |
+| `KB_OCR_BREAKER_COOLDOWN_S` | how long the breaker stays open | `60` |
+
+**Status: mock-tested.** Routing counts (3 scanned pages among 23, 20 pages in 3 Mistral
+batches, a second run at 0 requests), the breaker, the page cap, markers and the all-failed
+error are covered by `rust/crates/kb-extract/tests/ocr_router.rs` against generated PDFs and a
+fake provider. No real OCR call was made and no live throughput target from the `ING-6` spec has
+been measured. PDF pages are created by pdfium **one at a time** in the router (only the HTTP
+requests run concurrently): parallel document creation in this libpdfium build produced empty or
+unreadable documents in tests.
+
+## Picture reading (`ING-5`)
+
+Every picture a reader of a document can see (a standalone upload, a picture in a
+Word/PowerPoint/Excel/ODF/EPUB file, a PDF figure crop, and with `KB_IMAGE_PDF=true`
+a PDF image object) is read at ingest by one vision-language model, which returns
+the picture's kind, a description and its visible text. The picture becomes a
+`figure` chunk with its asset key. On the local tiers the model is
+Qwen3-VL-2B-Instruct (Apache-2.0) under llama.cpp's server, the `vlm-cpu` or
+`vlm-gpu` compose service on port 8085 bare-metal; Cloud calls
+`nvidia/nemotron-3.5-super-vl` through OpenRouter.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `KB_IMAGES` | the visual stage on or off | `true` |
+| `KB_IMAGE_DESCRIBE_MODEL` | model name; empty means pictures are indexed by alt text and captions only | empty |
+| `KB_IMAGE_DESCRIBE_BASE_URL` | full chat-completions URL | OpenRouter |
+| `KB_IMAGE_DESCRIBE_API_KEY` | bearer token; `OPENROUTER_API_KEY` is used only for an OpenRouter URL | empty |
+| `KB_IMAGE_DESCRIBE_LANGUAGE` | language of the descriptions (use `Indonesian` for Indonesian corpora) | `English` |
+| `KB_IMAGE_DESCRIBE_CONCURRENCY` / `_TIMEOUT_MS` / `_MAX_TOKENS` / `_ATTEMPTS` / `_NO_REASONING` | throughput and retries | `2` / `120000` / `400` / `4` / `false` |
+| `KB_IMAGE_MIN_SIDE` / `KB_IMAGE_MIN_AREA` / `KB_IMAGE_MAX_ASPECT` | size filters for pictures inside documents | `48` / `16384` / `8` |
+| `KB_IMAGE_REPEAT_ORNAMENT` | a picture repeated this often in one document is page furniture | `3` |
+| `KB_IMAGE_MAX_PER_DOCUMENT` | pictures indexed per document | `100` |
+| `KB_IMAGE_PDF` | also read image objects in text-layer PDFs | `false` |
+
+Measured quality, speed and cost: `docs/eval-ab/images/README.md`.
+
+## Tables
+
+Tables are read as data, not flattened text (`TBL-1`, `docs/core/specs/tbl-1.md`). Extraction
+runs locally and needs no model:
+
+- **Spreadsheets** (`.xlsx`, `.xls`, `.ods`, through calamine): one grid per table region.
+  Blank rows and columns split regions, merged cells are spread across their span, hidden
+  sheets are skipped and named in a note, and a multi-level header is flattened with ` / `
+  (`2023 / Q1`). The title is a merged title row above the header, else the sheet name.
+  Cached formula values are used; a data row whose numeric cells are formulas goes into
+  `formula_rows`, the strongest evidence that it is a subtotal. Calamine exposes merges for
+  xlsx/xls but not ods; a package calamine cannot open (a minimal ODS without its manifest)
+  falls back to the ODF XML reader.
+- **CSV / TSV**: the delimiter is sniffed from the first line (`,` `;` tab `|`) and the first
+  row is the header.
+- **DOCX**: tables in document order, rendered in place as markdown. Empty cells are kept, so
+  a column stays aligned (`gridSpan` repeats a cell, a `vMerge` continue takes the cell
+  above), and the paragraph above the table is its title.
+- **Markdown pipe tables** from any text extractor (Mistral, MinerU, the OCR router, the PDF
+  text layer) are parsed in one post-pass. The line above is the title. A table that
+  continues on the next page is stitched when its header matches (or the continuation has
+  the same width), and a fingerprint (header plus first-row shape) repeated on at least half
+  the pages is dropped as furniture (a letterhead or signature block).
+- **Numbers** are read locale-aware: `1.234,5` and `1,234.5` are both 1234.5, `(1.234)` is
+  negative, `%` and `Rp` are units. A zero-padded digit string stays text, so a NIK or phone
+  number keeps its leading zeros. A cell that is `true`/`false` becomes a boolean and an ISO
+  date stays a date.
+- **Text**: a spreadsheet is no longer rendered as CSV. Spreadsheets, DOCX tables and markdown
+  tables all render as markdown, and a table larger than the chunk budget is split at row
+  boundaries with the header repeated in each piece. A retrieved chunk is therefore readable
+  without its neighbour.
+- **Manifest** (`kb_core::tables::build_manifest`): column kind and role (Quantity, Code,
+  Date, Identifier, Label), the unit from the header (never applied to values), up to ten
+  sample values for non-quantity columns, and derived rows. Formula-proven rows are `High`
+  confidence, a row labelled `Jumlah`/`Total`/`Rata-rata` is `Medium`, and a markdown/PDF
+  table, a ragged row or a stitched page is `Low`.
+
+## Ingest seats (`ING-6`)
+
+The ingest worker runs several documents at once, and each stage of the pipeline has a
+small pool of **seats**. A document holds a seat only while it is in that stage and
+gives it back on every exit path — success, failure or a panic. When a seat frees, the
+waiter whose job was **uploaded first** gets it, not the waiter that asked first: a
+one-page memo queued behind a 300-page scan is served as soon as a seat is free, not
+after the scan.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `KB_JOB_WORKERS` | documents in flight at once | `6` (Lite and Lite-en: `2`) |
+| `KB_INGEST_CONCURRENCY` | the old name for `KB_JOB_WORKERS`; still accepted, and it loses to `KB_JOB_WORKERS` when both are set | unset |
+| `KB_SEATS` | the stage widths: `extract=2,embed=4,store=2` | `extract=2,embed=4,store=2` |
+| `KB_WORKER_ENABLED` | run the worker in this process | `true` |
+
+The three stages are **extract** (local parsing, PDF splitting and rendering), **embed**
+(one document's embedding requests) and **store** (the vector upsert, the document row
+and the graph writes). `KB_SEATS` refuses a count of `0` and an unknown stage name at
+startup rather than running with a limit the operator did not ask for.
+
+The OCR and picture-description calls are **not** seats: they are process-wide pools of
+their own (`KB_OCR_CONCURRENCY`, `KB_IMAGE_DESCRIBE_CONCURRENCY`), and a document waiting
+on a model holds no stage seat. The extract seat still covers the whole extractor call
+while the parsers do their OCR inside the extraction; the OCR offload narrows it.
 
 ## The one-model-per-role rule
 
@@ -198,6 +441,15 @@ numbers and how to override a setting.
 | `KB_CAPTION_*` | endpoint of the chat LLM used as the captioner | — |
 | `KB_OCR_*` | local OCR endpoint, model, prompt, DPI, concurrency and limits | off (`KB_OCR_BASE_URL` unset) |
 | `KB_CACHE_DIR` | directory for content-addressed caches | unset: no cache |
+| `KB_JOB_WORKERS` | documents ingested at once (`ING-6`); `KB_INGEST_CONCURRENCY` is the old name | `6` (Lite: `2`) |
+| `KB_SEATS` | the ingest stage widths (`ING-6`): `extract=2,embed=4,store=2` | `extract=2,embed=4,store=2` |
+| `KB_MIN_SCORE` | relevance floor: reranker score, else dense cosine (a request's `minScore` overrides it) | unset: no floor |
+| `KB_ADAPTIVE_ARMS` | skip the arms a query's class cannot use (RET-5; a request's `adaptiveArms` overrides it); skipped arms are named in `stats.skippedArms` | `false` (every arm runs) |
+| `KB_TREE_ARM` | navigate a document's section outline for `structural` questions (DEC-4); chunks carry the `tree` arm and `stats.treeArm` | `false` |
+| `KB_TREE_ARM_WEIGHT` | RRF weight of the tree arm's list | `0.5` |
+| `KB_TREE_ARM_NODES` | outline nodes kept per query | `5` |
+| `KB_GLOBAL_ARM` | global community-summary arm (`DEC-5`) for aggregative queries; **a measured loss in `EVAL-3`**, needs `KB_GRAPH_STORE=pg` and a build from `kb-server communities build`. `KB_GLOBAL_ARM_COMMUNITIES` (3), `KB_GLOBAL_ARM_WEIGHT` (0.5) and `KB_GLOBAL_ARM_CHUNKS` (200) tune it | `false` |
+| `ENTITY_EXTRACTION_LLM_*` | chat model for `communities build` (the entity extractor's settings; `OPENROUTER_API_KEY` is the key fallback). The build is an operator command, prints a `chars/4` estimate, requires `--max-usd`, caches every summary under `KB_CACHE_DIR`, and never caches an empty answer. `KB_COMMUNITY_PRICE_INPUT`/`KB_COMMUNITY_PRICE_OUTPUT` price it | model `openai/gpt-4.1-nano`; prices from a table |
 
 A tier is a **preset**: it fills in role defaults; any explicit `KB_*` setting wins.
 `kb-server setup` checks the VRAM budget and refuses a combination that cannot fit next to
@@ -240,7 +492,8 @@ measurement (build order 5); the Desk / Studio / Station rerank widths are estim
 | `KB_EMBEDDING_INPUT_TYPE` | — | — | — | — | `true` |
 | `KB_EMBED_CONCURRENCY` | 1 | 2 | 4 | 8 | — |
 | `KB_EMBEDDING_BATCH_SIZE` | 16 | — | — | — | — |
-| `KB_INGEST_CONCURRENCY` | 1 | — | — | — | — |
+| `KB_INGEST_CONCURRENCY` | 2 | — (6) | — (6) | — (6) | — (6) |
+| `KB_SEATS` | — | — | — | — | — (the default `extract=2,embed=4,store=2`) |
 | `KB_ENTITY_EXTRACTION_ENABLED` | `false` | `false` | `false` | `false` | `false` (a paid LLM call per document; only written to the Postgres graph when `KB_GRAPH_STORE=pg`) |
 | `KB_RERANK_ENABLED` | `false` | `true` | `true` | `true` | `true` |
 | `KB_RERANK_PROVIDER` | — | `tei` | `vllm` | `vllm` | `cohere` |
@@ -248,8 +501,10 @@ measurement (build order 5); the Desk / Studio / Station rerank widths are estim
 | `KB_RERANK_MODEL` | — | `BAAI/bge-reranker-v2-m3` | `Qwen/Qwen3-VL-Reranker-2B` | `Qwen/Qwen3-VL-Reranker-8B` | `voyageai/rerank-2.5` |
 | `KB_RERANK_CANDIDATE_LIMIT` | — | 10 | 20 | 30 | 20 |
 | `KB_OCR_BASE_URL` | `http://127.0.0.1:8083/v1/chat/completions` | same | same | same | — (Mistral OCR when `KB_MISTRAL_OCR_KEY` is set) |
-| `KB_OCR_MODEL` | `PaddlePaddle/PP-OCRv6` | `PaddlePaddle/PaddleOCR-VL-1.6` | same as desk | same as desk | — |
-| `KB_OCR_CONCURRENCY` | 1 | — (2) | 4 | 8 | — |
+| `KB_OCR_MODEL` | `rantai-kb/ocr-cpu` | `xiaomi-research/Xiaomi-OCR-0` | same as desk | same as desk | — |
+| `KB_OCR_RECIPE` | — (`paddle`) | `xiaomi` | `xiaomi` | `xiaomi` | — |
+| `KB_OCR_DPI` | 110 | — (150) | — (150) | — (150) | — |
+| `KB_OCR_CONCURRENCY` | 2 | 16 | 32 | 32 | — |
 | `KB_PAGE_EMBEDDING_MODEL` | — | — | `Qwen/Qwen3-VL-Embedding-2B` | `Qwen/Qwen3-VL-Embedding-8B` | `voyageai/voyage-multimodal-3.5` |
 | `KB_PAGE_EMBEDDING_FORMAT` | — | — | `vllm` | `vllm` | — (OpenRouter) |
 | `KB_PAGE_EMBEDDING_BASE_URL` | — | — | `http://127.0.0.1:8084/v1/embeddings` | same | — (OpenRouter) |
@@ -290,8 +545,10 @@ On 2 cores it ingests ViDoRe HR at 6.43 pages/s (page nDCG@10 0.517) against Lit
   and **pages** with Qwen3-VL-Embedding in a separate Qdrant vector, fused at search time. One
   shared text+page space, as the role table puts it, would need the VL model to embed text too;
   that is unmeasured, so it is not the preset.
-- Station runs PaddleOCR-VL-1.6 like Studio. MinerU2.5-Pro stays a documented alternative
-  (`KB_LAYOUT_EXTRACTOR_ORDER=sidecar` with a MinerU sidecar); no preset selects it.
+- Every GPU tier runs Xiaomi-OCR-0, the best measured local OCR (`docs/eval-ab/ocr-tiers`):
+  PaddleOCR-VL-1.6 scored 9.4 on tables read whole-page, LightOnOCR-2-1B was too slow at a
+  Desk-sized share. MinerU2.5-Pro and PaddleOCR-VL stay documented alternatives; no preset
+  selects them.
 - bge is a poor page reranker (`docs/eval-ab/vidore3-hr-en-night`, "bge should not rerank
   pages"), so every local tier sets `KB_PAGE_RERANK=false`; it only matters when the page arm
   is on.
@@ -408,7 +665,7 @@ Status as of 2026-10-24:
      Answers are cached on disk under `KB_CACHE_DIR`, keyed by model, prompt version,
      reasoning flag and image hash; a page with no visuals (`NONE`) is cached too. Effect on
      retrieval is not measured yet.
-5. Lite on exactly 2 cores (`taskset`): ✅ small-embedder bake-off (2026-10-24, `docs/eval-ab/lite-2core`): multilingual-e5-small, 0.802 nDCG@10 on MIRACL-id-50, ~2 min ingest, 42 ms search; Qwen3-0.6B ties on quality but is 41× slower to ingest. The embedder must be capped to 1 thread or it starves the server. PP-OCRv6 not done.
+5. Lite on exactly 2 cores (`taskset`): ✅ small-embedder bake-off (2026-10-24, `docs/eval-ab/lite-2core`): multilingual-e5-small, 0.802 nDCG@10 on MIRACL-id-50, ~2 min ingest, 42 ms search; Qwen3-0.6B ties on quality but is 41× slower to ingest. The embedder must be capped to 1 thread or it starves the server. OCR on 2 cores: ✅ 2026-11-16 (`docs/eval-ab/ocr-tiers`): the CPU document sidecar reads 0.69 pages/s end to end.
 6. ✅ `kb-server setup` (2026-10-30): hardware detection, tier suggestion, VRAM budget and
    licence gates, `.env`/`.tier` writing, `--check` probes. ❌ Desk / Studio / Station on
    real hardware: still no NVIDIA box, so those tiers are unit-tested and

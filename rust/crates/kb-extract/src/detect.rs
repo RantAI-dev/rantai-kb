@@ -10,7 +10,7 @@ pub enum SupportedFileType {
     Markdown,
     /// `.pdf`
     Pdf,
-    /// `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.heic`
+    /// `.png`, `.jpg`, `.jpeg`, `.gif`, `.webp`, `.heic`, `.tif`, `.tiff`
     Image,
     /// Office, ebook, RTF, OpenDocument, 3D model (`.docx` … `.glb`)
     Document,
@@ -20,7 +20,9 @@ pub enum SupportedFileType {
 
 const MARKDOWN_EXTENSIONS: &[&str] = &[".md", ".markdown"];
 const PDF_EXTENSIONS: &[&str] = &[".pdf"];
-const IMAGE_EXTENSIONS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic"];
+const IMAGE_EXTENSIONS: &[&str] = &[
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".tif", ".tiff",
+];
 const DOCUMENT_EXTENSIONS: &[&str] = &[
     ".docx", ".xlsx", ".pptx", ".rtf", ".epub", ".doc", ".xls", ".ppt", ".odt", ".ods", ".gltf",
     ".glb",

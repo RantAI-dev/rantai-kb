@@ -21,6 +21,13 @@ pub enum ChunkType {
     /// A whole page, as an image vector in the page-image index
     /// (`crate::pages`). Never stored in the text index.
     Page,
+    /// A table's schema and sample values (`TBL-1`): title, caption, sheet or
+    /// page, and every header with its kind, role and unit. Retrieval finds the
+    /// table through this unit; `metadata.tableId` names the table to query.
+    TableSummary,
+    /// One table row as `Header: value; …` (`TBL-1`), indexed for tables of at
+    /// most 60 rows so a key/value lookup lands on the row itself.
+    TableRow,
 }
 
 impl ChunkType {
@@ -35,6 +42,8 @@ impl ChunkType {
             Some("heading") => Self::Heading,
             Some("figure") => Self::Figure,
             Some("page") => Self::Page,
+            Some("table_summary") => Self::TableSummary,
+            Some("table_row") => Self::TableRow,
             _ => Self::Text,
         }
     }
@@ -50,6 +59,8 @@ impl ChunkType {
             Self::Heading => "heading",
             Self::Figure => "figure",
             Self::Page => "page",
+            Self::TableSummary => "table_summary",
+            Self::TableRow => "table_row",
         }
     }
 
@@ -70,6 +81,10 @@ pub struct ChunkMetadata {
     pub asset_key: Option<String>,
     pub anchor_chunk_index: Option<u32>,
     pub contextual_prefix: Option<String>,
+    /// The table this chunk describes or is a row of (`TBL-1`).
+    /// Additive: absent for every chunk that is not a table unit.
+    #[serde(default, rename = "tableId")]
+    pub table_id: Option<String>,
 }
 
 /// A chunk returned by the chunk store. The store is responsible for filling
@@ -124,7 +139,80 @@ pub struct JobRecord {
     pub attempt: i32,
     /// Job parameters written at enqueue time (title, categories, figure mode…).
     pub params: Option<serde_json::Value>,
+    /// When the job was created, in epoch milliseconds. `None` when the
+    /// adapter does not report it.
+    ///
+    /// The ingest seats serve the oldest upload first, so a small file never
+    /// waits behind a big one (`ING-6`). That order needs the upload time,
+    /// which the claim already sorts by; the worker reads it from here.
+    pub created_at: Option<i64>,
 }
+
+/// A stage seat the ingest worker lends to an extractor (`ING-6`).
+///
+/// The worker holds its `extract` seat while a document is read locally. An
+/// extractor that is about to wait on a remote service (OCR, a layout
+/// server) calls [`SeatRelease::release`] first, so a document waiting at OCR
+/// holds no seat and the local work of other documents goes on. The seat is
+/// type-erased: this crate does not know the worker's seat type, only that it
+/// is given back when dropped. Clones share the seat, so releasing through any
+/// clone releases it once.
+#[derive(Clone, Default)]
+pub struct SeatRelease(Option<std::sync::Arc<HeldSeat>>);
+
+/// The slot a lent seat sits in until it is given back.
+type HeldSeat = std::sync::Mutex<Option<Box<dyn Send>>>;
+
+impl SeatRelease {
+    /// A handle holding `seat` until [`release`](Self::release) or the last
+    /// clone is dropped.
+    #[must_use]
+    pub fn holding(seat: impl Send + 'static) -> Self {
+        Self(Some(std::sync::Arc::new(std::sync::Mutex::new(Some(
+            Box::new(seat),
+        )))))
+    }
+
+    /// Give the seat back now. Idempotent; a no-op when nothing is held.
+    pub fn release(&self) {
+        if let Some(slot) = &self.0 {
+            let seat = slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            drop(seat);
+        }
+    }
+
+    /// Whether a seat is still held through this handle.
+    #[must_use]
+    pub fn is_held(&self) -> bool {
+        self.0.as_ref().is_some_and(|slot| {
+            slot.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+        })
+    }
+}
+
+impl std::fmt::Debug for SeatRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SeatRelease")
+            .field("held", &self.is_held())
+            .finish()
+    }
+}
+
+/// A seat is not part of what the options *mean*: two option sets that differ
+/// only in the seat they carry ask for the same extraction (and the same cache
+/// entry).
+impl PartialEq for SeatRelease {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for SeatRelease {}
 
 /// Options passed to [`Extractor::extract_with_options`](crate::Extractor::extract_with_options).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,6 +224,11 @@ pub struct ExtractionOptions {
     /// Specific document type hint (e.g. "handwritten", "table", "form", "printed_text").
     #[serde(default)]
     pub document_type: Option<String>,
+    /// The worker's `extract` seat, released by an extractor before it waits
+    /// on a remote service (`ING-6`). Never serialised: it is not part of the
+    /// cache key.
+    #[serde(skip)]
+    pub seat: SeatRelease,
 }
 
 /// Result of running an [`Extractor`](crate::Extractor) over a stored file.
@@ -156,6 +249,11 @@ pub struct ExtractionResult {
     pub used_ocr: bool,
     /// Figures the layout parser found. Empty for text-only formats.
     pub figures: Vec<ExtractedFigure>,
+    /// Tables found as grids (`TBL-1`): spreadsheet sheets, DOCX tables,
+    /// markdown tables from OCR/layout output. Empty when none were found or
+    /// the extractor does not read tables.
+    #[serde(default)]
+    pub tables: Vec<kb_core::tables::TableGrid>,
     /// Per-page reading-order blocks, with figures inline at their own
     /// position, so a figure can be anchored to the text chunk it belongs to
     /// instead of to whatever caption matched.
@@ -163,6 +261,17 @@ pub struct ExtractionResult {
     /// `(page, text)` pairs in document order, so each chunk can carry the
     /// page it came from.
     pub page_map: Option<Vec<PageText>>,
+    /// The document's section hierarchy, when the format has one (PDF
+    /// bookmarks or numbered headings). `None` for formats with no structure
+    /// concept; an empty outline with [`OutlineMethod::None`] is a PDF that was
+    /// examined and had neither. ADDITIVE (DEC-4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outline: Option<kb_core::tree::Outline>,
+    /// What the OCR offload did for this document (ING-6): how many pages went
+    /// to the provider, how many came from the cache, and which pages could not
+    /// be read. `None` for a format that never goes to OCR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr: Option<crate::ocr::OcrReport>,
     /// Set when extraction failed; the caller must abort rather than index the
     /// empty content.
     pub error: Option<String>,
@@ -279,6 +388,16 @@ pub enum ProvenanceArm {
     Graph,
     /// Brought in by the page-image arm: its page matched the query as an image.
     Page,
+    /// Brought in by the tree arm (`DEC-4`): the query names a place in a
+    /// document, the outline scored the section, and a chunk on that section's
+    /// pages was fused into the candidate list.
+    Tree,
+    /// Brought in by the global (graph community) arm: a community summary
+    /// matched the query, and this chunk is one of that community's members.
+    ///
+    /// Appended last so every earlier variant keeps its position in the
+    /// `Ord`-derived arm list; the wire spelling is `global`.
+    Global,
 }
 
 /// Which arms produced a chunk, and what each of them said about it.
@@ -404,6 +523,23 @@ pub struct SearchHit {
     /// the honest answer for a hit an adapter fetched rather than ranked.
     #[serde(default)]
     pub retrieval: Option<RetrievalProvenance>,
+    /// Raw dense-arm cosine similarity, when the dense arm ranked this hit.
+    ///
+    /// Deliberately separate from [`Self::similarity`]: that field is `0.0` for
+    /// a BM25-only hit and falls back to the fused (rank-only) score for a hit
+    /// a store fetched without an arm. A relevance floor needs to tell "no
+    /// dense evidence" apart from "dense similarity 0.0", or it either keeps
+    /// every keyword hit or drops scores that were never computed (RET-2).
+    #[serde(default)]
+    pub dense_score: Option<f32>,
+    /// Cross-encoder relevance score, when a reranker scored this hit.
+    ///
+    /// `None` when the reranker did not run, failed or did not return this hit.
+    /// The pipeline used to throw this score away after ordering; the floor
+    /// needs it because a reranker score is comparable across queries and the
+    /// fused RRF score is not.
+    #[serde(default)]
+    pub rerank_score: Option<f32>,
 }
 
 impl SearchHit {
@@ -532,6 +668,12 @@ pub struct NewDocument {
     pub mime_type: Option<String>,
     pub status: String,
     pub external_ref: Option<String>,
+    /// Initial JSONB `Document.metadata`. Additive (`RET-4`): the upload route
+    /// accepts an optional JSON object so a caller can set the fields that
+    /// metadata filters (`RET-3`) and boosts (`RET-4`) read, e.g.
+    /// `{"effectiveDate": "2025-03-01", "authority": 0.9}`.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// Metadata update patch for a document.

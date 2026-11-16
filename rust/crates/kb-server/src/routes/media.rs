@@ -16,12 +16,32 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use kb_ports::{EntityView, RelationView};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::auth::Authed;
-use crate::error::ApiError;
+use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
 
-/// `GET /v1/documents/:id/raw` — streams the stored original.
+/// Download the stored original.
+///
+/// `GET /v1/documents/{id}/raw` — streams the stored original. The bytes come
+/// back with the document's own MIME type (or `application/octet-stream` when
+/// the store has none).
+#[utoipa::path(
+    get,
+    path = "/v1/documents/{id}/raw",
+    tag = "media",
+    params(("id" = String, Path, description = "The document's id.")),
+    responses(
+        (status = 200, description = "The stored original, as bytes", content_type = "application/octet-stream", body = String),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 404, description = "No such document is visible to this key, or it has no stored file", body = ErrorBody),
+        (status = 500, description = "The store could not be read", body = ErrorBody),
+        (status = 502, description = "The stored file could not be loaded", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn get_document_raw(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -58,13 +78,36 @@ pub async fn get_document_raw(
     ))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct AssetQuery {
-    /// Storage key of the figure crop.
+    /// The storage key of the figure crop, as `assetKey` in the document's
+    /// figures.
     pub key: Option<String>,
 }
 
-/// `GET /v1/documents/:id/assets?key=…` — streams one figure crop.
+/// Download one figure crop.
+///
+/// `GET /v1/documents/{id}/assets?key=…` — streams one figure crop. The key
+/// must live under the document's own asset prefix; anything else is the same
+/// 404 an unknown document gives, so a key cannot be probed.
+#[utoipa::path(
+    get,
+    path = "/v1/documents/{id}/assets",
+    tag = "media",
+    params(
+        ("id" = String, Path, description = "The document's id."),
+        AssetQuery
+    ),
+    responses(
+        (status = 200, description = "The figure's bytes", content_type = "application/octet-stream", body = String),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 404, description = "No such document, or no such asset in it", body = ErrorBody),
+        (status = 500, description = "The store could not be read", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn get_document_asset(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,
@@ -133,28 +176,56 @@ fn stream_bytes(content_type: &str, file_name: Option<&str>, bytes: Vec<u8>) -> 
     res
 }
 
-#[derive(Debug, Serialize)]
+/// The body `GET /v1/documents/{id}/intelligence` answers with.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct IntelligenceResponse {
+    /// The entities extracted for the document.
+    #[schema(value_type = Vec<crate::openapi::mirrors::EntityView>)]
     pub entities: Vec<EntityView>,
+    /// The relations extracted for the document.
+    #[schema(value_type = Vec<crate::openapi::mirrors::RelationView>)]
     pub relations: Vec<RelationView>,
+    /// `processing`, `failed` or `completed`.
     pub status: &'static str,
+    /// How much was found.
     pub stats: IntelligenceStats,
 }
 
-#[derive(Debug, Serialize)]
+/// The counts of what the extraction found.
+#[derive(Debug, Serialize, ToSchema)]
 pub struct IntelligenceStats {
+    /// How many entities were found.
     #[serde(rename = "totalEntities")]
     pub total_entities: usize,
+    /// How many relations were found.
     #[serde(rename = "totalRelations")]
     pub total_relations: usize,
+    /// How many distinct entity kinds were found.
     #[serde(rename = "entityTypes")]
     pub entity_types: usize,
+    /// How many distinct relation kinds were found.
     #[serde(rename = "relationTypes")]
     pub relation_types: usize,
 }
 
-/// `GET /v1/documents/:id/intelligence` — entities and relations extracted for
-/// a document.
+/// The entities and relations extracted for a document.
+///
+/// `GET /v1/documents/{id}/intelligence` — entities and relations extracted
+/// for a document.
+#[utoipa::path(
+    get,
+    path = "/v1/documents/{id}/intelligence",
+    tag = "media",
+    params(("id" = String, Path, description = "The document's id.")),
+    responses(
+        (status = 200, description = "The document's entities and relations", body = IntelligenceResponse),
+        (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
+        (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
+        (status = 404, description = "No such document is visible to this key", body = ErrorBody),
+        (status = 500, description = "The store could not be read", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
 pub async fn get_document_intelligence(
     State(state): State<Arc<AppState>>,
     Authed(auth): Authed,

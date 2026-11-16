@@ -7,6 +7,7 @@ use kb_engine::{RetrievalOutcome, timing::StageTimings};
 use kb_ports::{ProvenanceArm, RetrievalProvenance, SearchHit};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// Parse a request body the way the TypeScript routes do: `request.json()`
 /// wrapped in `.catch(() => ({}))`, so a malformed body becomes an empty object
@@ -76,7 +77,7 @@ fn null_if_empty(value: Option<String>) -> Option<String> {
     value.filter(|s| !s.is_empty())
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, ToSchema)]
 pub struct SearchRequestDto {
     /// Left as raw JSON: the TypeScript route rejects a non-string query with
     /// its own 400, which a typed field would turn into a parser error.
@@ -89,11 +90,38 @@ pub struct SearchRequestDto {
     #[serde(rename = "documentIds", default)]
     pub document_ids: Option<Vec<String>>,
     pub category: Option<String>,
+    /// Additive (`RET-3`): only documents whose `Document.externalRef` is one
+    /// of these. An explicit empty list selects nothing.
+    #[serde(rename = "externalRefs", default)]
+    pub external_refs: Option<Vec<String>>,
+    /// Additive (`RET-3`): only documents whose JSONB metadata `language` key
+    /// equals this value.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Additive (`RET-3`): top-level JSONB metadata predicates. Kept untyped
+    /// so an invalid key or a non-scalar value is a 400 from validation rather
+    /// than a deserialiser 422.
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
     pub hybrid: Option<bool>,
     pub format: Option<String>,
+    /// Optional relevance floor for this request (RET-2). Overrides the
+    /// server's `KB_MIN_SCORE`; absent means "use the server default" (which
+    /// is unset unless an operator configured one).
+    #[serde(rename = "minScore", default)]
+    pub min_score: Option<f32>,
+    /// Additive (`RET-4`): optional recency/authority boosts. Kept untyped so
+    /// a malformed value is this route's 400, not a deserialiser 422.
+    #[serde(default)]
+    pub boost: Option<serde_json::Value>,
+    /// Per-request adaptive arm choice (RET-5). `Some(true)`/`Some(false)`
+    /// overrides the server's `KB_ADAPTIVE_ARMS`; absent means "use the server
+    /// default", which is off.
+    #[serde(rename = "adaptiveArms", default)]
+    pub adaptive_arms: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct SearchResponseDto {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub chunks: Option<Vec<ChunkDto>>,
@@ -109,6 +137,20 @@ pub struct SearchResponseDto {
     pub note: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub degrades: Vec<String>,
+    /// Additive (`TBL-1`): the tables belonging to the documents this answer
+    /// named, so a caller can go straight to `POST /v1/tables/{id}/query`
+    /// without a second lookup. Omitted when there are none.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tables: Vec<TableRefDto>,
+}
+
+/// One table named by a search answer (`TBL-1`). Additive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TableRefDto {
+    pub table_id: String,
+    pub title: Option<String>,
+    pub document_id: String,
 }
 
 /// The `stats` object of a search response.
@@ -125,7 +167,7 @@ pub struct SearchResponseDto {
 /// microsecond resolution: a query-cache hit and a 0.4 ms arm are both "0 ms"
 /// once rounded to an integer, and the difference between them is the whole
 /// reason this exists.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct SearchStatsDto {
     /// Route entry to just before serialisation, in milliseconds.
     #[serde(rename = "totalTimeMs")]
@@ -150,6 +192,97 @@ pub struct SearchStatsDto {
     pub total_results: usize,
     #[serde(rename = "stageTimingsMs")]
     pub stage_timings_ms: StageTimingsDto,
+    /// Which comparable score the relevance floor used (`"rerank"` or
+    /// `"dense"`, ADDITIVE RET-2). Absent when no floor ran, so an old client
+    /// sees exactly the Bun shape.
+    #[serde(
+        rename = "floorScoreKind",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub floor_score_kind: Option<String>,
+    /// How many hits the floor removed. Absent when no floor ran.
+    #[serde(
+        rename = "floorDropped",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub floor_dropped: Option<usize>,
+    /// Additive (`RET-4`): what a recency/authority boost applied. Absent when
+    /// the request did not ask for one, so an old client's shape is unchanged.
+    #[serde(rename = "boost", skip_serializing_if = "Option::is_none", default)]
+    pub boost: Option<BoostStatsDto>,
+    /// The question's class (`"exact"`, `"factual"`, `"structural"`,
+    /// `"relational"`, `"aggregative"`, `"topical"`). ADDITIVE RET-5; present
+    /// only when adaptive arm choice ran. Absent on a default search so an old
+    /// client sees exactly the earlier shape.
+    #[serde(
+        rename = "queryClass",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub query_class: Option<String>,
+    /// The arms adaptive mode did not run, each with the class's reason
+    /// (`[{"arm":"pageImage","reason":"exact query"}]`). Empty only when the
+    /// plan skipped nothing or a fallback ran the full plan.
+    #[serde(
+        rename = "skippedArms",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub skipped_arms: Option<Vec<SkippedArmDto>>,
+    /// True when the adaptive plan returned nothing and the full plan was run
+    /// once more. Present only when adaptive mode ran.
+    #[serde(
+        rename = "armPlanFallback",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub arm_plan_fallback: Option<bool>,
+    /// Additive (`DEC-4`): what the tree arm did. `{"nodes": n, "pages": n}`.
+    /// Absent unless the arm ran for a structural query and found something, so
+    /// a default search keeps exactly the earlier shape.
+    #[serde(rename = "treeArm", skip_serializing_if = "Option::is_none", default)]
+    pub tree_arm: Option<TreeArmStatsDto>,
+    /// Additive (`DEC-5`): what the global community arm did. Present only when
+    /// the arm ran (`KB_GLOBAL_ARM` on and an aggregative query), so a server
+    /// with the flag off answers exactly the earlier shape. `communities: 0`
+    /// means the tenant has no community set — the arm had nothing to say, and
+    /// that is not a degrade.
+    #[serde(rename = "globalArm", skip_serializing_if = "Option::is_none", default)]
+    pub global_arm: Option<GlobalArmStatsDto>,
+}
+
+/// `stats.treeArm`: outline nodes the query scored and the distinct pages the
+/// arm read. Not a latency figure; the counts say how much structure the
+/// question actually reached.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct TreeArmStatsDto {
+    pub nodes: usize,
+    pub pages: usize,
+}
+
+/// `stats.globalArm`: the communities selected and the chunks contributed.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct GlobalArmStatsDto {
+    pub communities: usize,
+    pub chunks: usize,
+}
+
+/// `stats.boost`: how many returned hits carried a usable field for each
+/// requested boost. A hit without the field kept its base relevance and is
+/// not counted; this is not an error count.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct BoostStatsDto {
+    pub recency: usize,
+    pub authority: usize,
+}
+
+/// One arm adaptive mode skipped, as serialised in `stats.skippedArms`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+pub struct SkippedArmDto {
+    pub arm: String,
+    pub reason: String,
 }
 
 /// The per-stage breakdown, in milliseconds.
@@ -158,7 +291,7 @@ pub struct SearchStatsDto {
 /// after another and add up to no more than [`SearchStatsDto::total_time_ms`].
 /// `detail` is the overlapping part — the query embed and the two arms all
 /// happen inside `arms`, so they are reported, never summed with it.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StageTimingsDto {
     /// `build_scope` in Postgres: which documents this caller may see.
@@ -186,7 +319,7 @@ pub struct StageTimingsDto {
 }
 
 /// Measurements that overlap other stages and so are not part of the sum.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StageDetailDto {
     /// What the engine spent inside `execute_pipeline`.
@@ -205,6 +338,10 @@ pub struct StageDetailDto {
     /// The graph arm, end to end: seed lookup, scoped-graph load or cache hit,
     /// the walk, and the chunk fetch it needs to fuse.
     pub graph_arm: f64,
+    /// The global (graph community) arm (`DEC-5`): the scoped community read,
+    /// the BM25 selection and the scoped chunk fetch. Zero when the flag is off
+    /// or the query is not aggregative.
+    pub global_arm: f64,
     /// The page-image arm's query embed and page search, concurrent with the
     /// text arms.
     pub page_arm: f64,
@@ -291,6 +428,7 @@ impl StageDetailDto {
             keyword_arm: round_ms(self.keyword_arm),
             entity_arm: round_ms(self.entity_arm),
             graph_arm: round_ms(self.graph_arm),
+            global_arm: round_ms(self.global_arm),
             page_arm: round_ms(self.page_arm),
             vision_rerank: round_ms(self.vision_rerank),
             scope_check: round_ms(self.scope_check),
@@ -308,6 +446,7 @@ impl From<&StageTimings> for StageDetailDto {
             keyword_arm: t.keyword_arm_ms,
             entity_arm: t.entity_arm_ms,
             graph_arm: t.graph_arm_ms,
+            global_arm: t.global_arm_ms,
             page_arm: t.page_arm_ms,
             vision_rerank: t.vision_rerank_ms,
             scope_check: t.scope_check_ms,
@@ -315,7 +454,7 @@ impl From<&StageTimings> for StageDetailDto {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct SourceDto {
     #[serde(rename = "documentId")]
     pub document_id: Option<String>,
@@ -337,9 +476,10 @@ pub struct SourceDto {
 /// before diffing a Bun answer against a Rust one, because a field only one
 /// implementation produces is not a divergence to fix — see
 /// `docs/rust-cutover.md`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct RetrievalDto {
     /// The arms, in a canonical order: `dense`, `sparse`, `neighbour`, `figure`.
+    #[schema(value_type = Vec<crate::openapi::mirrors::ProvenanceArm>)]
     pub arms: Vec<ProvenanceArm>,
     #[serde(rename = "denseRank", skip_serializing_if = "Option::is_none")]
     pub dense_rank: Option<u32>,
@@ -347,6 +487,12 @@ pub struct RetrievalDto {
     pub sparse_rank: Option<u32>,
     #[serde(rename = "fusedScore", skip_serializing_if = "Option::is_none")]
     pub fused_score: Option<f32>,
+    /// The cross-encoder score, when a reranker scored this chunk (ADDITIVE
+    /// RET-2). Omitted when no reranker ran, so the no-rerank response is
+    /// unchanged. It exists so a floor calibration can sweep thresholds
+    /// offline against the same score the server's floor uses.
+    #[serde(rename = "rerankScore", skip_serializing_if = "Option::is_none")]
+    pub rerank_score: Option<f32>,
 }
 
 impl From<RetrievalProvenance> for RetrievalDto {
@@ -361,11 +507,12 @@ impl From<RetrievalProvenance> for RetrievalDto {
             dense_rank: p.dense_rank,
             sparse_rank: p.sparse_rank,
             fused_score: p.fused_score,
+            rerank_score: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
 pub struct ChunkDto {
     pub id: String,
     pub content: String,
@@ -392,6 +539,17 @@ pub struct ChunkDto {
     /// rather than null, so a caller can tell "no arms" from "old server".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retrieval: Option<RetrievalDto>,
+    /// Additive (`TBL-1`): the table a `table_summary`/`table_row` hit belongs
+    /// to. Absent for every other chunk type.
+    #[serde(rename = "tableId", skip_serializing_if = "Option::is_none", default)]
+    pub table_id: Option<String>,
+    /// Additive (`TBL-1`): that table's title, when the answer could resolve it.
+    #[serde(
+        rename = "tableTitle",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub table_title: Option<String>,
 }
 
 impl SearchResponseDto {
@@ -407,56 +565,116 @@ impl SearchResponseDto {
             stats: None,
             note: None,
             degrades: Vec::new(),
+            tables: Vec::new(),
         }
     }
 }
 
 impl From<RetrievalOutcome> for SearchResponseDto {
     fn from(outcome: RetrievalOutcome) -> Self {
-        let vector_results = outcome.chunks.iter().filter(|h| !h.is_bm25).count();
-        let total_results = outcome.chunks.len();
-        let chunks: Vec<ChunkDto> = outcome.chunks.into_iter().map(ChunkDto::from).collect();
-        let sources = outcome.sources.into_iter().map(SourceDto::from).collect();
-        let degrades = outcome
-            .degrades
+        let RetrievalOutcome {
+            chunks: outcome_chunks,
+            sources: outcome_sources,
+            context: outcome_context,
+            degrades: outcome_degrades,
+            note: outcome_note,
+            floor: outcome_floor,
+            boost: outcome_boost,
+            adaptive: outcome_adaptive,
+            tree: outcome_tree,
+            global_arm: outcome_global_arm,
+            timings: outcome_timings,
+        } = outcome;
+        let vector_results = outcome_chunks.iter().filter(|h| !h.is_bm25).count();
+        let total_results = outcome_chunks.len();
+        let chunks: Vec<ChunkDto> = outcome_chunks.into_iter().map(ChunkDto::from).collect();
+        let sources = outcome_sources.into_iter().map(SourceDto::from).collect();
+        let degrades = outcome_degrades
             .into_iter()
             .map(|d| d.label().to_string())
             .collect();
+        let (floor_score_kind, floor_dropped) = outcome_floor.map_or((None, None), |floor| {
+            (
+                Some(floor.score_kind.as_str().to_string()),
+                Some(floor.dropped),
+            )
+        });
+        let (query_class, skipped_arms, arm_plan_fallback) =
+            outcome_adaptive.map_or((None, None, None), |adaptive| {
+                (
+                    Some(adaptive.class.as_str().to_string()),
+                    Some(
+                        adaptive
+                            .skipped_arms
+                            .into_iter()
+                            .map(|skipped| SkippedArmDto {
+                                arm: skipped.arm.as_str().to_string(),
+                                reason: skipped.reason.to_string(),
+                            })
+                            .collect(),
+                    ),
+                    Some(adaptive.arm_plan_fallback),
+                )
+            });
         // The route adds its own stages (scope build, serialisation) and the
         // total afterwards; what the engine knows goes in here.
         let stats = SearchStatsDto {
-            total_time_ms: outcome.timings.total_ms,
-            embedding_time_ms: outcome.timings.query_embed_ms,
-            vector_search_time_ms: outcome.timings.vector_arm_ms,
-            entity_search_time_ms: outcome.timings.entity_arm_ms,
+            total_time_ms: outcome_timings.total_ms,
+            embedding_time_ms: outcome_timings.query_embed_ms,
+            vector_search_time_ms: outcome_timings.vector_arm_ms,
+            entity_search_time_ms: outcome_timings.entity_arm_ms,
             graph_search_time_ms: 0.0,
-            fusion_time_ms: outcome.timings.fusion_ms,
+            fusion_time_ms: outcome_timings.fusion_ms,
             vector_results,
             entity_results: 0,
             graph_results: 0,
             total_results,
             stage_timings_ms: StageTimingsDto {
-                expand: outcome.timings.expand_ms,
-                arms: outcome.timings.arms_ms,
-                enrich: outcome.timings.enrich_ms,
-                fusion: outcome.timings.fusion_ms,
-                rerank: outcome.timings.rerank_ms,
-                pages: outcome.timings.pages_ms,
-                neighbours: outcome.timings.neighbours_ms,
-                figures: outcome.timings.figures_ms,
-                context: outcome.timings.context_ms,
-                detail: StageDetailDto::from(&outcome.timings),
+                expand: outcome_timings.expand_ms,
+                arms: outcome_timings.arms_ms,
+                enrich: outcome_timings.enrich_ms,
+                fusion: outcome_timings.fusion_ms,
+                rerank: outcome_timings.rerank_ms,
+                pages: outcome_timings.pages_ms,
+                neighbours: outcome_timings.neighbours_ms,
+                figures: outcome_timings.figures_ms,
+                context: outcome_timings.context_ms,
+                detail: StageDetailDto::from(&outcome_timings),
                 ..StageTimingsDto::default()
             },
+            floor_score_kind,
+            floor_dropped,
+            boost: outcome_boost.map(BoostStatsDto::from),
+            query_class,
+            skipped_arms,
+            arm_plan_fallback,
+            tree_arm: outcome_tree.map(|tree| TreeArmStatsDto {
+                nodes: tree.nodes,
+                pages: tree.pages,
+            }),
+            global_arm: outcome_global_arm.map(|stats| GlobalArmStatsDto {
+                communities: stats.communities,
+                chunks: stats.chunks,
+            }),
         };
         SearchResponseDto {
             chunks: Some(chunks),
             sources: Some(sources),
-            context: Some(outcome.context),
+            context: Some(outcome_context),
             results: None,
             stats: Some(stats),
-            note: None,
+            note: outcome_note,
             degrades,
+            tables: Vec::new(),
+        }
+    }
+}
+
+impl From<kb_engine::BoostStats> for BoostStatsDto {
+    fn from(stats: kb_engine::BoostStats) -> Self {
+        Self {
+            recency: stats.recency,
+            authority: stats.authority,
         }
     }
 }
@@ -482,6 +700,7 @@ impl From<SearchHit> for ChunkDto {
                 Some(Some(hit.chunk.chunk_type.as_storage().to_string())), // vector hit serializes chunkType: "text"
             )
         };
+        let rerank_score = hit.rerank_score;
         ChunkDto {
             id: chunk_id_for_client(&hit.chunk.id.0),
             content: hit.chunk.content,
@@ -496,7 +715,13 @@ impl From<SearchHit> for ChunkDto {
             asset_key,
             page,
             chunk_type,
-            retrieval: hit.retrieval.map(RetrievalDto::from),
+            retrieval: hit.retrieval.map(|p| {
+                let mut dto = RetrievalDto::from(p);
+                dto.rerank_score = rerank_score;
+                dto
+            }),
+            table_id: hit.chunk.metadata.table_id,
+            table_title: None,
         }
     }
 }
@@ -587,6 +812,8 @@ mod tests {
             rank: 0,
             is_bm25: bm25,
             retrieval,
+            dense_score: (!bm25).then_some(0.81f32),
+            rerank_score: None,
         }
     }
 
@@ -892,6 +1119,14 @@ mod tests {
             graph_results: 0,
             total_results: 3,
             stage_timings_ms: StageTimingsDto::empty(),
+            floor_score_kind: None,
+            floor_dropped: None,
+            boost: None,
+            query_class: None,
+            skipped_arms: None,
+            arm_plan_fallback: None,
+            tree_arm: None,
+            global_arm: None,
         };
         let value = serde_json::to_value(&stats).unwrap();
         for key in [
@@ -914,6 +1149,85 @@ mod tests {
             Some(11),
             "exactly the Bun fields plus stageTimingsMs, nothing renamed away"
         );
+    }
+
+    #[test]
+    fn adaptive_stats_are_additive_and_absent_when_adaptive_mode_did_not_run() {
+        let mut stats = SearchStatsDto {
+            total_time_ms: 5.0,
+            embedding_time_ms: 1.0,
+            vector_search_time_ms: 2.0,
+            entity_search_time_ms: 0.0,
+            graph_search_time_ms: 0.0,
+            fusion_time_ms: 0.5,
+            vector_results: 2,
+            entity_results: 0,
+            graph_results: 0,
+            total_results: 3,
+            stage_timings_ms: StageTimingsDto::empty(),
+            floor_score_kind: None,
+            floor_dropped: None,
+            query_class: None,
+            skipped_arms: None,
+            arm_plan_fallback: None,
+            boost: None,
+            tree_arm: None,
+            global_arm: None,
+        };
+        let off = serde_json::to_value(&stats).unwrap();
+        assert!(off.get("queryClass").is_none());
+        assert!(off.get("skippedArms").is_none());
+        assert!(off.get("armPlanFallback").is_none());
+
+        stats.query_class = Some("exact".to_string());
+        stats.skipped_arms = Some(vec![SkippedArmDto {
+            arm: "pageImage".to_string(),
+            reason: "exact query".to_string(),
+        }]);
+        stats.arm_plan_fallback = Some(false);
+        let on = serde_json::to_value(&stats).unwrap();
+        assert_eq!(on["queryClass"], "exact");
+        assert_eq!(on["skippedArms"][0]["arm"], "pageImage");
+        assert_eq!(on["skippedArms"][0]["reason"], "exact query");
+        assert_eq!(on["armPlanFallback"], false);
+    }
+
+    #[test]
+    fn global_arm_stats_are_additive_and_absent_when_the_arm_did_not_run() {
+        let mut stats = SearchStatsDto {
+            total_time_ms: 5.0,
+            embedding_time_ms: 1.0,
+            vector_search_time_ms: 2.0,
+            entity_search_time_ms: 0.0,
+            graph_search_time_ms: 0.0,
+            fusion_time_ms: 0.5,
+            vector_results: 2,
+            entity_results: 0,
+            graph_results: 0,
+            total_results: 3,
+            stage_timings_ms: StageTimingsDto::empty(),
+            floor_score_kind: None,
+            floor_dropped: None,
+            boost: None,
+            query_class: None,
+            skipped_arms: None,
+            arm_plan_fallback: None,
+            global_arm: None,
+            tree_arm: None,
+        };
+        let off = serde_json::to_value(&stats).unwrap();
+        assert!(
+            off.get("globalArm").is_none(),
+            "the flag is off: an old client sees exactly the earlier shape"
+        );
+
+        stats.global_arm = Some(GlobalArmStatsDto {
+            communities: 2,
+            chunks: 5,
+        });
+        let on = serde_json::to_value(&stats).unwrap();
+        assert_eq!(on["globalArm"]["communities"], 2);
+        assert_eq!(on["globalArm"]["chunks"], 5);
     }
 
     #[test]

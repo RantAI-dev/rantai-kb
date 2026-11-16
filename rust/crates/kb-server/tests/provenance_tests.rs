@@ -47,12 +47,14 @@ fn engine_settings() -> EngineSettings {
         rerank_final_k: 10,
         max_chunks: 10,
         min_similarity: 0.30,
+        min_score: None,
         neighbour_window: 1,
         figure_limit: 3,
         expansion_enabled: false,
         expansion_paraphrases: 3,
         hybrid_bm25_enabled: true,
         rerank_enabled: false,
+        adaptive_arms: false,
     }
 }
 
@@ -360,6 +362,7 @@ async fn a_hit_from_an_adapter_that_reports_no_arm_omits_the_field() {
             embedder: Arc::new(h.embedder.clone()),
             jobs: Arc::new(h.jobs.clone()),
             events: EventBus::new(),
+            tables: None,
             version: "test".to_string(),
         },
         Arc::new(FakeReranker::default()),

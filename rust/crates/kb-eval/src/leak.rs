@@ -64,17 +64,45 @@ pub enum Arm {
     /// (the page index search and the chunk fetch), and the row reads the chunks
     /// the server tagged `page` in `retrieval.arms`. It only ever sees PDFs.
     Page,
+    /// The tree arm (`DEC-4`): a structural question scores the outline nodes
+    /// of the caller's visible documents, and the chunks on the winning nodes'
+    /// pages are fetched by (document, page). Like the page arm it has two
+    /// places a scope hole could hide — the outline read and the page fetch —
+    /// and the row reads the chunks the server tagged `tree`.
+    Tree,
+    /// The global (graph community) arm: a community summary matched the query
+    /// and its member chunks were fetched by id.
+    ///
+    /// Like the graph arm it is a two-place scope surface: the community read
+    /// names documents and chunk ids, and the chunk fetch then resolves them.
+    /// A community summary is written from every document in the community, so
+    /// a store that ignored the scope could steer an answer towards a document
+    /// the caller cannot see — which is exactly what this row watches for. The
+    /// summary text itself must never appear in an answer.
+    Global,
+    /// Stored tables (`TBL-1`): `GET /v1/tables`, `GET /v1/tables/{id}` and
+    /// `POST /v1/tables/{id}/query`.
+    ///
+    /// A table is addressed by its document, so this row probes the
+    /// document-authorised routes the same way the entity row does: a table of
+    /// a document in this tenant may be read (the key's knowledge-base limit
+    /// still applies), and a table of another tenant's document must answer
+    /// 404 — never the table, its manifest or a number computed from it.
+    Table,
 }
 
 impl Arm {
     /// Every arm, in the order the report lists them.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 10] = [
         Self::Vector,
         Self::Bm25,
         Self::Neighbour,
         Self::Figure,
         Self::Graph,
         Self::Page,
+        Self::Tree,
+        Self::Global,
+        Self::Table,
         Self::Entity,
     ];
 
@@ -87,6 +115,9 @@ impl Arm {
             Self::Figure => "figure",
             Self::Graph => "graph",
             Self::Page => "page",
+            Self::Tree => "tree",
+            Self::Global => "global",
+            Self::Table => "table",
             Self::Entity => "entity",
         }
     }
@@ -103,6 +134,9 @@ impl Arm {
             Self::Figure => Some("figure"),
             Self::Graph => Some("graph"),
             Self::Page => Some("page"),
+            Self::Tree => Some("tree"),
+            Self::Global => Some("global"),
+            Self::Table => None,
             Self::Entity => None,
         }
     }
@@ -121,6 +155,8 @@ impl Arm {
             "figure" => Some(Self::Figure),
             "graph" => Some(Self::Graph),
             "page" => Some(Self::Page),
+            "tree" => Some(Self::Tree),
+            "global" => Some(Self::Global),
             _ => None,
         }
     }
@@ -130,10 +166,15 @@ impl Arm {
     pub fn probe_kind(self) -> ProbeKind {
         match self {
             Self::Entity => ProbeKind::DocumentIntelligence,
+            Self::Table => ProbeKind::Tables,
             Self::Figure => ProbeKind::SearchOrAsset,
-            Self::Vector | Self::Bm25 | Self::Neighbour | Self::Graph | Self::Page => {
-                ProbeKind::Search
-            }
+            Self::Vector
+            | Self::Bm25
+            | Self::Neighbour
+            | Self::Graph
+            | Self::Page
+            | Self::Tree
+            | Self::Global => ProbeKind::Search,
         }
     }
 }
@@ -164,6 +205,9 @@ pub enum ProbeKind {
     /// `GET /v1/documents/:id/intelligence` — the entity graph of one document,
     /// addressed by id, which is the entity arm's only surface in this API.
     DocumentIntelligence,
+    /// `GET /v1/tables?documentId=`, `GET /v1/tables/{id}` and
+    /// `POST /v1/tables/{id}/query` for one document's tables (`TBL-1`).
+    Tables,
 }
 
 /// A way a caller narrows what a search may see.
@@ -178,14 +222,17 @@ pub enum ScopeKind {
     Category,
     /// `documentIds: [...]`.
     DocumentIds,
+    /// `externalRefs: [<ref>]`: a caller-side metadata filter (`RET-3`).
+    ExternalRef,
 }
 
 impl ScopeKind {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Tenant,
         Self::KnowledgeBase,
         Self::Category,
         Self::DocumentIds,
+        Self::ExternalRef,
     ];
 
     #[must_use]
@@ -195,6 +242,7 @@ impl ScopeKind {
             Self::KnowledgeBase => "knowledge_base",
             Self::Category => "category",
             Self::DocumentIds => "document_ids",
+            Self::ExternalRef => "external_ref",
         }
     }
 
@@ -246,6 +294,13 @@ pub struct Canaries {
     /// A sentence that is *not* the head of the document: the neighbouring
     /// chunk's text, for the weave.
     pub neighbour: String,
+    /// A pure-letter token for the global (community) arm.
+    ///
+    /// The other canaries contain digits (a token, a year), and the query
+    /// classifier treats a letters-and-digits token as an identifier, which wins
+    /// over the aggregative class the global arm needs. This one is letters only,
+    /// so `list all <token>` is aggregative *and* names exactly one document.
+    pub community: String,
 }
 
 /// A document the instrument seeded, with everything needed to probe it.
@@ -255,6 +310,9 @@ pub struct SeedDocument {
     pub tenant: String,
     pub knowledge_base_id: String,
     pub category_id: String,
+    /// Unique caller reference, so an `externalRefs` scope can select exactly
+    /// this document.
+    pub external_ref: String,
     pub canaries: Canaries,
     /// Chunks the ingest produced; the neighbour arm needs more than one.
     pub n_chunks: usize,
@@ -262,6 +320,10 @@ pub struct SeedDocument {
     pub has_figures: bool,
     /// First figure asset key, when there is one.
     pub figure_asset_key: Option<String>,
+    /// Ids of the tables the ingest stored for this document (`TBL-1`). Empty
+    /// when the document had none or the server has no table store.
+    #[serde(default)]
+    pub table_ids: Vec<String>,
 }
 
 /// A scope: the documents a caller may see, and the request that selects them.
@@ -278,6 +340,7 @@ pub struct Scope {
     pub knowledge_base_ids: Vec<String>,
     pub category: Option<String>,
     pub document_ids: Option<Vec<String>>,
+    pub external_refs: Option<Vec<String>>,
 }
 
 /// What one probe does and what it expects.
@@ -348,6 +411,7 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
             knowledge_base_ids: Vec::new(),
             category: None,
             document_ids: None,
+            external_refs: None,
         });
 
         // 2. One knowledge base each.
@@ -370,6 +434,7 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
                 knowledge_base_ids: vec![kb.to_string()],
                 category: None,
                 document_ids: None,
+                external_refs: None,
             });
         }
 
@@ -390,6 +455,7 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
                 knowledge_base_ids: Vec::new(),
                 category: Some(cat.to_string()),
                 document_ids: None,
+                external_refs: None,
             });
         }
 
@@ -405,6 +471,24 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
                 knowledge_base_ids: Vec::new(),
                 category: None,
                 document_ids: Some(vec![first.id.clone()]),
+                external_refs: None,
+            });
+        }
+
+        // 5. One externalRef: the search filter that runs inside every arm
+        //    (`RET-3`). The seeded document carries its own ref, so selecting
+        //    it here is the positive control and every sibling's canary is the
+        //    leak probe.
+        if let Some(first) = of_tenant.first() {
+            scopes.push(Scope {
+                kind: ScopeKind::ExternalRef,
+                label: format!("tenant={tenant} externalRefs=[{}]", first.external_ref),
+                tenant: tenant.clone(),
+                allowed: vec![first.id.clone()],
+                knowledge_base_ids: Vec::new(),
+                category: None,
+                document_ids: None,
+                external_refs: Some(vec![first.external_ref.clone()]),
             });
         }
     }
@@ -416,12 +500,17 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
             scopes: scopes.clone(),
             probes: Vec::new(),
         };
-        for outside in holder
-            .outside(scope)
-            .into_iter()
-            .take(MAX_OUTSIDE_PER_SCOPE)
-        {
-            for arm in Arm::ALL {
+        for arm in Arm::ALL {
+            // The table row probes documents that have tables; every other arm
+            // probes documents that do not, so adding table-bearing seed
+            // documents cannot dilute another arm's canary with a document it
+            // cannot find.
+            for outside in holder
+                .outside(scope)
+                .into_iter()
+                .filter(|document| has_the_right_corpus(document, arm))
+                .take(MAX_OUTSIDE_PER_SCOPE)
+            {
                 probes.push(PlannedProbe {
                     arm,
                     kind: arm.probe_kind(),
@@ -431,11 +520,12 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
                     positive: false,
                 });
             }
-        }
-        // One positive control per arm per scope, from the first document that
-        // this scope can see. If this cannot be found, the scope proves nothing.
-        if let Some(inside) = documents.iter().find(|d| scope.allowed.contains(&d.id)) {
-            for arm in Arm::ALL {
+            // One positive control per arm per scope, from a document that this
+            // scope can see. If there is none, the scope proves nothing.
+            if let Some(inside) = documents
+                .iter()
+                .find(|d| scope.allowed.contains(&d.id) && has_the_right_corpus(d, arm))
+            {
                 probes.push(PlannedProbe {
                     arm,
                     kind: arm.probe_kind(),
@@ -477,7 +567,43 @@ pub fn canary_query(document: &SeedDocument, arm: Arm) -> String {
         // `stub_embeddings`' `/page-embeddings`, which puts every page at the
         // top of every query.
         Arm::Page => document.canaries.vector.clone(),
+        // The tree arm only runs for a structural question. The query keeps
+        // only the canary sentence's digit-free words: a token mixing letters
+        // and digits is an *exact* query to the production classifier, which
+        // would take precedence over `structural` and skip the arm.
+        Arm::Tree => {
+            let words: Vec<&str> = document
+                .canaries
+                .vector
+                .split_whitespace()
+                .filter(|word| !word.chars().any(|c| c.is_ascii_digit()))
+                .collect();
+            format!("what does section 1.1 say about {}", words.join(" "))
+        }
+        // The global arm runs only when the query classifies as aggregative.
+        // `list all` is one of the classifier's aggregative cues; the canary
+        // sentence after it is what the community summary has to share a term
+        // with. Written as a literal because this crate is a black-box client
+        // and may not link `kb-core`.
+        Arm::Global => format!("list all {}", document.canaries.community),
+        // The table routes are addressed by document, like the entity graph.
+        Arm::Table => document.id.clone(),
         Arm::Entity => document.id.clone(),
+    }
+}
+
+/// Whether `document` is the right kind of probe for `arm`.
+///
+/// A table row needs a document whose ingest stored tables; every other arm
+/// must not use one, because a table-only document's prose canary is not what
+/// those arms were calibrated on and its presence would be a silent change to
+/// their coverage.
+#[must_use]
+pub fn has_the_right_corpus(document: &SeedDocument, arm: Arm) -> bool {
+    if arm == Arm::Table {
+        !document.table_ids.is_empty()
+    } else {
+        document.table_ids.is_empty()
     }
 }
 
@@ -981,6 +1107,18 @@ pub fn unreachable_arm_reason(arm: Arm, cell: &Cell) -> Option<String> {
              it measures the route, not the arm",
             cell.scope.as_str()
         )),
+        Arm::Tree if !cell.scope.reaches_pipeline_arms() => Some(format!(
+            "a `{}`-scoped search is answered by one dense search and never reaches the \
+             tree arm, so this cell's positive control is unreachable by construction: \
+             it measures the route, not the arm",
+            cell.scope.as_str()
+        )),
+        Arm::Global if !cell.scope.reaches_pipeline_arms() => Some(format!(
+            "a `{}`-scoped search is answered by one dense search and never reaches the \
+             global (community) arm, so this cell's positive control is unreachable by \
+             construction: it measures the route, not the arm",
+            cell.scope.as_str()
+        )),
         _ => None,
     }
 }
@@ -1008,6 +1146,20 @@ pub fn coverage_note(arm: Arm) -> &'static str {
             "chunks whose retrieval.arms include `page`, from POST /v1/search: chunks on the \
              PDF pages the page-image arm ranked inside the caller's scope, fetched by id. \
              Only PDFs have pages, so the row needs a PDF corpus (`eval leak --pdf`)"
+        }
+        Arm::Tree => {
+            "chunks whose retrieval.arms include `tree`, from POST /v1/search: chunks on the \
+             section pages the outline scored inside the caller's scope, fetched by \
+             (document, page)"
+        }
+        Arm::Global => {
+            "chunks whose retrieval.arms include `global`, from POST /v1/search: the member \
+             chunks of the communities the summary matched inside the caller's scope, fetched \
+             by id. The summary text itself is never returned, so it cannot be a canary"
+        }
+        Arm::Table => {
+            "GET /v1/tables?documentId=, GET /v1/tables/{id} and POST /v1/tables/{id}/query \
+             for a document id: the table record, its manifest and a count computed from it"
         }
         Arm::Entity => "GET /v1/documents/:id/intelligence for a document id",
     }
@@ -1251,7 +1403,13 @@ mod tests {
             entity: format!("Qzx{n} Vorlath"),
             figure: format!("Figure {n}: the Qzx{n} apparatus"),
             neighbour: format!("A neighbouring passage about Qzx{n}."),
+            community: format!("topicmarker{}", letter(n)),
         }
+    }
+
+    /// `0 -> a`, `1 -> b`, … so a canary is letters only.
+    fn letter(n: usize) -> char {
+        char::from(b'a' + u8::try_from(n % 26).unwrap_or(0))
     }
 
     fn doc(id: &str, tenant: &str, kb: &str, category: &str, n: usize) -> SeedDocument {
@@ -1260,11 +1418,20 @@ mod tests {
             tenant: tenant.to_string(),
             knowledge_base_id: kb.to_string(),
             category_id: category.to_string(),
+            external_ref: format!("ref-{id}"),
             canaries: canaries(n),
             n_chunks: 2,
             has_figures: false,
             figure_asset_key: None,
+            table_ids: Vec::new(),
         }
+    }
+
+    /// A document whose ingest stored one table (`TBL-1`).
+    fn table_doc(id: &str, tenant: &str, kb: &str, category: &str, n: usize) -> SeedDocument {
+        let mut document = doc(id, tenant, kb, category, n);
+        document.table_ids = vec![format!("{id}_t0")];
+        document
     }
 
     fn corpus() -> Vec<SeedDocument> {
@@ -1274,6 +1441,8 @@ mod tests {
             doc("a-kb0-c1", "A", "kb0", "cat1", 3),
             doc("a-kb1-c1", "A", "kb1", "cat1", 4),
             doc("b-kb0-c0", "B", "kb0", "cat0", 5),
+            table_doc("a-kb0-c0-table", "A", "kb0", "cat0", 6),
+            table_doc("b-kb1-c0-table", "B", "kb1", "cat0", 7),
         ]
     }
 
@@ -1348,10 +1517,20 @@ mod tests {
                 .iter()
                 .filter(|p| p.scope == scope_index && !p.positive)
                 .count();
-            let outside = one.outside(one.scope(scope_index).unwrap()).len();
-            assert!(
-                per_scope == outside.min(MAX_OUTSIDE_PER_SCOPE) * Arm::ALL.len(),
-                "scope {scope_index}: {per_scope} probes for {outside} outside documents"
+            let outside = one.outside(one.scope(scope_index).unwrap());
+            let expected: usize = Arm::ALL
+                .iter()
+                .map(|arm| {
+                    outside
+                        .iter()
+                        .filter(|d| has_the_right_corpus(d, *arm))
+                        .count()
+                        .min(MAX_OUTSIDE_PER_SCOPE)
+                })
+                .sum();
+            assert_eq!(
+                per_scope, expected,
+                "scope {scope_index}: {per_scope} probes, expected {expected}"
             );
         }
     }
@@ -1777,6 +1956,32 @@ mod tests {
         assert_eq!(Arm::from_wire("page"), Some(Arm::Page));
         assert!(Arm::ALL.contains(&Arm::Page));
         assert_eq!(Arm::Page.probe_kind(), ProbeKind::Search);
+    }
+
+    #[test]
+    fn the_tree_arm_is_named_on_the_wire_and_read_back() {
+        assert_eq!(Arm::Tree.as_str(), "tree");
+        assert_eq!(Arm::Tree.wire_label(), Some("tree"));
+        assert_eq!(Arm::from_wire("tree"), Some(Arm::Tree));
+        assert!(Arm::ALL.contains(&Arm::Tree));
+        assert_eq!(Arm::Tree.probe_kind(), ProbeKind::Search);
+    }
+
+    #[test]
+    fn the_tree_arm_query_is_structural_so_the_production_gate_runs_it() {
+        let document = doc("doc-a", "A", "kb0", "cat0", 1);
+        let query = canary_query(&document, Arm::Tree);
+        let words: Vec<&str> = document
+            .canaries
+            .vector
+            .split_whitespace()
+            .filter(|word| !word.chars().any(|c| c.is_ascii_digit()))
+            .collect();
+        assert!(query.ends_with(&words.join(" ")), "{query}");
+        // The production classifier labels "section N" structural; the exact
+        // wording is pinned here so a change to this query cannot silently turn
+        // the tree probe into an ordinary question the gate skips.
+        assert!(query.contains("section 1.1"), "{query}");
     }
 
     /// `documentIds` never reaches the page arm, and the report has to say that

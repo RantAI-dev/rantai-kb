@@ -5,10 +5,17 @@
 //! ```text
 //! <dataset>/
 //!   corpus/            the files to ingest; the file stem is the document key
+//!   metadata/          optional <doc-key>.json per corpus file: the JSON
+//!                      object sent as the upload's `metadata` field
 //!   queries.jsonl      {"_id": "q1", "text": "..."} per line
 //!   qrels/test.tsv     query-id<TAB>corpus-id<TAB>score
 //!   answers.jsonl      optional {"_id": "...", "answer": "..."} for later
 //! ```
+//!
+//! `metadata/` is an addition for `RET-4`: a dataset whose documents carry
+//! dates or authority values needs to upload them, and the upload route takes
+//! them as a JSON object. A sidecar that is absent keeps the document's
+//! metadata empty, exactly as before.
 //!
 //! `corpus-id` is either `<doc-key>` (document-level) or `<doc-key>#p<N>`
 //! (page-level, `N` 1-based). The loader is deliberately lenient about
@@ -58,6 +65,9 @@ pub struct CorpusFile {
     /// without a title the engine embeds the file stem in front of every one
     /// of its chunks.
     pub title: Option<String>,
+    /// The JSONB metadata object to upload with the file, from
+    /// `<dataset>/metadata/<key>.json`. `None` when the dataset has no sidecar.
+    pub metadata: Option<serde_json::Value>,
 }
 
 /// A loaded dataset.
@@ -89,7 +99,7 @@ impl Dataset {
             |n| n.to_string_lossy().into_owned(),
         );
 
-        let corpus = load_corpus(&dir.join("corpus"))?;
+        let corpus = load_corpus(&dir.join("corpus"), &dir.join("metadata"))?;
         let queries_path = dir.join("queries.jsonl");
         let queries =
             parse_queries(&read(&queries_path)?).map_err(|message| DatasetError::Parse {
@@ -139,7 +149,7 @@ fn read(path: &Path) -> Result<String, DatasetError> {
     })
 }
 
-fn load_corpus(dir: &Path) -> Result<Vec<CorpusFile>, DatasetError> {
+fn load_corpus(dir: &Path, metadata_dir: &Path) -> Result<Vec<CorpusFile>, DatasetError> {
     if !dir.is_dir() {
         return Err(DatasetError::NotFound(dir.to_path_buf()));
     }
@@ -164,10 +174,12 @@ fn load_corpus(dir: &Path) -> Result<Vec<CorpusFile>, DatasetError> {
         if key.starts_with('.') {
             continue;
         }
+        let metadata = load_metadata(metadata_dir, &key)?;
         files.push(CorpusFile {
             title: title_of(&path),
             key,
             path,
+            metadata,
         });
     }
     if files.is_empty() {
@@ -188,6 +200,34 @@ fn load_corpus(dir: &Path) -> Result<Vec<CorpusFile>, DatasetError> {
         }
     }
     Ok(files)
+}
+
+/// A document's optional metadata sidecar: `<metadata_dir>/<key>.json`.
+///
+/// It must be a JSON object; anything else is a dataset error rather than a
+/// silently dropped upload field, because a measurement with a missing date
+/// would read as "the boost did nothing".
+fn load_metadata(
+    metadata_dir: &Path,
+    key: &str,
+) -> Result<Option<serde_json::Value>, DatasetError> {
+    let path = metadata_dir.join(format!("{key}.json"));
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = read(&path)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|source| DatasetError::Parse {
+            path: path.clone(),
+            message: format!("metadata sidecar is not JSON: {source}"),
+        })?;
+    if !value.is_object() {
+        return Err(DatasetError::Parse {
+            path,
+            message: "metadata sidecar must be a JSON object".to_string(),
+        });
+    }
+    Ok(Some(value))
 }
 
 /// The document's title, when the corpus file names itself in its first
@@ -595,7 +635,7 @@ mod tests {
         fs::write(corpus.join("1000580_1.md"), "# DPTools\n\nbody").unwrap();
         fs::write(corpus.join("plain.txt"), "no heading here").unwrap();
         fs::write(corpus.join("sub.md"), "\n\n## Sub\n\nbody").unwrap();
-        let files = load_corpus(&corpus).unwrap();
+        let files = load_corpus(&corpus, &dir.join("metadata")).unwrap();
         let title = |key: &str| {
             files
                 .iter()
@@ -609,13 +649,42 @@ mod tests {
     }
 
     #[test]
+    fn a_metadata_sidecar_is_loaded_per_document_key() {
+        let dir = std::env::temp_dir().join(format!("kb-eval-meta-{}", std::process::id()));
+        let corpus = dir.join("corpus");
+        let metadata = dir.join("metadata");
+        fs::create_dir_all(&corpus).unwrap();
+        fs::create_dir_all(&metadata).unwrap();
+        fs::write(corpus.join("policy-v2025.md"), "body").unwrap();
+        fs::write(corpus.join("plain.md"), "body").unwrap();
+        fs::write(
+            metadata.join("policy-v2025.json"),
+            r#"{"effectiveDate":"2025-03-01","authority":0.9}"#,
+        )
+        .unwrap();
+        let files = load_corpus(&corpus, &metadata).unwrap();
+        let sidecar = |key: &str| {
+            files
+                .iter()
+                .find(|f| f.key == key)
+                .and_then(|f| f.metadata.clone())
+        };
+        assert_eq!(
+            sidecar("policy-v2025"),
+            Some(serde_json::json!({"effectiveDate": "2025-03-01", "authority": 0.9}))
+        );
+        assert_eq!(sidecar("plain"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn two_corpus_files_with_one_stem_are_refused() {
         let dir = std::env::temp_dir().join(format!("kb-eval-dup-{}", std::process::id()));
         let corpus = dir.join("corpus");
         fs::create_dir_all(&corpus).unwrap();
         fs::write(corpus.join("report.md"), "a").unwrap();
         fs::write(corpus.join("report.txt"), "b").unwrap();
-        let err = load_corpus(&corpus).unwrap_err();
+        let err = load_corpus(&corpus, &dir.join("metadata")).unwrap_err();
         assert!(matches!(err, DatasetError::DuplicateKey { .. }), "{err:?}");
         assert!(err.to_string().contains("report"), "{err}");
         let _ = fs::remove_dir_all(&dir);

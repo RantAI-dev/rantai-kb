@@ -56,7 +56,7 @@ pub fn parse(bytes: &[u8], file_name: &str) -> Result<String, ExtractError> {
 }
 
 /// The `full-path` of the first `rootfile`, which is the package document.
-fn rootfile_path(container: &str) -> Option<String> {
+pub(crate) fn rootfile_path(container: &str) -> Option<String> {
     let mut reader = xml::reader_from_str(container);
     let mut buffer = Vec::new();
     let mut path = None;
@@ -71,7 +71,7 @@ fn rootfile_path(container: &str) -> Option<String> {
 }
 
 /// Manifest id → href, and the spine's ids in order.
-fn spine_hrefs(opf: &str) -> Vec<String> {
+pub(crate) fn spine_hrefs(opf: &str) -> Vec<String> {
     let mut reader = xml::reader_from_str(opf);
     let mut buffer = Vec::new();
     let mut manifest: std::collections::HashMap<String, String> = std::collections::HashMap::new();

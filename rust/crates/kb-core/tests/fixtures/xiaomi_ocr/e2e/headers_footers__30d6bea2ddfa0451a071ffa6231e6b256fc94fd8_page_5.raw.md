@@ -1,0 +1,7 @@
+ferrite phases were distinct. It is however possible to clearly separate the content of phases in the tested composites. This suggests that the incorporation of nano particles in the crystal structure of iron changes its network parameters [22]. Fig. 3d shows a homogeneous distribution of TiN in the steel matrix with a general tendency of the reinforcing TiN phase to locate itself at the vicinity of grain boundaries in the matrix.
+
+Microstructural examinations from previous studies have shown that the favored sites for the formation of phases are grain boundaries and the reinforcement/matrix interface [27]. The phase of iron nitride formed in the XRD result (Fig. 2) is obviously due to the diffusion of iron and nitride at the grain boundary as indicated in the EDS result (Fig. 3b1). It is worthy to state that during the SPS process, non-equilibrium conditions exists in the material, which has a significant influence on diffusion and the reactions taking place during sintering. The formation of \(\mathrm{FeN}_{0.068}\) phase in the studied composites is as a result of intense phenomena taking place during SPS (surface activation, diffusion, surface melting, necking between the particles of sintered powder, and plastic flow [28]). During sintering, mass transport increases and eventually results in
+
+Fig. 4 – Effect of sintering temperature variation on the densification and hardness of DSS 2205-5TiN.
+
+Fig. 5 – Microstructures of composites with 5% TiN sintered at (a) 1000, (b) 1100, (c) 1150 and (d) 1200 °C.

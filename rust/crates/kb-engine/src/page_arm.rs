@@ -14,7 +14,7 @@
 //! other arm, and the chunks a page brings in are read back through
 //! `RetrievalIndex::fetch`, which is scoped too. Nothing here can widen it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -658,11 +658,85 @@ pub fn page_unit_id(document_id: &DocumentId, page: u32) -> ChunkId {
     ChunkId(format!("{}_page_{page}", document_id.0))
 }
 
+/// What the extractor knows about each page's text, recorded on the page unit
+/// so the structure read can say where the text came from without guessing.
+///
+/// `known` is the whole point: an extraction that cannot tell (anything that
+/// is not a PDF or an image) leaves every field `None` on the page unit, and
+/// the structure read reports `hasTextLayer: null` rather than a claim. A PDF
+/// in text-layer mode has every rendered page in `text_layer_pages` that the
+/// extractor returned text for; a PDF in OCR mode has those pages in
+/// `ocr_pages` instead, and `ocr` is true.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageTextSemantics {
+    /// Whether the extractor could classify the page text at all.
+    pub known: bool,
+    /// Pages whose text came from the PDF's own text layer.
+    pub text_layer_pages: HashSet<u32>,
+    /// Pages whose text came from OCR.
+    pub ocr_pages: HashSet<u32>,
+    /// Whether this document's text is OCR output (the `ocrText` marker).
+    pub ocr: bool,
+}
+
+impl PageTextSemantics {
+    /// Classify an extraction result. Only a PDF or an image has pages whose
+    /// origin this describes; every other format is left unknown.
+    #[must_use]
+    pub fn from_extraction(extraction: &kb_ports::ExtractionResult) -> Self {
+        let paged = extraction.file_type.eq_ignore_ascii_case("pdf")
+            || extraction.file_type.eq_ignore_ascii_case("image");
+        if !paged {
+            return Self::default();
+        }
+        let pages: HashSet<u32> = extraction
+            .page_map
+            .iter()
+            .flatten()
+            .map(|p| p.page)
+            .collect();
+        if extraction.used_ocr {
+            Self {
+                known: true,
+                text_layer_pages: HashSet::new(),
+                ocr_pages: pages,
+                ocr: true,
+            }
+        } else {
+            Self {
+                known: true,
+                text_layer_pages: pages,
+                ocr_pages: HashSet::new(),
+                ocr: false,
+            }
+        }
+    }
+
+    /// `hasTextLayer` for one page, or `None` when the extraction could not say.
+    #[must_use]
+    pub fn has_text_layer(&self, page: u32) -> Option<bool> {
+        if !self.known {
+            return None;
+        }
+        Some(self.text_layer_pages.contains(&page))
+    }
+
+    /// Whether this page's text is OCR output.
+    #[must_use]
+    pub fn is_ocr(&self, page: u32) -> bool {
+        self.known && self.ocr_pages.contains(&page)
+    }
+}
+
 impl PageIngest {
     /// Render, embed and store every page of one document, replacing what was
     /// stored for it before. `chunks_by_page` maps a 0-based page to the text
     /// chunk ids on it. Returns the number of pages stored (0 for a format
     /// without pages).
+    ///
+    /// This is the legacy entry point. It leaves the page-text provenance
+    /// unknown (`hasTextLayer: null`), which is what a caller that does not have
+    /// an [`ExtractionResult`](kb_ports::ExtractionResult) can honestly say.
     ///
     /// # Errors
     ///
@@ -677,6 +751,38 @@ impl PageIngest {
         bytes: &[u8],
         chunks_by_page: &HashMap<u32, Vec<ChunkId>>,
         page_texts: &HashMap<u32, String>,
+    ) -> Result<PageOutcome, PortError> {
+        self.index_document_with_semantics(
+            tenant,
+            document_id,
+            category,
+            mime_type,
+            bytes,
+            chunks_by_page,
+            page_texts,
+            &PageTextSemantics::default(),
+        )
+        .await
+    }
+
+    /// The ingest path's entry point: record each page's text origin as well as
+    /// its text, so `GET /v1/documents/:id/structure` can answer
+    /// `hasTextLayer`/`ocrText` without inferring them from content.
+    ///
+    /// # Errors
+    ///
+    /// Rendering, embedding or storing failed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn index_document_with_semantics(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+        category: Option<String>,
+        mime_type: &str,
+        bytes: &[u8],
+        chunks_by_page: &HashMap<u32, Vec<ChunkId>>,
+        page_texts: &HashMap<u32, String>,
+        semantics: &PageTextSemantics,
     ) -> Result<PageOutcome, PortError> {
         self.index.delete_document(tenant, document_id).await?;
         // Window by window: the next window renders while this one is embedded
@@ -705,7 +811,8 @@ impl PageIngest {
                     &category,
                     window,
                     chunks_by_page,
-                    page_texts
+                    page_texts,
+                    semantics
                 ),
                 render_next
             );
@@ -757,6 +864,7 @@ impl PageIngest {
     }
 
     /// Embed and store one window; pages that did not render are counted, never sent.
+    #[allow(clippy::too_many_arguments)]
     async fn store_window(
         &self,
         tenant: &TenantId,
@@ -765,6 +873,7 @@ impl PageIngest {
         window: Vec<PageImage>,
         chunks_by_page: &HashMap<u32, Vec<ChunkId>>,
         page_texts: &HashMap<u32, String>,
+        semantics: &PageTextSemantics,
     ) -> PageOutcome {
         let mut outcome = PageOutcome::default();
         let (window, unrendered): (Vec<PageImage>, Vec<PageImage>) =
@@ -782,7 +891,7 @@ impl PageIngest {
         }
         let store_images = async {
             let Some(blobs) = self.blobs.as_ref() else {
-                return 0;
+                return HashSet::new();
             };
             let uploads = window.iter().map(|p| {
                 let key =
@@ -790,14 +899,15 @@ impl PageIngest {
                 let blobs = Arc::clone(blobs);
                 let bytes = p.bytes.clone();
                 let mime = p.mime.clone();
-                async move { blobs.upload(&key, bytes, &mime).await }
+                let page = p.page;
+                async move { (page, blobs.upload(&key, bytes, &mime).await) }
             });
             let results = futures::future::join_all(uploads).await;
-            let mut failed = 0;
-            for result in results {
+            let mut failed = HashSet::new();
+            for (page, result) in results {
                 if let Err(e) = result {
-                    failed += 1;
-                    tracing::warn!(error = %e, "page image not stored (non-fatal)");
+                    failed.insert(page);
+                    tracing::warn!(page, error = %e, "page image not stored (non-fatal)");
                 }
             }
             failed
@@ -843,6 +953,8 @@ impl PageIngest {
                             chunks_by_page,
                             page_texts,
                             descriptions.by_page.get(&p.page).map(String::as_str),
+                            &images_failed,
+                            semantics,
                         )
                     })
                     .collect();
@@ -852,7 +964,7 @@ impl PageIngest {
         // The images the vision rerank reads. Best-effort and independent of
         // the vector write: a bucket that refused a page must not cost the page
         // its search entry, so failures are counted, never returned.
-        outcome.images_failed += images_failed;
+        outcome.images_failed += images_failed.len();
         match stored {
             Ok(()) => outcome.indexed += window.len(),
             Err(e) => {
@@ -915,6 +1027,8 @@ impl PageIngest {
         chunks_by_page: &HashMap<u32, Vec<ChunkId>>,
         page_texts: &HashMap<u32, String>,
         description: Option<&str>,
+        failed_images: &HashSet<u32>,
+        semantics: &PageTextSemantics,
     ) -> IndexUnit {
         let chunk_ids: Vec<&str> = chunks_by_page
             .get(&p.page)
@@ -934,6 +1048,19 @@ impl PageIngest {
             }
             _ => page_text.to_string(),
         };
+        // The structure read returns these three only when they were recorded
+        // here. Older page units have none of them, and the route says null
+        // rather than guessing from the content.
+        let mut metadata = serde_json::json!({ "chunkIds": chunk_ids, "page": p.page });
+        if let Some(has_text_layer) = semantics.has_text_layer(p.page) {
+            metadata["hasTextLayer"] = serde_json::json!(has_text_layer);
+        }
+        if semantics.known {
+            metadata["ocr"] = serde_json::json!(semantics.is_ocr(p.page));
+        }
+        if self.blobs.is_some() {
+            metadata["image"] = serde_json::json!(!failed_images.contains(&p.page));
+        }
         IndexUnit {
             id: page_unit_id(document_id, p.page),
             document_id: document_id.clone(),
@@ -947,7 +1074,7 @@ impl PageIngest {
             // visual description when that use is on.
             content: content.chars().take(PAGE_TEXT_STORED_CHARS).collect(),
             contextual_prefix: None,
-            metadata: serde_json::json!({ "chunkIds": chunk_ids, "page": p.page }),
+            metadata,
             dense,
             sparse: kb_core::sparse::SparseVector::default(),
         }

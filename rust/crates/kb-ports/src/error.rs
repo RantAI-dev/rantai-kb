@@ -64,6 +64,19 @@ pub enum RetrievalDegrade {
     /// not return one usable score per page. The page order is returned
     /// unchanged; the search is degraded, not empty.
     VisionRerankUnavailable,
+    /// A relevance floor was requested but the arm that supplies its score
+    /// (the reranker, or the dense arm) degraded. The floor is **not** applied:
+    /// the normal results are returned, because turning a failed arm into an
+    /// empty answer would be a silent failure dressed as a clean result.
+    FloorSkipped,
+    /// The tree arm could not read the outlines or the chunks on their pages.
+    /// The other arms' results are returned unchanged; the search is degraded,
+    /// not empty.
+    TreeArmFailed,
+    /// The global (community summary) arm failed: the community store or the
+    /// scoped chunk fetch did not answer. The other arms' results are returned
+    /// unchanged — a search that lost one arm is degraded, not empty.
+    GlobalArmFailed,
 }
 
 impl RetrievalDegrade {
@@ -80,6 +93,9 @@ impl RetrievalDegrade {
             Self::GraphArmUnavailable => "graph_arm_unavailable",
             Self::PageArmUnavailable => "page_arm_unavailable",
             Self::VisionRerankUnavailable => "vision_rerank_unavailable",
+            Self::FloorSkipped => "floor_skipped",
+            Self::TreeArmFailed => "tree_arm_failed",
+            Self::GlobalArmFailed => "global_arm_failed",
         }
     }
 }

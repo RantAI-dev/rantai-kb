@@ -9,7 +9,8 @@ use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use kb_ports::{EngineError, PortError};
-use serde_json::json;
+use serde::Serialize;
+use utoipa::ToSchema;
 
 /// Message returned for any request without a usable key
 /// (`handleRequest`, src/service/api.ts:876).
@@ -22,6 +23,17 @@ pub const NOT_FOUND: &str = "Not found";
 
 /// Message returned when a job exists but is not in `failed` state.
 pub const NOT_FAILED: &str = "Only a failed job can be retried";
+
+/// The body every failing request answers with.
+///
+/// One shape for every status: `{"error": "<message>"}`. The message is the
+/// string the TypeScript service returns, so a client that reads `error` keeps
+/// working.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ErrorBody {
+    /// What went wrong, in the words the service has always used.
+    pub error: String,
+}
 
 #[derive(Debug)]
 pub enum ApiError {
@@ -107,6 +119,6 @@ impl IntoResponse for ApiError {
                 )
             }
         };
-        (status, Json(json!({ "error": message }))).into_response()
+        (status, Json(ErrorBody { error: message })).into_response()
     }
 }

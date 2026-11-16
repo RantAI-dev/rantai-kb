@@ -25,11 +25,15 @@ use kb_ports::{
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod fakes;
+pub mod global_arm;
 pub mod graph_arm;
 pub mod ingest;
 pub mod page_arm;
 pub mod retrieval;
+pub mod seats;
 pub mod timing;
+pub mod tree_arm;
+pub mod visuals;
 
 /// The reference `RetrievalIndex`. Under `test-utils` so an adapter's contract
 /// test can depend on it as a control; it is also the implementation the engine
@@ -51,29 +55,48 @@ pub mod in_memory_graph_store;
 pub use in_memory_graph_store::InMemoryGraphStore;
 
 #[cfg(test)]
+mod boost_tests;
+#[cfg(test)]
+mod global_arm_tests;
+#[cfg(test)]
 mod graph_arm_tests;
 #[cfg(all(test, feature = "test-utils"))]
 mod in_memory_graph_store_tests;
 #[cfg(all(test, feature = "test-utils"))]
 mod in_memory_index_tests;
 #[cfg(test)]
+mod ingest_concurrency_tests;
+#[cfg(test)]
 mod ingest_tests;
 #[cfg(test)]
 mod page_arm_tests;
 #[cfg(test)]
+mod seats_tests;
+#[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tree_arm_tests;
+#[cfg(test)]
+mod visuals_tests;
 
+pub use global_arm::{GlobalArm, GlobalArmConfig, GlobalRanking, fuse_global};
 pub use graph_arm::{GraphArm, GraphArmConfig, GraphCache, GraphRanking};
 pub use ingest::{
-    CancelToken, INGEST_CHUNKING, IngestSettings, IngestWorker, JobOutcome, reap_failed_job_uploads,
+    CancelToken, DEFAULT_JOB_WORKERS, INGEST_CHUNKING, IngestSettings, IngestWorker, JobOutcome,
+    reap_failed_job_uploads,
 };
 pub use page_arm::{
     MergeOutcome, PageArm, PageArmConfig, PageCaption, PageCaptionConfig, PageIngest, PageOutcome,
-    PageRerankConfig, PageRerankContext, PageVision, PageVisionContext, PageVisionRerankConfig,
-    RankedPage,
+    PageRerankConfig, PageRerankContext, PageTextSemantics, PageVision, PageVisionContext,
+    PageVisionRerankConfig, RankedPage,
 };
-pub use retrieval::{RetrievalOptions, RetrievalOutcome, enrich_titles, execute_pipeline};
+pub use retrieval::{
+    AdaptiveStats, BoostStats, FloorScoreKind, FloorStats, RetrievalOptions, RetrievalOutcome,
+    apply_boosts, apply_boosts_now, enrich_titles, execute_pipeline,
+};
+pub use seats::{SeatCapacity, SeatGuard, SeatPriority, Seats, StageSeats};
 pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
+pub use tree_arm::{TreeArm, TreeArmConfig, TreeRanking, TreeStats};
 
 /// Tunable engine knobs.
 #[derive(Debug, Clone)]
@@ -92,6 +115,10 @@ pub struct EngineSettings {
     pub max_chunks: u32,
     /// Minimum similarity score for vector-only hits (`KB_MIN_SIMILARITY`).
     pub min_similarity: f32,
+    /// Default relevance floor (`KB_MIN_SCORE`). `None` means no floor, which
+    /// is rank-identical to every release before RET-2. A request's `minScore`
+    /// overrides this for that request.
+    pub min_score: Option<f32>,
     /// Chunks on either side of an anchor (`KB_NEIGHBOUR_WINDOW`).
     pub neighbour_window: u32,
     /// Figures kept per answer (`KB_FIGURE_MAX_PER_ANSWER`).
@@ -109,6 +136,10 @@ pub struct EngineSettings {
     /// 60 won live with the local embedder (commit 4c01a7d); 2 won offline
     /// with e5-large on MIRACL-id, so it is a per-deployment choice.
     pub rrf_k: u32,
+    /// Adaptive arm choice (`KB_ADAPTIVE_ARMS`, RET-5). Off by default: every
+    /// search runs the same arms it always has. A request's `adaptiveArms`
+    /// overrides this for that request.
+    pub adaptive_arms: bool,
 }
 
 impl Default for EngineSettings {
@@ -122,12 +153,14 @@ impl Default for EngineSettings {
             rerank_final_k: 5,
             max_chunks: 8,
             min_similarity: 0.30,
+            min_score: None,
             neighbour_window: 1,
             figure_limit: 3,
             expansion_enabled: false,
             expansion_paraphrases: 3,
             hybrid_bm25_enabled: true,
             rerank_enabled: false,
+            adaptive_arms: false,
         }
     }
 }
@@ -161,8 +194,13 @@ pub struct EngineInputs {
     /// scoped-graph cache, so the cache is per-process state rather than engine
     /// settings.
     pub graph_arm: Option<Arc<GraphArm>>,
+    /// The global (graph community) arm, or `None` when `KB_GLOBAL_ARM` is off.
+    /// `None` leaves the pipeline byte-identical to the one before `DEC-5`.
+    pub global_arm: Option<Arc<GlobalArm>>,
     /// The page-image arm, or `None` when it is off.
     pub page_arm: Option<Arc<PageArm>>,
+    /// The tree arm, or `None` when `KB_TREE_ARM` is off.
+    pub tree_arm: Option<Arc<TreeArm>>,
 }
 
 /// Engine handle — cheap to clone (all state behind `Arc`s).
@@ -220,7 +258,9 @@ impl Engine {
             query_expander: Arc::new(NoopExpander),
             figure_gate: None,
             graph_arm: None,
+            global_arm: None,
             page_arm: None,
+            tree_arm: None,
         };
         Self::new(settings, inputs)
     }
@@ -233,6 +273,94 @@ impl Engine {
         scope: &DocumentScope,
         request_max_chunks: Option<u32>,
     ) -> Result<RetrievalOutcome, EngineError> {
+        self.retrieve_with_floor(query, scope, request_max_chunks, None)
+            .await
+    }
+
+    /// [`Self::retrieve`] with optional recency/authority boosts (`RET-4`).
+    ///
+    /// `request_boost` is off when `None` or when both of its parts are `None`;
+    /// either way the pipeline never computes a factor or re-sorts, so the
+    /// answer is rank-identical to a request that never sent the field.
+    pub async fn retrieve_with_boost(
+        &self,
+        query: &str,
+        scope: &DocumentScope,
+        request_max_chunks: Option<u32>,
+        request_min_score: Option<f32>,
+        request_boost: Option<kb_core::BoostConfig>,
+    ) -> Result<RetrievalOutcome, EngineError> {
+        self.retrieve_inner(
+            query,
+            scope,
+            request_max_chunks,
+            request_min_score,
+            request_boost,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::retrieve`] with a per-request relevance floor.
+    ///
+    /// `request_min_score` wins over the server default (`KB_MIN_SCORE`,
+    /// [`EngineSettings::min_score`]); `None` means "use the default", which is
+    /// itself `None` unless an operator set one.
+    pub async fn retrieve_with_floor(
+        &self,
+        query: &str,
+        scope: &DocumentScope,
+        request_max_chunks: Option<u32>,
+        request_min_score: Option<f32>,
+    ) -> Result<RetrievalOutcome, EngineError> {
+        self.retrieve_inner(
+            query,
+            scope,
+            request_max_chunks,
+            request_min_score,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// [`Self::retrieve_with_floor`] with a per-request adaptive-arm override.
+    ///
+    /// `request_adaptive_arms` wins over the server default
+    /// (`KB_ADAPTIVE_ARMS`, [`EngineSettings::adaptive_arms`]). `None` means
+    /// "use the default", so a caller that has never heard of the field keeps
+    /// the operator's choice.
+    pub async fn retrieve_with_request(
+        &self,
+        query: &str,
+        scope: &DocumentScope,
+        request_max_chunks: Option<u32>,
+        request_min_score: Option<f32>,
+        request_adaptive_arms: Option<bool>,
+    ) -> Result<RetrievalOutcome, EngineError> {
+        self.retrieve_inner(
+            query,
+            scope,
+            request_max_chunks,
+            request_min_score,
+            None,
+            request_adaptive_arms,
+        )
+        .await
+    }
+
+    /// Every per-request option at once: floor (`RET-2`), boosts (`RET-4`) and
+    /// the adaptive-arm override (`RET-5`). The narrower `retrieve_*` methods
+    /// are this with the other options left at their defaults.
+    pub async fn retrieve_inner(
+        &self,
+        query: &str,
+        scope: &DocumentScope,
+        request_max_chunks: Option<u32>,
+        request_min_score: Option<f32>,
+        request_boost: Option<kb_core::BoostConfig>,
+        request_adaptive_arms: Option<bool>,
+    ) -> Result<RetrievalOutcome, EngineError> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             return Ok(RetrievalOutcome {
@@ -240,6 +368,12 @@ impl Engine {
                 sources: Vec::new(),
                 context: String::new(),
                 degrades: Vec::new(),
+                note: None,
+                floor: None,
+                boost: None,
+                adaptive: None,
+                tree: None,
+                global_arm: None,
                 timings: StageTimings::default(),
             });
         }
@@ -251,6 +385,7 @@ impl Engine {
         let opts = RetrievalOptions {
             max_chunks,
             min_similarity: self.settings.min_similarity,
+            min_score: request_min_score.or(self.settings.min_score),
             candidate_pool_size: self.settings.candidate_pool_size,
             rrf_k: self.settings.rrf_k,
             rerank_candidate_limit: self.settings.rerank_candidate_limit,
@@ -265,7 +400,12 @@ impl Engine {
             figure_gate: self.inputs.figure_gate.clone(),
             rerank_enabled: self.settings.rerank_enabled,
             graph_arm: self.inputs.graph_arm.clone(),
+            global_arm: self.inputs.global_arm.clone(),
             page_arm: self.inputs.page_arm.clone(),
+            tree_arm: self.inputs.tree_arm.clone(),
+            boost: request_boost,
+            boost_now: None,
+            adaptive_arms: request_adaptive_arms.unwrap_or(self.settings.adaptive_arms),
         };
 
         execute_pipeline(

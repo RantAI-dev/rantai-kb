@@ -187,6 +187,33 @@ fn table_chunk_type_detected() {
 }
 
 #[test]
+fn a_big_table_is_split_at_row_boundaries_with_the_header_repeated() {
+    let mut text = String::from("| Region | Value |\n| --- | --- |\n");
+    for index in 0..40 {
+        text.push_str(&format!("| region-{index} | {index} |\n"));
+    }
+    let out = SmartChunker::new(SmartChunkingOptions {
+        max_chunk_size: Some(160),
+        overlap_size: Some(0),
+        ..Default::default()
+    })
+    .chunk(&text);
+    assert!(
+        out.len() > 1,
+        "a table over the budget must be split, got {} chunk(s)",
+        out.len()
+    );
+    for chunk in &out {
+        assert_eq!(chunk.metadata.chunk_type, "table");
+        assert!(
+            chunk.text.starts_with("| Region | Value |\n| --- | --- |"),
+            "every piece repeats the header: {:?}",
+            chunk.text
+        );
+    }
+}
+
+#[test]
 fn list_chunk_type_detected() {
     let out = SmartChunker::new(SmartChunkingOptions::default())
         .chunk("- Item one\n- Item two\n- Item three");

@@ -76,6 +76,25 @@ impl ChunkId {
     }
 }
 
+impl ChunkId {
+    /// The document id ingest embedded in this chunk id.
+    ///
+    /// Ingest names a chunk `{documentId}_{chunkIndex}`, and a document id is a
+    /// UUID (hex and dashes, never an underscore), so the last `_` is the
+    /// separator. `None` for an id that was not written by that rule.
+    ///
+    /// This exists for the community arm, whose stored member chunk ids have to
+    /// be narrowed to a caller's scope without a second table: the derived
+    /// document id is what the scope compares against.
+    #[must_use]
+    pub fn document_part(&self) -> Option<&str> {
+        self.0
+            .rsplit_once('_')
+            .map(|(document, _index)| document)
+            .filter(|document| !document.is_empty())
+    }
+}
+
 impl fmt::Display for ChunkId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)

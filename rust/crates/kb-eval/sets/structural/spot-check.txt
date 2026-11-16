@@ -1,0 +1,46 @@
+# Structural set spot-check
+
+Seed 42, 10 of 80 queries, grade-2 (heading) page.
+PASS = the heading number is on the page, or >=60% of its content words are.
+
+PASS sq015 (section_topic, joint_employment_report_2025-KE0125018ENN#p46) number=False words=4/4
+  heading: 2.1.2. Measures taken by Member States
+  page:    2.1.2. Measures taken by Member States
+
+PASS sq004 (section_topic, Introduction_to_Python_Programming#p26) number=True words=2/2
+  heading: 1.4 String basics
+  page:    1.4 String basics
+
+PASS sq036 (section_number, future-oriented_occupations_in_the_eu-KE0125043ENN#p32) number=True words=3/3
+  heading: 5.2.1 Physical and social environment
+  page:    5.2.1 Physical and social environment
+
+PASS sq032 (section_number, Introduction_to_Python_Programming#p34) number=True words=2/2
+  heading: 1.6 Error messages
+  page:    1.6 Error messages
+
+PASS sq029 (section_number, Introduction_to_Python_Programming#p155) number=True words=2/2
+  heading: 6.1 Defining functions
+  page:    6.1 Defining functions
+
+PASS sq018 (section_topic, future-oriented_occupations_in_the_eu-KE0125043ENN#p21) number=True words=11/11
+  heading: 3.2 Core age groups workers (25-55) are more involved in future-oriented occupations
+  page:    3.2 Core age groups workers (25-55) are more involved in future-oriented occupations
+
+PASS sq014 (section_topic, future-oriented_occupations_in_the_eu-KE0125043ENN#p25) number=True words=7/7
+  heading: 4.2 Predictability of earnings in the next 3 months in future-oriented occupations
+  page:    4.2 Predictability of earnings in the next 3 months in future-oriented occupations
+
+PASS sq070 (chapter_number, undeclared_care_work_in_the_eu-TJ0125004ENN#p27) number=False words=5/5
+  heading: Chapter 2: Consequences of undeclared care work
+  page:    consequences of undeclared care work, mostly in terms
+
+PASS sq012 (section_topic, Introduction_to_Computer_Science#p260) number=True words=3/3
+  heading: 6.2 Fundamental OS Concepts
+  page:    6.2 Fundamental OS Concepts
+
+PASS sq055 (section_title, employment_and_social_developments_in_europe_2024-KEBD24002ENN#p38) number=True words=5/5
+  heading: 2.1. Convergence of economic outcomes and living standards
+  page:    2.1. Convergence of economic outcomes and living standards
+
+**10/10 passed.**

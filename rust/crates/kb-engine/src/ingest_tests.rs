@@ -9,15 +9,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use kb_ports::{
-    BlobStore, DocumentId, DocumentMeta, Embedder, Entity, ExtractedFigure, ExtractionResult,
-    Extractor, JobRecord, PageBlock, PageBlockKind, PageText, PortError, Relation, TenantId,
-    document_path,
+    BlobStore, ChunkToStore, DocumentId, DocumentMeta, Embedder, Entity, ExtractedFigure,
+    ExtractionResult, Extractor, JobRecord, OcrReport, PageBlock, PageBlockKind, PageText,
+    PortError, Relation, TenantId, document_path,
 };
 
 use super::*;
 use crate::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityExtractor,
-    FakeExtractor, FakeJobStore,
+    FakeExtractor, FakeJobStore, FakeTableStore,
 };
 use crate::in_memory_graph_store::InMemoryGraphStore;
 use crate::ingest::HEARTBEAT_INTERVAL;
@@ -69,6 +69,7 @@ fn job() -> JobRecord {
             "categories": ["finance"],
             "subcategory": "q3",
         })),
+        created_at: None,
     }
 }
 
@@ -153,6 +154,24 @@ async fn harness(extractor: Arc<FakeExtractor>) -> Harness {
     }
 }
 
+/// One grid as an extractor would hand it over: a header and three rows, the
+/// last a subtotal.
+fn table_grid() -> kb_core::tables::TableGrid {
+    use kb_core::tables::{Cell, TableGrid, TableSource};
+    TableGrid {
+        source: Some(TableSource::Xlsx),
+        sheet: Some("PDRB".to_string()),
+        title: Some("PDRB by region".to_string()),
+        header: vec!["Region".to_string(), "Revenue".to_string()],
+        rows: vec![
+            vec![Cell::Text("Jawa Timur".to_string()), Cell::Number(10.0)],
+            vec![Cell::Text("Bali".to_string()), Cell::Number(5.0)],
+            vec![Cell::Text("Jumlah".to_string()), Cell::Number(15.0)],
+        ],
+        ..TableGrid::default()
+    }
+}
+
 fn stored_chunks(h: &Harness) -> usize {
     h.chunks
         .stored_chunks
@@ -166,6 +185,95 @@ fn document_status(h: &Harness) -> String {
     h.documents.docs.read().unwrap()[&tenant()][0]
         .status
         .clone()
+}
+
+#[tokio::test]
+async fn a_documents_tables_are_stored_and_indexed_with_their_table_id() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"ID,Region,Revenue".to_vec(), "text/csv")
+        .await
+        .unwrap();
+    let result = ExtractionResult {
+        content: long_text(),
+        file_type: "csv".to_string(),
+        tables: vec![table_grid()],
+        ..ExtractionResult::default()
+    };
+    let tables = Arc::new(FakeTableStore::default());
+    let worker = worker_with(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        Arc::new(FakeExtractor::returning_result(result)),
+        Arc::new(FakeEmbedder::default()),
+    )
+    .with_table_store(Arc::clone(&tables) as Arc<dyn kb_ports::TableStore>);
+    jobs.push(job());
+
+    assert!(worker.run_once().await.unwrap());
+    let finished = jobs.finished.read().unwrap();
+    assert!(finished[0].success, "{}", finished[0].detail);
+    drop(finished);
+
+    // The store was asked to keep the grid, under the job's tenant and
+    // document.
+    assert!(
+        tables
+            .calls()
+            .iter()
+            .any(|(op, tenant)| op == "put" && tenant == TENANT),
+        "{:?}",
+        tables.calls()
+    );
+    let records = tables.records.read().unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].id.0, format!("{DOC}_t0"));
+    drop(records);
+
+    // One summary and one row unit per row, all carrying the table id and the
+    // document payload every chunk has.
+    let stored = chunks.stored_chunks.read().unwrap();
+    let units = stored.get(&DocumentId::new_unchecked(DOC)).unwrap();
+    let summaries: Vec<&ChunkToStore> = units
+        .iter()
+        .filter(|c| c.metadata.get("chunkType").and_then(|v| v.as_str()) == Some("table_summary"))
+        .collect();
+    let rows: Vec<&ChunkToStore> = units
+        .iter()
+        .filter(|c| c.metadata.get("chunkType").and_then(|v| v.as_str()) == Some("table_row"))
+        .collect();
+    assert_eq!(summaries.len(), 1, "one summary per table");
+    assert_eq!(rows.len(), 3, "one row unit per row for a small table");
+    assert_eq!(summaries[0].metadata["tableId"], format!("{DOC}_t0"));
+    assert_eq!(summaries[0].metadata["category"], "finance");
+    assert!(summaries[0].content.contains("PDRB by region"));
+    assert_eq!(rows[0].content, "Region: Jawa Timur; Revenue: 10");
+    let indexes: std::collections::HashSet<u32> = units.iter().map(|c| c.chunk_index).collect();
+    assert_eq!(
+        indexes.len(),
+        units.len(),
+        "every unit has its own chunk index"
+    );
+}
+
+#[tokio::test]
+async fn a_document_with_no_tables_does_not_touch_the_table_store() {
+    let h = harness(extractor()).await;
+    let tables = Arc::new(FakeTableStore::default());
+    let worker = h
+        .worker
+        .clone()
+        .with_table_store(Arc::clone(&tables) as Arc<dyn kb_ports::TableStore>);
+    h.jobs.push(job());
+    assert!(worker.run_once().await.unwrap());
+    assert!(
+        tables.calls().is_empty(),
+        "an extractor with no tables must not call the table store: {:?}",
+        tables.calls()
+    );
 }
 
 #[tokio::test]
@@ -478,7 +586,7 @@ async fn a_backlog_drains_without_sleeping_between_jobs() {
         IngestSettings::default().poll_interval,
         Duration::from_secs(3)
     );
-    assert_eq!(IngestSettings::default().claims_per_tick, 1);
+    assert_eq!(IngestSettings::default().job_workers, 6);
 
     let cancel = CancelToken::new();
     let token = cancel.clone();
@@ -599,6 +707,183 @@ impl Embedder for ShortEmbedder {
 /// A PDF whose content is its pages is chunked page by page: every stored
 /// chunk names its page, and none holds text from two pages.
 #[tokio::test]
+async fn a_pdf_outline_is_stored_in_document_metadata() {
+    let outline = kb_core::tree::Outline {
+        document_title: None,
+        method: kb_core::tree::OutlineMethod::Bookmarks,
+        nodes: vec![kb_core::tree::OutlineNode {
+            title: "Chapter 2 Leave policy".into(),
+            level: 1,
+            start_page: 0,
+            end_page: 1,
+        }],
+    };
+    let h = harness(Arc::new(FakeExtractor::returning_result(
+        ExtractionResult {
+            ocr: None,
+            content: long_text(),
+            file_type: "pdf".to_string(),
+            outline: Some(outline),
+            ..ExtractionResult::default()
+        },
+    )))
+    .await;
+    h.jobs.push(job());
+    assert!(h.worker.run_once().await.unwrap());
+
+    let docs = h.documents.docs.read().unwrap();
+    let meta = docs[&tenant()]
+        .iter()
+        .find(|d| d.id.as_str() == DOC)
+        .expect("the document");
+    let stored = meta
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("outline"))
+        .expect("metadata.outline");
+    assert_eq!(stored["method"], "bookmarks");
+    assert_eq!(stored["nodes"][0]["start_page"], 0);
+    // The title stored with the outline is the document's, so the tree arm can
+    // vote for a document by name without a second Postgres read.
+    assert_eq!(stored["document_title"], "Quarterly report");
+}
+
+#[tokio::test]
+async fn the_ocr_report_is_stored_in_document_metadata_in_the_documented_shape() {
+    let report = OcrReport {
+        mode: "hybrid".into(),
+        provider: Some("chat".into()),
+        pages: 23,
+        ocr_pages: 3,
+        cached_pages: 0,
+        local_pages: 20,
+        failed_pages: vec![7],
+        skipped_pages: vec![],
+        breaker_opened: false,
+        layout_pages: 0,
+        layout_failed: 0,
+    };
+    let h = harness(Arc::new(FakeExtractor::returning_result(
+        ExtractionResult {
+            content: long_text(),
+            file_type: "pdf".to_string(),
+            ocr: Some(report),
+            ..ExtractionResult::default()
+        },
+    )))
+    .await;
+    h.jobs.push(job());
+    assert!(h.worker.run_once().await.unwrap());
+
+    let docs = h.documents.docs.read().unwrap();
+    let meta = docs[&tenant()]
+        .iter()
+        .find(|d| d.id.as_str() == DOC)
+        .expect("the document");
+    let stored = meta
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("ocr"))
+        .expect("metadata.ocr");
+    // The calling apps read these camelCase names, so they are the contract.
+    assert_eq!(stored["mode"], "hybrid");
+    assert_eq!(stored["provider"], "chat");
+    assert_eq!(stored["pages"], 23);
+    assert_eq!(stored["ocrPages"], 3);
+    assert_eq!(stored["cachedPages"], 0);
+    assert_eq!(stored["localPages"], 20);
+    assert_eq!(stored["failedPages"][0], 7);
+    assert_eq!(stored["skippedPages"], serde_json::json!([]));
+    assert_eq!(stored["breakerOpened"], false);
+}
+
+/// An extractor whose extraction carries no outline (a pre-DEC-4 cache entry,
+/// or an OCR parser) but whose free outline read finds one.
+struct OutlineOnlyOnRequest {
+    inner: FakeExtractor,
+    outline_calls: AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl kb_ports::Extractor for OutlineOnlyOnRequest {
+    async fn extract(
+        &self,
+        filename: &str,
+        mime_type: &str,
+        file_bytes: &[u8],
+    ) -> Result<ExtractionResult, PortError> {
+        self.inner.extract(filename, mime_type, file_bytes).await
+    }
+
+    async fn outline(
+        &self,
+        mime_type: &str,
+        _file_bytes: &[u8],
+        _pages: &[String],
+    ) -> Option<kb_core::tree::Outline> {
+        self.outline_calls.fetch_add(1, Ordering::SeqCst);
+        (mime_type == "application/pdf").then(|| kb_core::tree::Outline {
+            document_title: None,
+            method: kb_core::tree::OutlineMethod::Headings,
+            nodes: vec![kb_core::tree::OutlineNode {
+                title: "3.1 Scope".into(),
+                level: 2,
+                start_page: 0,
+                end_page: 0,
+            }],
+        })
+    }
+}
+
+/// No paid extraction is repeated to get an outline: when the extraction has
+/// none, ingest asks the extractor's free outline read and stores that.
+#[tokio::test]
+async fn an_extraction_without_an_outline_gets_one_from_the_outline_read() {
+    let extractor = Arc::new(OutlineOnlyOnRequest {
+        inner: FakeExtractor::returning_result(ExtractionResult {
+            ocr: None,
+            content: long_text(),
+            file_type: "pdf".to_string(),
+            outline: None,
+            ..ExtractionResult::default()
+        }),
+        outline_calls: AtomicUsize::new(0),
+    });
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let worker = worker_with(
+        jobs.clone(),
+        documents.clone(),
+        chunks,
+        blobs,
+        extractor.clone(),
+        Arc::new(FakeEmbedder::default()),
+    );
+    jobs.push(job());
+    assert!(worker.run_once().await.unwrap());
+
+    assert_eq!(extractor.outline_calls.load(Ordering::SeqCst), 1);
+    let docs = documents.docs.read().unwrap();
+    let meta = docs[&tenant()]
+        .iter()
+        .find(|d| d.id.as_str() == DOC)
+        .expect("the document");
+    let stored = meta
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("outline"))
+        .expect("metadata.outline from the fallback read");
+    assert_eq!(stored["method"], "headings");
+    assert_eq!(stored["nodes"][0]["title"], "3.1 Scope");
+}
+
+/// A PDF whose content is its pages is chunked page by page: every stored
+/// chunk names its page, and none holds text from two pages.
+#[tokio::test]
 async fn a_paged_pdf_is_chunked_page_by_page() {
     let words = ["alpha", "beta", "gamma"];
     let page_map: Vec<PageText> = words
@@ -620,12 +905,15 @@ async fn a_paged_pdf_is_chunked_page_by_page() {
         .join("\n\n");
     let h = harness(Arc::new(FakeExtractor::returning_result(
         ExtractionResult {
+            tables: Vec::new(),
+            ocr: None,
             content,
             file_type: "pdf".to_string(),
             used_ocr: false,
             figures: Vec::new(),
             pages_blocks: None,
             page_map: Some(page_map),
+            outline: None,
             error: None,
         },
     )))
@@ -684,12 +972,15 @@ async fn page_furniture_is_stripped_from_chunks_but_not_from_the_document() {
             chunks.clone(),
             blobs.clone(),
             Arc::new(FakeExtractor::returning_result(ExtractionResult {
+                tables: Vec::new(),
+                ocr: None,
                 content,
                 file_type: "pdf".to_string(),
                 used_ocr: false,
                 figures: Vec::new(),
                 pages_blocks: None,
                 page_map: Some(page_map),
+                outline: None,
                 error: None,
             })),
             Arc::new(FakeEmbedder::default()),
@@ -769,6 +1060,8 @@ async fn test_ingest_worker_end_to_end_full_pipeline() {
     }];
 
     let extract_result = ExtractionResult {
+        tables: Vec::new(),
+        ocr: None,
         content: "Section one explains the quarter in detail with all financial figures.
 
 Section two follows with the breakdown by region and by product line.
@@ -780,6 +1073,7 @@ Alice works at Acme Corp."
         figures,
         pages_blocks: Some(pages_blocks),
         page_map: Some(page_map),
+        outline: None,
         error: None,
     };
 
@@ -1803,4 +2097,299 @@ async fn embedding_max_chars_caps_the_embedder_input_but_not_the_stored_chunk() 
         .max()
         .unwrap();
     assert!(longest > 40, "stored chunks keep their full text");
+}
+
+// ---------------------------------------------------------------- ING-6 seats
+
+/// An extractor that holds `big.pdf` until the test opens the gate, and
+/// answers every other file at once: a 300-page scan stuck at OCR, and a
+/// one-page memo uploaded right after it.
+struct GatedExtractor {
+    gate: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl Extractor for GatedExtractor {
+    async fn extract(
+        &self,
+        filename: &str,
+        mime_type: &str,
+        file_bytes: &[u8],
+    ) -> Result<ExtractionResult, PortError> {
+        self.extract_with_options(
+            filename,
+            mime_type,
+            file_bytes,
+            kb_ports::ExtractionOptions::default(),
+        )
+        .await
+    }
+
+    async fn extract_with_options(
+        &self,
+        filename: &str,
+        _mime_type: &str,
+        _file_bytes: &[u8],
+        _options: kb_ports::ExtractionOptions,
+    ) -> Result<ExtractionResult, PortError> {
+        if filename == "big.pdf" {
+            self.gate.notified().await;
+        }
+        Ok(ExtractionResult::text(long_text(), "markdown"))
+    }
+}
+
+fn named_job(id: &str, doc: &str, filename: &str, created_at: i64) -> JobRecord {
+    JobRecord {
+        id: id.to_string(),
+        document_id: Some(DocumentId::new_unchecked(doc)),
+        s3_key: Some(format!("documents/{TENANT}/{doc}/{filename}")),
+        filename: filename.to_string(),
+        created_at: Some(created_at),
+        ..job()
+    }
+}
+
+fn named_document(doc: &str) -> DocumentMeta {
+    DocumentMeta {
+        id: DocumentId::new_unchecked(doc),
+        ..document()
+    }
+}
+
+fn status_of(documents: &FakeDocumentStore, doc: &str) -> String {
+    documents.docs.read().unwrap()[&tenant()]
+        .iter()
+        .find(|d| d.id.0 == doc)
+        .map(|d| d.status.clone())
+        .unwrap_or_default()
+}
+
+/// Run a worker over a big job (stuck in extraction) and a small one queued
+/// after it, and report whether the small one became ready while the big one
+/// was still stuck.
+async fn small_job_finishes_behind_a_stuck_big_one(job_workers: usize) -> bool {
+    let (jobs, documents, chunks, blobs) = parts();
+    for (doc, file) in [("doc_big", "big.pdf"), ("doc_small", "small.pdf")] {
+        documents.insert_doc(tenant(), named_document(doc));
+        blobs
+            .upload(
+                &format!("documents/{TENANT}/{doc}/{file}"),
+                b"%PDF-1.7 fake".to_vec(),
+                "application/pdf",
+            )
+            .await
+            .unwrap();
+    }
+    // The big upload comes first, and the small one only once the worker is
+    // already busy with it: the live case. Queuing both before the worker
+    // starts hid a run loop that never claimed while a job was in flight.
+    jobs.push(named_job("job_big", "doc_big", "big.pdf", 1));
+
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let worker = IngestWorker::new(
+        jobs.clone(),
+        documents.clone(),
+        chunks,
+        blobs,
+        Arc::new(GatedExtractor { gate: gate.clone() }),
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings {
+            embedding_model: Some("bge-m3".to_string()),
+            job_workers,
+            poll_interval: Duration::from_millis(10),
+            ..IngestSettings::default()
+        },
+    );
+    let cancel = CancelToken::new();
+    let running = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move { worker.run(cancel).await })
+    };
+    for _ in 0..200 {
+        if jobs.pending_len() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(jobs.pending_len(), 0, "the worker claimed the big job");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    jobs.push(named_job("job_small", "doc_small", "small.pdf", 2));
+
+    // Give the small job ample time to finish while the big one is held.
+    let mut small_ready_while_big_stuck = false;
+    for _ in 0..200 {
+        if status_of(&documents, "doc_small") == "ready" {
+            small_ready_while_big_stuck = status_of(&documents, "doc_big") != "ready";
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Release the big job, and both finish: nothing was lost or stuck.
+    gate.notify_one();
+    for _ in 0..200 {
+        if status_of(&documents, "doc_big") == "ready"
+            && status_of(&documents, "doc_small") == "ready"
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(status_of(&documents, "doc_big"), "ready");
+    assert_eq!(status_of(&documents, "doc_small"), "ready");
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the worker stops when cancelled")
+        .unwrap();
+    small_ready_while_big_stuck
+}
+
+#[tokio::test]
+async fn a_small_job_is_not_held_behind_a_big_one_that_is_stuck() {
+    assert!(
+        small_job_finishes_behind_a_stuck_big_one(2).await,
+        "with two job slots the small upload must finish while the big one is stuck"
+    );
+}
+
+#[tokio::test]
+async fn one_job_slot_is_the_old_serial_worker_and_holds_the_small_job() {
+    // The control: one slot reproduces the pre-ING-6 worker, where the small
+    // upload waited for the big one. It proves the test above can fail.
+    assert!(
+        !small_job_finishes_behind_a_stuck_big_one(1).await,
+        "with one job slot the small upload must wait for the big one"
+    );
+}
+
+/// An extractor that, like the OCR router, gives the worker's extract seat
+/// back (or not) and then waits on a "remote service" until the test opens
+/// the gate. It counts how many documents are inside at once.
+struct RemoteWaitExtractor {
+    releases_seat: bool,
+    gate: Arc<tokio::sync::Notify>,
+    inside: Arc<AtomicUsize>,
+    most_inside: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Extractor for RemoteWaitExtractor {
+    async fn extract(
+        &self,
+        filename: &str,
+        mime_type: &str,
+        file_bytes: &[u8],
+    ) -> Result<ExtractionResult, PortError> {
+        self.extract_with_options(
+            filename,
+            mime_type,
+            file_bytes,
+            kb_ports::ExtractionOptions::default(),
+        )
+        .await
+    }
+
+    async fn extract_with_options(
+        &self,
+        _filename: &str,
+        _mime_type: &str,
+        _file_bytes: &[u8],
+        options: kb_ports::ExtractionOptions,
+    ) -> Result<ExtractionResult, PortError> {
+        if self.releases_seat {
+            options.seat.release();
+        }
+        let now = self.inside.fetch_add(1, Ordering::SeqCst) + 1;
+        self.most_inside.fetch_max(now, Ordering::SeqCst);
+        self.gate.notified().await;
+        self.inside.fetch_sub(1, Ordering::SeqCst);
+        Ok(ExtractionResult::text(long_text(), "markdown"))
+    }
+}
+
+/// Two documents waiting at "OCR" with ONE extract seat: how many were inside
+/// the extractor at the same time?
+async fn documents_waiting_at_ocr_together(releases_seat: bool) -> usize {
+    let (jobs, documents, chunks, blobs) = parts();
+    for (doc, file) in [("doc_a", "a.pdf"), ("doc_b", "b.pdf")] {
+        documents.insert_doc(tenant(), named_document(doc));
+        blobs
+            .upload(
+                &format!("documents/{TENANT}/{doc}/{file}"),
+                b"%PDF-1.7 fake".to_vec(),
+                "application/pdf",
+            )
+            .await
+            .unwrap();
+    }
+    jobs.push(named_job("job_a", "doc_a", "a.pdf", 1));
+    jobs.push(named_job("job_b", "doc_b", "b.pdf", 2));
+
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let most_inside = Arc::new(AtomicUsize::new(0));
+    let worker = IngestWorker::new(
+        jobs,
+        documents.clone(),
+        chunks,
+        blobs,
+        Arc::new(RemoteWaitExtractor {
+            releases_seat,
+            gate: gate.clone(),
+            inside: Arc::new(AtomicUsize::new(0)),
+            most_inside: most_inside.clone(),
+        }),
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings {
+            embedding_model: Some("bge-m3".to_string()),
+            job_workers: 2,
+            seats: crate::seats::SeatCapacity {
+                extract: 1,
+                ..crate::seats::SeatCapacity::default()
+            },
+            poll_interval: Duration::from_millis(10),
+            ..IngestSettings::default()
+        },
+    );
+    let cancel = CancelToken::new();
+    let running = {
+        let cancel = cancel.clone();
+        tokio::spawn(async move { worker.run(cancel).await })
+    };
+    // Let both jobs get as far as they can while the "OCR" is held.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let together = most_inside.load(Ordering::SeqCst);
+    // Open the gate for everyone, and both documents finish.
+    for _ in 0..50 {
+        gate.notify_waiters();
+        if status_of(&documents, "doc_a") == "ready" && status_of(&documents, "doc_b") == "ready" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(status_of(&documents, "doc_a"), "ready");
+    assert_eq!(status_of(&documents, "doc_b"), "ready");
+    cancel.cancel();
+    tokio::time::timeout(Duration::from_secs(5), running)
+        .await
+        .expect("the worker stops when cancelled")
+        .unwrap();
+    together
+}
+
+#[tokio::test]
+async fn a_document_waiting_at_ocr_holds_no_extract_seat() {
+    assert_eq!(
+        documents_waiting_at_ocr_together(true).await,
+        2,
+        "with the seat given back, a second document starts while the first waits at OCR"
+    );
+}
+
+#[tokio::test]
+async fn an_extractor_that_keeps_the_seat_holds_the_next_document_out() {
+    // The control: without the release, one extract seat admits one document,
+    // so the test above can fail.
+    assert_eq!(documents_waiting_at_ocr_together(false).await, 1);
 }

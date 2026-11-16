@@ -38,6 +38,11 @@ pub struct ChunkMetadata {
     pub asset_key: Option<String>,
     #[serde(default)]
     pub anchor_chunk_index: Option<u32>,
+    /// The table this chunk describes or is a row of (`TBL-1`), when the chunk
+    /// is the ingest-produced `table_summary`/`table_row` unit. Additive:
+    /// absent for every other chunk.
+    #[serde(default)]
+    pub table_id: Option<String>,
 }
 
 impl crate::page_map::HasContent<ChunkMetadata> for Chunk {
@@ -231,6 +236,7 @@ pub fn smart_chunk_document(
                 contextual_prefix: None,
                 asset_key: None,
                 anchor_chunk_index: None,
+                table_id: None,
             },
         })
         .filter(|c| !c.content.is_empty())

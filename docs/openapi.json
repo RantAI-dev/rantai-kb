@@ -1,0 +1,4798 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "rantai-kb API",
+    "description": "Upload documents, search them, and read back what was found.\n\nEvery route under `/v1` needs an API key: send it as `Authorization: Bearer <key>` or as `X-API-Key: <key>`. The key decides the tenant, the scopes (`kb:read`, `kb:write`) and, when it is limited, the knowledge bases the caller may see.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "version": "0.3.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness and readiness: are the dependencies answering?",
+        "description": "`GET /health` — the liveness probe. Public: a health check must not need a\nkey, or an operator cannot use it to find out why the service is not\nanswering.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Every dependency answered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "At least one dependency did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/v1/categories": {
+      "get": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "List the tenant's categories.",
+        "description": "`GET /v1/categories` — the tenant's categories, ordered by name.",
+        "operationId": "list_categories",
+        "responses": {
+          "200": {
+            "description": "The categories",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategoryListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "Create a category.",
+        "description": "`POST /v1/categories` — 201 with the created category.",
+        "operationId": "create_category",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CategoryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The created category",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategoryEnvelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body has no 'name' or no 'label'",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/categories/{id}": {
+      "delete": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "Delete a category.",
+        "description": "`DELETE /v1/categories/{id}`.",
+        "operationId": "delete_category",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The category's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The category was removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such category in this tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "Change a category.",
+        "description": "`PATCH /v1/categories/{id}`.",
+        "operationId": "patch_category",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The category's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CategoryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The category, after the patch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategoryEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such category in this tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/documents": {
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "List the caller's documents.",
+        "description": "`GET /v1/documents` — the caller's documents. Needs the `kb:read` scope. A\nkey bound to some knowledge bases sees only the documents in them.",
+        "operationId": "list_documents",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many documents to return. 1–500; anything else is the default (100).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "knowledgeBaseIds",
+            "in": "query",
+            "description": "The knowledge bases to list, as a JSON array or a comma-separated list.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "externalRef",
+            "in": "query",
+            "description": "Only documents with this exact external reference.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The documents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Upload a document.",
+        "description": "`POST /v1/documents` — accepts the upload, returns `202` with the document\nand job ids. Needs the `kb:write` scope. The answer is `202` because\nnothing is indexed yet: a worker picks the job up and the caller polls\n`GET /v1/jobs/{id}`.",
+        "operationId": "ingest_document",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/UploadForm"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "The document was accepted and a job was queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No file, an unsupported extension, or an unknown knowledge base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The upload is larger than the accepted limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The file extension is not on the accepted list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The file could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/documents/{id}": {
+      "get": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Read one document and its chunks.",
+        "description": "`GET /v1/documents/{id}` — one document and its chunks. Needs the\n`kb:read` scope. A document outside the caller's tenant, or outside a\nlimited key's knowledge bases, answers the same 404 as an unknown id.",
+        "operationId": "get_document",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The document's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The document and its chunks",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentDetailResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document is visible to this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "A store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Delete a document, softly or for good.",
+        "description": "`DELETE /v1/documents/{id}` — mirrors TS deleteDocument: needs `kb:write`;\nsoft delete sets `deletedAt` and leaves chunks and the blob alone; hard\ndelete (`?hard=true`) removes the chunks, then the stored object, then the\nrow.",
+        "operationId": "delete_document",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The document's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "hard",
+            "in": "query",
+            "description": "`\"true\"` removes the chunks, the stored original and the row. Anything\nelse (or nothing) is the soft delete.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The document was deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document is visible to this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Change a document's metadata.",
+        "description": "`PATCH /v1/documents/{id}` — change a document's metadata. Needs the\n`kb:write` scope. Absent members are left alone; `subcategory` set to\n`null` clears the column.",
+        "operationId": "patch_document",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The document's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchDocumentBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The document, after the patch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PatchedDocumentResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document is visible to this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/documents/{id}/assets": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Download one figure crop.",
+        "description": "`GET /v1/documents/{id}/assets?key=…` — streams one figure crop. The key\nmust live under the document's own asset prefix; anything else is the same\n404 an unknown document gives, so a key cannot be probed.",
+        "operationId": "get_document_asset",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The document's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "query",
+            "description": "The storage key of the figure crop, as `assetKey` in the document's\nfigures.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The figure's bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document, or no such asset in it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/documents/{id}/intelligence": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "The entities and relations extracted for a document.",
+        "description": "`GET /v1/documents/{id}/intelligence` — entities and relations extracted\nfor a document.",
+        "operationId": "get_document_intelligence",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The document's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The document's entities and relations",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntelligenceResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document is visible to this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/documents/{id}/raw": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "summary": "Download the stored original.",
+        "description": "`GET /v1/documents/{id}/raw` — streams the stored original. The bytes come\nback with the document's own MIME type (or `application/octet-stream` when\nthe store has none).",
+        "operationId": "get_document_raw",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The document's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stored original, as bytes",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document is visible to this key, or it has no stored file",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The stored file could not be loaded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/documents/{id}/structure": {
+      "get": {
+        "tags": [
+          "structure"
+        ],
+        "summary": "The pages, figures and chunk-to-page map of a document.",
+        "description": "`GET /v1/documents/{id}/structure`. Visibility is\n[`find_visible_document`](crate::routes::find_visible_document): tenant\n**and** the key's knowledge-base limit, answering the same 404 as an\nunknown id so a limited key cannot probe for documents outside its bases.",
+        "operationId": "get_document_structure",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The document's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The document's pages, figures and chunk map",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentStructureResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document is visible to this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "summary": "Stream ingest progress (server-sent events).",
+        "description": "`GET /v1/events` — server-sent ingest progress for the caller's tenant.\nThe wire format is the TypeScript one byte for byte: an immediate\n`\": connected\\n\\n\"`, a `\": ping\\n\\n\"` keep-alive every 25 s, and one\n`event: <name>\\ndata: <json>\\n\\n` frame per progress update. Only this\ntenant's frames are written; another tenant's are dropped without waking\nthe connection's writer. A key limited to some knowledge bases also drops a\nframe that names a document outside them, so the stream does not reveal\nprogress for a document its other routes answer 404 for.",
+        "operationId": "events_stream",
+        "responses": {
+          "200": {
+            "description": "The event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The stream could not be opened",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/formats": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "The upload formats the service accepts.",
+        "description": "`GET /v1/formats` — the accepted extensions and the size limit. Public,\nlike the health probe: a client has to know the accepted list before it\nhas a key.",
+        "operationId": "formats",
+        "responses": {
+          "200": {
+            "description": "The accepted extensions and the size limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FormatsResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/v1/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness and readiness, under the versioned path.",
+        "description": "`GET /v1/health` — the same probe as `GET /health`. A separate handler so\nthat each path is its own OpenAPI operation; the body is the same one\n`/health` returns.",
+        "operationId": "health_v1",
+        "responses": {
+          "200": {
+            "description": "Every dependency answered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "At least one dependency did not answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/v1/jobs/{id}": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Read an ingest job's progress.",
+        "description": "`GET /v1/jobs/{id}`. No scope check, matching the TypeScript route: any key\nof the tenant can poll its own jobs, which is how the upload UI polls the\njob the same key just created.",
+        "operationId": "get_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The job's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job's progress",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job, or its document is not visible to this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/jobs/{id}/retry": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "Requeue a failed ingest job.",
+        "description": "`POST /v1/jobs/{id}/retry` — only a failed job can be retried (409\notherwise). The row goes back to `pending` with the shape the worker's\nclaim expects, so the next poll picks it up exactly like a fresh job.",
+        "operationId": "retry_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The job's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job was requeued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetryResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such job, or its document is not visible to this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The job is not in the failed state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/knowledge-bases": {
+      "get": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "List the caller's knowledge bases.",
+        "description": "`GET /v1/knowledge-bases` — the caller's knowledge bases. Needs the\n`kb:read` scope. A key bound to some bases sees only those.",
+        "operationId": "list_knowledge_bases",
+        "responses": {
+          "200": {
+            "description": "The knowledge bases",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KbListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "Create a knowledge base.",
+        "description": "`POST /v1/knowledge-bases` — 201 with the created row. Needs the `kb:write`\nscope. A base without a name is a 400.",
+        "operationId": "create_knowledge_base",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KnowledgeBaseBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The created knowledge base",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeBaseView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body has no 'name'",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/knowledge-bases/{id}": {
+      "delete": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "Delete a knowledge base.",
+        "description": "`DELETE /v1/knowledge-bases/{id}` — removes the base and its document\nlinks.",
+        "operationId": "delete_knowledge_base",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The knowledge base's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The knowledge base was removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such knowledge base in this tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "taxonomy"
+        ],
+        "summary": "Change a knowledge base.",
+        "description": "`PATCH /v1/knowledge-bases/{id}`. Absent fields are untouched; an empty\nbody returns the row unchanged.",
+        "operationId": "patch_knowledge_base",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The knowledge base's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/KnowledgeBaseBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The knowledge base, after the patch",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KnowledgeBaseEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:write scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such knowledge base in this tenant",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be written",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/search": {
+      "post": {
+        "tags": [
+          "search"
+        ],
+        "summary": "Ask a question; get the chunks, the sources and the assembled context.",
+        "description": "`POST /v1/search` — the retrieval answer. Needs the `kb:read` scope. The\nanswer carries the chunks, the numbered sources, the assembled context and\nthe stage timings; `degrades` names the arms that did not run, so an empty\nanswer is never a silent one.",
+        "operationId": "search",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequestDto"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The search answer",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponseDto"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body has no usable 'query'",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The retrieval pipeline failed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/tables": {
+      "get": {
+        "tags": [
+          "tables"
+        ],
+        "summary": "List the tables the extractor found.",
+        "description": "`GET /v1/tables?documentId=…` — the document's tables, current version. A\nmissing `documentId` lists every table of the tenant: the same scope the\ntenant-wide reads use, and the shape a caller needs to discover what it may\nquery after a search.",
+        "operationId": "list_tables",
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "query",
+            "description": "Only the tables of this document. Without it, every table of the\ntenant is listed.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The tables",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TableDto"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document is visible to this key, or tables are not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/tables/{id}": {
+      "get": {
+        "tags": [
+          "tables"
+        ],
+        "summary": "Read one table and its manifest.",
+        "description": "`GET /v1/tables/{id}` — one table with its manifest.",
+        "operationId": "get_table",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The table's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The table and its manifest",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TableDto"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such table is visible to this key, or tables are not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
+    "/v1/tables/{id}/query": {
+      "post": {
+        "tags": [
+          "tables"
+        ],
+        "summary": "Run a typed query against a table.",
+        "description": "`POST /v1/tables/{id}/query` — run a typed query and return its rows and\nreceipt. The body is a typed query, never SQL: columns are checked against\nthe manifest and values are bound as parameters. A refused query answers\n`400` with the [`kb_core::tables::QueryError`] JSON itself, so a client\ncan react to `unknown_column` (and read `available`) instead of parsing\nprose.",
+        "operationId": "query_table",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The table's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TableQuery"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The rows and the receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The query was refused; the body is the QueryError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such table is visible to this key, or tables are not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Agg": {
+        "type": "string",
+        "description": "`kb_core::tables::Agg` — the aggregate functions a query may use.",
+        "enum": [
+          "sum",
+          "avg",
+          "min",
+          "max",
+          "count",
+          "count_distinct"
+        ]
+      },
+      "BoostStatsDto": {
+        "type": "object",
+        "description": "`stats.boost`: how many returned hits carried a usable field for each\nrequested boost. A hit without the field kept its base relevance and is\nnot counted; this is not an error count.",
+        "required": [
+          "recency",
+          "authority"
+        ],
+        "properties": {
+          "authority": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "recency": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "CategoryBody": {
+        "type": "object",
+        "description": "The body `POST /v1/categories` and `PATCH /v1/categories/{id}` accept.",
+        "properties": {
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The category's display colour."
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The category's human label. Required when creating one."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The category's machine name. Required when creating one."
+          }
+        }
+      },
+      "CategoryEnvelope": {
+        "type": "object",
+        "description": "The body `POST /v1/categories` and `PATCH /v1/categories/{id}` answer with.",
+        "required": [
+          "category"
+        ],
+        "properties": {
+          "category": {
+            "$ref": "#/components/schemas/CategoryView",
+            "description": "The category."
+          }
+        }
+      },
+      "CategoryListResponse": {
+        "type": "object",
+        "description": "The body `GET /v1/categories` answers with.",
+        "required": [
+          "categories"
+        ],
+        "properties": {
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CategoryView"
+            },
+            "description": "The tenant's categories, ordered by name."
+          }
+        }
+      },
+      "CategoryView": {
+        "type": "object",
+        "description": "One category on the wire. The TypeScript service sends the row as-is, so\nthe field names are the column names.",
+        "required": [
+          "id",
+          "name",
+          "label"
+        ],
+        "properties": {
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional display colour."
+          },
+          "id": {
+            "type": "string",
+            "description": "Row id."
+          },
+          "label": {
+            "type": "string",
+            "description": "Human label."
+          },
+          "name": {
+            "type": "string",
+            "description": "Machine name, unique per tenant."
+          }
+        }
+      },
+      "ChunkDto": {
+        "type": "object",
+        "required": [
+          "id",
+          "content",
+          "documentId",
+          "documentTitle",
+          "categories",
+          "similarity"
+        ],
+        "properties": {
+          "assetKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "chunkType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "contextualPrefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "documentId": {
+            "type": "string"
+          },
+          "documentTitle": {
+            "type": "string"
+          },
+          "externalRef": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (R2): the externalRef of the chunk's document, or null."
+          },
+          "id": {
+            "type": "string"
+          },
+          "page": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "retrieval": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RetrievalDto",
+                "description": "Present only when the engine knows which arms produced this chunk. Omitted\nrather than null, so a caller can tell \"no arms\" from \"old server\"."
+              }
+            ]
+          },
+          "section": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "similarity": {
+            "type": "number",
+            "format": "float"
+          },
+          "subcategory": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tableId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`TBL-1`): the table a `table_summary`/`table_row` hit belongs\nto. Absent for every other chunk type."
+          },
+          "tableTitle": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`TBL-1`): that table's title, when the answer could resolve it."
+          }
+        }
+      },
+      "ChunkPageRef": {
+        "type": "object",
+        "description": "One text chunk's place in the document.",
+        "required": [
+          "chunkId",
+          "chunkIndex"
+        ],
+        "properties": {
+          "chunkId": {
+            "type": "string",
+            "description": "The chunk's id."
+          },
+          "chunkIndex": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The chunk's 0-based position in the document.",
+            "minimum": 0
+          },
+          "page": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "0-based page, or null when the chunk has none (a format without pages).",
+            "minimum": 0
+          }
+        }
+      },
+      "ColumnInfo": {
+        "type": "object",
+        "description": "`kb_core::tables::ColumnInfo` — one column of a table's manifest.",
+        "required": [
+          "name",
+          "kind",
+          "role",
+          "sample_values",
+          "distinct_count"
+        ],
+        "properties": {
+          "distinct_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many distinct values the column has.",
+            "minimum": 0
+          },
+          "kind": {
+            "$ref": "#/components/schemas/ColumnKind",
+            "description": "What the column holds."
+          },
+          "name": {
+            "type": "string",
+            "description": "The column's name."
+          },
+          "role": {
+            "$ref": "#/components/schemas/ColumnRole",
+            "description": "What the column means, which decides what may be computed over it."
+          },
+          "sample_values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Up to ten frequent distinct values, for non-quantity columns."
+          },
+          "unit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The unit as written (`Rp juta`, `%`, `ton`); never applied to values."
+          }
+        }
+      },
+      "ColumnKind": {
+        "type": "string",
+        "description": "`kb_core::tables::ColumnKind` — what a column holds.",
+        "enum": [
+          "number",
+          "text",
+          "date",
+          "bool",
+          "mixed",
+          "empty"
+        ]
+      },
+      "ColumnRole": {
+        "type": "string",
+        "description": "`kb_core::tables::ColumnRole` — what a column *means*.\n\nA phone number, a postcode or a year is numeric but never summed, so the\nrole decides what an aggregate may do with the column.",
+        "enum": [
+          "quantity",
+          "code",
+          "identifier",
+          "label",
+          "date"
+        ]
+      },
+      "Confidence": {
+        "type": "string",
+        "description": "`kb_core::tables::Confidence` — how far the manifest's reading of the table\ncan be trusted.",
+        "enum": [
+          "high",
+          "medium",
+          "low"
+        ]
+      },
+      "DocumentChunkView": {
+        "type": "object",
+        "required": [
+          "id",
+          "chunkIndex",
+          "content"
+        ],
+        "properties": {
+          "chunkIndex": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The chunk's 0-based position in the document.",
+            "minimum": 0
+          },
+          "chunkType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The chunk's kind (`text`, `table_summary`, `table_row`, …)."
+          },
+          "content": {
+            "type": "string",
+            "description": "The chunk's text."
+          },
+          "id": {
+            "type": "string",
+            "description": "The chunk's id, in the wire form `document_chunk:⟨{bare}⟩`."
+          },
+          "page": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The 0-based page the chunk is on.",
+            "minimum": 0
+          },
+          "section": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The heading path the chunk sits under."
+          }
+        }
+      },
+      "DocumentDetail": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "categories",
+          "status",
+          "createdAt",
+          "updatedAt",
+          "knowledgeBaseIds",
+          "chunkCount",
+          "figures"
+        ],
+        "properties": {
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The categories the document is filed under."
+          },
+          "chunkCount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many chunks the document has.",
+            "minimum": 0
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "When the document was created."
+          },
+          "figures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FigureView"
+            },
+            "description": "The document's figures."
+          },
+          "fileSize": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The file's size in bytes."
+          },
+          "fileType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The file's type, as the store recorded it."
+          },
+          "id": {
+            "type": "string",
+            "description": "The document's id."
+          },
+          "knowledgeBaseIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The knowledge bases the document belongs to."
+          },
+          "mimeType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The file's MIME type."
+          },
+          "status": {
+            "type": "string",
+            "description": "`processing`, `ready` or `failed`."
+          },
+          "subcategory": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The subcategory, when it has one."
+          },
+          "title": {
+            "type": "string",
+            "description": "The document's title."
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "When the document was last changed."
+          }
+        }
+      },
+      "DocumentDetailResponse": {
+        "type": "object",
+        "required": [
+          "document",
+          "chunks"
+        ],
+        "properties": {
+          "chunks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentChunkView"
+            },
+            "description": "The document's chunks, in reading order."
+          },
+          "document": {
+            "$ref": "#/components/schemas/DocumentDetail",
+            "description": "The document's row."
+          }
+        }
+      },
+      "DocumentListResponse": {
+        "type": "object",
+        "required": [
+          "documents"
+        ],
+        "properties": {
+          "documents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocumentSummary"
+            },
+            "description": "The documents, newest first."
+          }
+        }
+      },
+      "DocumentStructureResponse": {
+        "type": "object",
+        "description": "The response body. camelCase on the wire, like every other `/v1` shape.",
+        "required": [
+          "documentId",
+          "title",
+          "pages",
+          "figures",
+          "chunks",
+          "truncated"
+        ],
+        "properties": {
+          "chunks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChunkPageRef"
+            },
+            "description": "The document's chunks and the pages they sit on."
+          },
+          "documentId": {
+            "type": "string",
+            "description": "The document's id."
+          },
+          "externalRef": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The caller's own reference for the document, when it has one."
+          },
+          "figures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FigureStructure"
+            },
+            "description": "The document's figures."
+          },
+          "pages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PageStructure"
+            },
+            "description": "The document's pages, by page number."
+          },
+          "title": {
+            "type": "string",
+            "description": "The document's title."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when either read reached its cap: more units may exist than are\nlisted. False does not prove there are none (an index can always answer\nshort), it only means the cap was not reached."
+          }
+        }
+      },
+      "DocumentSummary": {
+        "type": "object",
+        "description": "`GET /v1/documents` row, field for field as `listDocuments` selects it.",
+        "required": [
+          "id",
+          "title",
+          "categories",
+          "status",
+          "createdAt",
+          "knowledgeBaseIds"
+        ],
+        "properties": {
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The categories the document is filed under."
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "When the document was created."
+          },
+          "externalRef": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive: the caller's opaque document reference, or null."
+          },
+          "fileSize": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The file's size in bytes."
+          },
+          "fileType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The file's type, as the store recorded it."
+          },
+          "id": {
+            "type": "string",
+            "description": "The document's id."
+          },
+          "knowledgeBaseIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The knowledge bases the document belongs to."
+          },
+          "status": {
+            "type": "string",
+            "description": "`processing`, `ready` or `failed`."
+          },
+          "subcategory": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The subcategory, when it has one."
+          },
+          "title": {
+            "type": "string",
+            "description": "The document's title."
+          }
+        }
+      },
+      "EntityView": {
+        "type": "object",
+        "description": "`kb_ports::EntityView` — one entity the graph extracted for a document.",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "confidence",
+          "metadata"
+        ],
+        "properties": {
+          "confidence": {
+            "type": "number",
+            "format": "float",
+            "description": "How sure the extractor is, 0–1."
+          },
+          "id": {
+            "type": "string",
+            "description": "The entity's record id."
+          },
+          "metadata": {
+            "description": "Whatever else the extractor recorded."
+          },
+          "name": {
+            "type": "string",
+            "description": "The entity's name as it appears in the text."
+          },
+          "type": {
+            "type": "string",
+            "description": "The entity's kind (`person`, `organisation`, `place`, …)."
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "The body every failing request answers with.\n\nOne shape for every status: `{\"error\": \"<message>\"}`. The message is the\nstring the TypeScript service returns, so a client that reads `error` keeps\nworking.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "What went wrong, in the words the service has always used."
+          }
+        }
+      },
+      "FigureStructure": {
+        "type": "object",
+        "description": "One figure. `key` is the searchable figure chunk's id when the figure has a\nchunk, or the asset key for a figure recorded on the document row alone.",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "assetKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The blob key of the figure's image."
+          },
+          "bbox": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "number",
+              "format": "float"
+            },
+            "description": "`[x0, y0, x1, y1]` in page points, from `Document.metadata.figures`."
+          },
+          "caption": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The figure's caption, when it has one."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the picture shows, as the image describer read it (`ING-5`).\nAdditive; absent for figures from before it existed."
+          },
+          "key": {
+            "type": "string",
+            "description": "The figure's chunk id, or its asset key."
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The picture's kind (`photo`, `chart`, `diagram`, …), when known."
+          },
+          "ocrText": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Text legible in the picture, as the image describer read it (`ING-5`);\nnull when the picture was not read or shows no text."
+          },
+          "page": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The 0-based page the figure is on.",
+            "minimum": 0
+          }
+        }
+      },
+      "FigureView": {
+        "type": "object",
+        "required": [
+          "assetKey",
+          "page",
+          "kind"
+        ],
+        "properties": {
+          "assetKey": {
+            "type": "string",
+            "description": "The figure's storage key."
+          },
+          "caption": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The figure's caption, when it has one."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The figure's kind (`figure`, `chart`, `photo`, …)."
+          },
+          "page": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The 0-based page the figure is on.",
+            "minimum": 0
+          }
+        }
+      },
+      "Filter": {
+        "type": "object",
+        "description": "`kb_core::tables::Filter` — one predicate on a column.",
+        "required": [
+          "column",
+          "op",
+          "value"
+        ],
+        "properties": {
+          "column": {
+            "type": "string",
+            "description": "The column the predicate is on."
+          },
+          "op": {
+            "$ref": "#/components/schemas/FilterOp",
+            "description": "The comparison."
+          },
+          "value": {
+            "description": "The value to compare against; an array for `in`, `[low, high]` for\n`between`."
+          }
+        }
+      },
+      "FilterOp": {
+        "type": "string",
+        "description": "`kb_core::tables::FilterOp` — the comparison a filter makes.",
+        "enum": [
+          "=",
+          "!=",
+          ">",
+          ">=",
+          "<",
+          "<=",
+          "contains",
+          "in",
+          "between"
+        ]
+      },
+      "FormatsResponse": {
+        "type": "object",
+        "required": [
+          "extensions",
+          "maxFileBytes"
+        ],
+        "properties": {
+          "extensions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The file extensions the upload route accepts, each with its leading dot."
+          },
+          "maxFileBytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The largest accepted upload, in bytes.",
+            "minimum": 0
+          }
+        }
+      },
+      "GlobalArmStatsDto": {
+        "type": "object",
+        "description": "`stats.globalArm`: the communities selected and the chunks contributed.",
+        "required": [
+          "communities",
+          "chunks"
+        ],
+        "properties": {
+          "chunks": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "communities": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "HealthChecks": {
+        "type": "object",
+        "required": [
+          "postgres",
+          "vectors"
+        ],
+        "properties": {
+          "postgres": {
+            "type": "boolean",
+            "description": "Whether Postgres answered."
+          },
+          "vectors": {
+            "type": "boolean",
+            "description": "Whether the vector store answered."
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "checks",
+          "version",
+          "egress"
+        ],
+        "properties": {
+          "checks": {
+            "$ref": "#/components/schemas/HealthChecks",
+            "description": "One boolean per dependency."
+          },
+          "egress": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additive (R3): non-local model-endpoint hosts, sorted and de-duplicated."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "True when every dependency answered. False means at least one is down;\nthe `checks` say which."
+          },
+          "tier": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (R3): the `KB_TIER` preset name, or null when none is set."
+          },
+          "version": {
+            "type": "string",
+            "description": "The server's version."
+          }
+        }
+      },
+      "IngestResponse": {
+        "type": "object",
+        "description": "The body `POST /v1/documents` answers with.",
+        "required": [
+          "id",
+          "jobId",
+          "status",
+          "title",
+          "knowledgeBaseIds"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The new document's id."
+          },
+          "jobId": {
+            "type": "string",
+            "description": "The job that will ingest it."
+          },
+          "knowledgeBaseIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The knowledge bases the document was filed under."
+          },
+          "status": {
+            "type": "string",
+            "description": "Always `processing` — the document is not indexed yet."
+          },
+          "title": {
+            "type": "string",
+            "description": "The document's title."
+          }
+        }
+      },
+      "IntelligenceResponse": {
+        "type": "object",
+        "description": "The body `GET /v1/documents/{id}/intelligence` answers with.",
+        "required": [
+          "entities",
+          "relations",
+          "status",
+          "stats"
+        ],
+        "properties": {
+          "entities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EntityView"
+            },
+            "description": "The entities extracted for the document."
+          },
+          "relations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RelationView"
+            },
+            "description": "The relations extracted for the document."
+          },
+          "stats": {
+            "$ref": "#/components/schemas/IntelligenceStats",
+            "description": "How much was found."
+          },
+          "status": {
+            "type": "string",
+            "description": "`processing`, `failed` or `completed`."
+          }
+        }
+      },
+      "IntelligenceStats": {
+        "type": "object",
+        "description": "The counts of what the extraction found.",
+        "required": [
+          "totalEntities",
+          "totalRelations",
+          "entityTypes",
+          "relationTypes"
+        ],
+        "properties": {
+          "entityTypes": {
+            "type": "integer",
+            "description": "How many distinct entity kinds were found.",
+            "minimum": 0
+          },
+          "relationTypes": {
+            "type": "integer",
+            "description": "How many distinct relation kinds were found.",
+            "minimum": 0
+          },
+          "totalEntities": {
+            "type": "integer",
+            "description": "How many entities were found.",
+            "minimum": 0
+          },
+          "totalRelations": {
+            "type": "integer",
+            "description": "How many relations were found.",
+            "minimum": 0
+          }
+        }
+      },
+      "JobView": {
+        "type": "object",
+        "description": "`kb_ports::JobView` — the ingest job as `GET /v1/jobs/{id}` returns it.\n\ncamelCase on the wire, like every other `/v1` shape.",
+        "required": [
+          "id",
+          "status",
+          "progress",
+          "attempt"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many times the job has been attempted."
+          },
+          "documentId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The document the job ingests, when it names one."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The failure message, when the job failed."
+          },
+          "etaSeconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Seconds left, when the job can estimate it."
+          },
+          "id": {
+            "type": "string",
+            "description": "The job's id."
+          },
+          "progress": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Percent complete, 0–100.",
+            "minimum": 0
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending`, `processing`, `done` or `failed`."
+          },
+          "step": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The step the job is on, when it reports one."
+          },
+          "stepCurrent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The step the job is on, 1-based.",
+            "minimum": 0
+          },
+          "stepTotal": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many steps the job has.",
+            "minimum": 0
+          }
+        }
+      },
+      "KbListResponse": {
+        "type": "object",
+        "required": [
+          "knowledgeBases"
+        ],
+        "properties": {
+          "knowledgeBases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KbSummary"
+            },
+            "description": "The knowledge bases the caller may see."
+          }
+        }
+      },
+      "KbSummary": {
+        "type": "object",
+        "description": "One knowledge base, as `GET /v1/knowledge-bases` returns it.",
+        "required": [
+          "id",
+          "name",
+          "documentCount"
+        ],
+        "properties": {
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The base's display colour, when it has one."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The base's description, when it has one."
+          },
+          "documentCount": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many live documents the base holds.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "The base's id."
+          },
+          "name": {
+            "type": "string",
+            "description": "The base's name."
+          }
+        }
+      },
+      "KnowledgeBaseBody": {
+        "type": "object",
+        "description": "The body `POST /v1/knowledge-bases` and `PATCH /v1/knowledge-bases/{id}`\naccept.",
+        "properties": {
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The base's display colour."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The base's description."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The base's name. Required when creating one."
+          }
+        }
+      },
+      "KnowledgeBaseEnvelope": {
+        "type": "object",
+        "description": "The body `PATCH /v1/knowledge-bases/{id}` answers with.",
+        "required": [
+          "knowledgeBase"
+        ],
+        "properties": {
+          "knowledgeBase": {
+            "$ref": "#/components/schemas/KnowledgeBaseView",
+            "description": "The base, after the patch."
+          }
+        }
+      },
+      "KnowledgeBaseView": {
+        "type": "object",
+        "description": "The row `prisma.knowledgeBase.create` returns, field for field.",
+        "required": [
+          "id",
+          "tenantId",
+          "name",
+          "createdAt",
+          "updatedAt"
+        ],
+        "properties": {
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The base's display colour, when it has one."
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "When the base was created."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The base's description, when it has one."
+          },
+          "id": {
+            "type": "string",
+            "description": "The base's id."
+          },
+          "name": {
+            "type": "string",
+            "description": "The base's name."
+          },
+          "tenantId": {
+            "type": "string",
+            "description": "The tenant that owns the base."
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "When the base was last changed."
+          }
+        }
+      },
+      "OkResponse": {
+        "type": "object",
+        "description": "The body every delete answers with.\n\nOne shape for every route that removes something: `{\"ok\": true}`. A delete\nthat removed nothing answers `404` instead, so `ok` is always `true` when\nit is there at all.",
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "description": "Always `true`."
+          }
+        }
+      },
+      "OrderBy": {
+        "type": "object",
+        "description": "`kb_core::tables::OrderBy` — one output ordering.",
+        "required": [
+          "key",
+          "dir"
+        ],
+        "properties": {
+          "dir": {
+            "$ref": "#/components/schemas/SortDir",
+            "description": "Which way to sort."
+          },
+          "key": {
+            "type": "string",
+            "description": "An output column name or alias."
+          }
+        }
+      },
+      "PageStructure": {
+        "type": "object",
+        "description": "One page. `number` is 0-based, the same numbering as `ChunkMetadata.page`\nand a search chunk's `page`; the page-image key is built from `number + 1`.",
+        "required": [
+          "number"
+        ],
+        "properties": {
+          "hasTextLayer": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Whether the PDF page had its own text layer. `None` for a document\ningested before page units recorded it, or a page with no page unit."
+          },
+          "imageAssetKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stored page JPEG's blob key, when ingest recorded that it exists."
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The 0-based page number.",
+            "minimum": 0
+          },
+          "ocrText": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The page's text when ingest recorded it as OCR output. `None` otherwise,\nincluding for old documents where the origin was not stored."
+          }
+        }
+      },
+      "PatchDocumentBody": {
+        "type": "object",
+        "properties": {
+          "categories": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The document's new categories."
+          },
+          "knowledgeBaseIds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "The knowledge bases the document belongs to."
+          },
+          "subcategory": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`Some(None)` clears the column; absent leaves it alone."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The document's new title."
+          }
+        }
+      },
+      "PatchedDocument": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "categories",
+          "status",
+          "createdAt",
+          "updatedAt",
+          "knowledgeBaseIds"
+        ],
+        "properties": {
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The categories the document is filed under."
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "When the document was created."
+          },
+          "fileSize": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The file's size in bytes."
+          },
+          "fileType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The file's type, as the store recorded it."
+          },
+          "id": {
+            "type": "string",
+            "description": "The document's id."
+          },
+          "knowledgeBaseIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The knowledge bases the document belongs to."
+          },
+          "mimeType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The file's MIME type."
+          },
+          "status": {
+            "type": "string",
+            "description": "`processing`, `ready` or `failed`."
+          },
+          "subcategory": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The subcategory, when it has one."
+          },
+          "title": {
+            "type": "string",
+            "description": "The document's title."
+          },
+          "updatedAt": {
+            "type": "string",
+            "description": "When the document was last changed."
+          }
+        }
+      },
+      "PatchedDocumentResponse": {
+        "type": "object",
+        "required": [
+          "document"
+        ],
+        "properties": {
+          "document": {
+            "$ref": "#/components/schemas/PatchedDocument",
+            "description": "The document's row, after the patch."
+          }
+        }
+      },
+      "ProvenanceArm": {
+        "type": "string",
+        "description": "`kb_ports::ProvenanceArm` — the arms that produced a search hit.\n\nThe wire vocabulary, not the store's: `dense` and `sparse` are the two\nscored arms, the rest are the engine phases that add a chunk.",
+        "enum": [
+          "dense",
+          "sparse",
+          "neighbour",
+          "figure",
+          "graph",
+          "page",
+          "tree",
+          "global"
+        ]
+      },
+      "QueryError": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "The query named a column the table does not have.",
+            "required": [
+              "column",
+              "available",
+              "error"
+            ],
+            "properties": {
+              "available": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "The columns the table does have."
+              },
+              "column": {
+                "type": "string",
+                "description": "The column the query named."
+              },
+              "error": {
+                "type": "string",
+                "enum": [
+                  "unknown_column"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "SUM/AVG over a column whose role is not Quantity.",
+            "required": [
+              "column",
+              "role",
+              "error"
+            ],
+            "properties": {
+              "column": {
+                "type": "string",
+                "description": "The column the query named."
+              },
+              "error": {
+                "type": "string",
+                "enum": [
+                  "not_summable"
+                ]
+              },
+              "role": {
+                "$ref": "#/components/schemas/ColumnRole",
+                "description": "The column's role, which is why it was refused."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A plain column in `select` that is neither grouped nor aggregated.",
+            "required": [
+              "column",
+              "error"
+            ],
+            "properties": {
+              "column": {
+                "type": "string",
+                "description": "The column the query named."
+              },
+              "error": {
+                "type": "string",
+                "enum": [
+                  "not_grouped"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The document's privacy policy forbids this (plain rows, MIN/MAX).",
+            "required": [
+              "reason",
+              "error"
+            ],
+            "properties": {
+              "error": {
+                "type": "string",
+                "enum": [
+                  "restricted"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why the query was refused."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A value could not be compared with the column's kind.",
+            "required": [
+              "column",
+              "reason",
+              "error"
+            ],
+            "properties": {
+              "column": {
+                "type": "string",
+                "description": "The column the value was for."
+              },
+              "error": {
+                "type": "string",
+                "enum": [
+                  "bad_value"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why the value was refused."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "The query matched nothing.",
+            "required": [
+              "reason",
+              "error"
+            ],
+            "properties": {
+              "error": {
+                "type": "string",
+                "enum": [
+                  "empty"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "description": "Why the query was refused."
+              }
+            }
+          }
+        ],
+        "description": "`kb_core::tables::QueryError` — why a query was refused before it ran.\n\nEvery variant is a `400` at the API, and the JSON is the body, so a client\ncan react to `unknown_column` (and read `available`) instead of parsing a\nprose message."
+      },
+      "QueryResult": {
+        "type": "object",
+        "description": "`kb_core::tables::QueryResult` — the rows a query returned, and the receipt\nthat lets a caller say exactly how the number was computed.",
+        "required": [
+          "columns",
+          "rows",
+          "rows_matched",
+          "excluded_derived_rows",
+          "suppressed_groups",
+          "truncated",
+          "warnings"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The output columns, in order."
+          },
+          "excluded_derived_rows": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The derived rows left out of the computation.",
+            "minimum": 0
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {}
+            },
+            "description": "The rows, each with one value per output column."
+          },
+          "rows_matched": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The rows the query matched before grouping.",
+            "minimum": 0
+          },
+          "suppressed_groups": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The groups hidden by the document's privacy policy.",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when the row cap or the query's own limit cut the output."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Plain-language caveats about how the number was computed."
+          }
+        }
+      },
+      "RelationView": {
+        "type": "object",
+        "description": "`kb_ports::RelationView` — one edge of the document's entity graph.\n\n`in` and `out` are the record ids of the edge's endpoints.",
+        "required": [
+          "id",
+          "in",
+          "out",
+          "relation_type",
+          "confidence",
+          "metadata"
+        ],
+        "properties": {
+          "confidence": {
+            "type": "number",
+            "format": "float",
+            "description": "How sure the extractor is, 0–1."
+          },
+          "id": {
+            "type": "string",
+            "description": "The edge's record id."
+          },
+          "in": {
+            "type": "string",
+            "description": "The record id of the entity the edge starts at."
+          },
+          "metadata": {
+            "description": "Whatever else the extractor recorded."
+          },
+          "out": {
+            "type": "string",
+            "description": "The record id of the entity the edge ends at."
+          },
+          "relation_type": {
+            "type": "string",
+            "description": "The relation's type — the dynamic table the edge lives in."
+          }
+        }
+      },
+      "RetrievalDto": {
+        "type": "object",
+        "description": "Which retrieval arms produced a chunk, as the response reports it.\n\n**Additive** (step S.1c): Bun does not emit `retrieval`, and every field Bun\ndoes emit is unchanged. `search-parity.sh` deletes `.chunks[].retrieval`\nbefore diffing a Bun answer against a Rust one, because a field only one\nimplementation produces is not a divergence to fix — see\n`docs/rust-cutover.md`.",
+        "required": [
+          "arms"
+        ],
+        "properties": {
+          "arms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProvenanceArm"
+            },
+            "description": "The arms, in a canonical order: `dense`, `sparse`, `neighbour`, `figure`."
+          },
+          "denseRank": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "fusedScore": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          },
+          "rerankScore": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "The cross-encoder score, when a reranker scored this chunk (ADDITIVE\nRET-2). Omitted when no reranker ran, so the no-rerank response is\nunchanged. It exists so a floor calibration can sweep thresholds\noffline against the same score the server's floor uses."
+          },
+          "sparseRank": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "RetryResponse": {
+        "type": "object",
+        "description": "The body `POST /v1/jobs/{id}/retry` answers with.",
+        "required": [
+          "jobId"
+        ],
+        "properties": {
+          "jobId": {
+            "type": "string",
+            "description": "The job that was requeued."
+          }
+        }
+      },
+      "SearchRequestDto": {
+        "type": "object",
+        "properties": {
+          "adaptiveArms": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Per-request adaptive arm choice (RET-5). `Some(true)`/`Some(false)`\noverrides the server's `KB_ADAPTIVE_ARMS`; absent means \"use the server\ndefault\", which is off."
+          },
+          "boost": {
+            "description": "Additive (`RET-4`): optional recency/authority boosts. Kept untyped so\na malformed value is this route's 400, not a deserialiser 422."
+          },
+          "category": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "documentIds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "externalRefs": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Additive (`RET-3`): only documents whose `Document.externalRef` is one\nof these. An explicit empty list selects nothing."
+          },
+          "format": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hybrid": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "knowledgeBaseIds": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`RET-3`): only documents whose JSONB metadata `language` key\nequals this value."
+          },
+          "maxChunks": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "metadata": {
+            "description": "Additive (`RET-3`): top-level JSONB metadata predicates. Kept untyped\nso an invalid key or a non-scalar value is a 400 from validation rather\nthan a deserialiser 422."
+          },
+          "minScore": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Optional relevance floor for this request (RET-2). Overrides the\nserver's `KB_MIN_SCORE`; absent means \"use the server default\" (which\nis unset unless an operator configured one)."
+          },
+          "query": {
+            "description": "Left as raw JSON: the TypeScript route rejects a non-string query with\nits own 400, which a typed field would turn into a parser error."
+          }
+        }
+      },
+      "SearchResponseDto": {
+        "type": "object",
+        "properties": {
+          "chunks": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ChunkDto"
+            }
+          },
+          "context": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "degrades": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "results": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {}
+          },
+          "sources": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SourceDto"
+            }
+          },
+          "stats": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SearchStatsDto"
+              }
+            ]
+          },
+          "tables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TableRefDto"
+            },
+            "description": "Additive (`TBL-1`): the tables belonging to the documents this answer\nnamed, so a caller can go straight to `POST /v1/tables/{id}/query`\nwithout a second lookup. Omitted when there are none."
+          }
+        }
+      },
+      "SearchStatsDto": {
+        "type": "object",
+        "description": "The `stats` object of a search response.\n\nEvery field of the Bun `HybridSearchStats` is kept, with the same name and\nthe same meaning, because clients already read them and this service is\nmeant to be a drop-in for it. `stageTimingsMs` is additive: a client that\nhas never heard of it keeps working, and a client that reads it gets the\npart of the latency that the five legacy fields cannot explain — the arms,\nthe rerank, the Postgres round trips and the serialisation.\n\nThe legacy fields are now measured rather than zeroed, so `embeddingTimeMs`\non the standard path is a number instead of a lie. Milliseconds keep\nmicrosecond resolution: a query-cache hit and a 0.4 ms arm are both \"0 ms\"\nonce rounded to an integer, and the difference between them is the whole\nreason this exists.",
+        "required": [
+          "totalTimeMs",
+          "embeddingTimeMs",
+          "vectorSearchTimeMs",
+          "entitySearchTimeMs",
+          "graphSearchTimeMs",
+          "fusionTimeMs",
+          "vectorResults",
+          "entityResults",
+          "graphResults",
+          "totalResults",
+          "stageTimingsMs"
+        ],
+        "properties": {
+          "armPlanFallback": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "True when the adaptive plan returned nothing and the full plan was run\nonce more. Present only when adaptive mode ran."
+          },
+          "boost": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/BoostStatsDto",
+                "description": "Additive (`RET-4`): what a recency/authority boost applied. Absent when\nthe request did not ask for one, so an old client's shape is unchanged."
+              }
+            ]
+          },
+          "embeddingTimeMs": {
+            "type": "number",
+            "format": "double"
+          },
+          "entityResults": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "entitySearchTimeMs": {
+            "type": "number",
+            "format": "double"
+          },
+          "floorDropped": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "How many hits the floor removed. Absent when no floor ran.",
+            "minimum": 0
+          },
+          "floorScoreKind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which comparable score the relevance floor used (`\"rerank\"` or\n`\"dense\"`, ADDITIVE RET-2). Absent when no floor ran, so an old client\nsees exactly the Bun shape."
+          },
+          "fusionTimeMs": {
+            "type": "number",
+            "format": "double"
+          },
+          "globalArm": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GlobalArmStatsDto",
+                "description": "Additive (`DEC-5`): what the global community arm did. Present only when\nthe arm ran (`KB_GLOBAL_ARM` on and an aggregative query), so a server\nwith the flag off answers exactly the earlier shape. `communities: 0`\nmeans the tenant has no community set — the arm had nothing to say, and\nthat is not a degrade."
+              }
+            ]
+          },
+          "graphResults": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "graphSearchTimeMs": {
+            "type": "number",
+            "format": "double"
+          },
+          "queryClass": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The question's class (`\"exact\"`, `\"factual\"`, `\"structural\"`,\n`\"relational\"`, `\"aggregative\"`, `\"topical\"`). ADDITIVE RET-5; present\nonly when adaptive arm choice ran. Absent on a default search so an old\nclient sees exactly the earlier shape."
+          },
+          "skippedArms": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/SkippedArmDto"
+            },
+            "description": "The arms adaptive mode did not run, each with the class's reason\n(`[{\"arm\":\"pageImage\",\"reason\":\"exact query\"}]`). Empty only when the\nplan skipped nothing or a fallback ran the full plan."
+          },
+          "stageTimingsMs": {
+            "$ref": "#/components/schemas/StageTimingsDto"
+          },
+          "totalResults": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "totalTimeMs": {
+            "type": "number",
+            "format": "double",
+            "description": "Route entry to just before serialisation, in milliseconds."
+          },
+          "treeArm": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TreeArmStatsDto",
+                "description": "Additive (`DEC-4`): what the tree arm did. `{\"nodes\": n, \"pages\": n}`.\nAbsent unless the arm ran for a structural query and found something, so\na default search keeps exactly the earlier shape."
+              }
+            ]
+          },
+          "vectorResults": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "vectorSearchTimeMs": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
+      "SelectItem": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "An aggregate over a column.",
+            "required": [
+              "agg"
+            ],
+            "properties": {
+              "agg": {
+                "$ref": "#/components/schemas/Agg",
+                "description": "The aggregate function."
+              },
+              "as": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The output name for the aggregate."
+              },
+              "column": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The column to aggregate; absent for `count`."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "A plain column, which must be grouped or aggregated elsewhere.",
+            "required": [
+              "column"
+            ],
+            "properties": {
+              "as": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The output name for the column."
+              },
+              "column": {
+                "type": "string",
+                "description": "The column's name."
+              }
+            }
+          }
+        ],
+        "description": "`kb_core::tables::SelectItem` — one output column: a plain column, or an\naggregate.\n\nJSON: `{\"column\":\"Region\"}` or `{\"agg\":\"sum\",\"column\":\"Revenue\",\"as\":\"total\"}`;\n`{\"agg\":\"count\"}` with no column counts rows."
+      },
+      "SkippedArmDto": {
+        "type": "object",
+        "description": "One arm adaptive mode skipped, as serialised in `stats.skippedArms`.",
+        "required": [
+          "arm",
+          "reason"
+        ],
+        "properties": {
+          "arm": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "SortDir": {
+        "type": "string",
+        "description": "`kb_core::tables::SortDir` — which way to sort.",
+        "enum": [
+          "asc",
+          "desc"
+        ]
+      },
+      "SourceDto": {
+        "type": "object",
+        "required": [
+          "documentTitle",
+          "categories"
+        ],
+        "properties": {
+          "assetKey": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "chunkType": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "documentId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "documentTitle": {
+            "type": "string"
+          },
+          "page": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "section": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "StageDetailDto": {
+        "type": "object",
+        "description": "Measurements that overlap other stages and so are not part of the sum.",
+        "required": [
+          "engineTotal",
+          "queryEmbed",
+          "queryEmbedCached",
+          "vectorArm",
+          "keywordArm",
+          "entityArm",
+          "graphArm",
+          "globalArm",
+          "pageArm",
+          "visionRerank",
+          "scopeCheck"
+        ],
+        "properties": {
+          "engineTotal": {
+            "type": "number",
+            "format": "double",
+            "description": "What the engine spent inside `execute_pipeline`."
+          },
+          "entityArm": {
+            "type": "number",
+            "format": "double",
+            "description": "Always 0: the entity graph reaches search through the graph arm, not as an\narm of its own. Present so a client that reads it does not lose a field."
+          },
+          "globalArm": {
+            "type": "number",
+            "format": "double",
+            "description": "The global (graph community) arm (`DEC-5`): the scoped community read,\nthe BM25 selection and the scoped chunk fetch. Zero when the flag is off\nor the query is not aggregative."
+          },
+          "graphArm": {
+            "type": "number",
+            "format": "double",
+            "description": "The graph arm, end to end: seed lookup, scoped-graph load or cache hit,\nthe walk, and the chunk fetch it needs to fuse."
+          },
+          "keywordArm": {
+            "type": "number",
+            "format": "double",
+            "description": "The keyword arm's store call on its own."
+          },
+          "pageArm": {
+            "type": "number",
+            "format": "double",
+            "description": "The page-image arm's query embed and page search, concurrent with the\ntext arms."
+          },
+          "queryEmbed": {
+            "type": "number",
+            "format": "double"
+          },
+          "queryEmbedCached": {
+            "type": "boolean",
+            "description": "True when the query embedding came from the cache rather than the\nprovider."
+          },
+          "scopeCheck": {
+            "type": "number",
+            "format": "double",
+            "description": "`find_alive_meta_by_ids` inside the keyword arm (Postgres)."
+          },
+          "vectorArm": {
+            "type": "number",
+            "format": "double",
+            "description": "The vector arm's store call on its own."
+          },
+          "visionRerank": {
+            "type": "number",
+            "format": "double",
+            "description": "The live vision rerank of the top page images, inside `pages`."
+          }
+        }
+      },
+      "StageTimingsDto": {
+        "type": "object",
+        "description": "The per-stage breakdown, in milliseconds.\n\nThe top level is a *partition* of the request: the stages there run one\nafter another and add up to no more than [`SearchStatsDto::total_time_ms`].\n`detail` is the overlapping part — the query embed and the two arms all\nhappen inside `arms`, so they are reported, never summed with it.",
+        "required": [
+          "scopeBuild",
+          "expand",
+          "arms",
+          "enrich",
+          "fusion",
+          "rerank",
+          "pages",
+          "neighbours",
+          "figures",
+          "context",
+          "serialise",
+          "total",
+          "detail"
+        ],
+        "properties": {
+          "arms": {
+            "type": "number",
+            "format": "double",
+            "description": "The concurrent retrieval phase: query embed + both arms."
+          },
+          "context": {
+            "type": "number",
+            "format": "double",
+            "description": "Building the context string and the numbered sources."
+          },
+          "detail": {
+            "$ref": "#/components/schemas/StageDetailDto",
+            "description": "The overlapping measurements, reported for diagnosis only."
+          },
+          "enrich": {
+            "type": "number",
+            "format": "double",
+            "description": "Alive check and title/category enrichment on the hits that survived."
+          },
+          "expand": {
+            "type": "number",
+            "format": "double"
+          },
+          "figures": {
+            "type": "number",
+            "format": "double"
+          },
+          "fusion": {
+            "type": "number",
+            "format": "double"
+          },
+          "neighbours": {
+            "type": "number",
+            "format": "double"
+          },
+          "pages": {
+            "type": "number",
+            "format": "double",
+            "description": "Page-image arm after the text rerank: page fusion and page rerank."
+          },
+          "rerank": {
+            "type": "number",
+            "format": "double"
+          },
+          "scopeBuild": {
+            "type": "number",
+            "format": "double",
+            "description": "`build_scope` in Postgres: which documents this caller may see."
+          },
+          "serialise": {
+            "type": "number",
+            "format": "double",
+            "description": "Turning the response into bytes."
+          },
+          "total": {
+            "type": "number",
+            "format": "double",
+            "description": "Route entry to just before serialisation. The sum of everything above\nis bounded by it."
+          }
+        }
+      },
+      "TableDto": {
+        "type": "object",
+        "description": "A table as the API returns it: the record with its manifest, camelCase like\nthe rest of this API.\n\n`gridKey` is the caller's own blob key. It is included because the record is\nthe contract and an operator debugging a stored table needs it; it names no\nother tenant's data.",
+        "required": [
+          "id",
+          "tenantId",
+          "documentId",
+          "index",
+          "version",
+          "source",
+          "header",
+          "manifest",
+          "gridKey",
+          "createdAt"
+        ],
+        "properties": {
+          "caption": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The table's caption, when it has one."
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "When the table was stored."
+          },
+          "documentId": {
+            "type": "string",
+            "description": "The document the table came from."
+          },
+          "gridKey": {
+            "type": "string",
+            "description": "The blob key of the table's stored grid."
+          },
+          "header": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The table's column names."
+          },
+          "id": {
+            "type": "string",
+            "description": "The table's id."
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The table's position in the document.",
+            "minimum": 0
+          },
+          "manifest": {
+            "$ref": "#/components/schemas/TableManifest",
+            "description": "What the manifest's own reading of the table can be trusted to mean."
+          },
+          "pageSpan": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "The pages the table spans, as `[first, last]`."
+          },
+          "sheet": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The sheet the table was on, for spreadsheets."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the table came from (`csv`, `xlsx`, `pdf`, …)."
+          },
+          "tenantId": {
+            "type": "string",
+            "description": "The tenant that owns the table."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The table's title, when it has one."
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The table's version.",
+            "minimum": 0
+          }
+        }
+      },
+      "TableManifest": {
+        "type": "object",
+        "description": "`kb_core::tables::TableManifest` — what the manifest's own reading of a\ntable can be trusted to mean.",
+        "required": [
+          "columns",
+          "derived_rows",
+          "formulas_known",
+          "confidence",
+          "n_rows",
+          "n_cols",
+          "truncated",
+          "notes"
+        ],
+        "properties": {
+          "columns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ColumnInfo"
+            },
+            "description": "One entry per column, in the table's own order."
+          },
+          "confidence": {
+            "$ref": "#/components/schemas/Confidence",
+            "description": "How far the manifest can be trusted."
+          },
+          "derived_rows": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "0-based rows that are derived (subtotals, totals)."
+          },
+          "formulas_known": {
+            "type": "boolean",
+            "description": "True when the derived rows are proven by formulas rather than guessed."
+          },
+          "n_cols": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many columns the table has.",
+            "minimum": 0
+          },
+          "n_rows": {
+            "type": "integer",
+            "format": "int32",
+            "description": "How many data rows the table has.",
+            "minimum": 0
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Extraction notes carried forward (\"hidden sheet skipped\", …)."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when rows were dropped to fit the extractor's row cap."
+          }
+        }
+      },
+      "TableQuery": {
+        "type": "object",
+        "description": "`kb_core::tables::TableQuery` — the typed query\n`POST /v1/tables/{id}/query` accepts. Never SQL: columns are checked\nagainst the manifest and values are bound as parameters.",
+        "required": [
+          "select",
+          "filter",
+          "group_by",
+          "order_by",
+          "include_derived"
+        ],
+        "properties": {
+          "filter": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Filter"
+            },
+            "description": "The rows to keep."
+          },
+          "group_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The columns to group by."
+          },
+          "include_derived": {
+            "type": "boolean",
+            "description": "Count subtotal/total rows too (off by default: they double-count)."
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The maximum number of rows to return.",
+            "minimum": 0
+          },
+          "order_by": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OrderBy"
+            },
+            "description": "The output order."
+          },
+          "select": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SelectItem"
+            },
+            "description": "The output columns, plain or aggregated."
+          }
+        }
+      },
+      "TableRefDto": {
+        "type": "object",
+        "description": "One table named by a search answer (`TBL-1`). Additive.",
+        "required": [
+          "tableId",
+          "documentId"
+        ],
+        "properties": {
+          "documentId": {
+            "type": "string"
+          },
+          "tableId": {
+            "type": "string"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "TreeArmStatsDto": {
+        "type": "object",
+        "description": "`stats.treeArm`: outline nodes the query scored and the distinct pages the\narm read. Not a latency figure; the counts say how much structure the\nquestion actually reached.",
+        "required": [
+          "nodes",
+          "pages"
+        ],
+        "properties": {
+          "nodes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "pages": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "UploadForm": {
+        "type": "object",
+        "description": "The multipart form `POST /v1/documents` accepts.\n\nThe file is the part named `file`; every other part is a text field. The\nschema names them all — with the names the form really uses, camelCase\nincluded — so a reader of the spec knows the whole form without reading\nthe route.",
+        "required": [
+          "file"
+        ],
+        "properties": {
+          "categories": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The categories the document is filed under, as a JSON array or a\ncomma-separated list."
+          },
+          "documentType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The kind of document, as the extractor should read it."
+          },
+          "externalRef": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The caller's own reference for this document."
+          },
+          "figures": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How hard to look for figures: `auto`, `all`, `none` or `off`."
+          },
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "description": "The document itself. Its extension decides whether it is accepted."
+          },
+          "knowledgeBaseIds": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The knowledge bases to file the document under, as a JSON array or a\ncomma-separated list. Ids the tenant does not own are a 400."
+          },
+          "metadata": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "A JSON object of extra metadata, stored as the document's JSONB\nmetadata and read by the `metadata` search filter."
+          },
+          "subcategory": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The subcategory, when the document has one."
+          },
+          "tablePrivacy": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`aggregate-only` restricts this document's tables to whole-group\naggregates; `open` (the default) leaves them open."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The document's title. Defaults to the file name without its extension."
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "api_key_header": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "The API key, as `X-API-Key: <key>`."
+      },
+      "bearer_auth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The API key, as `Authorization: Bearer <key>`. The scheme is matched case-insensitively."
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer_auth": []
+    },
+    {
+      "api_key_header": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "documents",
+      "description": "Upload documents, list them, read one, and change or delete it."
+    },
+    {
+      "name": "search",
+      "description": "Ask a question and get the chunks, the numbered sources and the assembled context."
+    },
+    {
+      "name": "jobs",
+      "description": "Follow an ingest job's progress and requeue a failed one."
+    },
+    {
+      "name": "tables",
+      "description": "List the tables a document's extractor found and query them with a typed query."
+    },
+    {
+      "name": "taxonomy",
+      "description": "Knowledge bases and categories: the labels documents are filed under."
+    },
+    {
+      "name": "structure",
+      "description": "The pages, figures and chunk-to-page map of one document."
+    },
+    {
+      "name": "media",
+      "description": "The stored original, the figure crops and the entities extracted for a document."
+    },
+    {
+      "name": "events",
+      "description": "The server-sent ingest progress stream."
+    },
+    {
+      "name": "health",
+      "description": "Liveness, readiness and the accepted upload formats. No key needed."
+    }
+  ]
+}

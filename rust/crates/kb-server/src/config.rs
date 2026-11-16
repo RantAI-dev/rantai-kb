@@ -70,6 +70,33 @@ impl Default for GraphArmSettings {
     }
 }
 
+/// Global (graph community) arm tunables (`KB_GLOBAL_ARM`, `KB_GLOBAL_ARM_*`).
+///
+/// `DEC-5` built this arm although `EVAL-3` measured a loss, so it is off by
+/// default and every setting here is inert until an operator turns it on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GlobalArmSettings {
+    /// Master switch. Off by default.
+    pub enabled: bool,
+    /// Communities selected per aggregative query.
+    pub communities: usize,
+    /// RRF weight of the arm's chunk list.
+    pub weight: f32,
+    /// Chunks the arm may contribute per query.
+    pub chunks: usize,
+}
+
+impl Default for GlobalArmSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            communities: 3,
+            weight: 0.5,
+            chunks: 200,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub bind_addr: String,
@@ -90,6 +117,11 @@ pub struct Config {
     pub graph_store: GraphStoreChoice,
     /// Whether the graph retrieval arm runs (`KB_GRAPH_ARM`).
     pub graph_arm: GraphArmSettings,
+    /// The tree arm's tunables (`KB_TREE_ARM`, DEC-4). `None` turns it off,
+    /// which is the default and leaves the pipeline unchanged.
+    pub tree_arm: Option<kb_engine::TreeArmConfig>,
+    /// The global (graph community) arm (`KB_GLOBAL_ARM`, `DEC-5`).
+    pub global_arm: GlobalArmSettings,
     /// In-process ingest worker: whether it runs, and how it is tuned.
     pub worker: WorkerConfig,
     /// Reported by `GET /health` (`KB_VERSION`).
@@ -100,9 +132,143 @@ pub struct Config {
     pub cache: Option<CacheConfig>,
     /// The page-image arm (`KB_PAGE_EMBEDDING_MODEL`). `None` turns it off.
     pub pages: Option<PageArmSettings>,
+    /// The visual stage of ingest (`KB_IMAGES`, `KB_IMAGE_*`, `ING-5`).
+    pub visuals: VisualConfig,
+    /// The table store (`TBL-1`): grids as Parquet, typed queries in DuckDB.
+    pub tables: TablesConfig,
     /// The deployment tier preset that shaped this config (`KB_TIER`), with
     /// the variables it filled. `None` when no tier is set.
     pub tier: Option<crate::tier::TierPlan>,
+}
+
+/// The table store (`TBL-1`). On by default: a document with no tables is
+/// unchanged, and a document with one becomes answerable rather than just
+/// searchable.
+#[derive(Clone, Debug)]
+pub struct TablesConfig {
+    /// `KB_TABLES=false` turns grid storage and the table routes off. Ingest
+    /// then stores no grids and indexes no table units; `/v1/tables` 404s.
+    pub enabled: bool,
+    /// Where downloaded Parquet grids are cached, one file per grid version.
+    pub cache_dir: std::path::PathBuf,
+    /// `KB_TABLE_QUERY_TIMEOUT_MS` (`QUERY_TIMEOUT_MS` by default).
+    pub query_timeout_ms: u64,
+}
+
+impl Default for TablesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cache_dir: std::env::temp_dir().join("rantai-kb-tables"),
+            query_timeout_ms: kb_core::tables::QUERY_TIMEOUT_MS,
+        }
+    }
+}
+
+/// The visual stage (`ING-5`): every picture in a document read by what it
+/// shows. On by default (`KB_IMAGES`): without an image describer it still
+/// indexes pictures that carry alt text or a caption; with one
+/// (`KB_IMAGE_DESCRIBE_MODEL`), every picture.
+#[derive(Clone, Debug)]
+pub struct VisualConfig {
+    pub enabled: bool,
+    pub describer: Option<kb_inference::ImageDescriberSettings>,
+    pub settings: kb_engine::visuals::VisualSettings,
+}
+
+/// The default image-describer endpoint: OpenRouter's chat completions.
+pub const DEFAULT_IMAGE_DESCRIBE_BASE_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+
+fn visual_config<F>(lookup: &F) -> Result<VisualConfig>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let enabled = bool_flag(lookup, "KB_IMAGES", true);
+    let describer = match lookup("KB_IMAGE_DESCRIBE_MODEL")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        None => None,
+        Some(model) => {
+            let base_url = lookup("KB_IMAGE_DESCRIBE_BASE_URL")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| DEFAULT_IMAGE_DESCRIBE_BASE_URL.to_string());
+            // The OpenRouter key is only a fallback for OpenRouter itself: a
+            // local server must never be sent it.
+            let api_key = lookup("KB_IMAGE_DESCRIBE_API_KEY")
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    if base_url.contains("openrouter.ai") {
+                        lookup("OPENROUTER_API_KEY").filter(|s| !s.trim().is_empty())
+                    } else {
+                        None
+                    }
+                });
+            Some(kb_inference::ImageDescriberSettings {
+                base_url,
+                model,
+                api_key,
+                request_timeout: Duration::from_millis(
+                    int_var(lookup, "KB_IMAGE_DESCRIBE_TIMEOUT_MS", 120_000u64)?.max(1_000),
+                ),
+                max_tokens: int_var(lookup, "KB_IMAGE_DESCRIBE_MAX_TOKENS", 400u32)?.max(32),
+                no_reasoning: bool_flag(lookup, "KB_IMAGE_DESCRIBE_NO_REASONING", false),
+                language: lookup("KB_IMAGE_DESCRIBE_LANGUAGE")
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| "English".to_string()),
+                max_attempts: int_var(lookup, "KB_IMAGE_DESCRIBE_ATTEMPTS", 4u32)?.clamp(1, 10),
+            })
+        }
+    };
+    let defaults = kb_engine::visuals::VisualSettings::default();
+    let rules = kb_core::visuals::SelectRules {
+        min_side: int_var(lookup, "KB_IMAGE_MIN_SIDE", defaults.rules.min_side)?,
+        min_area: int_var(lookup, "KB_IMAGE_MIN_AREA", defaults.rules.min_area)?,
+        max_aspect: match lookup("KB_IMAGE_MAX_ASPECT").map(|v| v.trim().to_string()) {
+            Some(v) if !v.is_empty() => {
+                v.parse::<f32>().ok().filter(|a| *a >= 1.0).ok_or_else(|| {
+                    anyhow::anyhow!("KB_IMAGE_MAX_ASPECT must be a number >= 1, got {v:?}")
+                })?
+            }
+            _ => defaults.rules.max_aspect,
+        },
+        repeat_ornament: int_var(
+            lookup,
+            "KB_IMAGE_REPEAT_ORNAMENT",
+            defaults.rules.repeat_ornament,
+        )?,
+        max_per_document: int_var(
+            lookup,
+            "KB_IMAGE_MAX_PER_DOCUMENT",
+            defaults.rules.max_per_document,
+        )?,
+    };
+    let describe_timeout = describer.as_ref().map_or(defaults.describe_timeout, |d| {
+        d.request_timeout * d.max_attempts.max(1)
+    });
+    let settings = kb_engine::visuals::VisualSettings {
+        rules,
+        describe_concurrency: int_var(lookup, "KB_IMAGE_DESCRIBE_CONCURRENCY", 2usize)?
+            .clamp(1, 32),
+        describe_timeout,
+        pdf_images: bool_flag(lookup, "KB_IMAGE_PDF", false),
+        context_chars: int_var(lookup, "KB_IMAGE_CONTEXT_CHARS", defaults.context_chars)?,
+    };
+    if enabled {
+        match &describer {
+            Some(d) => tracing::info!(model = %d.model, url = %d.base_url, "image describing on"),
+            None => tracing::info!(
+                "images: no describer (KB_IMAGE_DESCRIBE_MODEL unset); pictures are indexed by alt text and captions only"
+            ),
+        }
+    }
+    Ok(VisualConfig {
+        enabled,
+        describer,
+        settings,
+    })
 }
 
 /// Page-image arm wiring: which multimodal embedder, how pages are rendered,
@@ -159,8 +325,12 @@ pub struct CacheConfig {
 pub struct WorkerConfig {
     /// `KB_WORKER_ENABLED=false` serves the API without running the worker.
     pub enabled: bool,
-    /// Jobs in flight at once (`KB_INGEST_CONCURRENCY`, floor 1).
-    pub concurrency: usize,
+    /// Jobs in flight at once (`KB_JOB_WORKERS`, default 6; floor 1).
+    /// `KB_INGEST_CONCURRENCY` is accepted as an alias.
+    pub job_workers: usize,
+    /// How many jobs may be in each stage of the pipeline at once
+    /// (`KB_SEATS`).
+    pub seats: kb_engine::SeatCapacity,
     /// Claim poll interval (`KB_INGEST_POLL_MS`, floor 500).
     pub poll_ms: u64,
     /// "processing" staleness cutoff (`KB_INGEST_STALE_MS`, floor 60_000).
@@ -194,7 +364,7 @@ impl WorkerConfig {
     #[must_use]
     pub fn ingest_settings(&self) -> IngestSettings {
         IngestSettings {
-            claims_per_tick: self.concurrency,
+            job_workers: self.job_workers,
             poll_interval: Duration::from_millis(self.poll_ms),
             stale_after: Duration::from_millis(self.stale_ms),
             max_attempts: self.max_attempts,
@@ -202,6 +372,7 @@ impl WorkerConfig {
             strip_page_furniture: self.strip_page_furniture,
             entity_extraction_enabled: self.entity_extraction_enabled,
             embedding_max_chars: self.embedding_max_chars,
+            seats: self.seats,
             chunking: kb_core::chunk::SmartChunkingOptions {
                 max_chunk_size: Some(self.chunk_size),
                 overlap_size: Some(self.chunk_overlap),
@@ -212,18 +383,72 @@ impl WorkerConfig {
     }
 }
 
-fn read_worker<F>(lookup: &F) -> WorkerConfig
+/// Read the seat capacities from `KB_SEATS="extract=2,embed=4,store=2"`.
+///
+/// An unknown stage name or a count of `0` is a startup error, not a silent
+/// fallback: a stage with no seats never runs, and a mistyped stage name
+/// would leave the operator believing a limit is in place that is not.
+fn read_seats<F>(lookup: &F) -> Result<kb_engine::SeatCapacity>
 where
     F: Fn(&str) -> Option<String>,
 {
-    WorkerConfig {
+    let mut capacity = kb_engine::SeatCapacity::default();
+    let Some(raw) = lookup("KB_SEATS")
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    else {
+        return Ok(capacity);
+    };
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let Some((name, count)) = entry.split_once('=') else {
+            bail!("KB_SEATS entry {entry:?} must be name=count (extract=2,embed=4,store=2)");
+        };
+        let name = name.trim().to_ascii_lowercase();
+        let count: usize = count.trim().parse().map_err(|_| {
+            anyhow::anyhow!("KB_SEATS {name} must be a whole number, got {count:?}")
+        })?;
+        if count == 0 {
+            bail!("KB_SEATS {name} must be at least 1: a stage with no seats never runs");
+        }
+        match name.as_str() {
+            "extract" => capacity.extract = count,
+            "embed" => capacity.embed = count,
+            "store" => capacity.store = count,
+            other => {
+                bail!("KB_SEATS has no stage {other:?}: the stages are extract, embed and store")
+            }
+        }
+    }
+    Ok(capacity)
+}
+
+fn read_worker<F>(lookup: &F) -> Result<WorkerConfig>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    // `KB_JOB_WORKERS` is the name; `KB_INGEST_CONCURRENCY` stays accepted as
+    // an alias so an existing deployment keeps working. When both are set the
+    // new name wins.
+    let job_workers = if lookup("KB_JOB_WORKERS").is_some() {
+        int_var(lookup, "KB_JOB_WORKERS", kb_engine::DEFAULT_JOB_WORKERS)?
+    } else {
+        int_var(
+            lookup,
+            "KB_INGEST_CONCURRENCY",
+            kb_engine::DEFAULT_JOB_WORKERS,
+        )?
+    };
+    Ok(WorkerConfig {
         enabled: lookup("KB_WORKER_ENABLED").as_deref() != Some("false"),
         // `Math.max(floor, parseInt(value, 10))` in the TypeScript worker: a
         // missing or unparsable value takes the documented default, and a
         // value below the floor is raised to it.
-        concurrency: int_var(lookup, "KB_INGEST_CONCURRENCY", 1)
-            .unwrap_or(1)
-            .max(1) as usize,
+        job_workers: job_workers.max(1) as usize,
+        seats: read_seats(lookup)?,
         poll_ms: int_var(lookup, "KB_INGEST_POLL_MS", 3000)
             .unwrap_or(3000)
             .max(500),
@@ -249,7 +474,7 @@ where
             .unwrap_or(800)
             .max(100),
         chunk_overlap: int_var(lookup, "KB_CHUNK_OVERLAP", 200u32).unwrap_or(200),
-    }
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -485,6 +710,26 @@ impl Config {
         let query_expansion_paraphrases = int_var(&lookup, "KB_QUERY_EXPANSION_PARAPHRASES", 3)?;
 
         let rerank_enabled = bool_flag(&lookup, "KB_RERANK_ENABLED", false);
+        // Adaptive arm choice (RET-5). Off by default: the pipeline must be
+        // byte-identical to the previous release unless an operator opts in
+        // (or a request sends `adaptiveArms`).
+        let adaptive_arms = bool_flag(&lookup, "KB_ADAPTIVE_ARMS", false);
+        // The tree arm (DEC-4). Off by default: the classifier gate and the
+        // outline ingest cost are both opt-in, and a pipeline identical to the
+        // previous release is the default the tests pin.
+        let tree_arm = if bool_flag(&lookup, "KB_TREE_ARM", false) {
+            let weight = float_var(&lookup, "KB_TREE_ARM_WEIGHT", 0.5)?;
+            if !weight.is_finite() || weight < 0.0 {
+                bail!("KB_TREE_ARM_WEIGHT must be a finite number >= 0, got {weight}");
+            }
+            Some(kb_engine::TreeArmConfig {
+                weight,
+                nodes: int_var(&lookup, "KB_TREE_ARM_NODES", 5u32)?.max(1) as usize,
+                ..kb_engine::TreeArmConfig::default()
+            })
+        } else {
+            None
+        };
         // Defaults keep the pre-L.4 behaviour (every candidate, full text, the
         // reranker client's own 20 s ceiling). A CPU-only box opts into a budget,
         // e.g. 5 candidates of 200 chars (`docs/eval-baseline.md` §8).
@@ -496,6 +741,22 @@ impl Config {
         // constant used by the TypeScript retriever (`minSimilarity = 0.30`).
         let min_similarity: f32 = 0.30;
 
+        // Optional relevance floor (RET-2). Unset means no floor, which is
+        // rank-identical to every release before it. A request's `minScore`
+        // overrides it for that request. Calibration is still pending, so the
+        // default is deliberately unset rather than a guessed number.
+        let min_score = lookup("KB_MIN_SCORE")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .map(|v| {
+                v.parse::<f32>()
+                    .map_err(|_| anyhow::anyhow!("KB_MIN_SCORE must be a number, got {v:?}"))
+            })
+            .transpose()?;
+        if min_score.is_some_and(|v| !v.is_finite()) {
+            bail!("KB_MIN_SCORE must be a finite number");
+        }
+
         let engine = EngineSettings {
             candidate_pool_size: rerank_initial_k,
             rrf_k,
@@ -505,12 +766,14 @@ impl Config {
             rerank_final_k,
             max_chunks: default_max_chunks,
             min_similarity,
+            min_score,
             neighbour_window,
             figure_limit,
             expansion_enabled: query_expansion_enabled,
             expansion_paraphrases: query_expansion_paraphrases,
             hybrid_bm25_enabled,
             rerank_enabled,
+            adaptive_arms,
         };
 
         let pg = PgSettings {
@@ -607,7 +870,24 @@ impl Config {
         if graph_arm.enabled && graph_store == GraphStoreChoice::None {
             bail!("KB_GRAPH_ARM=1 needs a graph store: set KB_GRAPH_STORE=pg");
         }
-        let worker = read_worker(&lookup);
+        let global_arm = GlobalArmSettings {
+            enabled: bool_flag(&lookup, "KB_GLOBAL_ARM", false),
+            communities: int_var(&lookup, "KB_GLOBAL_ARM_COMMUNITIES", 3)?.max(1) as usize,
+            weight: float_var(&lookup, "KB_GLOBAL_ARM_WEIGHT", 0.5)?.clamp(0.0, 1.0),
+            chunks: int_var(&lookup, "KB_GLOBAL_ARM_CHUNKS", 200)?.max(1) as usize,
+        };
+        // Communities are built from the Postgres entity graph and stored in
+        // Postgres. Without `KB_GRAPH_STORE=pg` there is neither a graph to build
+        // from nor a table to read, so an enabled arm would silently return
+        // nothing on every query — say so at boot instead.
+        if global_arm.enabled && graph_store == GraphStoreChoice::None {
+            bail!(
+                "KB_GLOBAL_ARM=1 needs the Postgres entity graph: set KB_GRAPH_STORE=pg \
+                 (communities are built from KbEntity/KbMention, which only exist when \
+                 entity extraction writes them)"
+            );
+        }
+        let worker = read_worker(&lookup)?;
         let version = lookup("KB_VERSION")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| crate::state::DEFAULT_VERSION.to_string());
@@ -839,8 +1119,24 @@ impl Config {
             }
         };
 
+        let visuals = visual_config(&lookup)?;
+        let tables = TablesConfig {
+            enabled: bool_flag(&lookup, "KB_TABLES", true),
+            cache_dir: lookup("KB_CACHE_DIR")
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+                .map(|dir| std::path::PathBuf::from(dir).join("tables"))
+                .unwrap_or_else(|| std::env::temp_dir().join("rantai-kb-tables")),
+            query_timeout_ms: int_var(
+                &lookup,
+                "KB_TABLE_QUERY_TIMEOUT_MS",
+                kb_core::tables::QUERY_TIMEOUT_MS,
+            )?,
+        };
         Ok(Config {
             pages,
+            visuals,
+            tables,
             cache,
             qdrant,
             qdrant_collection_override,
@@ -856,6 +1152,8 @@ impl Config {
             entity_extractor,
             graph_store,
             graph_arm,
+            tree_arm,
+            global_arm,
             worker,
             version,
             request_timeout: Duration::from_secs(30),
@@ -1113,6 +1411,88 @@ mod tests {
     }
 
     #[test]
+    fn test_min_score_is_unset_by_default_and_settable() {
+        let load = |value: Option<&'static str>| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            if let Some(v) = value {
+                map.insert("KB_MIN_SCORE", v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .engine
+                .min_score
+        };
+        assert_eq!(load(None), None, "unset means no floor");
+        assert_eq!(load(Some("")), None, "empty is the same as unset");
+        assert_eq!(load(Some("0.42")), Some(0.42));
+
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_MIN_SCORE", "not-a-number");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        assert!(err.to_string().contains("KB_MIN_SCORE"), "{err}");
+    }
+
+    #[test]
+    fn test_tree_arm_is_off_by_default_and_settable() {
+        let load = |vars: &[(&'static str, &'static str)]| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            for (k, v) in vars {
+                map.insert(*k, *v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .tree_arm
+        };
+        assert_eq!(load(&[]), None, "the tree arm must be opt-in");
+        assert_eq!(load(&[("KB_TREE_ARM", "false")]), None);
+        let arm = load(&[
+            ("KB_TREE_ARM", "true"),
+            ("KB_TREE_ARM_WEIGHT", "0.25"),
+            ("KB_TREE_ARM_NODES", "3"),
+        ])
+        .expect("the arm is on");
+        assert!((arm.weight - 0.25).abs() < f32::EPSILON);
+        assert_eq!(arm.nodes, 3);
+        assert_eq!(arm.pages_per_node, 5, "the prototype's five gold pages");
+        assert_eq!(arm.rrf_k, 60, "the pipeline's RRF constant");
+
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_TREE_ARM", "true");
+        map.insert("KB_TREE_ARM_WEIGHT", "-1");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        assert!(err.to_string().contains("KB_TREE_ARM_WEIGHT"), "{err}");
+    }
+
+    #[test]
+    fn test_adaptive_arms_is_off_by_default_and_settable() {
+        let load = |value: Option<&'static str>| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            if let Some(v) = value {
+                map.insert("KB_ADAPTIVE_ARMS", v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .engine
+                .adaptive_arms
+        };
+        assert!(!load(None), "adaptive arms must be opt-in");
+        assert!(!load(Some("")), "empty is the same as unset");
+        assert!(!load(Some("false")));
+        assert!(load(Some("true")));
+        assert!(load(Some("1")));
+    }
+
+    #[test]
     fn test_surreal_chunk_store_is_rejected_with_the_reindex_path() {
         let mut map = HashMap::new();
         map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
@@ -1184,6 +1564,13 @@ mod tests {
         map.insert("KB_EXTRACT_MINERU_BASE_URL", "http://mineru.local:8100");
         map.insert("KB_MINERU_API_KEY", "mineru-key");
         map.insert("KB_MISTRAL_OCR_KEY", "mistral-key");
+        map.insert("KB_OCR_MODE", "full");
+        map.insert("KB_OCR_SCAN_AREA", "0.8");
+        map.insert("KB_OCR_SCAN_TEXT", "20");
+        map.insert("KB_OCR_BATCH", "6");
+        map.insert("KB_OCR_MAX_PAGES", "120");
+        map.insert("KB_OCR_BREAKER", "4");
+        map.insert("KB_OCR_BREAKER_COOLDOWN_S", "30");
         map.insert("KB_LAYOUT_EXTRACTOR_ORDER", "mistral,sidecar");
         map.insert("OCR_FALLBACK_MODEL", "custom-ocr-model");
         map.insert("KB_WORKER_ENABLED", "false");
@@ -1234,13 +1621,24 @@ mod tests {
         assert_eq!(cfg.extract.mineru_api_key, "mineru-key");
         assert_eq!(cfg.extract.mistral_ocr_key, "mistral-key");
         assert_eq!(
+            cfg.extract.ocr_mode,
+            kb_extract::config::OcrMode::Full,
+            "KB_OCR_MODE is read in kb-server's config, like every other OCR var"
+        );
+        assert!((cfg.extract.ocr_scan_area - 0.8).abs() < 1e-6);
+        assert_eq!(cfg.extract.ocr_scan_text, 20);
+        assert_eq!(cfg.extract.ocr_batch, 6);
+        assert_eq!(cfg.extract.ocr_max_pages, 120);
+        assert_eq!(cfg.extract.ocr_breaker, 4);
+        assert_eq!(cfg.extract.ocr_breaker_cooldown.as_secs(), 30);
+        assert_eq!(
             cfg.extract.layout_extractor_order,
             vec!["mistral", "sidecar"]
         );
         assert_eq!(cfg.extract.ocr_fallback_model, "custom-ocr-model");
         assert_eq!(cfg.version, "9.9.9");
         assert!(!cfg.worker.enabled);
-        assert_eq!(cfg.worker.concurrency, 4);
+        assert_eq!(cfg.worker.job_workers, 4);
         assert_eq!(cfg.worker.poll_ms, 1500);
         assert_eq!(cfg.worker.stale_ms, 900_000);
         assert_eq!(cfg.worker.max_attempts, 5);
@@ -1286,7 +1684,9 @@ mod tests {
         assert!(matches!(cfg.reranker, RerankerConfig::Disabled));
         // Worker defaults match `src/lib/ingest/worker.ts`.
         assert!(cfg.worker.enabled);
-        assert_eq!(cfg.worker.concurrency, 1);
+        // The worker runs several documents at once (`ING-6`); the alias
+        // `KB_INGEST_CONCURRENCY` still sets it.
+        assert_eq!(cfg.worker.job_workers, 6);
         assert_eq!(cfg.worker.poll_ms, 3000);
         assert_eq!(cfg.worker.stale_ms, 300_000);
         assert_eq!(cfg.worker.max_attempts, 3);
@@ -1315,7 +1715,7 @@ mod tests {
         map.insert("KB_INGEST_RECLAIM_MS", "1");
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
-        assert_eq!(cfg.worker.concurrency, 1);
+        assert_eq!(cfg.worker.job_workers, 1);
         assert_eq!(cfg.worker.poll_ms, 500);
         assert_eq!(cfg.worker.stale_ms, 60_000);
         assert_eq!(cfg.worker.max_attempts, 1);
@@ -1329,6 +1729,67 @@ mod tests {
         let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
             .expect("config should load");
         assert!(cfg.worker.enabled);
+    }
+
+    #[test]
+    fn test_the_job_workers_name_wins_over_the_alias() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        // The alias is still accepted.
+        map.insert("KB_INGEST_CONCURRENCY", "3");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.worker.job_workers, 3);
+
+        // The new name wins when both are set.
+        map.insert("KB_JOB_WORKERS", "8");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.worker.job_workers, 8);
+    }
+
+    #[test]
+    fn test_the_seats_are_read_and_validated() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        // The default: two extractions, four embeddings, two writes.
+        assert_eq!(cfg.worker.seats.extract, 2);
+        assert_eq!(cfg.worker.seats.embed, 4);
+        assert_eq!(cfg.worker.seats.store, 2);
+
+        map.insert("KB_SEATS", "extract=1,embed=8,store=3");
+        let cfg = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(cfg.worker.seats.extract, 1);
+        assert_eq!(cfg.worker.seats.embed, 8);
+        assert_eq!(cfg.worker.seats.store, 3);
+
+        // A stage with no seats never runs: that is a startup error.
+        map.insert("KB_SEATS", "extract=0");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect_err("a stage with no seats is refused")
+            .to_string();
+        assert!(err.contains("KB_SEATS"), "{err}");
+        assert!(err.contains("extract"), "{err}");
+
+        // An unknown stage name is refused too, and the message says which
+        // stages exist.
+        map.insert("KB_SEATS", "extract=1,ocr=2");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect_err("an unknown stage is refused")
+            .to_string();
+        assert!(err.contains("KB_SEATS"), "{err}");
+        assert!(err.contains("ocr"), "{err}");
+
+        // A malformed entry is refused as well.
+        map.insert("KB_SEATS", "extract");
+        assert!(Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).is_err());
+        map.insert("KB_SEATS", "extract=two");
+        assert!(Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).is_err());
     }
 
     #[test]
@@ -1621,7 +2082,7 @@ mod tests {
         assert_eq!(cfg.embedder.request_timeout, Duration::from_secs(15));
         assert!(matches!(cfg.reranker, RerankerConfig::Disabled));
         assert_eq!(cfg.engine.rerank_candidate_limit, 0);
-        assert_eq!(cfg.worker.concurrency, 1);
+        assert_eq!(cfg.worker.job_workers, 6);
         assert!(cfg.worker.entity_extraction_enabled);
         assert!(cfg.pages.is_none());
 
@@ -1641,7 +2102,7 @@ mod tests {
         explicit.insert("KB_EMBEDDING_TIMEOUT_MS", "15000");
         explicit.insert("KB_RERANK_ENABLED", "false");
         explicit.insert("KB_RERANK_CANDIDATE_LIMIT", "0");
-        explicit.insert("KB_INGEST_CONCURRENCY", "1");
+        explicit.insert("KB_INGEST_CONCURRENCY", "6");
         explicit.insert("KB_ENTITY_EXTRACTION_ENABLED", "true");
         assert_eq!(
             format!("{cfg:#?}"),
@@ -1721,9 +2182,12 @@ mod tests {
                 if tier == "lite" {
                     assert!(matches!(cfg.reranker, RerankerConfig::Disabled));
                     assert_eq!(cfg.embedder.batch_size, 16);
-                    assert_eq!(cfg.worker.concurrency, 1);
+                    // Lite runs two documents at a time (`ING-6`).
+                    assert_eq!(cfg.worker.job_workers, 2);
                 } else {
                     assert_eq!(cfg.embedder.batch_size, 32);
+                    // The other tiers leave the worker width to the default.
+                    assert_eq!(cfg.worker.job_workers, 6);
                     match (tier, &cfg.reranker) {
                         ("desk", RerankerConfig::Tei { base_url, model }) => {
                             assert_eq!(base_url, "http://127.0.0.1:8082");
@@ -1762,7 +2226,15 @@ mod tests {
                         cfg.extract.ocr_base_url,
                         "http://127.0.0.1:8083/v1/chat/completions"
                     );
-                    assert_eq!(cfg.extract.ocr_model, "PaddlePaddle/PaddleOCR-VL-1.6");
+                    assert_eq!(cfg.extract.ocr_model, "xiaomi-research/Xiaomi-OCR-0");
+                    assert_eq!(
+                        cfg.extract.ocr_recipe,
+                        kb_extract::config::OcrRecipe::Xiaomi
+                    );
+                    assert_eq!(
+                        cfg.extract.ocr_max_tokens, 12288,
+                        "{tier}: the recipe's budget"
+                    );
                 }
                 // Paid per document and read by no search arm: off everywhere.
                 assert!(!cfg.worker.entity_extraction_enabled, "{tier}");
@@ -1844,7 +2316,7 @@ mod tests {
 
         assert_eq!(cfg.embedder.model, "operator/model");
         assert_eq!(cfg.embedder.embed_concurrency, 6);
-        assert_eq!(cfg.worker.concurrency, 3);
+        assert_eq!(cfg.worker.job_workers, 3);
         assert!(
             cfg.worker.entity_extraction_enabled,
             "an empty explicit value suppresses the preset"

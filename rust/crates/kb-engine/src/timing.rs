@@ -213,6 +213,11 @@ pub struct StageTimings {
     /// Cold it is the `load_tenant_graph` cost; warm it is microseconds. The two
     /// are reported apart in `docs/eval-baseline.md` §6.4 for exactly that reason.
     pub graph_arm_ms: f64,
+    /// The global (graph community) arm (`DEC-5`): the scoped community read,
+    /// the BM25 selection and the scoped chunk fetch. Reported as detail, like
+    /// the graph arm, because it is the arm's own work rather than one of the
+    /// partitioning stages.
+    pub global_arm_ms: f64,
     /// The page-image arm: query embedding and page search. It runs concurrently
     /// with the text arms, so it is not one of the partitioning stages.
     pub page_arm_ms: f64,
@@ -258,13 +263,14 @@ impl StageTimings {
 
     /// The overlapping measurements, as `(name, ms)` pairs.
     #[must_use]
-    pub fn detail_pairs(&self) -> [(&'static str, f64); 9] {
+    pub fn detail_pairs(&self) -> [(&'static str, f64); 10] {
         [
             ("queryEmbed", self.query_embed_ms),
             ("vectorArm", self.vector_arm_ms),
             ("keywordArm", self.keyword_arm_ms),
             ("entityArm", self.entity_arm_ms),
             ("graphArm", self.graph_arm_ms),
+            ("globalArm", self.global_arm_ms),
             ("pageArm", self.page_arm_ms),
             ("visionRerank", self.vision_rerank_ms),
             ("scopeCheck", self.scope_check_ms),
@@ -391,6 +397,6 @@ mod tests {
         assert_eq!(t.total_ms, 0.0);
         assert!(!t.query_embed_cached);
         assert_eq!(t.accounted_pairs().len(), 9);
-        assert_eq!(t.detail_pairs().len(), 9);
+        assert_eq!(t.detail_pairs().len(), 10);
     }
 }

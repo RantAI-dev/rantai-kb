@@ -16,8 +16,14 @@ thiserror = { workspace = true }
 tokio = { workspace = true }
 futures = { workspace = true }
 reqwest = { workspace = true, features = ["multipart"] }
+# The `--docx` leak corpus: a .docx with a picture whose alt text is the
+# figure canary (ING-5).
+zip = { workspace = true }
+image = { workspace = true }
 chrono = { workspace = true }
 # Latency percentiles with a bounded number of buckets. `hdrhistogram` records
 # into fixed-width buckets instead of keeping every sample, so a 30 s run at
 # concurrency 32 costs the same memory as one request.
 hdrhistogram = { version = "7.5", default-features = false }
+
+[dev-dependencies]

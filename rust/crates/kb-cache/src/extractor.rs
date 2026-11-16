@@ -159,4 +159,15 @@ impl Extractor for CachedExtractor {
         }
         Ok(result)
     }
+
+    async fn outline(
+        &self,
+        mime_type: &str,
+        file_bytes: &[u8],
+        pages: &[String],
+    ) -> Option<kb_ports::Outline> {
+        // Not cached: it is a free bookmark/heading read, and caching it would
+        // need a new cache epoch that throws away paid OCR results.
+        self.inner.outline(mime_type, file_bytes, pages).await
+    }
 }

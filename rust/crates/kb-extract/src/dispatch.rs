@@ -8,28 +8,36 @@
 //!    back to the mime the uploader supplied, then to `text/plain`;
 //! 3. that mime picks the parser.
 //!
-//! An unknown extension is not an error: it is read as UTF-8 text, which is what
-//! the TypeScript `else` branch does.
+//! An unknown extension is refused with a reason. The upload route already
+//! rejects it with a 415, so this guards the other ways a job reaches the
+//! extractor (a job row written by a calling app, a reindex of an older
+//! upload): reading arbitrary bytes as text would index binary noise.
 
+use kb_core::tables::TableGrid;
 use kb_ports::{ExtractionOptions, ExtractionResult};
 
 use crate::ExtractError;
 use crate::chain::{LayoutExtractorChain, ScannedPageOcr};
 use crate::clip_reason;
 use crate::code;
+use crate::csv;
 use crate::detect::{SupportedFileType, detect_file_type, extension_of};
 use crate::docx;
 use crate::epub;
 use crate::gltf;
 use crate::html;
+use crate::legacy::{self, Claimed};
 use crate::mime::ext_to_mime;
+use crate::ocr_router::OcrRouter;
 use crate::ods;
 use crate::odt;
 use crate::pdfium::{extract_pdf_text_layer, get_pdfium};
 use crate::pptx;
 use crate::rtf;
 use crate::scanned::is_pdf_scanned;
+use crate::table_post;
 use crate::text::to_utf8;
+use crate::tiff_pages;
 use crate::xlsx;
 
 const MIME_DOCX: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -41,13 +49,26 @@ const MIME_GLTF: &str = "model/gltf+json";
 const MIME_GLB: &str = "model/gltf-binary";
 const MIME_ODT: &str = "application/vnd.oasis.opendocument.text";
 const MIME_ODS: &str = "application/vnd.oasis.opendocument.spreadsheet";
+const MIME_CSV: &str = "text/csv";
+const MIME_TSV: &str = "text/tab-separated-values";
 
-/// The legacy binary formats that are not supported by officeparser v6 or rantai-kb.
-const LEGACY_BINARY_MIMES: &[&str] = &[
-    "application/msword",
-    "application/vnd.ms-excel",
-    "application/vnd.ms-powerpoint",
-];
+const MIME_DOC: &str = "application/msword";
+const MIME_XLS: &str = "application/vnd.ms-excel";
+const MIME_PPT: &str = "application/vnd.ms-powerpoint";
+
+/// The failure for a file whose extension no parser claims.
+fn unsupported_type(filename: &str) -> ExtractionResult {
+    let ext = extension_of(filename);
+    let what = if ext.is_empty() {
+        "has no file extension".to_string()
+    } else {
+        format!("has an unsupported file type ({ext})")
+    };
+    ExtractionResult::failed(
+        "markdown",
+        format!("\"{filename}\" {what}; see GET /v1/formats for the accepted list"),
+    )
+}
 
 /// Synchronous local extraction for stored uploads.
 pub fn extract(
@@ -59,7 +80,10 @@ pub fn extract(
         Some(SupportedFileType::Pdf) => {
             let pdfium = get_pdfium()?;
             match extract_pdf_text_layer(pdfium, bytes) {
-                Ok(res) => Ok(res),
+                Ok(mut res) => {
+                    table_post::attach_markdown_tables(&mut res);
+                    Ok(res)
+                }
                 Err(err) => Ok(ExtractionResult::failed(
                     "pdf",
                     format!(
@@ -79,8 +103,13 @@ pub fn extract(
                 .filter(|known| !known.is_empty())
                 .or_else(|| non_empty(mime_type))
                 .unwrap_or("text/plain");
-            Ok(match extract_from_buffer(bytes, mime, filename) {
-                Ok(content) => ExtractionResult::text(content, "markdown"),
+            Ok(match extract_from_buffer_full(bytes, mime, filename) {
+                Ok((content, tables)) => {
+                    let mut result = ExtractionResult::text(content, "markdown");
+                    result.tables = tables;
+                    table_post::attach_markdown_tables(&mut result);
+                    result
+                }
                 Err(reason) => ExtractionResult::failed(
                     "markdown",
                     format!(
@@ -90,11 +119,14 @@ pub fn extract(
                 ),
             })
         }
-        None => Ok(ExtractionResult::text(to_utf8(bytes), "markdown")),
+        None => Ok(unsupported_type(filename)),
     }
 }
 
 /// Asynchronous production extraction matching `src/lib/ingest/extract.ts:40`.
+///
+/// The result's tables are completed here: a parser that built grids keeps
+/// them, and markdown from any OCR/layout path is read into grids once.
 pub async fn extract_document(
     filename: &str,
     mime_type: &str,
@@ -102,6 +134,24 @@ pub async fn extract_document(
     options: ExtractionOptions,
     chain: &LayoutExtractorChain,
     vision_ocr: Option<&dyn ScannedPageOcr>,
+    ocr_router: Option<&OcrRouter>,
+) -> Result<ExtractionResult, ExtractError> {
+    let mut result = extract_document_raw(
+        filename, mime_type, bytes, options, chain, vision_ocr, ocr_router,
+    )
+    .await?;
+    table_post::attach_markdown_tables(&mut result);
+    Ok(result)
+}
+
+async fn extract_document_raw(
+    filename: &str,
+    mime_type: &str,
+    bytes: &[u8],
+    options: ExtractionOptions,
+    chain: &LayoutExtractorChain,
+    vision_ocr: Option<&dyn ScannedPageOcr>,
+    ocr_router: Option<&OcrRouter>,
 ) -> Result<ExtractionResult, ExtractError> {
     match detect_file_type(filename) {
         Some(SupportedFileType::Pdf) => {
@@ -118,6 +168,25 @@ pub async fn extract_document(
                 }
             };
             let is_scanned = options.force_layout || is_pdf_scanned(pdfium, bytes);
+            // The page router (ING-6) decides per page: `hybrid` keeps a
+            // digital page's text and sends only scans, `full` sends every
+            // page. An explicit layout request still takes the whole-document
+            // chain, which is the contract `/v1/extract?layout=1` established.
+            if let (Some(router), false) = (ocr_router, options.force_layout) {
+                return match router.extract_pdf(bytes, filename, &options).await {
+                    Ok(res) => Ok(res),
+                    Err(err) => {
+                        let reason = clip_reason(&err.to_string());
+                        let prefix = format!("OCR failed for \"{filename}\": ");
+                        let error_msg = if reason.starts_with(&prefix) {
+                            reason
+                        } else {
+                            format!("{prefix}{reason}")
+                        };
+                        Ok(ExtractionResult::failed("pdf", error_msg))
+                    }
+                };
+            }
             if is_scanned {
                 match chain.extract_scanned_pdf(filename, bytes, options).await {
                     Ok(res) => Ok(res),
@@ -148,6 +217,43 @@ pub async fn extract_document(
             }
         }
         Some(SupportedFileType::Image) => {
+            // A picture is read by a remote model (OCR or vision), or not at
+            // all: nothing local is left to do, so the worker's extract seat
+            // goes back before the wait (ING-6).
+            options.seat.release();
+            // The router carries the page cache, the shared pool and the
+            // breaker for pictures too (ING-6), when its provider reads
+            // images. A document-only provider (Mistral) keeps the old path.
+            if let Some(router) = ocr_router {
+                match router.extract_image(bytes, mime_type, filename).await {
+                    Ok(res) => return Ok(res),
+                    Err(ExtractError::Unsupported(_)) => {}
+                    Err(err) => {
+                        return Ok(ExtractionResult::failed(
+                            "image",
+                            format!(
+                                "Image OCR failed for \"{filename}\": {}",
+                                clip_reason(&err.to_string())
+                            ),
+                        ));
+                    }
+                }
+            }
+            if let (Some(ocr), true) = (
+                vision_ocr,
+                tiff_pages::is_tiff_extension(&extension_of(filename)),
+            ) {
+                return Ok(match tiff_pages::ocr_tiff(ocr, bytes, filename).await {
+                    Ok(res) => res,
+                    Err(err) => ExtractionResult::failed(
+                        "image",
+                        format!(
+                            "Image OCR failed for \"{filename}\": {}",
+                            clip_reason(&err.to_string())
+                        ),
+                    ),
+                });
+            }
             if let Some(ocr) = vision_ocr {
                 let ext = extension_of(filename);
                 let img_mime = match ext.as_str() {
@@ -175,12 +281,14 @@ pub async fn extract_document(
                     )),
                 }
             } else {
-                Ok(ExtractionResult::failed(
-                    "image",
-                    format!(
-                        "Image OCR failed for \"{filename}\": no vision OCR provider configured"
-                    ),
-                ))
+                // No OCR: the picture is still read by the visual stage when an
+                // image describer is configured, and ingest fails it visibly
+                // when nothing can (`ING-5`), so an empty text is not a lie.
+                tracing::info!(
+                    file = filename,
+                    "no vision OCR provider; image text left empty"
+                );
+                Ok(ExtractionResult::text(String::new(), "image"))
             }
         }
         Some(
@@ -190,8 +298,12 @@ pub async fn extract_document(
                 .filter(|known| !known.is_empty())
                 .or_else(|| non_empty(mime_type))
                 .unwrap_or("text/plain");
-            Ok(match extract_from_buffer(bytes, mime, filename) {
-                Ok(content) => ExtractionResult::text(content, "markdown"),
+            Ok(match extract_from_buffer_full(bytes, mime, filename) {
+                Ok((content, tables)) => {
+                    let mut result = ExtractionResult::text(content, "markdown");
+                    result.tables = tables;
+                    result
+                }
                 Err(reason) => ExtractionResult::failed(
                     "markdown",
                     format!(
@@ -201,7 +313,7 @@ pub async fn extract_document(
                 ),
             })
         }
-        None => Ok(ExtractionResult::text(to_utf8(bytes), "markdown")),
+        None => Ok(unsupported_type(filename)),
     }
 }
 
@@ -213,17 +325,59 @@ pub fn extract_from_buffer(
     mime_type: &str,
     file_name: &str,
 ) -> Result<String, ExtractError> {
+    Ok(extract_from_buffer_full(bytes, mime_type, file_name)?.0)
+}
+
+/// The parser registry, with the grids a table-aware parser found.
+///
+/// Spreadsheets, DOCX and delimited text return their tables here; every other
+/// format returns text and an empty list (a markdown pipe table in that text is
+/// read by the post-pass in [`table_post`]).
+pub fn extract_from_buffer_full(
+    bytes: &[u8],
+    mime_type: &str,
+    file_name: &str,
+) -> Result<(String, Vec<TableGrid>), ExtractError> {
     match mime_type {
-        MIME_DOCX => docx::parse(bytes),
-        MIME_XLSX => xlsx::parse(bytes, file_name),
+        MIME_DOCX => docx::parse_with_tables(bytes),
+        MIME_XLSX => {
+            xlsx::parse_with_tables(bytes, file_name).map(|sheet| (sheet.content, sheet.tables))
+        }
+        MIME_ODS => match xlsx::parse_with_tables(bytes, file_name) {
+            Ok(sheet) => Ok((sheet.content, sheet.tables)),
+            // A minimal package without the ODS manifest is still readable by
+            // the XML parser; its sheet text is one CSV region.
+            Err(_) => {
+                let text = ods::parse_ods(bytes)?;
+                csv::parse_with_tables(text.as_bytes(), file_name, None)
+            }
+        },
+        MIME_XLS => match xlsx::parse_xls_with_tables(bytes, file_name) {
+            Ok(sheet) => Ok((sheet.content, sheet.tables)),
+            // An HTML report saved as `.xls` is not a workbook; the legacy
+            // reader still turns its table into text.
+            Err(_) => {
+                legacy::parse(bytes, Claimed::Excel, file_name).map(|text| (text, Vec::new()))
+            }
+        },
+        MIME_CSV => csv::parse_with_tables(bytes, file_name, None),
+        MIME_TSV => csv::parse_with_tables(bytes, file_name, Some('\t')),
+        _ => extract_from_buffer_plain(bytes, mime_type, file_name).map(|text| (text, Vec::new())),
+    }
+}
+
+fn extract_from_buffer_plain(
+    bytes: &[u8],
+    mime_type: &str,
+    file_name: &str,
+) -> Result<String, ExtractError> {
+    match mime_type {
         MIME_PPTX => pptx::parse(bytes),
         MIME_RTF => rtf::parse(bytes),
         MIME_EPUB => epub::parse(bytes, file_name),
         MIME_ODT => odt::parse_odt(bytes),
-        MIME_ODS => ods::parse_ods(bytes),
-        other if LEGACY_BINARY_MIMES.contains(&other) => Err(ExtractError::Unsupported(format!(
-            "{other} is a legacy binary format that neither officeparser v6 nor rantai-kb supports (\"{file_name}\")"
-        ))),
+        MIME_DOC => legacy::parse(bytes, Claimed::Word, file_name),
+        MIME_PPT => legacy::parse(bytes, Claimed::PowerPoint, file_name),
         MIME_GLTF => gltf::parse_gltf(bytes, file_name),
         MIME_GLB => gltf::parse_glb(bytes, file_name),
         "text/html" => Ok(html::strip_html(&to_utf8(bytes))),
@@ -243,7 +397,7 @@ fn non_empty(value: &str) -> Option<&str> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::testkit::{chapter, docx_of, epub_of, slide_with, xlsx_of, zip_of};
+    use crate::testkit::{chapter, docx_of, epub_of, ods_of, slide_with, xlsx_of, zip_of};
 
     struct Case {
         name: &'static str,
@@ -273,7 +427,13 @@ mod tests {
         let cases = vec![
             text_case("plain text", "notes.txt", "text/plain", "just notes"),
             text_case("markdown", "readme.md", "text/markdown", "# Title\n\nbody"),
-            text_case("csv", "rows.csv", "text/csv", "a,b\n1,2"),
+            Case {
+                name: "csv becomes a markdown table",
+                file_name: "rows.csv",
+                mime_type: "text/csv",
+                bytes: b"a,b\n1,2".to_vec(),
+                expected: "| a | b |\n| --- | --- |\n| 1 | 2 |".to_string(),
+            },
             text_case("json", "config.json", "application/json", "{\"k\":1}"),
             text_case("yaml", "config.yml", "text/yaml", "k: 1"),
             text_case("toml", "config.toml", "application/toml", "k = 1"),
@@ -314,7 +474,8 @@ mod tests {
                     )],
                     &["name"],
                 ),
-                expected: "[Spreadsheet: book.xlsx]\n\n[Sheet: Summary]\nname".to_string(),
+                expected: "[Spreadsheet: book.xlsx]\n\n[Sheet: Summary]\n| name |\n| --- |"
+                    .to_string(),
             },
             Case {
                 name: "pptx paragraphs become one line each",
@@ -357,28 +518,15 @@ mod tests {
                 expected: "Title\nBody".to_string(),
             },
             Case {
-                name: "ods extracts rows as csv",
+                name: "ods becomes a markdown table",
                 file_name: "sheet.ods",
                 mime_type: MIME_ODS,
-                bytes: zip_of(&[(
-                    "content.xml",
+                bytes: ods_of(
                     r#"<?xml version="1.0" encoding="UTF-8"?>
-<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
-                         xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
-                         xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
-  <office:body>
-    <office:spreadsheet>
-      <table:table table:name="S1">
-        <table:table-row>
-          <table:table-cell><text:p>A</text:p></table:table-cell>
-          <table:table-cell><text:p>B</text:p></table:table-cell>
-        </table:table-row>
-      </table:table>
-    </office:spreadsheet>
-  </office:body>
-</office:document-content>"#,
-                )]),
-                expected: "A,B".to_string(),
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:spreadsheet><table:table table:name="S1"><table:table-row><table:table-cell office:value-type="string"><text:p>A</text:p></table:table-cell><table:table-cell office:value-type="string"><text:p>B</text:p></table:table-cell></table:table-row></table:table></office:spreadsheet></office:body></office:document-content>"#,
+                ),
+                expected: "[Spreadsheet: sheet.ods]\n\n[Sheet: S1]\n| A | B |\n| --- | --- |"
+                    .to_string(),
             },
             Case {
                 name: "gltf becomes a model inventory",
@@ -407,9 +555,39 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_extension_is_read_as_utf8() {
+    fn an_unknown_extension_is_refused_with_a_reason_not_indexed_as_text() {
         let result = extract("archive.bin", "application/octet-stream", b"raw bytes").unwrap();
-        assert_eq!(result.content, "raw bytes");
+        assert_eq!(result.content, "");
+        let error = result.error.expect("a reason");
+        assert!(error.contains("unsupported file type (.bin)"), "{error}");
+        assert!(error.contains("/v1/formats"), "{error}");
+
+        let result = extract("README", "text/plain", b"text").unwrap();
+        assert!(
+            result
+                .error
+                .expect("a reason")
+                .contains("no file extension"),
+            "an extensionless name is refused too"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_production_path_refuses_an_unknown_extension_too() {
+        let chain = LayoutExtractorChain::new(Vec::new(), None);
+        let result = extract_document(
+            "tool.exe",
+            "application/octet-stream",
+            b"MZ\x90\x00",
+            ExtractionOptions::default(),
+            &chain,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.content, "");
+        assert!(result.error.expect("a reason").contains("(.exe)"));
     }
 
     #[test]
@@ -434,16 +612,26 @@ mod tests {
     }
 
     #[test]
-    fn legacy_binary_formats_name_themselves_as_unported() {
-        for (file_name, mime) in [
-            ("old.doc", "application/msword"),
-            ("old.xls", "application/vnd.ms-excel"),
-            ("old.ppt", "application/vnd.ms-powerpoint"),
+    fn legacy_formats_route_by_their_bytes_and_explain_garbage() {
+        // Not an OLE file and not text: the reason names the claimed format
+        // and the bytes, instead of indexing them.
+        for (file_name, mime, label) in [
+            ("old.doc", "application/msword", "Word 97-2003"),
+            ("old.xls", "application/vnd.ms-excel", "Excel 97-2003"),
+            (
+                "old.ppt",
+                "application/vnd.ms-powerpoint",
+                "PowerPoint 97-2003",
+            ),
         ] {
-            let result = extract(file_name, mime, b"binary").unwrap();
+            let result = extract(file_name, mime, b"\x00\x01binary").unwrap();
             let error = result.error.unwrap_or_else(|| panic!("{file_name}"));
-            assert!(error.contains("officeparser"), "{file_name}: {error}");
-            assert!(error.contains(mime), "{file_name}: {error}");
+            assert!(error.contains(label), "{file_name}: {error}");
+            assert!(error.contains("00 01 62"), "{file_name}: {error}");
         }
+        // An HTML report saved as .xls is read.
+        let result = extract("report.xls", "", b"<html><td>Total</td></html>").unwrap();
+        assert_eq!(result.error, None);
+        assert!(result.content.contains("Total"));
     }
 }

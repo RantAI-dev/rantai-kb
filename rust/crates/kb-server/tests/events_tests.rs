@@ -235,6 +235,9 @@ async fn formats_reports_the_accepted_extensions_and_the_byte_limit() {
     assert_eq!(extensions[0], ".pdf");
     assert!(extensions.contains(&serde_json::json!(".gltf")));
     assert!(extensions.contains(&serde_json::json!(".kt")));
+    for ext in [".tif", ".tiff", ".doc", ".xls", ".ppt"] {
+        assert!(extensions.contains(&serde_json::json!(ext)), "{ext}");
+    }
 }
 
 #[tokio::test]

@@ -57,12 +57,23 @@ for arm in "$@"; do
   (umask 077; echo "$key" > "$STACK_DIR/ab-key-$label")
   rm -rf "${OUT:?}/$label"
   start=$(date +%s)
+  # Adaptive arm choice (RET-5): KB_AB_ADAPTIVE_ARMS=true|false forces the
+  # per-request flag for every query. Unset omits it and leaves the server's
+  # KB_ADAPTIVE_ARMS in charge, so an arm can test the default too.
+  adaptive_arg=""
+  case "${KB_AB_ADAPTIVE_ARMS:-}" in
+    true|1|yes|on) adaptive_arg="--adaptive-arms" ;;
+    false|0|no|off) adaptive_arg="--no-adaptive-arms" ;;
+    "") ;;
+    *) echo "KB_AB_ADAPTIVE_ARMS must be true or false, got ${KB_AB_ADAPTIVE_ARMS:?}" >&2; exit 2 ;;
+  esac
   "$CLIENT_BIN" eval \
     --base-url "$KB_STACK_BASE_URL" \
     --api-key "$key" \
     --dataset "$DATASET" \
     --out "$OUT/$label" \
     --label "$label" \
+    ${adaptive_arg:+$adaptive_arg} \
     ${KB_AB_MAX_CHUNKS:+--max-chunks "$KB_AB_MAX_CHUNKS"} \
     ${KB_AB_TIMEOUT:+--timeout "$KB_AB_TIMEOUT"}
   echo "$label: $(( $(date +%s) - start )) s wall (ingest + queries)" | tee -a "$OUT/timings.txt"

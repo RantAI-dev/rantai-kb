@@ -16,6 +16,10 @@
 # and `status` work without repeating it. Settings live in rust/deploy/.env
 # (copy .env.example); shell exports win over that file.
 #
+# The installed binary drives the same stack: `kb-server up|down|logs|ps|status|key`
+# (rust/crates/kb-server/src/stack.rs) is a Rust port of this script, and the
+# two follow the same profile rule.
+#
 # `up` builds the image when it is missing, and otherwise only when asked
 # (`up <tier> --build`).
 set -euo pipefail
@@ -28,7 +32,7 @@ ENV_FILE="$DEPLOY_DIR/.env"
 TIER_FILE="$DEPLOY_DIR/.tier"
 PROJECT="${KB_DEV_PROJECT:-rantai-kb-dev}"
 IMAGE="rantai-kb-rust:${KB_IMAGE_TAG:-dev}"
-OCR_IMAGE="rantai-kb-ocr-ppocr:${KB_IMAGE_TAG:-dev}"
+OCR_IMAGE="${KB_OCR_CPU_IMAGE:-rantai-kb-ocr-cpu:${KB_IMAGE_TAG:-dev}}"
 TIERS=(lite lite-en desk studio station cloud)
 CMD=""
 
@@ -53,6 +57,12 @@ Environment:
   KB_WAIT_SECONDS       how long `up` waits for /health (default 900)
   KB_API_URL            base URL for status (default http://127.0.0.1:$KB_PORT)
   OPENROUTER_API_KEY    required by `up cloud` (shell or rust/deploy/.env)
+
+Profiles:
+  The compose services are behind profiles. If rust/deploy/.env sets
+  COMPOSE_PROFILES, exactly that list is used (no --profile flags are added).
+  Otherwise the tier's own profiles are activated: <tier>, <tier>-ocr and
+  <tier>-vision.
 
 Docs: rust/deploy/README.md
 EOF
@@ -128,6 +138,14 @@ compose() {
   docker compose "${files[@]}" -p "$PROJECT" "$@"
 }
 
+# The compose services are activated by profiles.
+#
+# If the env file sets COMPOSE_PROFILES, compose reads it natively and no
+# --profile flag is passed: the operator's list is the list. Otherwise the
+# tier's own profiles are activated (the tier itself, plus its OCR and vision
+# sidecars). `kb-server up|down|logs|ps` (rust/crates/kb-server/src/stack.rs)
+# follows the same rule, so the script and the binary start the same
+# containers.
 compose_for() {
   local tier="$1"
   shift
@@ -135,7 +153,17 @@ compose_for() {
   if [ -n "${KB_DEV_OVERRIDE:-}" ]; then
     files+=(-f "$KB_DEV_OVERRIDE")
   fi
-  docker compose "${files[@]}" -p "$PROJECT" --profile "$tier" "$@"
+  local -a profiles=()
+  local from_file
+  from_file="$(env_file_value COMPOSE_PROFILES || true)"
+  if [ -z "$from_file" ]; then
+    profiles=(--profile "$tier" --profile "$tier-ocr" --profile "$tier-vision")
+  fi
+  if [ "${#profiles[@]}" -gt 0 ]; then
+    docker compose "${files[@]}" -p "$PROJECT" "${profiles[@]}" "$@"
+  else
+    docker compose "${files[@]}" -p "$PROJECT" "$@"
+  fi
 }
 
 last_tier() {
@@ -245,12 +273,12 @@ cmd_up() {
   if [ "$build" = "1" ]; then
     compose_for "$tier" build "kb-$tier"
   fi
-  # The lite tiers also run a locally built OCR sidecar (rust/deploy/ocr-ppocr).
+  # The lite tiers also run a locally built OCR sidecar (rust/deploy/ocr-cpu).
   case "$tier" in
     lite | lite-en)
       if [ "$build" = "1" ] || ! docker image inspect "$OCR_IMAGE" >/dev/null 2>&1; then
-        note "building the PP-OCRv6 sidecar image $OCR_IMAGE"
-        compose_for "$tier" build ocr-ppocr
+        note "building the CPU OCR sidecar image $OCR_IMAGE"
+        compose_for "$tier" build ocr-cpu
       fi
       ;;
   esac

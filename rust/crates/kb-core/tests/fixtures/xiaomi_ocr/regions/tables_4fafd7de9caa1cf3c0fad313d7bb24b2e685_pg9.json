@@ -1,0 +1,181 @@
+{
+ "regions": [
+  {
+   "index": 0,
+   "label": "text",
+   "bbox_2d": [
+    148,
+    83,
+    820,
+    153
+   ],
+   "merged": "The rational function \\(\\psi_{s + 2}(-hA)\\) is uniformly bounded and satisfies \\(\\psi_{s + 2}(0) = 0\\) due to (15a). The second and third term of (16) are thus bounded as in the previous theorem. For the term with \\(\\psi_{s + 1}\\), we use the fact that due to (12) and (15b)"
+  },
+  {
+   "index": 1,
+   "label": "display_formula",
+   "bbox_2d": [
+    247,
+    164,
+    721,
+    185
+   ],
+   "merged": "\\[\\psi_ {s + 1} (- h A) = \\psi_ {s + 1} (- h A) - \\psi_ {s + 1} (0) = h A \\cdot \\psi_ {s + 1} ^ {(1)} (- h A)\\]"
+  },
+  {
+   "index": 2,
+   "label": "text",
+   "bbox_2d": [
+    149,
+    196,
+    437,
+    216
+   ],
+   "merged": "with \\(\\psi_{s + 1}^{(1)}(0) = 0\\). Thus, we have"
+  },
+  {
+   "index": 3,
+   "label": "display_formula",
+   "bbox_2d": [
+    174,
+    227,
+    792,
+    247
+   ],
+   "merged": "\\[h ^ {s + 1} \\psi_ {s + 1} (- h A) f ^ {(s)} (t _ {n}) = h ^ {s + 1 + \\beta} \\psi_ {s + 1} ^ {(1)} (- h A) (h \\widetilde {A}) ^ {1 - \\beta} \\cdot A \\widetilde {A} ^ {- 1} \\cdot \\widetilde {A} ^ {\\beta} f ^ {(s)} (t _ {n}).\\]"
+  },
+  {
+   "index": 4,
+   "label": "text",
+   "bbox_2d": [
+    150,
+    259,
+    818,
+    294
+   ],
+   "merged": "With the help of Lemma 2, this term can be bounded in the desired way, which concludes the proof. \\(\\square\\)"
+  },
+  {
+   "index": 5,
+   "label": "text",
+   "bbox_2d": [
+    149,
+    307,
+    820,
+    446
+   ],
+   "merged": "Remark The restriction to \\(\\beta \\leq 1\\) in Theorem 3 was made just for simplicity. If the source term has higher spatial regularity, and if further conditions of the type (15) are fulfilled, then we can also show higher temporal order of convergence. The additional conditions can be derived by expanding the defect in (16) even further, and it can be shown as in Lemma 3 that they are implied by the underlying quadrature rule being of higher order. In particular, full (classical) order is achieved for sufficiently smooth source term with periodic boundary conditions."
+  },
+  {
+   "index": 6,
+   "label": "text",
+   "bbox_2d": [
+    149,
+    458,
+    819,
+    493
+   ],
+   "merged": "Example To illustrate the sharpness of the bounds in Theorem 3, we consider the linear parabolic problem"
+  },
+  {
+   "index": 7,
+   "label": "display_formula",
+   "bbox_2d": [
+    308,
+    502,
+    662,
+    538
+   ],
+   "merged": "\\[\\frac {\\partial U}{\\partial t} (x, t) - \\frac {\\partial^ {2} U}{\\partial x ^ {2}} (x, t) = (2 + x (1 - x)) \\mathrm{e} ^ {t}\\]"
+  },
+  {
+   "index": 8,
+   "label": "formula_number",
+   "bbox_2d": [
+    780,
+    512,
+    816,
+    531
+   ],
+   "merged": "(17)"
+  },
+  {
+   "index": 9,
+   "label": "text",
+   "bbox_2d": [
+    148,
+    545,
+    816,
+    581
+   ],
+   "merged": "for \\( x \\in [0,1] \\) and \\( t \\in [0,1] \\), subject to homogeneous Dirichlet boundary conditions. For the initial value \\( x(1 - x) \\), the exact solution is \\( U(x,t) = x(1 - x)\\mathrm{e}^t \\)."
+  },
+  {
+   "index": 10,
+   "label": "text",
+   "bbox_2d": [
+    149,
+    595,
+    819,
+    662
+   ],
+   "merged": "We discretize this problem in space by standard finite differences, and in time by the exponential 2-stage Gauss method, respectively. The numerically observed temporal orders of convergence in different norms are displayed in Table 1."
+  },
+  {
+   "index": 11,
+   "label": "table",
+   "bbox_2d": [
+    354,
+    666,
+    616,
+    765
+   ],
+   "merged": "<table><tr><td>\\( N \\)</td><td>\\( {H}^{1} \\)</td><td>\\( {L}^{1} \\)</td><td>\\( {L}^{2} \\)</td><td>\\( {L}^{\\infty } \\)</td></tr><tr><td>50</td><td>2.80</td><td>3.53</td><td>3.27</td><td>3.00</td></tr><tr><td>100</td><td>2.76</td><td>3.50</td><td>3.26</td><td>3.01</td></tr><tr><td>200</td><td>2.75</td><td>3.50</td><td>3.25</td><td>3.00</td></tr></table>"
+  },
+  {
+   "index": 12,
+   "label": "figure_title",
+   "bbox_2d": [
+    150,
+    762,
+    214,
+    777
+   ],
+   "merged": "Table 1"
+  },
+  {
+   "index": 13,
+   "label": "text",
+   "bbox_2d": [
+    149,
+    777,
+    818,
+    811
+   ],
+   "merged": "Numerically observed temporal orders of convergence in different norms for discretizations with \\(N\\) spatial degrees of freedom and \\(h = 1 / 128\\)."
+  },
+  {
+   "index": 14,
+   "label": "text",
+   "bbox_2d": [
+    149,
+    822,
+    819,
+    856
+   ],
+   "merged": "The attainable value of \\(\\beta\\) in Theorem 3 relies on the characterization of the domains of fractional powers of elliptic operators. The source function in (17)"
+  },
+  {
+   "index": 15,
+   "label": "number",
+   "bbox_2d": [
+    475,
+    887,
+    488,
+    900
+   ],
+   "merged": "9"
+  }
+ ],
+ "expected": "The rational function \\(\\psi_{s + 2}(-hA)\\) is uniformly bounded and satisfies \\(\\psi_{s + 2}(0) = 0\\) due to (15a). The second and third term of (16) are thus bounded as in the previous theorem. For the term with \\(\\psi_{s + 1}\\), we use the fact that due to (12) and (15b)\n\n$$\n\\psi_ {s + 1} (- h A) = \\psi_ {s + 1} (- h A) - \\psi_ {s + 1} (0) = h A \\cdot \\psi_ {s + 1} ^ {(1)} (- h A)\n$$\n\nwith \\(\\psi_{s + 1}^{(1)}(0) = 0\\). Thus, we have\n\n$$\nh ^ {s + 1} \\psi_ {s + 1} (- h A) f ^ {(s)} (t _ {n}) = h ^ {s + 1 + \\beta} \\psi_ {s + 1} ^ {(1)} (- h A) (h \\widetilde {A}) ^ {1 - \\beta} \\cdot A \\widetilde {A} ^ {- 1} \\cdot \\widetilde {A} ^ {\\beta} f ^ {(s)} (t _ {n}).\n$$\n\nWith the help of Lemma 2, this term can be bounded in the desired way, which concludes the proof. \\(\\square\\)\n\nRemark The restriction to \\(\\beta \\leq 1\\) in Theorem 3 was made just for simplicity. If the source term has higher spatial regularity, and if further conditions of the type (15) are fulfilled, then we can also show higher temporal order of convergence. The additional conditions can be derived by expanding the defect in (16) even further, and it can be shown as in Lemma 3 that they are implied by the underlying quadrature rule being of higher order. In particular, full (classical) order is achieved for sufficiently smooth source term with periodic boundary conditions.\n\nExample To illustrate the sharpness of the bounds in Theorem 3, we consider the linear parabolic problem\n\n$$\n\\frac {\\partial U}{\\partial t} (x, t) - \\frac {\\partial^ {2} U}{\\partial x ^ {2}} (x, t) = (2 + x (1 - x)) \\mathrm{e} ^ {t} \\tag{17}\n$$\n\nfor \\( x \\in [0,1] \\) and \\( t \\in [0,1] \\), subject to homogeneous Dirichlet boundary conditions. For the initial value \\( x(1 - x) \\), the exact solution is \\( U(x,t) = x(1 - x)\\mathrm{e}^t \\).\n\nWe discretize this problem in space by standard finite differences, and in time by the exponential 2-stage Gauss method, respectively. The numerically observed temporal orders of convergence in different norms are displayed in Table 1.\n\n<table><tr><td>\\( N \\)</td><td>\\( {H}^{1} \\)</td><td>\\( {L}^{1} \\)</td><td>\\( {L}^{2} \\)</td><td>\\( {L}^{\\infty } \\)</td></tr><tr><td>50</td><td>2.80</td><td>3.53</td><td>3.27</td><td>3.00</td></tr><tr><td>100</td><td>2.76</td><td>3.50</td><td>3.26</td><td>3.01</td></tr><tr><td>200</td><td>2.75</td><td>3.50</td><td>3.25</td><td>3.00</td></tr></table>\n\nTable 1\n\nNumerically observed temporal orders of convergence in different norms for discretizations with \\(N\\) spatial degrees of freedom and \\(h = 1 / 128\\).\n\nThe attainable value of \\(\\beta\\) in Theorem 3 relies on the characterization of the domains of fractional powers of elliptic operators. The source function in (17)"
+}

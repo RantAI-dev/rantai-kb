@@ -1,0 +1,159 @@
+{
+ "regions": [
+  {
+   "index": 0,
+   "label": "header",
+   "bbox_2d": [
+    81,
+    39,
+    180,
+    51
+   ],
+   "merged": "DE GRUYTER"
+  },
+  {
+   "index": 1,
+   "label": "header",
+   "bbox_2d": [
+    497,
+    39,
+    838,
+    53
+   ],
+   "merged": "Åsberg and Mikkelsen: Two TSH results from the same patient"
+  },
+  {
+   "index": 2,
+   "label": "number",
+   "bbox_2d": [
+    883,
+    39,
+    896,
+    50
+   ],
+   "merged": "3"
+  },
+  {
+   "index": 3,
+   "label": "figure_title",
+   "bbox_2d": [
+    81,
+    87,
+    475,
+    197
+   ],
+   "merged": "Table 1: Classification of two simulated s-TSH values from 100,000 individuals according to the bivariate distribution and the combination of RCVs and univariate reference limits. Classified as normal according to the bivariate distribution were the pairs of measurement within the central \\(95\\%\\) of that distribution. Classified as normal according to the combination of RCVs and univariate reference limits were those pairs of measurements where the difference between them was within RCVs and both measurements were within the univariate reference range."
+  },
+  {
+   "index": 4,
+   "label": "table",
+   "bbox_2d": [
+    81,
+    207,
+    481,
+    299
+   ],
+   "merged": "<table><tr><td rowspan=\"2\">Combination of non-parametric RCVs and reference limits</td><td colspan=\"2\">Bivariate distribution</td><td rowspan=\"2\">Total</td></tr><tr><td>Normal</td><td>Abnormal</td></tr><tr><td>Normal</td><td>87,608</td><td>992</td><td>88,600</td></tr><tr><td>Abnormal</td><td>7,392</td><td>4,008</td><td>11,400</td></tr><tr><td>Total</td><td>95,000</td><td>5,000</td><td>100,000</td></tr></table>"
+  },
+  {
+   "index": 5,
+   "label": "text",
+   "bbox_2d": [
+    79,
+    340,
+    482,
+    371
+   ],
+   "merged": "and 0.960 (95 % CI 0.957 to 0.962) for those with x1 above the median."
+  },
+  {
+   "index": 6,
+   "label": "text",
+   "bbox_2d": [
+    79,
+    373,
+    483,
+    487
+   ],
+   "merged": "The graphical study of the s-sodium data is presented in a supplementary figure. The sensitivity of the combination of univariate reference limits and RCVs for identifying pairs of x1 and x2 lying outside the central 95% of the bivariate distribution of s-sodium was 100%. The specificity for identifying pairs of x1 and x2 lying inside the central 95% of the bivariate distribution was 92.5%."
+  },
+  {
+   "index": 7,
+   "label": "paragraph_title",
+   "bbox_2d": [
+    82,
+    522,
+    201,
+    541
+   ],
+   "merged": "## Discussion"
+  },
+  {
+   "index": 8,
+   "label": "text",
+   "bbox_2d": [
+    79,
+    559,
+    484,
+    918
+   ],
+   "merged": "If the physician does not know the patient's setpoint value of s-TSH and wants to judge the clinical condition from s-TSH in two samples taken a time apart, we believe that the physician basically wants to assess whether the patient is healthy and stable. Then the two s-TSH values could be compared against the bivariate distribution in Figure 1, which represents a stable, euthyreot population. As clearly shown in Figure 1, the lines of the 2.5 and 97.5 percentile univariate reference limits in combination with the 2.5 and 97.5 percentile RCVs do not accurately delineate the central \\(95\\%\\) of the points of the bivariate distribution of x1 and x2. The space between the RCV lines contains \\(95\\%\\) of the points, as do the space between each set of reference limits, but the space between the RCVs and the reference limits is not congruent with the ellipse marking the central \\(95\\%\\) of the bivariate distribution. The RCV lines are approximately tangent to the ellipse marking the central \\(50\\%\\) of the distribution and cut through the other ellipses. Compared to the central \\(95\\%\\) of the bivariate distribution, the combination of univariate reference limits and RCVs had a fair specificity of \\(92.2\\%\\) but a lower sensitivity of \\(80.2\\%\\). Without the assistance of univariate reference limits, the RCVs showed a particularly low sensitivity. Obviously, RCVs are not designed to detect healthiness, as the"
+  },
+  {
+   "index": 9,
+   "label": "text",
+   "bbox_2d": [
+    493,
+    87,
+    898,
+    248
+   ],
+   "merged": "area between the limits of RCVs includes analyte concentrations from zero to infinity (Figure 1). These considerations are not limited to s-TSH; probability density contour plots for bivariate distributions are not straight lines for any analyte, as indicated in the Supplementary Figure. In the example of s-sodium, the diagnostic accuracy of the univariate reference limits and RCVs was considerably better than for s-TSH. Obviously, how well the combination of univariate reference limits and RCVs delineate the corresponding bivariate distribution must be studied for each analyte."
+  },
+  {
+   "index": 10,
+   "label": "text",
+   "bbox_2d": [
+    494,
+    250,
+    897,
+    412
+   ],
+   "merged": "Looking at the ellipses marking the various central proportions of the bivariate distribution and the line of equality (Figure 1), it is obvious that regression towards the mean does occur in this scenario. If the measured value in the first specimen (x1) is relatively low, the measured value in the second specimen (x2) is most likely to be higher, and vice versa. The median values of the difference x2 - x1 and the ratio x2/x1 for pairs with x1 below and above the median value of x1 showed the same phenomenon, as expected, because a difference in percent is equivalent to a ratio. We prefer ratios in this setting."
+  },
+  {
+   "index": 11,
+   "label": "text",
+   "bbox_2d": [
+    493,
+    414,
+    898,
+    591
+   ],
+   "merged": "Thus, the idea of RCVs as a constant fraction of the first measurement is flawed, a finding in accordance with a previous study [7]. We estimated the RCVs both parametrically and non-parametrically, to see whether the two methods gave different results. They did not; the two methods of estimation gave almost identical RCV lines. They were symmetrical about the equality line, and asymmetrical in the y direction. We simulated the s-TSH-values assuming a Gaussian distribution around the setpoints; still, the non-parametrically derived RCVs based on the simulated values were asymmetrical in the y direction."
+  },
+  {
+   "index": 12,
+   "label": "text",
+   "bbox_2d": [
+    493,
+    593,
+    898,
+    835
+   ],
+   "merged": "We believe our data set was theoretically sound. Data were derived from a Gaussian distribution truncated at \\(\\pm 3\\) standard deviation, and transformed to lognormally distributed data as coming from an euthyreot (healthy) population. Each data pair was generated from the same, individual setpoint value, so the data represented a stable population. All data pairs were generated with the same \\(\\mathrm{CV_I}\\) of \\(17.9\\%\\) [4], thus the variance was homogeneous. The value of \\(3.4\\%\\) for \\(\\mathrm{CV_A}\\) is the total \\(\\mathrm{CV_A}\\) in our laboratory, estimated from quality control values over several months. Truncation at \\(\\pm 3\\) standard deviation when generating population setpoint and individual values were done because those distributions are not really Gaussian (they do not include values from minus to plus infinity) and often values outside \\(\\pm 3\\) standard deviation are regarded as outliers."
+  },
+  {
+   "index": 13,
+   "label": "text",
+   "bbox_2d": [
+    493,
+    837,
+    898,
+    918
+   ],
+   "merged": "Note that this work deals with how the physician might interpret two s-TSH values from the same patient when the patient's setpoint value is unknown. It has no relevance if the physician needs to judge a time series of three or more measured values of the same analyte. Neither does it go"
+  }
+ ],
+ "expected": "Table 1: Classification of two simulated s-TSH values from 100,000 individuals according to the bivariate distribution and the combination of RCVs and univariate reference limits. Classified as normal according to the bivariate distribution were the pairs of measurement within the central \\(95\\%\\) of that distribution. Classified as normal according to the combination of RCVs and univariate reference limits were those pairs of measurements where the difference between them was within RCVs and both measurements were within the univariate reference range.\n\n<table><tr><td rowspan=\"2\">Combination of non-parametric RCVs and reference limits</td><td colspan=\"2\">Bivariate distribution</td><td rowspan=\"2\">Total</td></tr><tr><td>Normal</td><td>Abnormal</td></tr><tr><td>Normal</td><td>87,608</td><td>992</td><td>88,600</td></tr><tr><td>Abnormal</td><td>7,392</td><td>4,008</td><td>11,400</td></tr><tr><td>Total</td><td>95,000</td><td>5,000</td><td>100,000</td></tr></table>\n\nand 0.960 (95 % CI 0.957 to 0.962) for those with x1 above the median.\n\nThe graphical study of the s-sodium data is presented in a supplementary figure. The sensitivity of the combination of univariate reference limits and RCVs for identifying pairs of x1 and x2 lying outside the central 95% of the bivariate distribution of s-sodium was 100%. The specificity for identifying pairs of x1 and x2 lying inside the central 95% of the bivariate distribution was 92.5%.\n\n## Discussion\n\nIf the physician does not know the patient's setpoint value of s-TSH and wants to judge the clinical condition from s-TSH in two samples taken a time apart, we believe that the physician basically wants to assess whether the patient is healthy and stable. Then the two s-TSH values could be compared against the bivariate distribution in Figure 1, which represents a stable, euthyreot population. As clearly shown in Figure 1, the lines of the 2.5 and 97.5 percentile univariate reference limits in combination with the 2.5 and 97.5 percentile RCVs do not accurately delineate the central \\(95\\%\\) of the points of the bivariate distribution of x1 and x2. The space between the RCV lines contains \\(95\\%\\) of the points, as do the space between each set of reference limits, but the space between the RCVs and the reference limits is not congruent with the ellipse marking the central \\(95\\%\\) of the bivariate distribution. The RCV lines are approximately tangent to the ellipse marking the central \\(50\\%\\) of the distribution and cut through the other ellipses. Compared to the central \\(95\\%\\) of the bivariate distribution, the combination of univariate reference limits and RCVs had a fair specificity of \\(92.2\\%\\) but a lower sensitivity of \\(80.2\\%\\). Without the assistance of univariate reference limits, the RCVs showed a particularly low sensitivity. Obviously, RCVs are not designed to detect healthiness, as the\n\narea between the limits of RCVs includes analyte concentrations from zero to infinity (Figure 1). These considerations are not limited to s-TSH; probability density contour plots for bivariate distributions are not straight lines for any analyte, as indicated in the Supplementary Figure. In the example of s-sodium, the diagnostic accuracy of the univariate reference limits and RCVs was considerably better than for s-TSH. Obviously, how well the combination of univariate reference limits and RCVs delineate the corresponding bivariate distribution must be studied for each analyte.\n\nLooking at the ellipses marking the various central proportions of the bivariate distribution and the line of equality (Figure 1), it is obvious that regression towards the mean does occur in this scenario. If the measured value in the first specimen (x1) is relatively low, the measured value in the second specimen (x2) is most likely to be higher, and vice versa. The median values of the difference x2 - x1 and the ratio x2/x1 for pairs with x1 below and above the median value of x1 showed the same phenomenon, as expected, because a difference in percent is equivalent to a ratio. We prefer ratios in this setting.\n\nThus, the idea of RCVs as a constant fraction of the first measurement is flawed, a finding in accordance with a previous study [7]. We estimated the RCVs both parametrically and non-parametrically, to see whether the two methods gave different results. They did not; the two methods of estimation gave almost identical RCV lines. They were symmetrical about the equality line, and asymmetrical in the y direction. We simulated the s-TSH-values assuming a Gaussian distribution around the setpoints; still, the non-parametrically derived RCVs based on the simulated values were asymmetrical in the y direction.\n\nWe believe our data set was theoretically sound. Data were derived from a Gaussian distribution truncated at \\(\\pm 3\\) standard deviation, and transformed to lognormally distributed data as coming from an euthyreot (healthy) population. Each data pair was generated from the same, individual setpoint value, so the data represented a stable population. All data pairs were generated with the same \\(\\mathrm{CV_I}\\) of \\(17.9\\%\\) [4], thus the variance was homogeneous. The value of \\(3.4\\%\\) for \\(\\mathrm{CV_A}\\) is the total \\(\\mathrm{CV_A}\\) in our laboratory, estimated from quality control values over several months. Truncation at \\(\\pm 3\\) standard deviation when generating population setpoint and individual values were done because those distributions are not really Gaussian (they do not include values from minus to plus infinity) and often values outside \\(\\pm 3\\) standard deviation are regarded as outliers.\n\nNote that this work deals with how the physician might interpret two s-TSH values from the same patient when the patient's setpoint value is unknown. It has no relevance if the physician needs to judge a time series of three or more measured values of the same analyte. Neither does it go"
+}

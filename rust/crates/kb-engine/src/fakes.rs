@@ -38,7 +38,8 @@ use kb_ports::{
     KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor, NewDocument, PatchCategory,
     PatchDocument, PatchKnowledgeBase, PortError, ProgressSink, QueryEmbedding, ReapableJob,
     Relation, RerankCandidate, RerankResult, Reranker, RetrievalIndex, RetryJobOutcome,
-    ScopeRequest, SearchHit, StoredChunk, TenantId, adapter::ScopeToken, sort_candidates,
+    ScopeRequest, SearchHit, StoredChunk, TableId, TableQueryFailure, TableRecord, TableStore,
+    TenantId, adapter::ScopeToken, sort_candidates,
 };
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -65,6 +66,10 @@ fn stored_chunk_metadata(value: &serde_json::Value) -> ChunkMetadata {
         anchor_chunk_index: get_u32("anchorChunkIndex"),
         contextual_prefix: value
             .get("contextualPrefix")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        table_id: value
+            .get("tableId")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
     }
@@ -99,6 +104,8 @@ pub fn make_fake_hit(
         rank: 0,
         is_bm25: false,
         retrieval: None,
+        dense_score: None,
+        rerank_score: None,
     }
 }
 
@@ -107,6 +114,43 @@ pub fn make_fake_hit(
 pub fn make_fake_scope(tenant: TenantId, doc_ids: Vec<DocumentId>) -> DocumentScope {
     let token = ScopeToken::new_for_adapter();
     DocumentScope::new(&token, tenant, doc_ids)
+}
+
+/// A JSON scalar as Postgres `->>` renders it: strings unquoted, numbers and
+/// booleans as their text, everything else unmatchable.
+fn json_scalar_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Whether `metadata[key]` equals one of `values`, or (when the document value
+/// is an array) contains one of them. Mirrors `scope_sql` in `kb-store-pg`.
+fn metadata_values_match(
+    metadata: Option<&serde_json::Value>,
+    key: &str,
+    values: &[String],
+) -> bool {
+    let Some(value) = metadata
+        .and_then(serde_json::Value::as_object)
+        .and_then(|object| object.get(key))
+    else {
+        return false;
+    };
+    match value {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(json_scalar_text)
+            .any(|item| values.contains(&item)),
+        scalar => json_scalar_text(scalar).is_some_and(|item| values.contains(&item)),
+    }
+}
+
+fn metadata_key_matches(metadata: Option<&serde_json::Value>, key: &str, value: &str) -> bool {
+    metadata_values_match(metadata, key, &[value.to_string()])
 }
 
 /// Fake in-memory document store.
@@ -119,6 +163,15 @@ pub struct FakeDocumentStore {
     pub categories: Arc<RwLock<HashMap<TenantId, Vec<CategoryRecord>>>>,
     pub download_metas: Arc<RwLock<HashMap<(TenantId, DocumentId), DocumentDownloadMeta>>>,
     pub fail_scope: Arc<AtomicBool>,
+    /// Section outlines by document, for the tree arm (DEC-4).
+    pub outlines: Arc<RwLock<HashMap<DocumentId, kb_core::tree::Outline>>>,
+    /// Force [`DocumentStore::outlines`] to fail, so a test can assert the
+    /// tree arm degrades instead of emptying the search.
+    pub fail_outlines: Arc<AtomicBool>,
+    /// Return every outline regardless of scope, the way the old unscoped
+    /// `bm25_search_global` returned every tenant's hits. Only the red-team
+    /// matrix sets this, to prove the scoped page read contains the hole.
+    pub outline_scope_hole: Arc<AtomicBool>,
     /// Soft-deleted documents, kept so tests can assert on them.
     pub deleted: Arc<RwLock<Vec<DocumentMeta>>>,
 }
@@ -127,6 +180,11 @@ impl FakeDocumentStore {
     pub fn insert_doc(&self, tenant: TenantId, meta: DocumentMeta) {
         let mut map = self.docs.write().unwrap();
         map.entry(tenant).or_default().push(meta);
+    }
+
+    /// Store a document's outline for the tree arm.
+    pub fn insert_outline(&self, id: DocumentId, outline: kb_core::tree::Outline) {
+        self.outlines.write().unwrap().insert(id, outline);
     }
 
     pub fn insert_api_key(&self, key: &str, tenant: TenantId) {
@@ -180,7 +238,22 @@ impl DocumentStore for FakeDocumentStore {
                         return false;
                     }
                 }
-                true
+                if let Some(refs) = &req.filter.external_refs
+                    && !d
+                        .external_ref
+                        .as_ref()
+                        .is_some_and(|r| refs.iter().any(|allowed| allowed == r))
+                {
+                    return false;
+                }
+                if let Some(language) = &req.filter.language
+                    && !metadata_key_matches(d.metadata.as_ref(), "language", language)
+                {
+                    return false;
+                }
+                req.filter.metadata.iter().all(|predicate| {
+                    metadata_values_match(d.metadata.as_ref(), &predicate.key, &predicate.values)
+                })
             })
             .map(|d| d.id)
             .collect();
@@ -279,6 +352,34 @@ impl DocumentStore for FakeDocumentStore {
         Ok(list
             .into_iter()
             .filter(|d| id_set.contains(&d.id))
+            .collect())
+    }
+
+    async fn outlines(
+        &self,
+        scope: &DocumentScope,
+    ) -> Result<Vec<(DocumentId, kb_core::tree::Outline)>, PortError> {
+        if self.fail_outlines.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable("forced outline failure".to_string()));
+        }
+        // The fake checks the scope exactly as the Postgres adapter does: a
+        // document outside the caller's visible ids is never returned, even
+        // when it has a matching outline.
+        let outlines = self.outlines.read().unwrap();
+        if self.outline_scope_hole.load(Ordering::Relaxed) {
+            return Ok(outlines
+                .iter()
+                .map(|(id, outline)| (id.clone(), outline.clone()))
+                .collect());
+        }
+        Ok(scope
+            .document_ids()
+            .iter()
+            .filter_map(|id| {
+                outlines
+                    .get(id)
+                    .map(|outline| (id.clone(), outline.clone()))
+            })
             .collect())
     }
 
@@ -403,7 +504,7 @@ impl DocumentStore for FakeDocumentStore {
             created_at: FAKE_TIMESTAMP.to_string(),
             updated_at: FAKE_TIMESTAMP.to_string(),
             knowledge_base_ids: group_kb_ids.iter().map(|k| k.0.clone()).collect(),
-            metadata: None,
+            metadata: doc.metadata.clone(),
         };
         self.insert_doc(doc.tenant_id.clone(), meta);
         self.download_metas.write().unwrap().insert(
@@ -941,6 +1042,7 @@ impl RetrievalIndex for FakeChunkStore {
                         "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
                         "chunkIndex": h.chunk.metadata.chunk_index,
                         "page": h.chunk.metadata.page,
+                        "tableId": h.chunk.metadata.table_id,
                     }),
                     scores: ArmScores {
                         dense: Some(h.similarity),
@@ -977,6 +1079,7 @@ impl RetrievalIndex for FakeChunkStore {
                         "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
                         "chunkIndex": h.chunk.metadata.chunk_index,
                         "page": h.chunk.metadata.page,
+                        "tableId": h.chunk.metadata.table_id,
                     }),
                     scores: ArmScores {
                         dense: None,
@@ -1074,6 +1177,7 @@ impl RetrievalIndex for FakeChunkStore {
                         "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
                         "chunkIndex": h.chunk.metadata.chunk_index,
                         "page": h.chunk.metadata.page,
+                        "tableId": h.chunk.metadata.table_id,
                     }),
                     scores: ArmScores::default(),
                     ranks: ArmRanks::default(),
@@ -1112,12 +1216,78 @@ impl RetrievalIndex for FakeChunkStore {
                         "anchorChunkIndex": h.chunk.metadata.anchor_chunk_index,
                         "chunkIndex": h.chunk.metadata.chunk_index,
                         "page": h.chunk.metadata.page,
+                        "tableId": h.chunk.metadata.table_id,
                     }),
                     scores: ArmScores::default(),
                     ranks: ArmRanks::default(),
                 });
             }
         }
+        Ok(out)
+    }
+
+    async fn fetch_pages(
+        &self,
+        scope: &DocumentScope,
+        pages: &[(DocumentId, u32)],
+        per_page: usize,
+    ) -> Result<Vec<Candidate>, PortError> {
+        if pages.is_empty() || per_page == 0 || scope.document_ids().is_empty() {
+            return Ok(Vec::new());
+        }
+        let wanted: std::collections::HashSet<(DocumentId, u32)> = pages
+            .iter()
+            .filter(|(document, _)| scope.document_ids().contains(document))
+            .cloned()
+            .collect();
+        let stored = self.stored_chunks.read().unwrap();
+        let mut out: Vec<Candidate> = Vec::new();
+        let mut counts: std::collections::HashMap<(DocumentId, u32), usize> =
+            std::collections::HashMap::new();
+        for (document, chunks) in stored.iter() {
+            if !scope.document_ids().contains(document) {
+                continue;
+            }
+            for c in chunks {
+                let meta = stored_chunk_metadata(&c.metadata);
+                let Some(page) = meta.page else {
+                    continue;
+                };
+                let key = (document.clone(), page);
+                if !wanted.contains(&key) {
+                    continue;
+                }
+                let count = counts.entry(key).or_insert(0);
+                if *count >= per_page {
+                    continue;
+                }
+                *count += 1;
+                out.push(Candidate {
+                    unit_id: ChunkId(format!("{document}_{}", meta.chunk_index.unwrap_or(0))),
+                    document_id: document.clone(),
+                    tenant: scope.tenant().clone(),
+                    chunk_index: meta.chunk_index.unwrap_or(0),
+                    page: meta.page,
+                    chunk_type: ChunkType::from_storage(
+                        c.metadata
+                            .get("chunkType")
+                            .and_then(serde_json::Value::as_str),
+                    ),
+                    content: c.content.clone(),
+                    contextual_prefix: c.contextual_prefix.clone(),
+                    metadata: c.metadata.clone(),
+                    scores: ArmScores::default(),
+                    ranks: ArmRanks::default(),
+                });
+            }
+        }
+        out.sort_by(|a, b| {
+            a.document_id
+                .as_str()
+                .cmp(b.document_id.as_str())
+                .then_with(|| a.page.cmp(&b.page))
+                .then_with(|| a.chunk_index.cmp(&b.chunk_index))
+        });
         Ok(out)
     }
 
@@ -1287,6 +1457,178 @@ impl BlobStore for FakeBlobStore {
     }
 }
 
+/// In-memory table store (`TBL-1`) for the HTTP and engine tests.
+///
+/// It implements the same tenant rule as the real adapter — no record is ever
+/// returned under another tenant — and records `(operation, tenant)` for every
+/// call, so a route test can prove the handler passed the caller's tenant
+/// rather than the table's.
+#[derive(Clone, Default)]
+pub struct FakeTableStore {
+    pub records: Arc<RwLock<Vec<TableRecord>>>,
+    pub calls: Arc<RwLock<Vec<(String, String)>>>,
+}
+
+impl FakeTableStore {
+    fn note(&self, operation: &str, tenant: &TenantId) {
+        self.calls
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((operation.to_string(), tenant.0.clone()));
+    }
+
+    /// Seed one stored table.
+    pub fn seed(&self, record: TableRecord) {
+        self.records
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(record);
+    }
+
+    /// The operations recorded, in order.
+    pub fn calls(&self) -> Vec<(String, String)> {
+        self.calls
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The current records of a tenant, latest version per document.
+    fn current(&self, tenant: &TenantId, document: Option<&DocumentId>) -> Vec<TableRecord> {
+        let records = self
+            .records
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut out: Vec<TableRecord> = records
+            .iter()
+            .filter(|r| &r.tenant_id == tenant)
+            .filter(|r| document.is_none_or(|d| &r.document_id == d))
+            .filter(|r| {
+                records
+                    .iter()
+                    .filter(|o| o.tenant_id == r.tenant_id && o.document_id == r.document_id)
+                    .map(|o| o.version)
+                    .max()
+                    .is_none_or(|latest| r.version == latest)
+            })
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| (&a.document_id.0, a.index).cmp(&(&b.document_id.0, b.index)));
+        out
+    }
+}
+
+#[async_trait]
+impl TableStore for FakeTableStore {
+    async fn put_tables(
+        &self,
+        tenant: &TenantId,
+        document: &DocumentId,
+        tables: Vec<(kb_core::tables::TableGrid, kb_core::tables::TableManifest)>,
+    ) -> Result<Vec<TableRecord>, PortError> {
+        self.note("put", tenant);
+        let version = self
+            .current(tenant, Some(document))
+            .iter()
+            .map(|r| r.version)
+            .max();
+        let version = version.unwrap_or(0) + 1;
+        let mut written = Vec::new();
+        for (index, (grid, manifest)) in tables.into_iter().enumerate() {
+            let index = index as u32;
+            let record = TableRecord {
+                id: TableId::of(document, index),
+                tenant_id: tenant.clone(),
+                document_id: document.clone(),
+                index,
+                version,
+                source: grid.source.unwrap_or(kb_core::tables::TableSource::Csv),
+                sheet: grid.sheet,
+                page_span: grid.page_span,
+                title: grid.title,
+                caption: grid.caption,
+                header: grid.header,
+                manifest,
+                grid_key: format!(
+                    "tables/{}/{}_t{index}/v{version}.parquet",
+                    tenant.0, document.0
+                ),
+                created_at: FAKE_TIMESTAMP.to_string(),
+            };
+            self.seed(record.clone());
+            written.push(record);
+        }
+        Ok(written)
+    }
+
+    async fn list_tables(
+        &self,
+        tenant: &TenantId,
+        document: Option<&DocumentId>,
+    ) -> Result<Vec<TableRecord>, PortError> {
+        self.note("list", tenant);
+        Ok(self.current(tenant, document))
+    }
+
+    async fn get_table(
+        &self,
+        tenant: &TenantId,
+        id: &TableId,
+    ) -> Result<Option<TableRecord>, PortError> {
+        self.note("get", tenant);
+        Ok(self.current(tenant, None).into_iter().find(|r| &r.id == id))
+    }
+
+    async fn query(
+        &self,
+        tenant: &TenantId,
+        id: &TableId,
+        query: &kb_core::tables::TableQuery,
+        policy: &kb_core::tables::QueryPolicy,
+    ) -> Result<kb_core::tables::QueryResult, TableQueryFailure> {
+        self.note("query", tenant);
+        let Some(record) = self.current(tenant, None).into_iter().find(|r| &r.id == id) else {
+            return Err(TableQueryFailure::Store(PortError::Invalid(format!(
+                "table {id} does not exist in this tenant"
+            ))));
+        };
+        if policy.aggregate_only
+            && query
+                .select
+                .iter()
+                .any(|item| matches!(item, kb_core::tables::SelectItem::Column { .. }))
+        {
+            return Err(TableQueryFailure::Invalid(
+                kb_core::tables::QueryError::Restricted {
+                    reason: "this table only answers aggregates".to_string(),
+                },
+            ));
+        }
+        Ok(kb_core::tables::QueryResult {
+            columns: vec!["count".to_string()],
+            rows: vec![vec![serde_json::json!(record.manifest.n_rows)]],
+            rows_matched: u64::from(record.manifest.n_rows),
+            excluded_derived_rows: record.manifest.derived_rows.len() as u32,
+            suppressed_groups: 0,
+            truncated: false,
+            warnings: vec![format!("fake table {}", record.id)],
+        })
+    }
+
+    async fn delete_document_tables(
+        &self,
+        tenant: &TenantId,
+        document: &DocumentId,
+    ) -> Result<(), PortError> {
+        self.note("delete", tenant);
+        self.records
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|r| !(&r.tenant_id == tenant && &r.document_id == document));
+        Ok(())
+    }
+}
+
 /// One terminal write recorded by [`FakeJobStore`].
 #[derive(Debug, Clone)]
 pub struct FinishedJob {
@@ -1443,6 +1785,9 @@ impl JobStore for FakeJobStore {
             mime_type: input.mime_type.clone(),
             attempt: 1,
             params: Some(input.params.clone()),
+            // The fake has no clock: a job created here reports no creation
+            // time, and the seats serve such a job last.
+            created_at: None,
         });
         Ok(job_id)
     }
@@ -1555,6 +1900,7 @@ impl Extractor for FakeExtractor {
             return Ok(res.clone());
         }
         Ok(ExtractionResult {
+            ocr: None,
             content: self.content.read().unwrap().clone(),
             file_type: self.file_type.read().unwrap().clone(),
             ..ExtractionResult::default()

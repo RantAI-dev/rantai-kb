@@ -1,0 +1,2 @@
+FROM kb-cpuocr:bench
+RUN pip install --no-cache-dir rapid-layout rapid-table

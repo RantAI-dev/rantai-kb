@@ -14,16 +14,19 @@ use kb_ports::{ExtractionOptions, ExtractionResult, Extractor, PortError};
 
 use crate::ExtractError;
 use crate::chain::{LayoutExtractorChain, ScannedPageOcr};
-use crate::config::ExtractConfig;
+use crate::config::{ExtractConfig, OcrMode, OcrRecipe};
 use crate::hybrid::HybridExtractor;
+use crate::layout_client::HttpLayoutDetector;
 use crate::mineru::MineruExtractor;
 use crate::mineru_api::MineruApiExtractor;
 use crate::mistral::MistralOcrExtractor;
+use crate::ocr_router::{OcrRouter, OcrRouterSettings, OcrTransport, process_breaker};
 use crate::openrouter_vision::OpenRouterVisionProvider;
 use crate::page_ocr::{PageOcrExtractor, PageOcrSettings};
 use crate::pdfium::{extract_pdf_text_layer, get_pdfium};
 use crate::smart_router::SmartRouterExtractor;
 use crate::vision_llm::VisionLlmExtractor;
+use crate::xiaomi_ocr::{XiaomiOcrProvider, XiaomiOcrSettings};
 
 /// Text-layer extractor using Pdfium. Replaces `UnpdfExtractor` from the TS codebase.
 #[derive(Debug, Clone, Copy, Default)]
@@ -48,13 +51,26 @@ impl Extractor for PdfiumTextExtractor {
 pub struct ProductionExtractor {
     chain: LayoutExtractorChain,
     vision_ocr: Option<Arc<dyn ScannedPageOcr>>,
+    ocr_router: Option<Arc<OcrRouter>>,
 }
 
 impl ProductionExtractor {
     /// Create a new production extractor with the given chain and OCR provider.
     #[must_use]
     pub fn new(chain: LayoutExtractorChain, vision_ocr: Option<Arc<dyn ScannedPageOcr>>) -> Self {
-        Self { chain, vision_ocr }
+        Self {
+            chain,
+            vision_ocr,
+            ocr_router: None,
+        }
+    }
+
+    /// Add the per-page OCR router (`ING-6`). Without one the PDF path is the
+    /// document-level scanned test the service has always used.
+    #[must_use]
+    pub fn with_ocr_router(mut self, router: Arc<OcrRouter>) -> Self {
+        self.ocr_router = Some(router);
+        self
     }
 
     /// The extractor as a port object.
@@ -93,15 +109,57 @@ impl Extractor for ProductionExtractor {
         let bytes = file_bytes.to_vec();
         let chain = self.chain.clone();
         let vision = self.vision_ocr.clone();
-        crate::dispatch::extract_document(&name, &mime, &bytes, options, &chain, vision.as_deref())
-            .await
-            .map_err(PortError::from)
+        let router = self.ocr_router.clone();
+        crate::dispatch::extract_document(
+            &name,
+            &mime,
+            &bytes,
+            options,
+            &chain,
+            vision.as_deref(),
+            router.as_deref(),
+        )
+        .await
+        .map_err(PortError::from)
+    }
+
+    async fn outline(
+        &self,
+        mime_type: &str,
+        file_bytes: &[u8],
+        pages: &[String],
+    ) -> Option<kb_core::tree::Outline> {
+        if !mime_type.eq_ignore_ascii_case("application/pdf") {
+            return None;
+        }
+        let bytes = file_bytes.to_vec();
+        let pages = pages.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let pdfium = crate::pdfium::get_pdfium().ok()?;
+            let outline = crate::outline::extract_outline(pdfium, &bytes, &pages);
+            (!outline.nodes.is_empty()).then_some(outline)
+        })
+        .await
+        .ok()
+        .flatten()
     }
 }
 
 /// Build the full production extractor wired to the configured layout chain and vision OCR.
 pub fn build_production_extractor(
     cfg: &ExtractConfig,
+) -> Result<ProductionExtractor, ExtractError> {
+    build_production_extractor_with_cache(cfg, None)
+}
+
+/// The production extractor with the page cache the composition root owns.
+///
+/// The cache is a `kb-ports` trait, so `kb-extract` never names `kb-cache`;
+/// `kb-server` passes its disk implementation and every routed page is served
+/// from it on a re-upload.
+pub fn build_production_extractor_with_cache(
+    cfg: &ExtractConfig,
+    page_cache: Option<Arc<dyn kb_ports::OcrPageCache>>,
 ) -> Result<ProductionExtractor, ExtractError> {
     let chain = build_layout_chain(cfg)?;
     let vision_ocr = build_page_ocr(cfg);
@@ -114,7 +172,126 @@ pub fn build_production_extractor(
             "local page OCR on"
         );
     }
-    Ok(ProductionExtractor::new(chain, vision_ocr))
+    let mut extractor = ProductionExtractor::new(chain, vision_ocr);
+    if let Some(router) = build_ocr_router(cfg, page_cache) {
+        tracing::info!(
+            mode = cfg.resolved_ocr_mode().as_str(),
+            pages = cfg.ocr_max_pages,
+            batch = cfg.ocr_batch,
+            "OCR page router on"
+        );
+        extractor = extractor.with_ocr_router(router);
+    }
+    Ok(extractor)
+}
+
+/// The OCR provider the page router uses: the local chat adapter first (a
+/// local tier never sends a page to a paid provider), then Mistral when its key
+/// and its place in `KB_LAYOUT_EXTRACTOR_ORDER` both say to use it.
+///
+/// Which local adapter depends on the recipe (`KB_OCR_RECIPE`): PaddleOCR-VL
+/// answers one page with the task prefix and no postprocessing, Xiaomi-OCR-0
+/// answers with markdown plus OTSL table markup that has to be turned into
+/// text before it is worth indexing.
+///
+/// The composition root asks for it directly when it needs a provider without
+/// a whole router — the evaluation CLI, which reads a page through the same
+/// recipe the pipeline uses but does not run the ingest path.
+pub fn build_ocr_provider(
+    cfg: &ExtractConfig,
+) -> Option<Arc<dyn crate::ocr_router::OcrPageProvider>> {
+    if !cfg.ocr_base_url.trim().is_empty() {
+        match cfg.ocr_recipe {
+            OcrRecipe::Xiaomi => {
+                let mut settings = XiaomiOcrSettings::from_extract_config(cfg);
+                settings.layout = build_layout_detector(cfg);
+                if let Ok(provider) = XiaomiOcrProvider::new(settings) {
+                    return Some(Arc::new(provider));
+                }
+            }
+            OcrRecipe::Paddle => {
+                if let Ok(ocr) = PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg)) {
+                    return Some(Arc::new(ocr));
+                }
+            }
+        }
+    }
+    if !cfg.mistral_ocr_key.trim().is_empty()
+        && cfg
+            .layout_extractor_order
+            .iter()
+            .any(|name| name == "mistral")
+    {
+        if let Ok(mistral) = MistralOcrExtractor::new(
+            &cfg.mistral_ocr_key,
+            Some(cfg.mistral_ocr_base.clone()),
+            Some(cfg.mistral_ocr_model.clone()),
+            None,
+        ) {
+            return Some(Arc::new(mistral));
+        }
+    }
+    None
+}
+
+/// The layout detector, when `KB_OCR_LAYOUT_URL` names one.
+///
+/// An empty URL turns the layout path off: a page is then read whole, which is
+/// what the pipeline did before the layout sidecar existed.
+fn build_layout_detector(cfg: &ExtractConfig) -> Option<Arc<dyn kb_ports::LayoutDetector>> {
+    let url = cfg.ocr_layout_url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    match HttpLayoutDetector::new(url, cfg.ocr_layout_timeout) {
+        Ok(detector) => Some(Arc::new(detector) as Arc<dyn kb_ports::LayoutDetector>),
+        Err(err) => {
+            tracing::warn!(error = %err, "layout detector not built");
+            None
+        }
+    }
+}
+
+/// Build the page router when the mode asks for one.
+///
+/// `Auto` with no provider stays `None`: that installation keeps the old
+/// document-level path, not a router that can never send anything. An explicit
+/// `off` still builds one, so `metadata.ocr` reports the pages it did not read.
+fn build_ocr_router(
+    cfg: &ExtractConfig,
+    page_cache: Option<Arc<dyn kb_ports::OcrPageCache>>,
+) -> Option<Arc<OcrRouter>> {
+    let settings = OcrRouterSettings::from_config(cfg);
+    let provider = build_ocr_provider(cfg);
+    let mode = settings.mode;
+
+    if mode == OcrMode::Off && cfg.ocr_mode == OcrMode::Auto {
+        return None;
+    }
+    if mode != OcrMode::Off && provider.is_none() {
+        tracing::warn!(
+            mode = mode.as_str(),
+            "KB_OCR_MODE asks for OCR but no provider is configured; keeping the local path"
+        );
+        return None;
+    }
+
+    // A document provider batches pages; a chat provider reads images one at a
+    // time and its batch size is fixed at one by the transport.
+    let mut settings = settings;
+    if let Some(provider) = provider.as_ref() {
+        if let OcrTransport::Pdf { batch } = provider.transport() {
+            settings.batch = batch;
+        }
+    }
+
+    let breaker = process_breaker(settings.breaker_threshold, settings.breaker_cooldown);
+    Some(Arc::new(OcrRouter::new(
+        settings,
+        provider,
+        page_cache,
+        Some(breaker),
+    )))
 }
 
 /// The local page-OCR adapter, when `KB_OCR_BASE_URL` is set.
@@ -122,12 +299,26 @@ fn local_page_ocr(cfg: &ExtractConfig) -> Option<Arc<dyn ScannedPageOcr>> {
     if cfg.ocr_base_url.trim().is_empty() {
         return None;
     }
-    match PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg)) {
-        Ok(ocr) => Some(Arc::new(ocr)),
-        Err(e) => {
-            tracing::warn!(error = %e, "local page OCR not built");
-            None
+    match cfg.ocr_recipe {
+        OcrRecipe::Xiaomi => {
+            let mut settings = XiaomiOcrSettings::from_extract_config(cfg);
+            settings.layout = build_layout_detector(cfg);
+            match XiaomiOcrProvider::new(settings) {
+                Ok(provider) => Some(Arc::new(provider) as Arc<dyn ScannedPageOcr>),
+                Err(e) => {
+                    tracing::warn!(error = %e, "xiaomi page OCR not built");
+                    None
+                }
+            }
         }
+        OcrRecipe::Paddle => match PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg))
+        {
+            Ok(ocr) => Some(Arc::new(ocr)),
+            Err(e) => {
+                tracing::warn!(error = %e, "local page OCR not built");
+                None
+            }
+        },
     }
 }
 
@@ -239,11 +430,22 @@ pub fn build_layout_chain(cfg: &ExtractConfig) -> Result<LayoutExtractorChain, E
             // when no endpoint is configured — the same rule `mistral` follows
             // for its key. When it is not listed it still serves as the chain's
             // final fallback (see `build_page_ocr`).
-            "ocr" if !cfg.ocr_base_url.trim().is_empty() => {
-                if let Ok(ocr) = PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg)) {
-                    extractors.push(("ocr".to_string(), Arc::new(ocr)));
+            "ocr" if !cfg.ocr_base_url.trim().is_empty() => match cfg.ocr_recipe {
+                OcrRecipe::Xiaomi => {
+                    let mut settings = XiaomiOcrSettings::from_extract_config(cfg);
+                    settings.layout = build_layout_detector(cfg);
+                    if let Ok(provider) = XiaomiOcrProvider::new(settings) {
+                        extractors.push(("ocr".to_string(), Arc::new(provider)));
+                    }
                 }
-            }
+                OcrRecipe::Paddle => {
+                    if let Ok(ocr) =
+                        PageOcrExtractor::new(PageOcrSettings::from_extract_config(cfg))
+                    {
+                        extractors.push(("ocr".to_string(), Arc::new(ocr)));
+                    }
+                }
+            },
             _ => {}
         }
     }

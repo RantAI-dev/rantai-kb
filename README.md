@@ -32,9 +32,43 @@ partner's own frontend without any of them sharing a codebase.
 
 ## Quick start
 
-`rust/scripts/kb-dev.sh` is the interface to the compose stack. `setup` reads the
-hardware, suggests a tier, checks the model licences and writes `rust/deploy/.env`;
-`up` starts the tier and waits for `/health`; `key` prints an API key once.
+One command installs the CLI and the stack it drives:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/RantAI-dev/rantai-kb/main/install.sh | sh
+```
+
+The installer puts the binary in `~/.rantai-kb/bin`, links `rantai-kb` (and
+`kb-server`, the same program under its other name) into `~/.local/bin`, and
+keeps the compose stack in `~/.rantai-kb/deploy`. Add `~/.local/bin` to your
+`PATH` if it is not there already.
+
+Then the three commands that matter:
+
+```bash
+rantai-kb setup lite-en        # detect the hardware, write deploy/.env + deploy/.tier
+rantai-kb up lite-en           # start the containers and wait for /health
+rantai-kb key my-tenant        # print an API key, once
+```
+
+`setup` suggests the tier the machine can actually run (`lite` and `lite-en` need
+no GPU; `desk`, `studio` and `station` need an NVIDIA card or Apple silicon), checks
+the VRAM budget and the model licences, and refuses a tier that does not fit. `up`
+needs Docker and compose ≥ 2.20; the first start downloads the models, so it can
+take a few minutes.
+
+The API is then at `http://127.0.0.1:8080`. `rantai-kb up` prints where to find
+it, and — on a build that serves the OpenAPI document — its API page (every
+endpoint, with a "try it" button) at `http://127.0.0.1:8080/docs`.
+
+`rantai-kb serve` runs the stack the same way, and `rantai-kb down` stops it
+(`down -v` also wipes the data). `rantai-kb --help` lists everything; the same
+commands exist in the source checkout as `rust/scripts/kb-dev.sh`.
+
+### From a source checkout
+
+`rust/scripts/kb-dev.sh` is the same interface without the install step, and it
+runs against `rust/deploy/`:
 
 ```bash
 rust/scripts/kb-dev.sh setup                  # detect the hardware, write .env + .tier
@@ -132,8 +166,12 @@ tenant; **there is no route that reads across tenants.**
 | `GET` `PATCH` `DELETE` | `/v1/documents/:id` | Read, edit or delete one document. |
 | `GET` | `/v1/documents/:id/raw` | Download the stored original. |
 | `GET` | `/v1/documents/:id/assets` | Fetch a document figure or page image. |
+| `GET` | `/v1/documents/:id/structure` | Pages, figures and the chunk → page map. |
 | `GET` | `/v1/documents/:id/intelligence` | Extracted entities and relations. |
 | `POST` | `/v1/search` | Retrieve chunks for a query. The reason this service exists. |
+| `GET` | `/v1/tables` | A document's stored tables (`?documentId=…`), or the tenant's. |
+| `GET` | `/v1/tables/:id` | One table with its manifest: columns, roles, units, subtotal rows. |
+| `POST` | `/v1/tables/:id/query` | Run a typed table query and get rows plus a receipt. |
 | `GET` | `/v1/jobs/:id` | Ingest progress: step, percentage, ETA, error. |
 | `POST` | `/v1/jobs/:id/retry` | Retry a failed ingest job. |
 | `GET` `POST` | `/v1/knowledge-bases` | List or create knowledge bases. |
@@ -145,10 +183,53 @@ tenant; **there is no route that reads across tenants.**
 | `GET` | `/health` · `/v1/health` | Liveness, dependency checks, build version, tier and egress hosts. No auth. |
 
 **Ingest options** (multipart fields): `title`, `categories`, `subcategory`,
-`knowledgeBaseIds`, `externalRef`, and `figures` — `auto` (default), `force` or `skip`.
+`knowledgeBaseIds`, `externalRef`, `figures` — `auto` (default), `force` or `skip` — and
+`tablePrivacy` — `open` (default) or `aggregate-only`.
 
 **Search options** (JSON): `query` (required), `maxChunks`, `knowledgeBaseIds`,
-`documentIds`, `category`, `hybrid`, `format`.
+`documentIds`, `category`, `hybrid`, `format`, `minScore`.
+
+**Tables.** An xlsx, CSV, DOCX or OCR/markdown table is stored as a typed grid
+(Parquet in the blob store, one record per version in `KbTable`) and indexed as two
+retrieval units, `table_summary` (title, caption, sheet or page, every header with
+its kind, role and unit, sample values) and `table_row` (`Header: value; …`, for
+tables of at most 60 rows). A search hit from either carries `tableId` and
+`tableTitle`, and the answer lists `tables: [{tableId, title, documentId}]` for its
+documents, so a caller can go straight to a number instead of adding up text:
+
+```json
+POST /v1/tables/doc123_t0/query
+{"select": [{"column": "Region"}, {"agg": "sum", "column": "Revenue", "as": "total"}],
+ "filter": [{"column": "Tahun", "op": "=", "value": 2023}],
+ "group_by": ["Region"], "order_by": [{"key": "total", "dir": "desc"}], "limit": 10}
+```
+
+The query is **typed, never SQL**: columns are checked against the manifest (a SUM
+over a phone-number column is refused), identifiers are quoted from the manifest's
+whitelist and values are bound parameters. Subtotal rows are excluded unless
+`includeDerived` is set. The answer is `{columns, rows, rows_matched,
+excluded_derived_rows, suppressed_groups, truncated, warnings}` — the receipt says what
+was computed and from which table. A refused query answers `400` with the
+`QueryError` JSON (`unknown_column` with `available`, `not_summable`, `not_grouped`,
+`restricted`, `bad_value`, `empty`). `tablePrivacy: "aggregate-only"` on upload
+restricts the document's tables to whole-group aggregates and suppresses groups
+smaller than five rows (with complementary suppression), and forbids plain rows and
+MIN/MAX. Tables are tenant-scoped and document-authorised like every other by-ID
+read; a hard delete removes them and their Parquet.
+
+**Document structure.** `GET /v1/documents/:id/structure` returns the document's
+`pages` (`number`, 0-based like every other `page` in the API), `figures` (`key`,
+`page`, `bbox`, `caption`, `assetKey`) and the `chunks` → page map, plus
+`documentId`, `externalRef` and `title`. It never re-parses the file: pages come from
+the page-image index, figures from the figure chunks a search can return and the
+document's figure records, and chunks from the text index. `hasTextLayer` and
+`ocrText` are recorded at ingest from this release on; `ocrText` is the page's stored
+text (at most 8,000 characters) and omits the visual description the caption stage
+appends. `imageAssetKey` is present only when ingest recorded that the page JPEG was
+written. A document ingested before these fields were recorded answers `null` for
+them, never a guess. The read is capped at 20,000 chunks and 2,000 pages and sets
+`truncated` when either cap is reached. Like every by-ID route it enforces the tenant
+and the key's knowledge-base limit.
 
 ## What it does with a file
 
@@ -194,6 +275,16 @@ embedding model changes. RRF sidesteps that.
 notion of category, group or ownership. Every hit is resolved back to its parent
 document through the scoped document store, so a keyword arm cannot leak chunks from
 a document the caller cannot see.
+
+**A relevance floor is available but off by default.** `minScore` on the request
+(or `KB_MIN_SCORE` for the whole server) drops hits whose comparable score is
+below the threshold: the reranker score when a reranker ran, otherwise the dense
+cosine similarity — never the fused RRF score, which is rank-only. An
+exact-match / identifier query keeps a hit the keyword arm matched and whose text
+literally contains the identifier. If the arm that supplies the score fails, the
+floor is skipped and `floor_skipped` is reported, so a failed arm never becomes
+a silent empty answer. Unset means the floor does not run and the ranking is
+identical to a build without it.
 
 **Neighbour-window expansion is cheap and load-bearing.** `KB_NEIGHBOR_WINDOW=1` pulls
 ±1 adjacent chunk around each hit, woven into reading order next to its anchor and
@@ -278,9 +369,16 @@ Contributions: [`CONTRIBUTING.md`](CONTRIBUTING.md). Work is tracked in
 ## Releases
 
 Tagging `v*` builds the Rust image from `rust/Dockerfile` for amd64 and arm64, publishes
-it to `ghcr.io/rantai-dev/rantai-kb` and cuts a GitHub release. `/health` reports the
-build version. `v0.2.0` is the first Rust release; `v0.1.0` is the last Bun release.
-Changes are in [`CHANGELOG.md`](CHANGELOG.md).
+it to `ghcr.io/rantai-dev/rantai-kb`, publishes the OCR sidecar images, packages the
+binary for Linux (x86_64, aarch64) and macOS (arm64) as release tarballs with their
+checksums, and cuts a GitHub release. `/health` reports the build version. `v0.2.0` is
+the first Rust release; `v0.1.0` is the last Bun release. Changes are in
+[`CHANGELOG.md`](CHANGELOG.md).
+
+The release tarballs are what `install.sh` downloads; the image is what the compose
+stack runs. An installed bundle has no source, so its `deploy/.env` points at the
+published images (`KB_IMAGE`, `KB_OCR_CPU_IMAGE`, `KB_OCR_LAYOUT_IMAGE`) instead of
+building them.
 
 ## License
 

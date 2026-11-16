@@ -178,8 +178,40 @@ for scanned pages and images, so a local tier never sends a page to a paid API. 
 and the served commands are in `docs/kb-tiers.md` ("Local OCR"). Unset, behaviour is identical
 to Bun's vision path.
 
-### 2. Legacy Binary Office Formats Unsupported
-In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`) and throws `EXTENSION_UNSUPPORTED` on legacy binary `.doc`, `.xls`, and `.ppt` files. The Rust port matches this exact behavior by returning `ExtractError::Unsupported`.
+**`ING-6` adds a per-page router.** With an OCR provider configured (`KB_OCR_BASE_URL`, or
+`KB_MISTRAL_OCR_KEY` plus `mistral` in `KB_LAYOUT_EXTRACTOR_ORDER`), the default mode is now
+`hybrid`: a page is OCR'd when raster images cover most of it and it has almost no visible text,
+and a digital page keeps its text layer. Before, the decision was made once per document (an
+average of <100 characters per page sent the whole PDF to the chain). A PDF that used to be OCR'd
+whole because a few pages were scanned now keeps its digital pages; a sparse slide deck that was
+treated as digital may now send its slide pages to OCR. `KB_OCR_MODE=off` restores the old
+whole-document decision, and `KB_OCR_MODE=full` sends every page. The change is additive on the
+outside: `metadata.ocr` is a new JSONB key, and an installation with no OCR provider behaves
+exactly as before. Details and the new settings are in `docs/kb-tiers.md` ("OCR offload").
+
+### 2. Legacy Binary Office Formats, TIFF and Unknown Extensions
+In TypeScript, `officeparser` v6 only supports modern ZIP-based XML formats (`.docx`, `.pptx`, `.xlsx`, `.odt`, `.ods`) and throws `EXTENSION_UNSUPPORTED` on legacy binary `.doc`, `.xls`, and `.ppt` files. Rust v0.2.0 matched that.
+
+**Since `ING-1` / `ING-4` (after v0.2.0) Rust differs from Bun here, additively:**
+
+- `.doc` (Word 6.0 to 2003), `.xls` (Excel 5.0 to 2003) and `.ppt` (PowerPoint 95 to 2003) are extracted. A document that failed with `Unsupported` under Bun or v0.2.0 succeeds on `kb-server reindex`.
+- `.tif` / `.tiff` are accepted at upload (`GET /v1/formats` lists them) and OCR'd page by page through the vision provider.
+- An unknown or missing extension is a failed extraction instead of UTF-8 text. Upload already refused such files with a 415 in both services, so only a job created outside the upload route (or a reindex of such a document) sees the difference. Reindex takes the filename from the last segment of `s3Key`, so count stored documents by extension before reindexing and compare the list with `GET /v1/formats` (a `NULL` extension is a name without one):
+
+  ```sql
+  SELECT lower(substring(regexp_replace("s3Key", '^.*/', '') FROM '(\.[^./]+)$')) AS ext, count(*)
+  FROM "Document" WHERE "deletedAt" IS NULL AND "s3Key" IS NOT NULL
+  GROUP BY 1 ORDER BY 2 DESC;
+  ```
+
+**Pictures (`ING-5`, after v0.2.0), also additive for callers:** pictures become
+`figure` chunks with an `assetKey` (fetch them through
+`GET /v1/documents/:id/assets?key=`), `Document.metadata` gains `visuals`, and
+`metadata.figures` entries gain `origin` and `description`. One behaviour differs
+from Bun and v0.2.0: an image upload with no OCR text that no image describer can
+read now **fails** (`nothing searchable in "<name>": …`) instead of finishing
+`ready` with zero chunks. Set `KB_IMAGE_DESCRIBE_MODEL` (or use a `KB_TIER` that
+fills it) before reindexing image uploads.
 
 ### 3. PDFium vs pdf.js Smart Router Thresholds
 - Bun uses `unpdf` (Mozilla `pdf.js`), which renders text streams through JS code.
@@ -471,6 +503,249 @@ The same rule covers `GET /v1/jobs/:id` and `POST /v1/jobs/:id/retry` when the j
 knowledge bases is dropped, and a lookup failure fails closed (drop plus a warning). Bun
 enforces none of this.
 
+### 17. Additive: search-time metadata filters (`RET-3`, 2026-11-04)
+
+`POST /v1/search` accepts three optional body fields, beside `knowledgeBaseIds`,
+`documentIds` and `category`:
+
+- `externalRefs: string[]` — only documents whose `Document.externalRef` is in the list;
+  an explicit `[]` selects nothing.
+- `language: string` — only documents whose JSONB `metadata.language` equals the value.
+  No dedicated language column exists, so the metadata key is the stored language.
+- `metadata: { "<key>": <scalar> | [<scalar>] }` — top-level JSONB equality, with an
+  array meaning "any of". Keys must match `[A-Za-z0-9_.-]{1,64}`; values must be
+  strings, numbers, booleans or arrays of those; anything else is a **400**.
+
+All of them are resolved into the `DocumentScope` by the same Postgres query that applies
+the tenant, soft-delete, knowledge-base and category predicates
+(`kb-store-pg/src/store.rs::resolve_filter`), so every arm — dense, BM25, page image,
+figure, neighbour, graph, entity — inherits the narrowed scope before ranking. Bun has no
+equivalent; a client that filters after the fact spends top-k on documents it then drops.
+The fields are additive and Bun ignores them.
+### 18. Additive: `GET /v1/documents/:id/structure` (2026-11-04)
+
+A new read-only route returns a document's `pages`, `figures` and chunk → page map, with
+`documentId`, `externalRef` and `title`. Bun has no equivalent, so nothing changes for an
+existing client. Every value is read from what ingest already stored: page units in the
+page-image index, figure chunks in the text index merged with `Document.metadata.figures`
+for bbox/caption, and text-index units for the chunk map. `hasTextLayer`, `ocrText` and
+`imageAssetKey` are recorded on page units from this release on; a document ingested
+before that answers `null` for them rather than inferring an answer. Figure OCR is not
+extracted today, so `figures[].ocrText` is null. The read is capped at 20,000 text units
+and 2,000 page units and sets `truncated: true` when a cap is reached. It uses the same
+by-ID visibility helper as §16, so a key limited to other knowledge bases gets the same
+404 as an unknown document.
+
+### 19. Additive: recency and authority boosts (`RET-4`, 2026-11-04)
+
+`POST /v1/search` accepts one more optional body member, `boost`:
+
+```json
+{
+  "query": "what is the current remote work allowance?",
+  "boost": {
+    "recency":   {"field": "metadata.effectiveDate", "halfLifeDays": 365, "weight": 1.0},
+    "authority": {"field": "metadata.authority", "weight": 0.5}
+  }
+}
+```
+
+- `recency.field` — `createdAt`, `updatedAt`, or `metadata.<key>`. A metadata date
+  must be ISO-8601: a date (`2025-03-01`) or a date-time with an offset
+  (`2025-03-01T09:30:00Z`); a local date-time without an offset is read as UTC.
+- `recency.halfLifeDays` — a finite number `> 0`.
+- `authority.field` — `metadata.<key>`, whose JSONB value must be a JSON number.
+- `weight` (both) — a finite number in `(0, 1]`.
+- Metadata keys follow the `RET-3` rule, `[A-Za-z0-9_.-]{1,64}`. Unknown members, a
+  bad field, a non-positive half-life or an out-of-range weight are a **400**, in the
+  same shape as the other request-shape errors on this route.
+
+**Off is off.** An absent `boost`, `null`, `{}`, or an object with no `recency` and no
+`authority` computes no factor and does no re-sort, so the answer is rank-identical to
+a server before this release. The request is per call; there is no tenant-wide or
+env-configured default.
+
+**Formula.** Each hit gets a base relevance in `[0, 1]`: the `rerankScore` when a
+reranker scored it (a sigmoid only if the request's rerank scores are logits outside
+`[0, 1]`), otherwise `1/(1+rank)` on its post-fusion/post-rerank rank (`rank`
+is 0-based). Then
+
+```text
+final = base * recency_factor * authority_factor
+recency_factor   = 1 - w_r + w_r * 0.5 ^ (age_days / halfLifeDays)
+authority_factor = 1 - w_a + w_a * minmax(authority over this request's hits)
+```
+
+`age_days` is clamped at zero, so a future date is as new as now, not fresher.
+Authority is min-max normalised over the candidate documents that carry the value; if
+every present value is equal (or only one is), they all normalise to `1`, and that
+boost changes no order. A missing, non-numeric or unparseable field gives that factor
+`1.0` and is never an error.
+
+**Where it runs.** After fusion, the rerank and the relevance floor (so the floor
+still compares the raw rerank/dense score and keeps the meaning `RET-2` defined), and
+before the final cut to `maxChunks`. Only the order and `rank` change; `similarity`,
+`denseScore` and `rerankScore` are untouched. Ties break on content, page and chunk
+index — the same keys `kb_ports::sort_candidates` uses — never on a document or chunk
+UUID, so the order is reproducible across ingests. The document dates and metadata are
+read from the rows `find_alive_meta_by_ids` already fetched for title enrichment (one
+round trip, not two).
+
+**Response.** Additive `stats.boost: {"recency": n, "authority": n}` counts returned
+hits that carried a usable field for each boost. The member is absent when the request
+did not boost, so an old client's body is unchanged. The by-id search branch
+(`documentIds`) applies the same boost; the `hybrid: true` stub searches nothing and
+therefore boosts nothing.
+
+**Upload metadata.** `POST /v1/documents` accepts an optional multipart field
+`metadata`: a JSON object stored as `Document.metadata`. It is additive (an absent
+field stores nothing) and is the way a caller supplies `effectiveDate`, `authority`, or
+any field the `RET-3` filters read. Any value that is not a JSON object is a **400**.
+
+**Evaluation.** `rust/crates/kb-eval/sets/dated-versions/` is a synthetic set of 55
+families × 3 dated editions with 55 "current/latest" questions, judged only on the
+newest edition; `generate.py` (Python stdlib, deterministic) rebuilds it.
+`kb-server eval --boost '<json>'` sends the object with every query, and dataset
+sidecars in `metadata/<doc-key>.json` are uploaded with the corpus, so off/on share one
+ingest. MRR@10 comes from `rust/crates/kb-eval/scripts/score_deltas.py`, which already
+reported it. The set is synthetic and measures ranking, not answer correctness; the
+live MRR measurement for `RET-4` has **not** been run yet.
+### 20. Additive: adaptive arm choice (`RET-5`, 2026-11-04)
+
+`POST /v1/search` accepts an optional `adaptiveArms: boolean`, and the server accepts a
+default from `KB_ADAPTIVE_ARMS`. Both are off unless set, so an unconfigured server runs
+exactly the arms it ran before this release.
+
+When adaptive mode is on, the query is classified once, locally and without a model, into
+one of six labels: `exact` (an identifier, code or quoted phrase), `factual`, `structural`
+("chapter 2", "section 3.1", "table 4", "page 12"), `relational` ("relationship between X
+and Y", "who … with"), `aggregative` ("main themes", "list every", "how many documents") or
+`topical`. Both English and Indonesian cues are recognised because MIRACL-id is
+Indonesian. The class selects an arm plan; only arms that are clearly useless for the
+class are skipped:
+
+| class | runs | skipped |
+|---|---|---|
+| `exact` | dense, sparse, figure, neighbour, rerank | page image, graph |
+| `factual` | every configured arm | — |
+| `structural` | dense, sparse, page image, figure, neighbour, rerank | graph |
+| `relational` | every configured arm | — |
+| `aggregative` | dense, sparse, neighbour, graph, rerank | page image, figure |
+| `topical` | every configured arm | — |
+
+A skipped arm is not started: the page-image arm does not embed the query or search the
+page index, and the graph arm does not seed or walk the graph. The response reports the
+decision through three additive `stats` fields, present only when adaptive mode ran:
+`queryClass`, `skippedArms` (`[{"arm":"pageImage","reason":"exact query"}]`) and
+`armPlanFallback`. Because the plan can be wrong, an empty result from a plan that skipped
+a candidate-producing arm re-runs the full plan once and sets `armPlanFallback: true`
+instead of returning silence. A failed arm still degrades as before; adaptive mode adds no
+new failure path and changes no existing one.
+
+The evaluation harness takes `--adaptive-arms` / `--no-adaptive-arms` (or
+`KB_EVAL_ADAPTIVE_ARMS=true|false`) per run, and writes `latency.json` beside
+`metrics.json` with one record per query. `kb-server eval classify --queries FILE` prints
+the class distribution of a `queries.tsv` or `queries.jsonl` with the same classifier the
+pipeline uses. Measurement against the p50 −20% / nDCG@10 −0.005 target is pending; the
+commands are in `docs/core/specs/ret-5.md`.
+
+### 21. Additive: global community arm (`DEC-5`, 2026-11-04)
+
+`KB_GLOBAL_ARM=1` turns on a "global mode" retrieval arm built on graph community
+summaries. **It is off by default and it is a measured loss**: `EVAL-3` found that
+fusing summary-selected communities into search lowered aggregative recall@10 by
+0.067 on ViDoRe HR and 0.103 on CS with an oracle gate
+(`docs/eval-ab/retrieval-gaps/README.md` § `EVAL-3`). The product owner asked for
+it to be built and switchable anyway (`DEC-5`), so an operator can measure it on
+their own corpus. With the flag unset, the pipeline is byte-identical to the one
+before this release: the query is not classified for this arm, no community is
+read, and no new `stats` field appears.
+
+**Data.** Communities are detected from the entity graph ingest already stores in
+Postgres (`KbEntity`, `KbMention`), which exists only when entity extraction is on
+(`KB_ENTITY_EXTRACTION_ENABLED`, `KB_ENTITY_EXTRACTOR=heuristic|llm`) and
+`KB_GRAPH_STORE=pg`. Detection is deterministic weighted Louvain over entity
+co-occurrence (`kb_core::community`), with the prototype's hub cap: an entity
+seen on more than 5% of the documents is dropped from the graph
+(`KB_GLOBAL_ARM` build's `--max-df-fraction`).
+
+**Build.** `kb-server communities build --tenant <id> [--min-pages 2]
+[--max-usd X] [--dry-run]` is the only writer. It is an operator command, never
+automatic: a summary pass is a paid LLM batch. It prints a `chars/4` token
+estimate and the uncached cost before any call, refuses to start when the
+estimate exceeds `--max-usd` (default 0, so a paid run needs an explicit
+ceiling), turns provider reasoning off (`"reasoning": {"enabled": false}` — with
+it on, the prototype lost 95 of 159 summaries to thinking tokens), caches every
+answer under `KB_CACHE_DIR` keyed by model + `sha256(prompt)`, counts an empty
+answer as a failure and never caches it, and replaces the tenant's previous
+community set in one transaction. `--dry-run` makes no call and writes nothing.
+Prices come from `--price-input`/`--price-output` (USD per 1M tokens),
+`KB_COMMUNITY_PRICE_INPUT`/`KB_COMMUNITY_PRICE_OUTPUT`, or a table read from the
+providers on 2026-11-04; a `:free` model id is zero.
+
+**Search.** The arm runs only when the flag is on **and** the query classifies
+`aggregative`. It ranks the tenant's community summaries with BM25, takes the top
+`KB_GLOBAL_ARM_COMMUNITIES` (default 3), and fuses their member chunks with the
+current fused ranking at `KB_GLOBAL_ARM_WEIGHT` (default 0.5) before the rerank.
+A contributed chunk carries the `global` provenance arm. `stats.globalArm`
+(`{communities, chunks}`) is present only when the arm ran; `communities: 0` is
+"this tenant has no community set", not a degrade. A store or fetch failure is
+the `global_arm_failed` degrade and the other arms' results go out unchanged.
+
+**Scope.** The summary text is never returned to a caller: it is written from
+every document in the community, including ones the caller cannot see, so it is
+used only to *select* a community. The community read is filtered to the caller's
+`DocumentScope` (`"documentIds" && scope`), the member document and chunk ids are
+narrowed again in the arm, and each member chunk is fetched through the scoped
+`RetrievalIndex`. A community with one out-of-scope member contributes only its
+in-scope chunks; a community entirely out of scope contributes nothing. The leak
+matrix (`kb-server --test leak_tests`) has a `global` row, including a run whose
+community store ignores the scope and is contained by the arm.
+
+The new table is additive: `prisma/migrations/20261104120000_community_tables`
+creates `KbCommunity` and two indexes, touching nothing that exists.
+
+### 22. Additive: stored tables and `POST /v1/tables/:id/query` (`TBL-1`, 2026-11-14)
+
+A document's tables are now data, not text. On ingest each grid is stored as Parquet
+in the blob store (`tables/{tenant}/{document}/{tableId}/v{n}.parquet`, one typed
+column per header plus `_row` and `_derived`) with a record in the new **additive**
+Postgres table `KbTable` (`prisma/migrations/20261114120000_kb_tables`; primary key
+`(id, version)`, `documentId` cascading from `Document`). Nothing existing changes:
+Bun ignores the table, the columns it reads are untouched, and an unset `KB_TABLES`
+(or no table store) leaves ingest and search byte-identical.
+
+Three routes are added, with the document routes' `kb:read` scope and tenant rules:
+
+| Method | Path | Answer |
+|---|---|---|
+| `GET` | `/v1/tables?documentId=…` | The document's current tables; no `documentId` lists the tenant's. |
+| `GET` | `/v1/tables/:id` | The record with its manifest (`columns` with kind/role/unit, `derivedRows`, `confidence`). |
+| `POST` | `/v1/tables/:id/query` | `{columns, rows, rows_matched, excluded_derived_rows, suppressed_groups, truncated, warnings}`. |
+
+The query body is a typed `TableQuery` (never SQL): `select` (plain columns or
+`{agg, column, as}`), `filter`, `groupBy`, `orderBy`, `limit`, `includeDerived`.
+A refused query is a `400` whose body *is* the `QueryError` JSON — `unknown_column`
+(with `available`), `not_summable` (with `role`), `not_grouped`, `restricted`,
+`bad_value`, `empty` — so a client can act on the tag rather than a message. A table
+id that is not in the caller's tenant is a `404`, exactly like a missing one.
+
+Search is additive in two places: a `table_summary`/`table_row` hit carries
+`tableId` and `tableTitle`, and the answer gains `tables: [{tableId, title,
+documentId}]` for the documents it hit. Both keys are omitted when there is nothing
+to say, so an older client sees the response it always saw.
+
+The upload accepts an optional `tablePrivacy` field: `"aggregate-only"` stores
+`metadata.tablePrivacy` on the document and makes every query on its tables
+aggregate-only (no plain rows, no grouping, no MIN/MAX, groups smaller than five
+rows suppressed, with complementary suppression when exactly one group would be
+hidden). An old deployment's documents have no such key and answer as before.
+
+Operational notes: `KB_TABLES=false` disables the store and the routes (404);
+`KB_TABLE_QUERY_TIMEOUT_MS` overrides `QUERY_TIMEOUT_MS` (5000); downloaded grids
+are cached under `KB_CACHE_DIR/tables/` (or the system temporary directory), one
+file per grid version; a hard delete removes the document's table rows and Parquet.
+
 ---
 
 ## 6. Shared Known Issues
@@ -495,3 +770,55 @@ enforces none of this.
 - **Next Step**: Bun is frozen. If it is ever unfrozen, key the pool and the RRF
   accumulator on `String(id)` instead of the `RecordId` instance.
 
+
+---
+
+## 7. Tree arm (DEC-4) — additive
+
+`KB_TREE_ARM` (default `false`) adds a retrieval arm that navigates a
+document's section hierarchy. It changes no existing request or response field
+when off.
+
+**Ingest.** PDF extraction reads the bookmark tree through pdfium and, when a
+document has no bookmarks, numbered headings from its page text (`3.4 Title`,
+`Chapter 3 …`, the same rules as `kb-eval/scripts/outline.py`). The result is
+written to `Document.metadata.outline`, an ordinary JSONB field, so no schema
+migration is needed:
+
+```json
+{
+  "document_title": "Joint Employment Report 2024",
+  "method": "bookmarks",
+  "nodes": [
+    { "title": "Chapter 4 Social policy", "level": 1, "start_page": 30, "end_page": 44 },
+    { "title": "4.2 Leave entitlement", "level": 2, "start_page": 33, "end_page": 36 }
+  ]
+}
+```
+
+`start_page` and `end_page` are **zero-based**, the same numbering as
+`PageText.page` and every chunk's `page`. `method` is `bookmarks`, `headings`
+or `none`. The extraction adds no model call and no second PDF parse: bookmarks
+come from the catalog and the heading fallback reuses the page text the text
+layer already read. **Existing documents have no outline until they are
+re-ingested**; `kb-server reindex` rebuilds them from the S3 originals.
+
+**Search.** When on, the arm runs only when `kb_core::classify_query` labels
+the question `structural`, independently of `KB_ADAPTIVE_ARMS`. It reads
+outlines through `DocumentStore::outlines(scope)`, which binds both the tenant
+and the caller's document ids, scores nodes with `kb_core::tree` (explicit
+section/chapter numbers plus BM25 over titles and the document title), and asks
+`RetrievalIndex::fetch_pages(scope, documents×pages, per_page)` for the chunks
+on the winning nodes' pages. That read repeats the scope in the adapter's own
+filter, so a bug in the arm cannot widen the scope. The tree list is fused with
+the text candidates by weighted RRF (`KB_TREE_ARM_WEIGHT`, default 0.5,
+`KB_TREE_ARM_NODES` default 5) before rerank.
+
+Response additions, all present only when the arm ran and found nodes:
+
+- `retrieval.arms` may contain `"tree"` on a chunk the outline brought in;
+- `stats.treeArm` is `{"nodes": n, "pages": n}`.
+
+`POST /v1/search` gains no request field and no response field changes for a
+deployment that leaves `KB_TREE_ARM` unset. A failed outline or page read adds
+the `tree_arm_failed` degrade; the other arms answer unchanged.

@@ -8,7 +8,9 @@ use std::sync::Arc;
 use kb_engine::{Engine, EngineInputs, EngineSettings, NoopExpander, QueryExpander};
 use kb_inference::EmbedderSettings;
 use kb_inference::ExpansionSettings;
-use kb_ports::{BlobStore, DocumentStore, Embedder, EntityStore, GraphStore, JobStore, PortError};
+use kb_ports::{
+    BlobStore, DocumentStore, Embedder, EntityStore, GraphStore, JobStore, PortError, TableStore,
+};
 
 use crate::config::{EmbedderConfig, RerankerConfig};
 use crate::events::EventBus;
@@ -32,6 +34,10 @@ pub struct AppState {
     /// Object storage: the upload route writes, the raw/asset routes read, the
     /// hard-delete and reaper paths remove.
     pub blob: Arc<dyn BlobStore>,
+    /// Stored tables (`TBL-1`), or `None` when `KB_TABLES=false`. With no store
+    /// the `/v1/tables` routes 404, ingest stores nothing, and search is
+    /// exactly what it was.
+    pub tables: Option<Arc<dyn TableStore>>,
     pub embedder: Arc<dyn Embedder>,
     /// Ingest queue, written by the upload route and read by the job routes.
     pub jobs: Arc<dyn JobStore>,
@@ -60,6 +66,9 @@ pub struct StateParts {
     pub embedder: Arc<dyn Embedder>,
     pub jobs: Arc<dyn JobStore>,
     pub events: Arc<EventBus>,
+    /// The table store, when the caller wants one. `None` in a test state that
+    /// does not exercise tables.
+    pub tables: Option<Arc<dyn TableStore>>,
     pub version: String,
 }
 
@@ -111,9 +120,40 @@ impl AppState {
             }
             (false, _) => None,
         };
+        // The global (graph community) arm, `DEC-5`. Off unless the operator
+        // turned `KB_GLOBAL_ARM` on; the store reads the `KbCommunity` table the
+        // operator command `communities build` writes.
+        let global_arm = if config.global_arm.enabled {
+            let store: Arc<dyn kb_ports::CommunityStore> =
+                Arc::new(kb_store_pg::PgCommunityStore::from_pool(pool.clone()));
+            Some(Arc::new(kb_engine::GlobalArm::new(
+                store,
+                kb_engine::GlobalArmConfig {
+                    communities: config.global_arm.communities,
+                    weight: config.global_arm.weight,
+                    chunks: config.global_arm.chunks,
+                },
+            )))
+        } else {
+            None
+        };
         let blob: Arc<dyn BlobStore> = Arc::new(
             kb_store_blob::S3BlobStore::new(config.s3).map_err(|e| anyhow::anyhow!("s3: {e}"))?,
         );
+        // The table store shares the pool and the bucket: it is Postgres rows,
+        // Parquet blobs and an in-memory DuckDB over one cached file.
+        let tables: Option<Arc<dyn TableStore>> = if config.tables.enabled {
+            Some(Arc::new(kb_store_tables::TablesStore::from_pool(
+                pool.clone(),
+                Arc::clone(&blob),
+                kb_store_tables::TableStoreSettings {
+                    cache_dir: config.tables.cache_dir.clone(),
+                    query_timeout_ms: config.tables.query_timeout_ms,
+                },
+            )))
+        } else {
+            None
+        };
         let page_arm = match config.pages.as_ref() {
             None => None,
             Some(pages) => Some(Arc::new(
@@ -189,6 +229,9 @@ impl AppState {
             Arc::new(NoopExpander)
         };
 
+        let tree_arm = config
+            .tree_arm
+            .map(|tree| Arc::new(kb_engine::TreeArm::new(tree)));
         let inputs = EngineInputs {
             embedder: embedder.clone(),
             index: index.clone(),
@@ -197,7 +240,9 @@ impl AppState {
             query_expander: expander,
             figure_gate: None,
             graph_arm: graph_arm.clone(),
+            global_arm: global_arm.clone(),
             page_arm,
+            tree_arm,
         };
         let engine = Engine::new(config.engine, inputs);
         Ok(Self {
@@ -207,6 +252,7 @@ impl AppState {
             graph,
             graph_arm,
             blob,
+            tables,
             embedder,
             jobs,
             events: EventBus::new(),
@@ -233,7 +279,11 @@ impl AppState {
             query_expander: Arc::new(NoopExpander),
             figure_gate: None,
             graph_arm: parts.graph_arm.clone(),
+            // A hand-built state carries no `KbCommunity` store; a test that
+            // wants the arm installs it on `state.engine.inputs` directly.
+            global_arm: None,
             page_arm: None,
+            tree_arm: None,
         };
         let engine = Engine::new(settings, inputs);
         Self {
@@ -243,6 +293,7 @@ impl AppState {
             graph: parts.graph,
             graph_arm: parts.graph_arm,
             blob: parts.blob,
+            tables: parts.tables,
             embedder: parts.embedder,
             jobs: parts.jobs,
             events: parts.events,
@@ -267,9 +318,16 @@ impl AppState {
         config: &crate::Config,
         settings: kb_engine::IngestSettings,
     ) -> anyhow::Result<kb_engine::IngestWorker> {
-        let mut extractor = kb_extract::build_production_extractor(&config.extract)
-            .map_err(|e| anyhow::anyhow!("extractor: {e}"))?
-            .shared();
+        let mut extractor = kb_extract::build_production_extractor_with_cache(
+            &config.extract,
+            config.cache.as_ref().map(|cache| {
+                Arc::new(kb_cache::DiskOcrPageCache::new(kb_cache::DiskCache::new(
+                    &cache.dir,
+                ))) as Arc<dyn kb_ports::OcrPageCache>
+            }),
+        )
+        .map_err(|e| anyhow::anyhow!("extractor: {e}"))?
+        .shared();
         if let Some(cache) = config.cache.as_ref() {
             let fingerprint = config.extract.cache_fingerprint();
             tracing::info!(dir = %cache.dir.display(), "extraction disk cache on");
@@ -306,6 +364,15 @@ impl AppState {
                 .with_graph_store(Arc::clone(graph))
                 .with_entity_extractor(entity_extractor);
         }
+        if config.visuals.enabled {
+            worker = worker.with_visuals(Arc::new(build_visuals(
+                &config.visuals,
+                config.cache.as_ref(),
+            )?));
+        }
+        if let Some(tables) = self.tables.as_ref() {
+            worker = worker.with_table_store(Arc::clone(tables));
+        }
         if let (Some(arm), Some(pages)) =
             (self.engine.inputs.page_arm.as_ref(), config.pages.as_ref())
         {
@@ -335,6 +402,48 @@ impl AppState {
         }
         Ok(worker)
     }
+}
+
+/// The visual stage (`ING-5`): the local collector, and the image describer
+/// wrapped in its disk cache when `KB_CACHE_DIR` is set. The fingerprint names
+/// everything but the image that changes an answer.
+fn build_visuals(
+    visuals: &crate::config::VisualConfig,
+    cache: Option<&crate::config::CacheConfig>,
+) -> anyhow::Result<kb_engine::visuals::VisualPipeline> {
+    let describer = match &visuals.describer {
+        None => None,
+        Some(settings) => {
+            let inner: Arc<dyn kb_ports::ImageDescriber> = Arc::new(
+                kb_inference::HttpImageDescriber::new(settings.clone())
+                    .map_err(|e| anyhow::anyhow!("image describer: {e}"))?,
+            );
+            Some(match cache {
+                Some(cache) => {
+                    let fingerprint = format!(
+                        "image-read|{}|prompt={}|lang={}|tokens={}|reasoning={}",
+                        settings.model,
+                        kb_inference::IMAGE_READ_PROMPT_VERSION,
+                        settings.language,
+                        settings.max_tokens,
+                        if settings.no_reasoning { "off" } else { "on" },
+                    );
+                    tracing::info!(%fingerprint, "image reading disk cache on");
+                    Arc::new(kb_cache::CachedImageDescriber::new(
+                        inner,
+                        kb_cache::DiskCache::new(&cache.dir),
+                        fingerprint,
+                    )) as Arc<dyn kb_ports::ImageDescriber>
+                }
+                None => inner,
+            })
+        }
+    };
+    Ok(kb_engine::visuals::VisualPipeline::new(
+        Arc::new(kb_extract::LocalVisualCollector),
+        describer,
+        visuals.settings.clone(),
+    ))
 }
 
 /// The opt-in ingest-time page describer, wrapped in its disk cache when

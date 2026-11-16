@@ -44,6 +44,7 @@ use crate::ExtractError;
 use crate::chain::ScannedPageOcr;
 use crate::config::ExtractConfig;
 use crate::detect::{SupportedFileType, detect_file_type};
+use crate::ocr_router::{OcrCallError, OcrPageAnswer, OcrPageProvider, OcrPageRead, OcrTransport};
 use crate::page_render::render_pdf_page_range;
 use crate::pdfium::{get_pdf_page_count, get_pdfium};
 
@@ -280,71 +281,80 @@ impl PageOcrExtractor {
 
     /// One page: one chat request, retried on 429/5xx and connection errors.
     async fn ocr_one(&self, page: &PageImage, page_index: usize) -> Result<String, ExtractError> {
-        let body = serde_json::to_vec(&self.request_body(page))
-            .map_err(|e| ExtractError::Container(format!("local OCR request body: {e}")))?;
-        let mut last = String::new();
+        let mut last = "no attempt was made".to_string();
 
         for attempt in 1..=MAX_ATTEMPTS {
-            let mut request = self
-                .client
-                .post(&self.settings.base_url)
-                .header("content-type", "application/json")
-                .body(body.clone());
-            if let Some(key) = self.settings.api_key.as_deref() {
-                request = request.bearer_auth(key);
-            }
-
-            let response = match request.send().await {
-                Ok(response) => response,
-                Err(e) => {
-                    last = format!("request failed: {e}");
-                    if attempt < MAX_ATTEMPTS {
-                        backoff(attempt).await;
-                        continue;
-                    }
-                    break;
-                }
-            };
-
-            let status = response.status().as_u16();
-            let bytes = match response.bytes().await {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    last = format!("response body: {e}");
-                    if attempt < MAX_ATTEMPTS {
-                        backoff(attempt).await;
-                        continue;
-                    }
-                    break;
-                }
-            };
-
-            if !(200..300).contains(&status) {
-                let message: String = String::from_utf8_lossy(&bytes).chars().take(300).collect();
-                // 429 and 5xx are the server saying "later"; anything else is
-                // our request being wrong and a retry only wastes the page.
-                if (status == 429 || status >= 500) && attempt < MAX_ATTEMPTS {
+            match self.one_attempt(page, page_index).await {
+                Ok(text) => return Ok(text),
+                Err(err) if err.transient && attempt < MAX_ATTEMPTS => {
                     tracing::warn!(
                         page = page_index + 1,
                         attempt,
-                        status,
+                        error = %err.message,
                         "local OCR transient error; backing off"
                     );
-                    last = format!("http {status}: {message}");
+                    last = err.message;
                     backoff(attempt).await;
-                    continue;
                 }
-                return Err(ExtractError::Container(format!(
-                    "local OCR http {status}: {message}"
-                )));
+                Err(err) => return Err(ExtractError::Container(err.message)),
             }
-
-            return parse_content(&bytes);
         }
 
         Err(ExtractError::Container(format!(
             "local OCR failed after {MAX_ATTEMPTS} attempts: {last}"
         )))
+    }
+
+    /// A single chat request. The router retries (and shares one breaker and
+    /// one pool across documents), so its path calls this rather than the
+    /// retrying [`Self::ocr_one`].
+    async fn one_attempt(
+        &self,
+        page: &PageImage,
+        _page_index: usize,
+    ) -> Result<String, OcrCallError> {
+        let body = serde_json::to_vec(&self.request_body(page))
+            .map_err(|e| OcrCallError::permanent(format!("local OCR request body: {e}")))?;
+
+        let mut request = self
+            .client
+            .post(&self.settings.base_url)
+            .header("content-type", "application/json")
+            .body(body);
+        if let Some(key) = self.settings.api_key.as_deref() {
+            request = request.bearer_auth(key);
+        }
+
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(e) => {
+                return Err(OcrCallError::transient(format!("request failed: {e}")));
+            }
+        };
+
+        let status = response.status().as_u16();
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Err(OcrCallError::transient(format!("response body: {e}")));
+            }
+        };
+
+        if !(200..300).contains(&status) {
+            let message: String = String::from_utf8_lossy(&bytes).chars().take(300).collect();
+            // 429 and 5xx are the server saying "later"; anything else is
+            // our request being wrong and a retry only wastes the page.
+            if status == 429 || status >= 500 {
+                return Err(OcrCallError::transient(format!(
+                    "local OCR http {status}: {message}"
+                )));
+            }
+            return Err(OcrCallError::permanent(format!(
+                "local OCR http {status}: {message}"
+            )));
+        }
+
+        parse_content(&bytes).map_err(|e| OcrCallError::permanent(e.to_string()))
     }
 
     /// The OpenAI chat body: the image part first, then the task prefix.
@@ -389,7 +399,7 @@ fn parse_content(bytes: &[u8]) -> Result<String, ExtractError> {
 /// `content` is the non-empty pages joined by a blank line, which is exactly
 /// the shape `kb_core::chunk::content_is_pages` recognises: each page is
 /// chunked on its own and every chunk carries its true page.
-fn paged_result(texts: Vec<String>, file_type: &str) -> ExtractionResult {
+pub(crate) fn paged_result(texts: Vec<String>, file_type: &str) -> ExtractionResult {
     let mut content_pages = Vec::new();
     let mut page_map = Vec::new();
     let mut pages_blocks = Vec::new();
@@ -415,6 +425,8 @@ fn paged_result(texts: Vec<String>, file_type: &str) -> ExtractionResult {
     }
 
     ExtractionResult {
+        tables: Vec::new(),
+        ocr: None,
         content: content_pages.join("\n\n"),
         file_type: file_type.to_string(),
         used_ocr: true,
@@ -425,6 +437,7 @@ fn paged_result(texts: Vec<String>, file_type: &str) -> ExtractionResult {
         } else {
             Some(page_map)
         },
+        outline: None,
         error: None,
     }
 }
@@ -443,6 +456,13 @@ impl Extractor for PageOcrExtractor {
                 .extract_pdf(file_bytes, filename)
                 .await
                 .map_err(PortError::from),
+            Some(SupportedFileType::Image)
+                if crate::tiff_pages::is_tiff_extension(&crate::detect::extension_of(filename)) =>
+            {
+                crate::tiff_pages::ocr_tiff(self, file_bytes, filename)
+                    .await
+                    .map_err(PortError::from)
+            }
             Some(SupportedFileType::Image) => {
                 let mime = if mime_type.is_empty() {
                     image_mime(filename).unwrap_or("image/png")
@@ -453,7 +473,7 @@ impl Extractor for PageOcrExtractor {
                     .await
                     .map_err(PortError::from)
             }
-            // `detect_file_type` accepts the uploader's image list; `.tif` is
+            // `detect_file_type` accepts the uploader's image list; `.bmp` is
             // not on it, but the adapter can still read one when it is handed
             // straight to it (a scanner export, a test).
             _ => match image_mime(filename) {
@@ -489,7 +509,61 @@ impl ScannedPageOcr for PageOcrExtractor {
     }
 }
 
-/// The mime implied by an image file name, including `.tif`, which the
+/// The page router's view of this adapter: one image, one attempt. Retries,
+/// the shared pool and the breaker live in the router, so the old whole-file
+/// path and the routed path share one request shape.
+#[async_trait::async_trait]
+impl OcrPageProvider for PageOcrExtractor {
+    fn id(&self) -> &str {
+        "chat"
+    }
+
+    fn model(&self) -> &str {
+        &self.settings.model
+    }
+
+    fn prompt(&self) -> &str {
+        &self.settings.prompt
+    }
+
+    fn dpi(&self) -> u32 {
+        self.settings.dpi
+    }
+
+    fn transport(&self) -> OcrTransport {
+        OcrTransport::Image
+    }
+
+    async fn read_pdf(
+        &self,
+        _pdf_bytes: &[u8],
+        _include_figures: bool,
+    ) -> Result<Vec<OcrPageRead>, OcrCallError> {
+        Err(OcrCallError::permanent(
+            "the chat OCR adapter reads one page image per request, not a PDF",
+        ))
+    }
+
+    async fn read_image(
+        &self,
+        image_bytes: &[u8],
+        mime: &str,
+    ) -> Result<OcrPageAnswer, OcrCallError> {
+        let page = PageImage {
+            page: 0,
+            mime: if mime.is_empty() {
+                "image/png".to_string()
+            } else {
+                mime.to_string()
+            },
+            bytes: image_bytes.to_vec(),
+            text: String::new(),
+        };
+        self.one_attempt(&page, 0).await.map(OcrPageAnswer::text)
+    }
+}
+
+/// The mime implied by an image file name, including `.bmp`, which the
 /// uploader's extension list does not accept.
 fn image_mime(filename: &str) -> Option<&'static str> {
     let lower = filename.to_ascii_lowercase();
@@ -888,28 +962,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_tif_handed_straight_to_the_adapter_is_one_page() {
+    async fn a_tif_handed_straight_to_the_adapter_is_sent_as_png_pages() {
         let (url, seen, _calls) = mock(0, 500).await;
         let extractor = PageOcrExtractor::new(settings(url)).unwrap();
+        let mut tif = std::io::Cursor::new(Vec::new());
+        let mut encoder = tiff::encoder::TiffEncoder::new(&mut tif).unwrap();
+        for _ in 0..2 {
+            encoder
+                .write_image::<tiff::encoder::colortype::Gray8>(1, 1, &[128])
+                .unwrap();
+        }
         let out = extractor
             .extract_with_options(
                 "scan.tif",
                 "",
-                b"II*\x00",
+                &tif.into_inner(),
                 kb_ports::ExtractionOptions::default(),
             )
             .await
             .unwrap();
         assert!(out.content.starts_with("PAGE-"), "{}", out.content);
-        let seen = seen.lock().unwrap();
-        assert!(
-            seen.bodies[0]
-                .pointer("/messages/0/content/0/image_url/url")
-                .and_then(|u| u.as_str())
-                .unwrap_or_default()
-                .starts_with("data:image/tiff;base64,"),
-            "the extension supplies the mime"
+        assert_eq!(
+            out.page_map.unwrap().len(),
+            2,
+            "one result page per TIFF page"
         );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.bodies.len(), 2);
+        for body in &seen.bodies {
+            assert!(
+                body.pointer("/messages/0/content/0/image_url/url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or_default()
+                    .starts_with("data:image/png;base64,"),
+                "vision endpoints get PNG, not TIFF"
+            );
+        }
     }
 
     #[tokio::test]
