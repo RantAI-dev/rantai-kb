@@ -49,6 +49,36 @@ numbers, upload/search examples, GPU notes and troubleshooting: [`deploy/README.
 
 ---
 
+## API reference
+
+The HTTP API is described by an OpenAPI 3.1 document that the server serves
+itself, so the contract can be read — and tried in a browser — before a client
+is written:
+
+- `GET /openapi.json` — the document.
+- `GET /docs` — Swagger UI rendering that document.
+
+Both answer **without a key**, like `/health`: a caller has to be able to read
+the contract before it has one. The `/v1` routes keep exactly the
+authentication they always had — `Authorization: Bearer <key>` or
+`X-API-Key: <key>` — and the document says which scheme and scope each
+operation needs.
+
+```bash
+kb-server openapi > ../docs/openapi.json   # the same document, printed
+```
+
+The UI's assets are embedded in the binary (`utoipa-swagger-ui`'s `vendored`
+feature), so the service never reaches a CDN at runtime and the docs work on
+an air-gapped host.
+
+The document is derived from the handlers themselves, and
+`tests/openapi_tests.rs` checks it against the route table in both
+directions: a route that is missing from the document, or an operation that is
+not a route, fails the build.
+
+---
+
 ## Testing & Live Verification
 
 ### 1. Workspace Unit & Integration Tests

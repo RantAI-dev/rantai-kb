@@ -4,6 +4,29 @@
 
 ### Added
 
+- **The HTTP API has an OpenAPI 3.1 document and a Swagger UI.**
+  `GET /openapi.json` serves the document and `GET /docs` renders it in Swagger UI,
+  both **without an API key** — like `/health`, the contract has to be readable
+  before the caller has one. The `/v1` routes keep exactly the authentication they
+  always had (`Authorization: Bearer <key>` or `X-API-Key: <key>`), and the document
+  states the scheme and the scope each operation needs.
+  - **Derived from the handlers:** every route carries a `#[utoipa::path]` attribute
+    and the router is built from one route table, so the document and the router
+    cannot drift: `tests/openapi_tests.rs` checks the table against the published
+    document in both directions — a route missing from the document, or an operation
+    that is not a route, fails the build.
+  - **Every route is described:** method, path, path/query parameters, the JSON and
+    multipart request bodies, and the response schemas with their status codes
+    (including the `{"error": "..."}` body of every failure). The wire names are the
+    real ones — camelCase included — because the schemas come from the same serde
+    attributes the responses are built from.
+  - **Offline by construction:** the UI's assets are embedded in the binary
+    (`utoipa-swagger-ui`'s `vendored` feature), so the service never reaches a CDN
+    at runtime and the docs work on an air-gapped host.
+  - **Also printable:** `kb-server openapi` writes the same document to stdout, and
+    the generated document is committed as `docs/openapi.json`; a test fails when
+    the committed file is out of date.
+
 - **Tables you can ask questions of (`TBL-1`, work package B: store, query, ingest, API).**
   A document's spreadsheets, CSVs, DOCX tables and OCR/markdown tables are now stored
   as typed grids and answered by a query instead of being summed by a language model
