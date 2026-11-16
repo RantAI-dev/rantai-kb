@@ -34,7 +34,9 @@ name: rantai-kb-dev
 # ─── Shared kb-server half: image, published port, healthcheck, stores ───────
 
 x-kb-server: &kb-server
-  image: rantai-kb-rust:${KB_IMAGE_TAG:-dev}
+  # A source checkout builds the image; an installed bundle pulls the published
+  # one (`rantai-kb setup` writes KB_IMAGE there).
+  image: ${KB_IMAGE:-rantai-kb-rust:${KB_IMAGE_TAG:-dev}}
   build:
     context: ../..
     dockerfile: rust/Dockerfile
@@ -275,7 +277,8 @@ services:
     healthcheck: *vlm-health
 
   ocr-ppocr:
-    image: rantai-kb-ocr-ppocr:${KB_IMAGE_TAG:-dev}
+    # The published sidecar image, for an installed bundle that cannot build.
+    image: ${KB_OCR_CPU_IMAGE:-rantai-kb-ocr-ppocr:${KB_IMAGE_TAG:-dev}}
     build:
       context: ./ocr-ppocr
     profiles: ["lite", "lite-en"]
