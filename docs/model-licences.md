@@ -78,6 +78,9 @@ change; MinerU's did.
 | Model | Size | Licence | Verdict |
 |---|---|---|---|
 | PaddlePaddle/PP-OCRv6 (tiny/small/medium, ONNX) | 1.5–34.5M | Apache-2.0 | 🟢 |
+| PP-Layout CDLA (PicoDet-LCNet, PaddleOCR; the CPU OCR sidecar's default layout) | ~10M | Apache-2.0 | 🟢 |
+| SLANet-plus (PaddleOCR table structure; the CPU OCR sidecar's tables) | ~7M | Apache-2.0 | 🟢 |
+| qihoo360/360LayoutAnalysis (YOLOv8n layout weights) | 6M | Apache-2.0 code; the model licence asks for an application to 360 for commercial use | 🟡 (opt-in `KB_LITE_LAYOUT_MODEL`, not a default) |
 | PaddlePaddle/PaddleOCR-VL-1.6 (+ official GGUF) | 0.9B | Apache-2.0 | 🟢 |
 | PaddlePaddle/PP-DocLayoutV3 (the layout sidecar's detector) | — | Apache-2.0 | 🟢 |
 | zai-org/GLM-OCR | 0.9B | MIT | 🟢 |

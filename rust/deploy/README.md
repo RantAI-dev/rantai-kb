@@ -149,17 +149,20 @@ and the caption priority queue do not exist, so setup does not ask about them.
 
 ## Tiers
 
-One profile per tier; `up <tier>` starts that profile's model containers plus
-the shared stores. Only one tier runs at a time (they share the stores and the
+One profile per tier, plus one per model role (`<tier>-ocr`, `<tier>-vision`,
+`<tier>-ocr-layout`); `up <tier>` starts the tier, the roles `.env` names in
+`COMPOSE_PROFILES` (written by `setup`) and the shared stores. A role that runs
+elsewhere (`setup --ocr mistral`, `--ocr <url>`, `--vision off`) starts no
+container. Only one tier runs at a time (they share the stores and the
 host port). Chunks, vectors, BM25 and page images live in Qdrant on every tier;
 Postgres holds documents, jobs, KBs, keys and the entity graph.
 
 | Tier | Model containers | Hardware | Measured (see below) |
 |---|---|---|---|
-| `lite` | TEI CPU, `intfloat/multilingual-e5-small` (384-d); `ocr-ppocr` (PP-OCRv6, CPU) for scanned pages | CPU, 1–2 cores, no GPU | MIRACL-id-50 nDCG@10 **0.802**, recall@10 0.938, MRR@10 0.823; 1,485 passages ingest ~126 s; search p50 42 ms / p95 49 ms. ViDoRe HR: 1.55 pages/s at page nDCG@10 0.545 |
-| `lite-en` | TEI CPU, `sentence-transformers/all-MiniLM-L6-v2` (384-d, English only); `ocr-ppocr` | CPU, 1–2 cores, no GPU | ViDoRe HR: **6.43 pages/s** at page nDCG@10 0.517. English only: 0.679 vs 0.802 for `lite` on Indonesian MIRACL-id |
-| `desk` | TEI CUDA, `Qwen/Qwen3-Embedding-0.6B` (1024-d) + `BAAI/bge-reranker-v2-m3`; `ocr-paddlevl-desk` (PaddleOCR-VL-1.6 GGUF on llama.cpp CUDA) | NVIDIA 8 GB | **not measured on this hardware** — see `docs/kb-tiers.md` for estimates |
-| `studio` | TEI CUDA Qwen3-Embedding-0.6B; vLLM: `vllm-page-embed-studio` (Qwen3-VL-Embedding-2B, 2048-d page images), `vllm-rerank-studio` (Qwen3-VL-Reranker-2B), `vllm-ocr-studio` (PaddleOCR-VL-1.6) | NVIDIA 24 GB | not measured; `docker compose config` only |
+| `lite` | TEI CPU, `intfloat/multilingual-e5-small` (384-d); `ocr-cpu` (layout + PP-OCRv6 tiny + SLANet-plus tables, CPU) for scanned pages | CPU, 1–2 cores, no GPU | MIRACL-id-50 nDCG@10 **0.802**, recall@10 0.938, MRR@10 0.823; 1,485 passages ingest ~126 s; search p50 42 ms / p95 49 ms. ViDoRe HR: 1.55 pages/s at page nDCG@10 0.545 |
+| `lite-en` | TEI CPU, `sentence-transformers/all-MiniLM-L6-v2` (384-d, English only); `ocr-cpu` | CPU, 1–2 cores, no GPU | ViDoRe HR: **6.43 pages/s** at page nDCG@10 0.517. English only: 0.679 vs 0.802 for `lite` on Indonesian MIRACL-id |
+| `desk` | TEI CUDA, `Qwen/Qwen3-Embedding-0.6B` (1024-d) + `BAAI/bge-reranker-v2-m3`; `vllm-ocr-desk` (Xiaomi-OCR-0, vLLM fp8) | NVIDIA 8 GB | OCR measured on a GB10 at a Desk-sized share ([ocr-tiers](../../docs/eval-ab/ocr-tiers/)); the rest **not measured on this hardware** |
+| `studio` | TEI CUDA Qwen3-Embedding-0.6B; vLLM: `vllm-page-embed-studio` (Qwen3-VL-Embedding-2B, 2048-d page images), `vllm-rerank-studio` (Qwen3-VL-Reranker-2B), `vllm-ocr-studio` (Xiaomi-OCR-0) | NVIDIA 24 GB | not measured; `docker compose config` only |
 | `station` | as studio with the 8B Qwen3-VL models in FP8 (4096-d page images) | NVIDIA 48 GB | not measured; `docker compose config` only |
 | `cloud` | none (OpenRouter: `voyage-multimodal-3.5` embeddings, `voyageai/rerank-2.5`); page-image arm on | any machine + `OPENROUTER_API_KEY` | ViDoRe HR page nDCG@10 **0.711** ([vidore3-hr-en-image](../../docs/eval-ab/vidore3-hr-en-image/)), ViDoRe CS **0.828** ([vidore3-cs-en-night](../../docs/eval-ab/vidore3-cs-en-night/)); **paid** per page and query |
 

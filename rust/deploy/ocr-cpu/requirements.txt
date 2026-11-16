@@ -1,0 +1,8 @@
+# rapidocr 3.10 ships PP-OCRv6 (det + rec, tiny/small); ONNX Runtime is a separate
+# install. rapid-layout / rapid-table add the layout model and SLANet-plus.
+rapidocr==3.10.0
+onnxruntime==1.31.1
+rapid-layout==1.2.1
+rapid-table==3.0.2
+numpy<3
+Pillow

@@ -21,10 +21,21 @@
 #     1024 for desk/studio/station/cloud; page images 2048 on studio, 4096 on
 #     station, 1024 on cloud): wipe the data with `kb-dev.sh down -v` before
 #     moving between tiers of different widths.
-#   * Scanned pages are OCRed on the host on every local tier: PP-OCRv6 (CPU
-#     sidecar, ./ocr-ppocr) on lite, PaddleOCR-VL-1.6 from desk up. Model
-#     services listen on :8000 inside the network; the KB_TIER preset's
-#     loopback ports (8081-8084) are for bare-metal installs.
+#   * Scanned pages are OCRed on the host on every local tier: the CPU document
+#     sidecar (./ocr-cpu: layout + PP-OCRv6 tiny + SLANet-plus tables) on lite,
+#     Xiaomi-OCR-0 on vLLM from desk up, with an optional table pass through the
+#     PP-DocLayoutV3 sidecar (./ocr-layout) on the CPU. Model services listen on
+#     :8000 inside the network; the KB_TIER preset's loopback ports (8081-8084)
+#     are for bare-metal installs.
+#   * Model roles are switchable. Each local model service is in a *role*
+#     profile (`<tier>-ocr`, `<tier>-vision`, `<tier>-ocr-layout`), not the tier
+#     profile, and kb-server depends on it with `required: false`. `rantai-kb
+#     setup <tier>` writes COMPOSE_PROFILES into .env, so `--ocr mistral` (say)
+#     leaves the local OCR container out and points kb-server at Mistral. Without
+#     COMPOSE_PROFILES, `up` turns on `<tier>`, `<tier>-ocr` and `<tier>-vision`.
+#   * Every setting in .env reaches kb-server (env_file below); the tier
+#     services' `environment:` only supplies compose hostnames, as defaults that
+#     an explicit value in .env (even an empty one: "off") replaces.
 #   * GPU profiles (desk/studio/station) are validated with `docker compose
 #     config` only: no NVIDIA machine has run them yet. Every vLLM memory
 #     fraction is an estimate (docs/kb-tiers.md), tunable from .env.
@@ -34,7 +45,9 @@ name: rantai-kb-dev
 # ─── Shared kb-server half: image, published port, healthcheck, stores ───────
 
 x-kb-server: &kb-server
-  image: rantai-kb-rust:${KB_IMAGE_TAG:-dev}
+  # A source checkout builds the image; an installed bundle pulls the published
+  # one (`rantai-kb setup` writes KB_IMAGE there).
+  image: ${KB_IMAGE:-rantai-kb-rust:${KB_IMAGE_TAG:-dev}}
   build:
     context: ../..
     dockerfile: rust/Dockerfile
@@ -43,6 +56,9 @@ x-kb-server: &kb-server
       CARGO_BUILD_JOBS: ${CARGO_BUILD_JOBS:-2}
       KB_VERSION: ${KB_VERSION:-dev}
   restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
   # Ingest can be mid-batch when the stack goes down; give it time to finish.
   stop_grace_period: 30s
   ports:
@@ -139,6 +155,29 @@ x-vllm: &vllm
     retries: 20
     # First start downloads the weights and compiles the graphs.
     start_period: 1800s
+
+# Xiaomi-OCR-0 on vLLM: the OCR server of every GPU tier. Pinned to the vLLM
+# release it was measured on; the hybrid model needs a recent one.
+x-vllm-xiaomi-ocr: &vllm-xiaomi-ocr
+  <<: *vllm
+  image: ${VLLM_OCR_IMAGE:-vllm/vllm-openai:v0.33.0}
+
+# The table pass of the Xiaomi recipe: PP-DocLayoutV3 on the CPU. Keep it off
+# the vLLM GPU: sharing the card crashed or hung the engine (docs/kb-tiers.md).
+x-ocr-layout: &ocr-layout
+  image: ${KB_OCR_LAYOUT_IMAGE:-rantai-kb-ocr-layout:${KB_IMAGE_TAG:-dev}}
+  build:
+    context: ./ocr-layout
+  restart: unless-stopped
+  environment:
+    LAYOUT_DEVICE: cpu
+  cpus: ${KB_OCR_LAYOUT_CPUS:-4.0}
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8193/health"]
+    interval: 10s
+    timeout: 5s
+    retries: 12
+    start_period: 120s
 
 # ─── picture reading (ING-5): Qwen3-VL-2B-Instruct on llama.cpp ─────────────
 # One model reads every picture at ingest (kind, description, visible text).
@@ -240,15 +279,15 @@ services:
       retries: 20
       start_period: 10s
 
-  # ─── lite / lite-en: PP-OCRv6 on CPU for scanned pages ────────────────────
+  # ─── lite / lite-en: document OCR on the CPU for scanned pages ──────────────
   #
-  # Speaks the chat shape kb-server's local OCR adapter sends (KB_OCR_*), so
-  # the same adapter talks to it and to PaddleOCR-VL on the GPU tiers. Digital
-  # pages never reach it (pdfium reads their text layer).
+  # Speaks the chat shape kb-server's local OCR adapter sends (KB_OCR_*,
+  # recipe `paddle`), so the same adapter talks to it and to any other OCR
+  # server. Digital pages never reach it (pdfium reads their text layer).
 
   vlm-cpu:
     image: ${LLAMA_CPP_IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
-    profiles: ["lite", "lite-en"]
+    profiles: ["lite-vision", "lite-en-vision"]
     restart: unless-stopped
     command: *vlm-command
     environment:
@@ -263,7 +302,7 @@ services:
   vlm-gpu:
     <<: *gpu
     image: ${LLAMA_CPP_CUDA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
-    profiles: ["desk", "studio", "station"]
+    profiles: ["desk-vision", "studio-vision", "station-vision"]
     restart: unless-stopped
     command: *vlm-command
     environment:
@@ -274,21 +313,27 @@ services:
       - llama-models:/models
     healthcheck: *vlm-health
 
-  ocr-ppocr:
-    image: rantai-kb-ocr-ppocr:${KB_IMAGE_TAG:-dev}
+  # Layout regions, PP-OCRv6 tiny text in reading order, SLANet-plus tables as
+  # HTML, figure boxes; headers and footers dropped. Measured on 2 cores of a
+  # 2016 Xeon: 0.69 pages/s end to end, image-only pages 52.5 on olmOCR-bench (docs/eval-ab/ocr-tiers).
+  ocr-cpu:
+    image: ${KB_OCR_CPU_IMAGE:-rantai-kb-ocr-cpu:${KB_IMAGE_TAG:-dev}}
     build:
-      context: ./ocr-ppocr
-    profiles: ["lite", "lite-en"]
+      context: ./ocr-cpu
+    profiles: ["lite-ocr", "lite-en-ocr"]
     restart: unless-stopped
     environment:
-      OCR_THREADS: ${KB_OCR_THREADS:-1}
-    cpus: ${KB_LITE_OCR_CPUS:-1.0}
+      OCR_MODE: ${KB_LITE_OCR_MODE:-structure}
+      OCR_WORKERS: ${KB_LITE_OCR_WORKERS:-2}
+      OCR_THREADS: ${KB_OCR_THREADS:-2}
+      LAYOUT_MODEL: ${KB_LITE_LAYOUT_MODEL:-pp_layout_cdla}
+    cpus: ${KB_LITE_OCR_CPUS:-2.0}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 12
-      start_period: 30s
+      start_period: 60s
 
   # ─── lite: multilingual-e5-small on CPU ───────────────────────────────────
 
@@ -326,10 +371,10 @@ services:
     environment:
       <<: *kb-local-env
       KB_TIER: lite
-      KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL:-http://vlm-cpu:8000/v1/chat/completions}
+      KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL-http://vlm-cpu:8000/v1/chat/completions}
       # Inside compose the tier's loopback defaults are wrong; these point the
       # roles at the compose services. A value in .env wins.
-      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL:-http://ocr-ppocr:8000/v1/chat/completions}
+      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL-http://ocr-cpu:8000/v1/chat/completions}
       KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-lite:80/v1/embeddings}
       KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
     cpus: ${KB_LITE_SERVER_CPUS:-2.0}
@@ -337,10 +382,12 @@ services:
       <<: *kb-stores
       vlm-cpu:
         condition: service_healthy
+        required: false
       tei-lite:
         condition: service_healthy
-      ocr-ppocr:
+      ocr-cpu:
         condition: service_healthy
+        required: false
 
   # ─── lite-en: all-MiniLM-L6-v2 on CPU, English only ───────────────────────
 
@@ -370,10 +417,10 @@ services:
     environment:
       <<: *kb-local-env
       KB_TIER: lite-en
-      KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL:-http://vlm-cpu:8000/v1/chat/completions}
+      KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL-http://vlm-cpu:8000/v1/chat/completions}
       # Inside compose the tier's loopback defaults are wrong; these point the
       # roles at the compose services. A value in .env wins.
-      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL:-http://ocr-ppocr:8000/v1/chat/completions}
+      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL-http://ocr-cpu:8000/v1/chat/completions}
       KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-lite-en:80/v1/embeddings}
       KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
     cpus: ${KB_LITE_SERVER_CPUS:-2.0}
@@ -381,17 +428,20 @@ services:
       <<: *kb-stores
       vlm-cpu:
         condition: service_healthy
+        required: false
       tei-lite-en:
         condition: service_healthy
-      ocr-ppocr:
+      ocr-cpu:
         condition: service_healthy
+        required: false
 
   # ─── desk / studio / station: GPU tiers ────────────────────────────────────
   #
   # Text embedding is Qwen3-Embedding-0.6B on TEI everywhere (the measured
-  # local text stack). Desk adds bge on TEI and PaddleOCR-VL-1.6 on llama.cpp;
-  # Studio and Station run the Qwen3-VL embedder (page images) and reranker
-  # plus PaddleOCR-VL on vLLM. The TEI tags without a suffix are the CUDA
+  # local text stack). Desk adds bge on TEI; Studio and Station run the
+  # Qwen3-VL embedder (page images) and reranker. Every GPU tier OCRs scans
+  # with Xiaomi-OCR-0 on vLLM (the best measured local OCR, ahead of Mistral
+  # OCR on olmOCR-bench) and can add the PP-DocLayoutV3 table pass on the CPU. The TEI tags without a suffix are the CUDA
   # images (`cpu-…`, `turing-…`, `rocm-…` are the alternatives).
 
   tei-embed-desk:
@@ -409,46 +459,48 @@ services:
       - hf-models:/data
     healthcheck: *tei-health
 
-  # PaddleOCR-VL-1.6, the official GGUF, on llama.cpp: ~1.8 GB with the
-  # vision projector, the smallest way to keep it on an 8 GB card next to
-  # the chat model. Measured on CPU only (102.5 s/page, text identical to the
-  # PDF text layer: docs/tier-readiness-plan.md); GPU speed is unmeasured.
-  ocr-paddlevl-desk:
-    <<: *gpu
-    image: ${LLAMA_CPP_CUDA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
-    profiles: ["desk"]
-    restart: unless-stopped
+  # Xiaomi-OCR-0 (0.8B, Apache-2.0) in fp8 with an fp8 KV cache: its hybrid
+  # attention keeps the cache small. The cache is fixed in bytes (1 GiB holds
+  # 16 pages here) so the footprint does not depend on the card's size; pages
+  # are capped at 2048x2048 px (kb-server renders at most that) so vLLM does
+  # not reserve activations for larger images; the context stays at the
+  # vendor's 20480 (the cache is fixed, so it costs nothing) so a 12288-token
+  # answer always fits. Measured on a GB10 with these flags (context 16384):
+  # 1.35 pages/s at 16 in flight, 4.4 GB peak for the process
+  # (docs/eval-ab/ocr-tiers). The fraction only has to cover that peak; on an
+  # 8 GB card shared with the chat model it is not measured, tune it from .env.
+  vllm-ocr-desk:
+    <<: *vllm-xiaomi-ocr
+    profiles: ["desk-ocr"]
     command:
-      - --hf-repo
-      - PaddlePaddle/PaddleOCR-VL-1.6-GGUF
-      - --hf-file
-      - PaddleOCR-VL-1.6-GGUF.gguf
-      - --mmproj-url
-      - https://huggingface.co/PaddlePaddle/PaddleOCR-VL-1.6-GGUF/resolve/main/PaddleOCR-VL-1.6-GGUF-mmproj.gguf
-      - --alias
-      - PaddlePaddle/PaddleOCR-VL-1.6
-      - --host
-      - 0.0.0.0
+      - xiaomi-research/Xiaomi-OCR-0
+      - --quantization
+      - fp8
+      - --kv-cache-dtype
+      - fp8
+      - --mamba-ssm-cache-dtype
+      - bfloat16
+      - --no-enable-prefix-caching
+      - --limit-mm-per-prompt
+      - '{"image": 1}'
+      - --max-model-len
+      - "20480"
+      - --max-num-batched-tokens
+      - "8192"
+      - --mm-processor-kwargs
+      - '{"max_pixels": 4194304}'
+      - --max-num-seqs
+      - "${KB_DESK_OCR_SEQS:-16}"
+      - --kv-cache-memory-bytes
+      - "${KB_DESK_OCR_KV_BYTES:-1073741824}"
+      - --gpu-memory-utilization
+      - "${KB_DESK_OCR_GPU_FRACTION:-0.45}"
       - --port
       - "8000"
-      - --n-gpu-layers
-      - "99"
-      - --ctx-size
-      - "8192"
-      - --parallel
-      - "2"
-      - --temp
-      - "0"
-    environment:
-      LLAMA_CACHE: /models
-    volumes:
-      - llama-models:/models
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-      start_period: 900s
+
+  ocr-layout:
+    <<: *ocr-layout
+    profiles: ["desk-ocr-layout", "studio-ocr-layout", "station-ocr-layout"]
 
   kb-desk:
     <<: *kb-server
@@ -456,22 +508,30 @@ services:
     environment:
       <<: *kb-local-env
       KB_TIER: desk
-      KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL:-http://vlm-gpu:8000/v1/chat/completions}
+      KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL-http://vlm-gpu:8000/v1/chat/completions}
       KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-embed-desk:80/v1/embeddings}
       KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
       KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-tei}
       KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://tei-rerank-desk:80}
-      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL:-http://ocr-paddlevl-desk:8000/v1/chat/completions}
+      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL-http://vllm-ocr-desk:8000/v1/chat/completions}
+      # The table pass is off unless `rantai-kb setup --ocr-tables accurate`
+      # turns on the layout profile and sets this to http://ocr-layout:8193.
+      KB_OCR_LAYOUT_URL: ${KB_OCR_LAYOUT_URL-}
     depends_on:
       <<: *kb-stores
       vlm-gpu:
         condition: service_healthy
+        required: false
       tei-embed-desk:
         condition: service_healthy
       tei-rerank-desk:
         condition: service_healthy
-      ocr-paddlevl-desk:
+      vllm-ocr-desk:
         condition: service_healthy
+        required: false
+      ocr-layout:
+        condition: service_healthy
+        required: false
 
   # Studio (24 GB): 2B models in bf16, ~12.5 GB for the KB at these fractions.
   tei-embed-studio:
@@ -479,18 +539,31 @@ services:
     profiles: ["studio"]
 
   vllm-ocr-studio:
-    <<: *vllm
-    profiles: ["studio"]
+    <<: *vllm-xiaomi-ocr
+    profiles: ["studio-ocr"]
     command:
-      - PaddlePaddle/PaddleOCR-VL-1.6
-      - --trust-remote-code
-      - --max-num-batched-tokens
-      - "16384"
+      - xiaomi-research/Xiaomi-OCR-0
+      - --quantization
+      - fp8
+      - --kv-cache-dtype
+      - fp8
+      - --mamba-ssm-cache-dtype
+      - bfloat16
       - --no-enable-prefix-caching
-      - --mm-processor-cache-gb
-      - "0"
+      - --limit-mm-per-prompt
+      - '{"image": 1}'
+      - --max-model-len
+      - "20480"
+      - --max-num-batched-tokens
+      - "8192"
+      - --mm-processor-kwargs
+      - '{"max_pixels": 4194304}'
+      - --max-num-seqs
+      - "${KB_STUDIO_OCR_SEQS:-32}"
+      - --kv-cache-memory-bytes
+      - "${KB_STUDIO_OCR_KV_BYTES:-2147483648}"
       - --gpu-memory-utilization
-      - ${KB_STUDIO_OCR_GPU_FRACTION:-0.12}
+      - "${KB_STUDIO_OCR_GPU_FRACTION:-0.2}"
       - --port
       - "8000"
 
@@ -535,21 +608,29 @@ services:
     environment:
       <<: *kb-local-env
       KB_TIER: studio
-      KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL:-http://vlm-gpu:8000/v1/chat/completions}
+      KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL-http://vlm-gpu:8000/v1/chat/completions}
       KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-embed-studio:80/v1/embeddings}
       KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
       KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-vllm}
       KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://vllm-rerank-studio:8000}
-      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL:-http://vllm-ocr-studio:8000/v1/chat/completions}
+      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL-http://vllm-ocr-studio:8000/v1/chat/completions}
+      # The table pass is off unless `rantai-kb setup --ocr-tables accurate`
+      # turns on the layout profile and sets this to http://ocr-layout:8193.
+      KB_OCR_LAYOUT_URL: ${KB_OCR_LAYOUT_URL-}
       KB_PAGE_EMBEDDING_BASE_URL: ${KB_PAGE_EMBEDDING_BASE_URL:-http://vllm-page-embed-studio:8000/v1/embeddings}
     depends_on:
       <<: *kb-stores
       vlm-gpu:
         condition: service_healthy
+        required: false
       tei-embed-studio:
         condition: service_healthy
       vllm-ocr-studio:
         condition: service_healthy
+        required: false
+      ocr-layout:
+        condition: service_healthy
+        required: false
       vllm-page-embed-studio:
         condition: service_healthy
       vllm-rerank-studio:
@@ -562,18 +643,31 @@ services:
     profiles: ["station"]
 
   vllm-ocr-station:
-    <<: *vllm
-    profiles: ["station"]
+    <<: *vllm-xiaomi-ocr
+    profiles: ["station-ocr"]
     command:
-      - PaddlePaddle/PaddleOCR-VL-1.6
-      - --trust-remote-code
-      - --max-num-batched-tokens
-      - "16384"
+      - xiaomi-research/Xiaomi-OCR-0
+      - --quantization
+      - fp8
+      - --kv-cache-dtype
+      - fp8
+      - --mamba-ssm-cache-dtype
+      - bfloat16
       - --no-enable-prefix-caching
-      - --mm-processor-cache-gb
-      - "0"
+      - --limit-mm-per-prompt
+      - '{"image": 1}'
+      - --max-model-len
+      - "20480"
+      - --max-num-batched-tokens
+      - "8192"
+      - --mm-processor-kwargs
+      - '{"max_pixels": 4194304}'
+      - --max-num-seqs
+      - "${KB_STATION_OCR_SEQS:-32}"
+      - --kv-cache-memory-bytes
+      - "${KB_STATION_OCR_KV_BYTES:-2147483648}"
       - --gpu-memory-utilization
-      - ${KB_STATION_OCR_GPU_FRACTION:-0.06}
+      - "${KB_STATION_OCR_GPU_FRACTION:-0.12}"
       - --port
       - "8000"
 
@@ -622,21 +716,29 @@ services:
     environment:
       <<: *kb-local-env
       KB_TIER: station
-      KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL:-http://vlm-gpu:8000/v1/chat/completions}
+      KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL-http://vlm-gpu:8000/v1/chat/completions}
       KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-embed-station:80/v1/embeddings}
       KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
       KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-vllm}
       KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://vllm-rerank-station:8000}
-      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL:-http://vllm-ocr-station:8000/v1/chat/completions}
+      KB_OCR_BASE_URL: ${KB_OCR_BASE_URL-http://vllm-ocr-station:8000/v1/chat/completions}
+      # The table pass is off unless `rantai-kb setup --ocr-tables accurate`
+      # turns on the layout profile and sets this to http://ocr-layout:8193.
+      KB_OCR_LAYOUT_URL: ${KB_OCR_LAYOUT_URL-}
       KB_PAGE_EMBEDDING_BASE_URL: ${KB_PAGE_EMBEDDING_BASE_URL:-http://vllm-page-embed-station:8000/v1/embeddings}
     depends_on:
       <<: *kb-stores
       vlm-gpu:
         condition: service_healthy
+        required: false
       tei-embed-station:
         condition: service_healthy
       vllm-ocr-station:
         condition: service_healthy
+        required: false
+      ocr-layout:
+        condition: service_healthy
+        required: false
       vllm-page-embed-station:
         condition: service_healthy
       vllm-rerank-station:

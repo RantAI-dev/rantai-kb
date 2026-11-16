@@ -34,7 +34,7 @@ Metal); that is accepted for the chat model only.
 | Embedding (text + page images, one space) | multilingual-e5-small on CPU (measured: `docs/eval-ab/lite-2core`) | Qwen3-Embedding-0.6B, text only (decided 2026-10-26) | Qwen3-VL-Embedding-2B, full precision | Qwen3-VL-Embedding-8B | voyage-multimodal-3.5 or gemini-embedding-2 |
 | Reranker | tiny text reranker, or none | bge-reranker-v2-m3 (text) | Qwen3-VL-Reranker-2B, full precision | Qwen3-VL-Reranker-8B | voyage rerank-2.5 / cohere rerank-4 / qwen3-reranker-8b |
 | Digital PDF text | pdfium text layer | text layer | text layer | text layer | text layer |
-| Scans / complex pages | PP-OCRv6 (ONNX, CPU) | PaddleOCR-VL-1.6, loaded during ingest | PaddleOCR-VL-1.6, resident | MinerU2.5-Pro / PaddleOCR-VL | Mistral OCR |
+| Scans / complex pages | CPU document OCR sidecar: PP-Layout + PP-OCRv6 tiny + SLANet-plus tables (0.69 pages/s on 2 cores) | Xiaomi-OCR-0, vLLM fp8 (1.35 pages/s, 4.4 GB peak) | Xiaomi-OCR-0 (1.5 pages/s), table pass optional | Xiaomi-OCR-0 + layout table pass | Mistral OCR |
 | Pictures (photos, charts, diagrams, embedded images; `ING-5`) | Qwen3-VL-2B-Instruct Q4 on CPU (llama.cpp sidecar `vlm-cpu`) | Qwen3-VL-2B-Instruct on GPU (`vlm-gpu`, ~2.5 GB) | same | same | nemotron-3.5-super-vl (API) |
 | Page-image search | optional tiny model (colSmol-256M), off by default | off (text-only embedder) | yes | yes | yes |
 | Est. VRAM chat / KB | — | ~3.5 / ~4.5 GB (tight) | ~9 / ~10 GB | ~26 / ~20 GB on 48 GB | — |
@@ -44,7 +44,8 @@ Metal); that is accepted for the chat model only.
 On 1–2 cores no model is fast enough to run on every page, so ingest routes **each page**:
 
 1. Text layer present → pdfium text. Free.
-2. No text layer (scan) → PP-OCRv6 (1.5–34.5M params; vendor: 0.20–1.40 s per image on Xeon).
+2. No text layer (scan) → the CPU document OCR sidecar (layout regions, PP-OCRv6 tiny text,
+   SLANet-plus tables; 0.69 pages/s on 2 cores, measured in `docs/eval-ab/ocr-tiers`).
 3. Tables in digital PDFs → rebuilt from the text layer's word positions. No model.
 4. Figures → a small VLM on the crop, in a low-priority background queue, capped per
    document. The document is searchable before its captions arrive.
@@ -107,54 +108,42 @@ GPU, so the request shape and ordering are covered by unit tests in
 throughput with Qwen3-VL-Embedding-2B on vLLM are unverified. Do not quote a local-tier
 page-retrieval number from this path until it has run on Desk/Studio hardware.
 
-## Local OCR (PaddleOCR-VL / PP-OCRv6)
+## Local OCR per tier
 
-Scanned and complex pages are OCRed by a **local** model on every local tier: PaddleOCR-VL-1.6
-under vLLM (Desk/Studio/Station) or `llama.cpp` (Apple, CPU), and PP-OCRv6 on Lite through a
-sidecar that speaks the same shape. The adapter (`kb_extract::PageOcrExtractor`) renders each
-PDF page with pdfium at `KB_OCR_DPI`, sends **one chat request per page** (image part first,
-then the task prefix, `temperature: 0`) and keeps page order into the chunker's page map. Image
+Scanned pages are OCRed by a **local** model on every local tier, chosen by measurement
+(`docs/eval-ab/ocr-tiers`, olmOCR-bench, official scorer):
+
+| Tier | Engine | Speed | Text-layer / tables / scans / image-only |
+|---|---|---|---|
+| Lite, lite-en | `rust/deploy/ocr-cpu`: PP-Layout CDLA regions, PP-OCRv6 tiny text in XY-cut reading order, SLANet-plus tables as HTML, figure boxes; headers and footers dropped | 0.69 pages/s end to end on 2 cores of a 2016 Xeon | — / 38.8 (image-only tables) / 31.4 / 52.5 |
+| Desk, Studio, Station | Xiaomi-OCR-0 under vLLM (fp8 weights and cache, 1 GiB fixed cache on Desk), the `xiaomi` recipe below | Desk config: 1.35 pages/s at 16 in flight, 4.4 GB peak; 1.50 at 32 (GB10) | 87.0 / 77.9 / 73.7 / 77.4 |
+| … with `--ocr-tables accurate` | + PP-DocLayoutV3 table pass, detector on the CPU | 0.90 pages/s (detector-bound) | 89.0 / 87.9 / 73.1 / 78.2 |
+| Cloud (or `--ocr mistral` anywhere) | Mistral OCR, hosted, billed per page | — | 77.4 / 85.5 / 70.8 / 75.3 |
+
+Lite cannot read formulas into LaTeX or read handwriting inside its CPU budget; a Lite box that
+needs them can send scans to a shared Xiaomi server (`rantai-kb setup lite --ocr <url>`).
+
+Every OCR server speaks one shape: kb-server renders each PDF page with pdfium at `KB_OCR_DPI`
+and sends **one chat request per page** (`kb_extract::PageOcrExtractor` for the `paddle`
+recipe, `XiaomiOcrProvider` for `xiaomi`), keeping page order into the chunker's page map. Image
 uploads (`png`, `jpg`, `tif`) are a document of one page.
-
-```sh
-# Desk / Studio / Station (vLLM; PaddleOCR-VL selects its task with the prompt prefix)
-vllm serve PaddlePaddle/PaddleOCR-VL-1.6 --trust-remote-code
-
-# Apple / CPU (llama.cpp, the GGUF build)
-llama-server -m PaddleOCR-VL-1.6-Q8_0.gguf --host 127.0.0.1 --port 8000
-
-# point kb-server at either one; `ocr` also works as a name in
-# KB_LAYOUT_EXTRACTOR_ORDER when you want OCR ahead of another parser
-KB_OCR_BASE_URL=http://127.0.0.1:8000/v1/chat/completions
-KB_OCR_MODEL=PaddlePaddle/PaddleOCR-VL-1.6
-```
 
 | Setting | Meaning | Default |
 |---|---|---|
-| `KB_OCR_BASE_URL` | full URL of `/v1/chat/completions`; empty turns the adapter off | empty (off) |
-| `KB_OCR_MODEL` | model name the server serves | `PaddlePaddle/PaddleOCR-VL-1.6` |
+| `KB_OCR_BASE_URL` | full URL of `/v1/chat/completions`; empty turns the adapter off | empty (off); the tier preset fills it |
+| `KB_OCR_MODEL` | model name the server serves | tier preset |
 | `KB_OCR_API_KEY` | optional bearer token; never filled from `OPENROUTER_API_KEY` | empty (no header) |
-| `KB_OCR_PROMPT` | task prefix (PaddleOCR-VL: `OCR:`, `Table Recognition:`, …) | `OCR:` |
-| `KB_OCR_DPI` | page render resolution | `150` |
-| `KB_OCR_CONCURRENCY` | page requests in flight | `2` |
-| `KB_OCR_TIMEOUT_MS` | timeout per page request | `120000` |
-| `KB_OCR_MAX_TOKENS` | `max_tokens` per page | `4096` |
+| `KB_OCR_PROMPT` | task prefix for the `paddle` recipe | `OCR:` |
+| `KB_OCR_DPI` | page render resolution | `150` (Lite preset: `110`) |
+| `KB_OCR_CONCURRENCY` | page requests in flight | `2` (presets: Lite 2, Desk 16, Studio/Station 32) |
+| `KB_OCR_TIMEOUT_MS` | timeout per page request | `120000` (`xiaomi`: `600000`) |
+| `KB_OCR_MAX_TOKENS` | `max_tokens` per page | `4096` (`xiaomi`: `12288`) |
 
 When `KB_OCR_BASE_URL` is set it also replaces OpenRouter vision as the OCR path for image
-uploads and as the layout chain's final fallback, so no page leaves the host. Unset, everything
-resolves exactly as before. A page that still fails after its retries fails the extraction with
-its page number rather than producing a document with a silently missing page. Answers are
-cached under `KB_CACHE_DIR` with the rest of the extraction, keyed by model, prompt, DPI and
-endpoint.
-
-**Status: mock-tested.** The request shape, ordering, retries, `Authorization` rule and the
-`ocr`/OpenRouter precedence are covered by tests in
-`rust/crates/kb-extract/src/page_ocr.rs` and `builder.rs`; end-to-end OCR quality and
-throughput with PaddleOCR-VL-1.6 on real hardware are not measured yet. PaddleOCR-VL-1.6's GGUF
-did run end to end under llama.cpp on this CPU (102.5 s per page, text identical to the PDF text
-layer: `docs/tier-readiness-plan.md`). PP-OCRv6 on Lite runs in `rust/deploy/ocr-ppocr`
-(RapidOCR 3.10, ONNX Runtime, CPU), a sidecar that answers the same chat shape; it is
-**built but not yet run** (the image has not been built on this machine).
+uploads and as the layout chain's final fallback, so no page leaves the host. A page that still
+fails after its retries fails the extraction with its page number rather than producing a
+document with a silently missing page. Answers are cached under `KB_CACHE_DIR` with the rest of
+the extraction, keyed by model, prompt, DPI and endpoint.
 
 ## OCR recipes (`KB_OCR_RECIPE`)
 
@@ -163,7 +152,7 @@ with a different prompt.
 
 | Recipe | Model | What it answers | Postprocessing |
 |---|---|---|---|
-| `paddle` (default) | PaddleOCR-VL-1.6, PP-OCRv6 | one page, with the task prefix (`OCR:`, `Table Recognition:`, …) | none — the answer is the text |
+| `paddle` (default) | the CPU sidecar, PaddleOCR-VL-1.6, any OCR server answering text | one page, with the task prefix (`OCR:`, `Table Recognition:`, …) | none — the answer is the text |
 | `xiaomi` | Xiaomi-OCR-0 (0.8B, Apache-2.0) | one page, as markdown with OTSL tables | the vendor's: repetition retry, truncated-tail cut, math delimiters, OTSL → table |
 
 `KB_OCR_RECIPE` picks one. An unknown value is a configuration error, exactly like
@@ -512,8 +501,10 @@ measurement (build order 5); the Desk / Studio / Station rerank widths are estim
 | `KB_RERANK_MODEL` | — | `BAAI/bge-reranker-v2-m3` | `Qwen/Qwen3-VL-Reranker-2B` | `Qwen/Qwen3-VL-Reranker-8B` | `voyageai/rerank-2.5` |
 | `KB_RERANK_CANDIDATE_LIMIT` | — | 10 | 20 | 30 | 20 |
 | `KB_OCR_BASE_URL` | `http://127.0.0.1:8083/v1/chat/completions` | same | same | same | — (Mistral OCR when `KB_MISTRAL_OCR_KEY` is set) |
-| `KB_OCR_MODEL` | `PaddlePaddle/PP-OCRv6` | `PaddlePaddle/PaddleOCR-VL-1.6` | same as desk | same as desk | — |
-| `KB_OCR_CONCURRENCY` | 1 | — (2) | 4 | 8 | — |
+| `KB_OCR_MODEL` | `rantai-kb/ocr-cpu` | `xiaomi-research/Xiaomi-OCR-0` | same as desk | same as desk | — |
+| `KB_OCR_RECIPE` | — (`paddle`) | `xiaomi` | `xiaomi` | `xiaomi` | — |
+| `KB_OCR_DPI` | 110 | — (150) | — (150) | — (150) | — |
+| `KB_OCR_CONCURRENCY` | 2 | 16 | 32 | 32 | — |
 | `KB_PAGE_EMBEDDING_MODEL` | — | — | `Qwen/Qwen3-VL-Embedding-2B` | `Qwen/Qwen3-VL-Embedding-8B` | `voyageai/voyage-multimodal-3.5` |
 | `KB_PAGE_EMBEDDING_FORMAT` | — | — | `vllm` | `vllm` | — (OpenRouter) |
 | `KB_PAGE_EMBEDDING_BASE_URL` | — | — | `http://127.0.0.1:8084/v1/embeddings` | same | — (OpenRouter) |
@@ -554,8 +545,10 @@ On 2 cores it ingests ViDoRe HR at 6.43 pages/s (page nDCG@10 0.517) against Lit
   and **pages** with Qwen3-VL-Embedding in a separate Qdrant vector, fused at search time. One
   shared text+page space, as the role table puts it, would need the VL model to embed text too;
   that is unmeasured, so it is not the preset.
-- Station runs PaddleOCR-VL-1.6 like Studio. MinerU2.5-Pro stays a documented alternative
-  (`KB_LAYOUT_EXTRACTOR_ORDER=sidecar` with a MinerU sidecar); no preset selects it.
+- Every GPU tier runs Xiaomi-OCR-0, the best measured local OCR (`docs/eval-ab/ocr-tiers`):
+  PaddleOCR-VL-1.6 scored 9.4 on tables read whole-page, LightOnOCR-2-1B was too slow at a
+  Desk-sized share. MinerU2.5-Pro and PaddleOCR-VL stay documented alternatives; no preset
+  selects them.
 - bge is a poor page reranker (`docs/eval-ab/vidore3-hr-en-night`, "bge should not rerank
   pages"), so every local tier sets `KB_PAGE_RERANK=false`; it only matters when the page arm
   is on.
@@ -672,7 +665,7 @@ Status as of 2026-10-24:
      Answers are cached on disk under `KB_CACHE_DIR`, keyed by model, prompt version,
      reasoning flag and image hash; a page with no visuals (`NONE`) is cached too. Effect on
      retrieval is not measured yet.
-5. Lite on exactly 2 cores (`taskset`): ✅ small-embedder bake-off (2026-10-24, `docs/eval-ab/lite-2core`): multilingual-e5-small, 0.802 nDCG@10 on MIRACL-id-50, ~2 min ingest, 42 ms search; Qwen3-0.6B ties on quality but is 41× slower to ingest. The embedder must be capped to 1 thread or it starves the server. PP-OCRv6 not done.
+5. Lite on exactly 2 cores (`taskset`): ✅ small-embedder bake-off (2026-10-24, `docs/eval-ab/lite-2core`): multilingual-e5-small, 0.802 nDCG@10 on MIRACL-id-50, ~2 min ingest, 42 ms search; Qwen3-0.6B ties on quality but is 41× slower to ingest. The embedder must be capped to 1 thread or it starves the server. OCR on 2 cores: ✅ 2026-11-16 (`docs/eval-ab/ocr-tiers`): the CPU document sidecar reads 0.69 pages/s end to end.
 6. ✅ `kb-server setup` (2026-10-30): hardware detection, tier suggestion, VRAM budget and
    licence gates, `.env`/`.tier` writing, `--check` probes. ❌ Desk / Studio / Station on
    real hardware: still no NVIDIA box, so those tiers are unit-tested and

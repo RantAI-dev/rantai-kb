@@ -4,6 +4,25 @@
 
 ### Added
 
+- **OCR per tier, chosen by measurement (`ING-8`).** Lite reads scans with a new CPU document
+  sidecar, `rust/deploy/ocr-cpu` (replaces `ocr-ppocr`): PP-Layout CDLA regions, PP-OCRv6 tiny
+  text in XY-cut reading order (multi-column pages read column by column), SLANet-plus tables
+  as HTML, figure boxes; page headers and footers dropped. Every model is Apache-2.0 and baked
+  into the image, so it starts offline. Desk, Studio and Station read scans with
+  Xiaomi-OCR-0 on vLLM 0.33 (`xiaomi` recipe, fp8, a fixed KV cache) instead of
+  PaddleOCR-VL-1.6, with the PP-DocLayoutV3 table pass on the CPU as an option
+  (`rust/deploy/ocr-layout` now builds with CPU torch and bakes its weights). Measured on
+  olmOCR-bench (`docs/eval-ab/ocr-tiers`): Lite 0.69 pages/s on two cores, image-only pages
+  52.5 (PP-OCRv6 alone: 31.6), tables 38.8 (was 0); Desk 1.35 pages/s at a 4.4 GB peak,
+  text-layer PDFs 87.0, tables 77.9 (PaddleOCR-VL whole-page: 59.8 and 9.4). Lite presets
+  render scans at 110 dpi (`KB_OCR_DPI`).
+- **Model roles you can move (`DEP-5`).** `kb-server setup` takes `--ocr local|mistral|off|<url>`
+  (e.g. Mistral OCR on a Lite box, or a shared Xiaomi server for several Lite boxes),
+  `--ocr-tables accurate`, `--vision local|off|<url>` and `--set KEY=VALUE`. Compose runs each
+  local model in a role profile (`<tier>-ocr`, `<tier>-vision`, `<tier>-ocr-layout`) that
+  setup writes to `.env` as `COMPOSE_PROFILES`, so a role that runs elsewhere starts no
+  container. Mistral OCR on a local tier is a 🟡 licence opt-in (pages leave the machine).
+
 - **Tables you can ask questions of (`TBL-1`, work package B: store, query, ingest, API).**
   A document's spreadsheets, CSVs, DOCX tables and OCR/markdown tables are now stored
   as typed grids and answered by a query instead of being summed by a language model
@@ -391,6 +410,13 @@
   so a caller's shape does not change when it is). `ocrText` is the page's stored text
   (at most 8,000 characters) with the caption stage's `[Visual] …` description
   stripped. `pages[].number` is 0-based, matching `chunks[].page`.
+
+### Fixed
+
+- **Settings in `rust/deploy/.env` now reach kb-server.** The compose services listed their
+  variables one by one, so `KB_MISTRAL_OCR_KEY` (and any other `KB_*` not in the list) never
+  reached the container: Mistral OCR could not be turned on through compose. kb-server now
+  loads `.env` (`env_file`); a present-but-empty value in `.env` means "off".
 
 ## 0.2.0 — 2026-11-04
 

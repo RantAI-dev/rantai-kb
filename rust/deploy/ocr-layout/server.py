@@ -30,10 +30,10 @@ GPU model, so one page at a time under a lock keeps its memory flat.
 
 Settings (environment):
 
-    LAYOUT_MODEL_DIR       PP-DocLayoutV3 directory (required)
+    LAYOUT_MODEL_DIR       PP-DocLayoutV3 directory  /app/model in the image
     LAYOUT_HOST            bind address              0.0.0.0
     LAYOUT_PORT            port                      8193
-    LAYOUT_DEVICE          torch device              cuda:0
+    LAYOUT_DEVICE          torch device              cpu (keep it off the vLLM GPU)
     LAYOUT_THRESHOLD       detection confidence      0.3
     LAYOUT_MAX_IMAGE_BYTES largest decoded image     33554432 (32 MiB)
 """
@@ -53,7 +53,7 @@ import numpy as np
 from PIL import Image
 
 MODEL_DIR = os.environ.get("LAYOUT_MODEL_DIR", "").strip()
-DEVICE = os.environ.get("LAYOUT_DEVICE", "cuda:0")
+DEVICE = os.environ.get("LAYOUT_DEVICE", "cpu")
 THRESHOLD = float(os.environ.get("LAYOUT_THRESHOLD", "0.3"))
 MAX_IMAGE_BYTES = int(os.environ.get("LAYOUT_MAX_IMAGE_BYTES", str(32 * 1024 * 1024)))
 

@@ -2226,7 +2226,15 @@ mod tests {
                         cfg.extract.ocr_base_url,
                         "http://127.0.0.1:8083/v1/chat/completions"
                     );
-                    assert_eq!(cfg.extract.ocr_model, "PaddlePaddle/PaddleOCR-VL-1.6");
+                    assert_eq!(cfg.extract.ocr_model, "xiaomi-research/Xiaomi-OCR-0");
+                    assert_eq!(
+                        cfg.extract.ocr_recipe,
+                        kb_extract::config::OcrRecipe::Xiaomi
+                    );
+                    assert_eq!(
+                        cfg.extract.ocr_max_tokens, 12288,
+                        "{tier}: the recipe's budget"
+                    );
                 }
                 // Paid per document and read by no search arm: off everywhere.
                 assert!(!cfg.worker.entity_extraction_enabled, "{tier}");
