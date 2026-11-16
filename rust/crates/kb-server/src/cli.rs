@@ -468,8 +468,29 @@ async fn bench(args: &[String]) -> Result<(), CliError> {
 /// starting the server.
 fn openapi() -> Result<(), CliError> {
     let document = crate::openapi::spec_json().map_err(|err| CliError::Failed(err.to_string()))?;
-    println!("{document}");
-    Ok(())
+    let mut stdout = std::io::stdout().lock();
+    write_document(&mut stdout, &document)
+}
+
+/// Write the document to a writer.
+///
+/// The bytes are written rather than printed, because a reader that stops
+/// early (`kb-server openapi | head`) closes the pipe, and `println!` turns
+/// that into a panic and a backtrace on the operator's terminal. A closed
+/// pipe is the reader's decision, not an error of this command.
+///
+/// The trailing newline keeps `kb-server openapi > docs/openapi.json` a
+/// byte-for-byte copy of the committed document.
+fn write_document(writer: &mut impl std::io::Write, document: &str) -> Result<(), CliError> {
+    let written = writer
+        .write_all(document.as_bytes())
+        .and_then(|()| writer.write_all(b"\n"))
+        .and_then(|()| writer.flush());
+    match written {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(err) => Err(CliError::Failed(err.to_string())),
+    }
 }
 
 /// `kb-server check-boundary` — the layering rule as an executable check.
@@ -760,5 +781,46 @@ mod tests {
     fn usage_errors_mention_the_command_shape() {
         let err = CliError::Usage("missing tenant id".to_string());
         assert!(err.to_string().contains("create-api-key") || err.to_string().contains("usage"));
+    }
+
+    /// A writer that always fails with the given error kind.
+    struct Failing(std::io::ErrorKind);
+
+    impl std::io::Write for Failing {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(self.0, "closed"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn the_openapi_document_is_written_with_a_trailing_newline() {
+        // `kb-server openapi > docs/openapi.json` has to be a byte-for-byte
+        // copy of the committed document, newline included.
+        let mut out: Vec<u8> = Vec::new();
+        write_document(&mut out, "{\"openapi\":\"3.1.0\"}").expect("write");
+        assert_eq!(
+            String::from_utf8(out).expect("utf-8"),
+            "{\"openapi\":\"3.1.0\"}\n"
+        );
+    }
+
+    #[test]
+    fn a_reader_that_stops_early_is_not_an_error() {
+        // `kb-server openapi | head` closes the pipe. The command must stop
+        // quietly: a backtrace on the operator's terminal would read as a
+        // crash of the service.
+        let mut out = Failing(std::io::ErrorKind::BrokenPipe);
+        assert!(write_document(&mut out, "{}").is_ok());
+    }
+
+    #[test]
+    fn a_broken_stdout_that_is_not_a_pipe_is_still_an_error() {
+        let mut out = Failing(std::io::ErrorKind::PermissionDenied);
+        let err = write_document(&mut out, "{}").unwrap_err();
+        assert!(matches!(err, CliError::Failed(_)), "{err:?}");
     }
 }
