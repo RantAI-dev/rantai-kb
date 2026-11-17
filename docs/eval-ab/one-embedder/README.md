@@ -115,6 +115,18 @@ Every delta among its own arms is inside ±0.015 (`one-space − image` = −0.0
 image agree, and mixing them costs nothing. On the same pages, `Qwen3-VL`'s text vectors
 *dragged the page arm down* by 0.056.
 
+One cell is deliberately empty. `Qwen3-VL`'s **image+text in one vector** (its documented page
+form) could not be measured: the batched run hits its maximum context on some pages even at
+32,768 tokens, while the same input succeeds when sent one request at a time and the pages are
+all ≤ 1.7 MPx — so the failure is in that serving path, not in the input size. No number is
+quoted for it. Its image-only and one-space arms are both 0.35 below `Nemotron-3.5`, and those
+were measured cleanly.
+
+Practical note for anyone indexing page vectors: `Qwen3-VL-2B` needed 32k context before it
+would accept a page's text alongside its image on this corpus (8k and 16k both refused), so a
+page-vector pipeline has to cap or resize its inputs. `Nemotron-3.5-Embed-1B` took the same
+pages with their full text at 32k without complaint.
+
 Context for those numbers, all page nDCG@10 on the same 318 queries:
 
 | Stack | |
