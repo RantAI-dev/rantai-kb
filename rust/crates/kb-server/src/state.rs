@@ -610,6 +610,7 @@ fn embedder_settings_from(c: EmbedderConfig) -> EmbedderSettings {
         query_prefix: c.query_prefix,
         passage_prefix: c.passage_prefix,
         send_input_type: c.send_input_type,
+        format: c.format,
         request_timeout: c.request_timeout,
     }
 }

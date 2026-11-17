@@ -490,6 +490,10 @@ pub struct EmbedderConfig {
     /// `KB_EMBEDDING_INPUT_TYPE=true`: send Voyage's `input_type`
     /// (`query` / `document`) with every embedding request.
     pub send_input_type: bool,
+    /// `KB_EMBEDDING_FORMAT`: `openai` (default, `/v1/embeddings`) or
+    /// `omniembed` (vLLM `/v2/embed`, the shape an OmniEmbed-style multimodal
+    /// model needs so one endpoint serves text and pages in one space).
+    pub format: kb_inference::EmbedFormat,
     pub request_timeout: Duration,
 }
 
@@ -815,6 +819,16 @@ impl Config {
             query_prefix: lookup("KB_EMBEDDING_QUERY_PREFIX").unwrap_or_default(),
             passage_prefix: lookup("KB_EMBEDDING_PASSAGE_PREFIX").unwrap_or_default(),
             send_input_type: bool_flag(&lookup, "KB_EMBEDDING_INPUT_TYPE", false),
+            format: match lookup("KB_EMBEDDING_FORMAT")
+                .unwrap_or_else(|| "openai".into())
+                .trim()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "openai" | "" => kb_inference::EmbedFormat::OpenAi,
+                "omniembed" | "v2" => kb_inference::EmbedFormat::OmniEmbed,
+                other => bail!("KB_EMBEDDING_FORMAT must be openai or omniembed, got {other:?}"),
+            },
             request_timeout: Duration::from_millis(
                 int_var(&lookup, "KB_EMBEDDING_TIMEOUT_MS", 15_000u64)?.max(1_000),
             ),
