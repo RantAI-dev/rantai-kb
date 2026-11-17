@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.0 — 2026-11-17
+
+### Added
+
+- **`rantai-kb setup --embedders one` wires the one-embedder stack into compose.** It writes
+  `KB_EMBEDDERS=one`, the service-name endpoints (`vllm-embed:8000/v2/embed` for text *and* pages,
+  `llama-rerank:8082/v1/rerank`, provider `cohere`) and the matching `COMPOSE_PROFILES`. The model
+  services moved behind `<tier>-one` / `<tier>-two`, so exactly one stack starts — the two-model
+  TEI + VL pair, or `Nemotron-3.5-Embed-1B` with `Qwen3-Reranker-0.6B`.
+- **Licence entries** for `nvidia/Nemotron-3.5-Embed-1B-BF16` (`openmdw-1.1`, 🟡 opt-in) and
+  `Qwen/Qwen3-Reranker-0.6B` (Apache-2.0), so the gate can price and refuse the new stack like any
+  other.
+
+### Changed
+
+- `.env.example` documents `KB_EMBEDDERS` where operators look first, with the measured numbers and
+  the warning that adopting it is a re-index.
+- The README describes one embedder for text and page images on the GPU tiers, not a text encoder
+  beside an image encoder.
+- `kb-dev.sh` and `kb-server up|down|logs|ps` activate the same `<tier>-one` / `<tier>-two` profile,
+  so the script and the binary still start the same containers.
+
+### Fixed
+
+- **The OpenAPI document's version is stamped at runtime**, not inside the `#[openapi(...)]` derive:
+  Cargo does not rebuild a macro's output when only the package version changes, so a cached build
+  kept emitting the previous version and the drift test failed after a release bump.
+
 ## 0.4.0 — 2026-11-17
 
 ### Changed
