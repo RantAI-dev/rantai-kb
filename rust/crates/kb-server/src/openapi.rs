@@ -40,7 +40,9 @@ pub const API_KEY_SCHEME: &str = "api_key_header";
 #[openapi(
     info(
         title = "rantai-kb API",
-        version = env!("CARGO_PKG_VERSION"),
+        // Set for real by `VersionAddon`: a value written here is baked in by the
+        // derive macro, whose output a cached build keeps after a version bump.
+        version = "0.0.0",
         description = "Upload documents, search them, and read back what was found.\n\n\
                        Every route under `/v1` needs an API key: send it as `Authorization: Bearer <key>` \
                        or as `X-API-Key: <key>`. The key decides the tenant, the scopes \
@@ -90,9 +92,24 @@ pub const API_KEY_SCHEME: &str = "api_key_header";
         ("bearer_auth" = []),
         ("api_key_header" = []),
     ),
-    modifiers(&SecurityAddon),
+    modifiers(&SecurityAddon, &VersionAddon),
 )]
 pub struct ApiDoc;
+
+/// Stamps the crate version on the document.
+///
+/// Not in the `#[openapi(info(version = ...))]` attribute: that value is
+/// expanded by the derive macro, and Cargo does not rebuild a macro's output
+/// when only the package version changes, so a CI build cache kept answering
+/// `0.3.0` after the bump to `0.4.0`. `env!` in ordinary code is a tracked
+/// dependency of this crate, so it follows every bump.
+pub struct VersionAddon;
+
+impl Modify for VersionAddon {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        openapi.info.version = env!("CARGO_PKG_VERSION").to_string();
+    }
+}
 
 /// Adds the two security schemes the API accepts.
 ///

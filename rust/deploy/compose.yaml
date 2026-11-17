@@ -446,12 +446,12 @@ services:
 
   tei-embed-desk:
     <<: *tei-embed
-    profiles: ["desk"]
+    profiles: ["desk-two"]
 
   tei-rerank-desk:
     <<: *gpu
     image: ${TEI_GPU_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:1.8.1}
-    profiles: ["desk"]
+    profiles: ["desk-two"]
     restart: unless-stopped
     command:
       ["--model-id", "BAAI/bge-reranker-v2-m3", "--max-batch-tokens", "2048", "--max-client-batch-size", "64", "--auto-truncate"]
@@ -502,6 +502,61 @@ services:
     <<: *ocr-layout
     profiles: ["desk-ocr-layout", "studio-ocr-layout", "station-ocr-layout"]
 
+  # ─── DEP-6: one embedder for text and pages ──────────────────────────────
+  # Selected by `KB_EMBEDDERS=one` (or `rantai-kb setup --embedders one`), which
+  # also switches the tier's model services to the `-one` profile. One model in
+  # one space, so the tier runs these two containers instead of a text embedder,
+  # a page embedder and a reranker.
+  vllm-embed:
+    <<: *vllm
+    profiles: ["desk-one", "studio-one", "station-one"]
+    command:
+      - nvidia/Nemotron-3.5-Embed-1B-BF16
+      - --served-model-name
+      - nvidia/Nemotron-3.5-Embed-1B-BF16
+      - --dtype
+      - bfloat16
+      - --max-model-len
+      - "32768"
+      - --chat-template-content-format
+      - openai
+      - --gpu-memory-utilization
+      - ${KB_EMBED_GPU_FRACTION:-0.15}
+      - --port
+      - "8000"
+
+  # Qwen3-Reranker-0.6B under llama.cpp: /v1/rerank, the Cohere shape the
+  # `cohere` rerank provider posts. Measured at +0.055 nDCG@10 on Indonesian
+  # and 1.19 GB, against 4.26 GB and 17.5 GB for the VL rerankers it replaces.
+  llama-rerank:
+    <<: *gpu
+    image: ${LLAMA_CPP_CUDA_IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}
+    profiles: ["desk-one", "studio-one", "station-one"]
+    restart: unless-stopped
+    command:
+      - --hf-repo
+      - Qwen/Qwen3-Reranker-0.6B-GGUF
+      - --hf-file
+      - Qwen3-Reranker-0.6B-Q8_0.gguf
+      - --alias
+      - Qwen/Qwen3-Reranker-0.6B
+      - --reranking
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8082"
+      - --api-key
+      - ${KB_RERANK_API_KEY:-local}
+    environment:
+      LLAMA_CACHE: /models
+    volumes:
+      - llama-models:/models
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8082/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   kb-desk:
     <<: *kb-server
     profiles: ["desk"]
@@ -522,10 +577,6 @@ services:
       vlm-gpu:
         condition: service_healthy
         required: false
-      tei-embed-desk:
-        condition: service_healthy
-      tei-rerank-desk:
-        condition: service_healthy
       vllm-ocr-desk:
         condition: service_healthy
         required: false
@@ -536,7 +587,7 @@ services:
   # Studio (24 GB): 2B models in bf16, ~12.5 GB for the KB at these fractions.
   tei-embed-studio:
     <<: *tei-embed
-    profiles: ["studio"]
+    profiles: ["studio-two"]
 
   vllm-ocr-studio:
     <<: *vllm-xiaomi-ocr
@@ -569,7 +620,7 @@ services:
 
   vllm-page-embed-studio:
     <<: *vllm
-    profiles: ["studio"]
+    profiles: ["studio-two"]
     command:
       - Qwen/Qwen3-VL-Embedding-2B
       - --runner
@@ -586,7 +637,7 @@ services:
   # /rerank the `vllm` rerank provider posts.
   vllm-rerank-studio:
     <<: *vllm
-    profiles: ["studio"]
+    profiles: ["studio-two"]
     command:
       - Qwen/Qwen3-VL-Reranker-2B
       - --runner
@@ -623,24 +674,18 @@ services:
       vlm-gpu:
         condition: service_healthy
         required: false
-      tei-embed-studio:
-        condition: service_healthy
       vllm-ocr-studio:
         condition: service_healthy
         required: false
       ocr-layout:
         condition: service_healthy
         required: false
-      vllm-page-embed-studio:
-        condition: service_healthy
-      vllm-rerank-studio:
-        condition: service_healthy
 
   # Station (48 GB): the 8B models, FP8 weights (~8 GB each) so the KB stays
   # near the 20 GB budget in docs/kb-tiers.md; ~22 GB at these fractions.
   tei-embed-station:
     <<: *tei-embed
-    profiles: ["station"]
+    profiles: ["station-two"]
 
   vllm-ocr-station:
     <<: *vllm-xiaomi-ocr
@@ -673,7 +718,7 @@ services:
 
   vllm-page-embed-station:
     <<: *vllm
-    profiles: ["station"]
+    profiles: ["station-two"]
     command:
       - Qwen/Qwen3-VL-Embedding-8B
       - --runner
@@ -692,7 +737,7 @@ services:
   # /rerank the `vllm` rerank provider posts.
   vllm-rerank-station:
     <<: *vllm
-    profiles: ["station"]
+    profiles: ["station-two"]
     command:
       - Qwen/Qwen3-VL-Reranker-8B
       - --runner
@@ -731,18 +776,12 @@ services:
       vlm-gpu:
         condition: service_healthy
         required: false
-      tei-embed-station:
-        condition: service_healthy
       vllm-ocr-station:
         condition: service_healthy
         required: false
       ocr-layout:
         condition: service_healthy
         required: false
-      vllm-page-embed-station:
-        condition: service_healthy
-      vllm-rerank-station:
-        condition: service_healthy
 
   # ─── cloud: no local models; OpenRouter pays for embeddings + rerank ──────
   #

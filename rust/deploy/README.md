@@ -208,7 +208,16 @@ Postgres holds documents, jobs, KBs, keys and the entity graph.
 | `station` | as studio with the 8B Qwen3-VL models in FP8 (4096-d page images) | NVIDIA 48 GB | not measured; `docker compose config` only |
 | `cloud` | none (OpenRouter: `voyage-multimodal-3.5` embeddings, `voyageai/rerank-2.5`); page-image arm on | any machine + `OPENROUTER_API_KEY` | ViDoRe HR page nDCG@10 **0.711** ([vidore3-hr-en-image](../../docs/eval-ab/vidore3-hr-en-image/)), ViDoRe CS **0.828** ([vidore3-cs-en-night](../../docs/eval-ab/vidore3-cs-en-night/)); **paid** per page and query |
 
-**One embedder or two (`KB_EMBEDDERS`, 0.4.0).** Desk, Studio and Station can run
+**One embedder or two (`KB_EMBEDDERS`).** `rantai-kb setup --embedders one` (or
+`KB_EMBEDDERS=one` in `.env`) starts `vllm-embed` (Nemotron-3.5-Embed-1B, text *and* pages in one
+2048-d space) and `llama-rerank` (Qwen3-Reranker-0.6B) instead of the tier's TEI embedder, page
+embedder and reranker. The model services live behind `<tier>-one` / `<tier>-two`, so exactly one
+stack starts; `COMPOSE_PROFILES` written by `setup` names the one it wants. One consequence worth
+knowing on a first start: `up` waits on the stores, OCR and vision containers but not on the
+embedder, so if the embedder is still downloading its 2.4 GB the first upload can fail with a
+connection error while it finishes — retry it, or run `setup --check` first.
+
+**The same option, measured.** Desk, Studio and Station can run
 `Nemotron-3.5-Embed-1B` for text *and* page images in one 2048-d space, with `Qwen3-Reranker-0.6B`,
 instead of the text embedder plus a separate VL embedder. It is opt-in because it changes the index
 width, so adopting it means a re-index (`docs/rust-cutover.md` §17). The numbers and the compose

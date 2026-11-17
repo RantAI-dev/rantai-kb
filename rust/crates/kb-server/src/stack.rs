@@ -140,15 +140,27 @@ pub enum Profiles {
 /// Resolve the profiles for a tier.
 ///
 /// `compose_profiles` is the raw value of `COMPOSE_PROFILES` from the env
-/// file (`None` when the file does not set it).
+/// file (`None` when the file does not set it). `embedders_one` is
+/// `KB_EMBEDDERS=one`: the model services move from `<tier>-two` (a text
+/// embedder, a page embedder and a reranker) to `<tier>-one` (one embedder and
+/// one reranker), so exactly one stack starts.
 #[must_use]
-pub fn resolve_profiles(tier: Tier, compose_profiles: Option<&str>) -> Profiles {
+pub fn resolve_profiles(
+    tier: Tier,
+    compose_profiles: Option<&str>,
+    embedders_one: bool,
+) -> Profiles {
     match compose_profiles.map(str::trim) {
         Some(value) if !value.is_empty() => Profiles::FromEnvFile(value.to_string()),
         _ => Profiles::Tier(vec![
             tier.as_str().to_string(),
             format!("{}-ocr", tier.as_str()),
             format!("{}-vision", tier.as_str()),
+            format!(
+                "{}-{}",
+                tier.as_str(),
+                if embedders_one { "one" } else { "two" }
+            ),
         ]),
     }
 }
@@ -269,7 +281,11 @@ impl Stack {
     #[must_use]
     pub fn profiles(&self, tier: Tier) -> Profiles {
         let from_file = self.read_env_file().get("COMPOSE_PROFILES").cloned();
-        resolve_profiles(tier, from_file.as_deref())
+        let embedders_one = self
+            .read_env_file()
+            .get("KB_EMBEDDERS")
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("one"));
+        resolve_profiles(tier, from_file.as_deref(), embedders_one)
     }
 
     /// The host port of kb-server.
@@ -1060,14 +1076,15 @@ mod tests {
     // ─── profiles ───────────────────────────────────────────────────────────
 
     #[test]
-    fn without_compose_profiles_the_tier_owns_three_profiles() {
-        let profiles = resolve_profiles(Tier::Lite, None);
+    fn without_compose_profiles_the_tier_owns_four_profiles() {
+        let profiles = resolve_profiles(Tier::Lite, None, false);
         assert_eq!(
             profiles,
             Profiles::Tier(vec![
                 "lite".to_string(),
                 "lite-ocr".to_string(),
-                "lite-vision".to_string()
+                "lite-vision".to_string(),
+                "lite-two".to_string()
             ])
         );
         assert_eq!(
@@ -1078,14 +1095,16 @@ mod tests {
                 "--profile",
                 "lite-ocr",
                 "--profile",
-                "lite-vision"
+                "lite-vision",
+                "--profile",
+                "lite-two"
             ]
         );
     }
 
     #[test]
     fn compose_profiles_in_the_env_file_win_and_add_no_flag() {
-        let profiles = resolve_profiles(Tier::Studio, Some("lite,ocr"));
+        let profiles = resolve_profiles(Tier::Studio, Some("lite,ocr"), false);
         assert_eq!(profiles, Profiles::FromEnvFile("lite,ocr".to_string()));
         // Compose reads COMPOSE_PROFILES itself; a --profile flag would
         // override the operator's list.
@@ -1094,7 +1113,7 @@ mod tests {
 
     #[test]
     fn an_empty_compose_profiles_is_not_a_list() {
-        let profiles = resolve_profiles(Tier::Desk, Some("   "));
+        let profiles = resolve_profiles(Tier::Desk, Some("   "), false);
         assert!(matches!(profiles, Profiles::Tier(_)));
     }
 
@@ -1102,7 +1121,7 @@ mod tests {
     fn every_tier_names_its_own_profiles() {
         for name in crate::tier::TIER_NAMES {
             let tier = Tier::parse(name).expect("known tier");
-            let Profiles::Tier(profiles) = resolve_profiles(tier, None) else {
+            let Profiles::Tier(profiles) = resolve_profiles(tier, None, false) else {
                 panic!("{name} should own its profiles");
             };
             assert_eq!(profiles[0], name);
