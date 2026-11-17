@@ -105,6 +105,12 @@ const LOCAL: &[(&str, &str)] = &[
     ("KB_ENTITY_EXTRACTION_ENABLED", "false"),
 ];
 
+/// `DEP-6`: one embedder for text and page images on the GPU tiers. The
+/// instruction lives in the checkpoint and is selected with `input_type`, so
+/// there are no client-side prefixes and one vector space serves both.
+const NEMOTRON_EMBED_ID: &str = "nvidia/Nemotron-3.5-Embed-1B-BF16";
+const LOCAL_EMBED_OMNI: &str = "http://127.0.0.1:8081/v2/embed";
+
 /// Desk and up embed text with Qwen3-Embedding-0.6B on a GPU.
 const QWEN3_TEXT: &[(&str, &str)] = &[
     ("KB_EMBEDDING_MODEL", QWEN3_EMBEDDING),
@@ -209,6 +215,35 @@ const VL_PAGES_8B: &[(&str, &str)] = &[
     ("KB_PAGE_EMBEDDING_FORMAT", "vllm"),
     ("KB_PAGE_EMBEDDING_BASE_URL", LOCAL_PAGE_EMBEDDINGS),
     ("KB_PAGE_EMBEDDING_DIM", "4096"),
+];
+
+/// `KB_EMBEDDERS=one`: text and pages with one model in one space (`DEP-6`).
+/// Measured on the GB10: MIRACL-id text 0.826 (`+0.030` over the 0.6B) and
+/// ViDoRe HR pages 0.611 text / 0.626 image / 0.621 one space, every arm within
+/// ±0.015, against 0.221 for the same design on Qwen3-VL-Embedding-2B
+/// (`docs/eval-ab/one-embedder/`). Replaces [`QWEN3_TEXT`] and the
+/// `VL_PAGES_*` arm, and needs `KB_EMBEDDING_FORMAT=omniembed`: the endpoint is
+/// vLLM's `/v2/embed`, not `/v1/embeddings`.
+const NEMOTRON_ONE: &[(&str, &str)] = &[
+    ("KB_EMBEDDING_MODEL", NEMOTRON_EMBED_ID),
+    ("KB_EMBEDDING_DIM", "2048"),
+    ("KB_EMBEDDING_FORMAT", "omniembed"),
+    ("KB_EMBEDDING_BASE_URL", LOCAL_EMBED_OMNI),
+    ("KB_PAGE_EMBEDDING_MODEL", NEMOTRON_EMBED_ID),
+    ("KB_PAGE_EMBEDDING_FORMAT", "omniembed"),
+    ("KB_PAGE_EMBEDDING_BASE_URL", LOCAL_EMBED_OMNI),
+    ("KB_PAGE_EMBEDDING_DIM", "2048"),
+];
+
+/// The reranker for the one-embedder stack: Qwen3-Reranker-0.6B under
+/// llama.cpp, which answers the Cohere shape at `/v1/rerank`. Measured on
+/// MIRACL-id: nDCG@10 0.795 → 0.850 (+0.055) at 1.19 GB, against the 4.26 GB
+/// and 17.5 GB VL rerankers it replaces (`docs/eval-ab/rerank-2026-11-17/`).
+const LOCAL_RERANK_QWEN3: &[(&str, &str)] = &[
+    ("KB_RERANK_ENABLED", "true"),
+    ("KB_RERANK_PROVIDER", "cohere"),
+    ("KB_RERANK_BASE_URL", "http://127.0.0.1:8082/v1/rerank"),
+    ("KB_RERANK_MODEL", "Qwen/Qwen3-Reranker-0.6B"),
 ];
 
 /// Lite and Lite-en: pictures read by Qwen3-VL-2B on the CPU, one at a time
@@ -362,7 +397,43 @@ impl Tier {
     }
 
     /// The preset tables that apply to this tier, most general first.
-    fn tables(self) -> &'static [&'static [(&'static str, &'static str)]] {
+    ///
+    /// `DESK-6`'s one-embedder stack is selected with `KB_EMBEDDERS=one`; the
+    /// default is the two-embedder stack those tiers have shipped, because the
+    /// one-embedder stack still owes four measurements (`docs/core/specs/dep-6.md`).
+    fn tables_with(
+        self,
+        embedders: Embedders,
+    ) -> &'static [&'static [(&'static str, &'static str)]] {
+        if embedders == Embedders::One {
+            return match self {
+                Self::Desk => &[
+                    LOCAL,
+                    NEMOTRON_ONE,
+                    LOCAL_RERANK_QWEN3,
+                    XIAOMI_OCR_PAGES,
+                    GPU_DESCRIBE,
+                    DESK,
+                ],
+                Self::Studio => &[
+                    LOCAL,
+                    NEMOTRON_ONE,
+                    LOCAL_RERANK_QWEN3,
+                    XIAOMI_OCR_PAGES,
+                    GPU_DESCRIBE,
+                    STUDIO,
+                ],
+                Self::Station => &[
+                    LOCAL,
+                    NEMOTRON_ONE,
+                    LOCAL_RERANK_QWEN3,
+                    XIAOMI_OCR_PAGES,
+                    GPU_DESCRIBE,
+                    STATION,
+                ],
+                other => other.tables_with(Embedders::Two),
+            };
+        }
         match self {
             Self::Lite => &[LOCAL, E5_SMALL_TEXT, CPU_OCR_PAGES, CPU_DESCRIBE, LITE],
             Self::LiteEn => &[LOCAL, MINILM_TEXT, CPU_OCR_PAGES, CPU_DESCRIBE, LITE],
@@ -396,10 +467,22 @@ impl Tier {
         }
     }
 
+    /// Every `(variable, value)` pair this tier could fill for a given
+    /// embedding stack, in table order.
+    #[must_use]
+    pub fn presets_for(self, embedders: Embedders) -> Vec<(&'static str, &'static str)> {
+        self.tables_with(embedders)
+            .iter()
+            .flat_map(|table| table.iter().copied())
+            .collect()
+    }
+
     /// Every `(variable, value)` pair this tier could fill, in table order.
+    /// The two-embedder stack; `presets_for` is the one that honours
+    /// `KB_EMBEDDERS`.
     #[must_use]
     pub fn presets(self) -> Vec<(&'static str, &'static str)> {
-        self.tables()
+        self.tables_with(Embedders::Two)
             .iter()
             .flat_map(|table| table.iter().copied())
             .collect()
@@ -408,7 +491,7 @@ impl Tier {
     /// The preset value for `variable`, or `None` when this tier fills nothing.
     #[must_use]
     pub fn preset(self, variable: &str) -> Option<&'static str> {
-        self.tables()
+        self.tables_with(Embedders::Two)
             .iter()
             .flat_map(|table| table.iter())
             .find(|(name, _)| *name == variable)
@@ -422,10 +505,37 @@ impl Tier {
     where
         F: Fn(&str) -> Option<String>,
     {
-        self.presets()
+        let embedders = Embedders::from_lookup(lookup).unwrap_or(Embedders::Two);
+        self.presets_for(embedders)
             .into_iter()
             .filter(|(name, _)| lookup(name).is_none())
             .collect()
+    }
+}
+
+/// Which embedding stack a GPU tier runs (`KB_EMBEDDERS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Embedders {
+    /// Text and pages with two models, the stack those tiers have shipped.
+    #[default]
+    Two,
+    /// `DEP-6`: one model in one space (`Nemotron-3.5-Embed-1B`).
+    One,
+}
+
+impl Embedders {
+    /// `KB_EMBEDDERS=one|two`; unset or empty is `two`. Anything else is an
+    /// error naming both, so a typo cannot silently select the other stack.
+    pub fn from_lookup<F>(lookup: &F) -> anyhow::Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        match lookup("KB_EMBEDDERS").map(|v| v.trim().to_lowercase()) {
+            None => Ok(Self::Two),
+            Some(v) if v.is_empty() || v == "two" => Ok(Self::Two),
+            Some(v) if v == "one" => Ok(Self::One),
+            Some(other) => anyhow::bail!("KB_EMBEDDERS must be \"one\" or \"two\", got {other:?}"),
+        }
     }
 }
 
@@ -737,5 +847,51 @@ mod tests {
                 "{name}: page arm off"
             );
         }
+    }
+
+    /// `DEP-6`: `KB_EMBEDDERS=one` swaps both roles on the GPU tiers to one
+    /// model, and leaves the default stack alone when it is unset.
+    #[test]
+    fn embedders_one_switches_both_roles_to_nemotron() {
+        let one = |name: &str| (name == "KB_EMBEDDERS").then(|| "one".to_string());
+        for tier in [Tier::Desk, Tier::Studio, Tier::Station] {
+            let filled = tier.filled(&one);
+            let value = |wanted: &str| {
+                filled
+                    .iter()
+                    .find(|(name, _)| *name == wanted)
+                    .map(|(_, v)| *v)
+            };
+            assert_eq!(
+                value("KB_EMBEDDING_MODEL"),
+                Some("nvidia/Nemotron-3.5-Embed-1B-BF16"),
+                "{tier:?} text embedder"
+            );
+            assert_eq!(value("KB_EMBEDDING_DIM"), Some("2048"));
+            assert_eq!(value("KB_EMBEDDING_FORMAT"), Some("omniembed"));
+            assert_eq!(
+                value("KB_PAGE_EMBEDDING_MODEL"),
+                Some("nvidia/Nemotron-3.5-Embed-1B-BF16"),
+                "{tier:?} page embedder is the same model"
+            );
+            assert_eq!(value("KB_PAGE_EMBEDDING_FORMAT"), Some("omniembed"));
+            assert_eq!(value("KB_RERANK_MODEL"), Some("Qwen/Qwen3-Reranker-0.6B"));
+        }
+
+        // Unset keeps the two-embedder stack those tiers ship today.
+        let two = TierPlan::resolve(Tier::Studio, &|_: &str| None);
+        let text = two
+            .filled
+            .iter()
+            .find(|(name, _)| *name == "KB_EMBEDDING_MODEL")
+            .map(|(_, v)| *v);
+        assert_eq!(text, Some("Qwen/Qwen3-Embedding-0.6B"));
+    }
+
+    /// A typo in the selector is an error, not a quiet fallback.
+    #[test]
+    fn embedders_rejects_an_unknown_value() {
+        let bad = |name: &str| (name == "KB_EMBEDDERS").then(|| "onn".to_string());
+        assert!(Embedders::from_lookup(&bad).is_err());
     }
 }

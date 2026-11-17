@@ -110,6 +110,13 @@ Use `lite` for a mixed or non-English corpus.
 | Pictures → description | `Qwen3-VL-2B-Instruct`, Q4_K_M, llama.cpp CUDA, 1.11 GB | same | same |
 | Page-image search | off (text-only embedder) | `Qwen3-VL-Embedding-2B` — 2048-d, vLLM, 4.26 GB | `Qwen3-VL-Embedding-8B` — 4096-d, FP8, 16.3 GB on disk |
 
+`KB_EMBEDDERS=one` switches Desk, Studio and Station to a single embedder
+(`Nemotron-3.5-Embed-1B`, 2048-d) that puts text and page images in one space, with
+`Qwen3-Reranker-0.6B` as the reranker. Measured: text **0.826** against 0.796, pages **0.621**
+one space against 0.277 for the Qwen3-VL stack, and the reranker **+0.055** on Indonesian at 1.19 GB
+instead of 4.26/17.5 GB. It is opt-in until the page-reranker run and one live tier run land
+([`docs/core/specs/dep-6.md`](docs/core/specs/dep-6.md)).
+
 The optional table pass (`--ocr-tables accurate`) adds the `ocr-layout` sidecar:
 PP-DocLayoutV3, ~130 MB, on the CPU — **never on the same card as the OCR model**, which
 crashed or hung vLLM in a full benchmark.
