@@ -127,6 +127,23 @@ would accept a page's text alongside its image on this corpus (8k and 16k both r
 page-vector pipeline has to cap or resize its inputs. `Nemotron-3.5-Embed-1B` took the same
 pages with their full text at 32k without complaint.
 
+### The 8B (Station's model) earns its place on pages, not text
+
+`Nemotron-3.5-Embed-8B` — the teacher the 1B was distilled from — measured on the same harness:
+
+| Arm | 8B | 1B [95% CI] | |
+|---|---:|---:|---|
+| MIRACL-id text | 0.831 | 0.826 | +0.005 [−0.008, +0.019] — a tie |
+| ViDoRe HR text | 0.639 | 0.611 | **+0.028** [+0.017, +0.040] |
+| ViDoRe HR image | 0.642 | 0.626 | **+0.017** [+0.002, +0.031] |
+| ViDoRe HR one space | **0.645** | 0.621 | **+0.024** [+0.011, +0.036] |
+
+Every page delta is above zero, so the bigger model is not noise on pages — it is a real
++0.017 to +0.028 — and it is a tie on Indonesian text. That is the case for Station running the
+8B: quality on pages, at 8× the compute per vector, 16.3 GB resident instead of 2.4 GB, a 4096-d
+index instead of 2048-d, and a corpus that no longer moves between Station and Studio without a
+re-embed.
+
 Context for those numbers, all page nDCG@10 on the same 318 queries:
 
 | Stack | |
@@ -199,6 +216,7 @@ list (to compare like-for-like with 0.705), ingest throughput at 32k context, an
 | `probe_text_length.py`, `probe.json` | the length probe and its output |
 | `miracl-nemo35/`, `miracl-nemotron3/` | the two nemotron text embedders on MIRACL-id chunks |
 | `vidore-hr-nemo35/`, `vidore-hr-nemo35-combined/` | Nemotron-3.5 on ViDoRe HR: text, image, one space, and image+text in one vector |
+| `miracl-nemo35-8b/`, `vidore-hr-nemo35-8b/` | the 8B on the same two datasets |
 
 The TREC runs (~9 MB of top-100 lists) are deliberately not in git; `embed_ab.py` regenerates
 them from the cache with the command in the plan.

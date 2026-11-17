@@ -22,7 +22,7 @@ pub mod vlm_gate;
 pub use community_summary::{
     CommunitySummariser, CommunitySummarySettings, LlmCommunitySummariser,
 };
-pub use embedder::{EmbedderImpl, EmbedderSettings};
+pub use embedder::{EmbedFormat, EmbedderImpl, EmbedderSettings};
 pub use heuristic_extractor::{HeuristicExtractor, HeuristicExtractorSettings};
 pub use image_describer::{
     HttpImageDescriber, IMAGE_READ_PROMPT, IMAGE_READ_PROMPT_VERSION, ImageDescriberSettings,

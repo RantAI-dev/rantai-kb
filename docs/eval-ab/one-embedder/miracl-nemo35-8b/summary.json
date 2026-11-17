@@ -1,0 +1,22 @@
+{
+  "dataset": "miracl-id-200",
+  "mode": "text",
+  "queries": 200,
+  "models": [
+    {
+      "model": "nemo35_8b",
+      "dim": 4096,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.8311552610768334,
+            "MRR@10": 0.8504446803196803,
+            "Hit@1": 0.78,
+            "Recall@10": 0.951390873015873
+          },
+          "trec": "/tmp/opencode/ab-miracl-nemo35-8b/nemo35_8b.text.trec"
+        }
+      }
+    }
+  ]
+}

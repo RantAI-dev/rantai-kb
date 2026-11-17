@@ -29,6 +29,22 @@ use tracing::warn;
 
 use crate::query_cache::QueryCache;
 
+/// How the endpoint is addressed.
+///
+/// `OpenAi` is the common shape — `POST /v1/embeddings` with an `input` array —
+/// and it is what TEI, llama.cpp, OpenRouter and vLLM's plain pooler all answer.
+/// `OmniEmbed` is vLLM's `POST /v2/embed`: the inputs are message content, the
+/// query/document instruction lives in the checkpoint and is selected with
+/// `input_type`, and the vectors come back under `embeddings.float`. It is the
+/// shape an OmniEmbed-style multimodal model needs, because one endpoint serves
+/// text and page images in the same space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmbedFormat {
+    #[default]
+    OpenAi,
+    OmniEmbed,
+}
+
 /// Per-call settings. All fields are required; defaults live in `kb-server`.
 #[derive(Debug, Clone)]
 pub struct EmbedderSettings {
@@ -44,6 +60,8 @@ pub struct EmbedderSettings {
     /// embedding hint) on OpenAI-shaped requests. Off by default: most
     /// OpenAI-compatible servers reject or ignore unknown fields.
     pub send_input_type: bool,
+    /// The wire shape: OpenAI `/v1/embeddings` or vLLM `/v2/embed`.
+    pub format: EmbedFormat,
     pub request_timeout: Duration,
 }
 
@@ -78,6 +96,37 @@ struct MiniMaxReqOne<'a> {
     model: &'a str,
     texts: Vec<String>,
     r#type: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct OmniEmbedContent<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct OmniEmbedInput<'a> {
+    content: Vec<OmniEmbedContent<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct OmniEmbedReq<'a> {
+    model: &'a str,
+    input_type: &'static str,
+    inputs: Vec<OmniEmbedInput<'a>>,
+    embedding_types: [&'static str; 1],
+    truncate: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+struct OmniEmbedResp {
+    embeddings: OmniEmbedVectors,
+}
+
+#[derive(Debug, Deserialize)]
+struct OmniEmbedVectors {
+    float: Vec<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,13 +286,16 @@ impl EmbedderImpl {
         Err(last_err.unwrap_or_else(|| PortError::Unavailable("embedding failed".into())))
     }
 
-    /// Embed `inputs` in one OpenAI-compatible request and return the vectors
-    /// in the order the inputs were sent.
+    /// Embed `inputs` in one request and return the vectors in the order the
+    /// inputs were sent, in whichever wire shape the settings selected.
     async fn embed_openai_batch(
         &self,
         inputs: &[String],
         kind: EmbedKind,
     ) -> Result<Vec<Vec<f32>>, PortError> {
+        if self.settings.format == EmbedFormat::OmniEmbed {
+            return self.embed_omniembed_batch(inputs, kind).await;
+        }
         let r = OpenAiReq {
             model: &self.settings.model,
             input: inputs.iter().map(String::as_str).collect(),
@@ -253,6 +305,46 @@ impl EmbedderImpl {
         let body = serde_json::to_vec(&r).map_err(|e| PortError::Malformed(format!("req: {e}")))?;
         let bytes = self.post(body).await?;
         parse_openai_ordered(&bytes, inputs.len())
+    }
+
+    /// vLLM `/v2/embed`: one request, every input as a message content list,
+    /// the instruction carried by `input_type`.
+    async fn embed_omniembed_batch(
+        &self,
+        inputs: &[String],
+        kind: EmbedKind,
+    ) -> Result<Vec<Vec<f32>>, PortError> {
+        // No prefixing here: `embed_one` has already prefixed a query and the
+        // batch path never prefixes (the same asymmetry the OpenAI shape has,
+        // `ING-9`). The instruction this model needs travels in `input_type`.
+        let texts: Vec<String> = inputs.to_vec();
+        let r = OmniEmbedReq {
+            model: &self.settings.model,
+            input_type: kind.as_input_type(),
+            inputs: texts
+                .iter()
+                .map(|t| OmniEmbedInput {
+                    content: vec![OmniEmbedContent {
+                        kind: "text",
+                        text: t,
+                    }],
+                })
+                .collect(),
+            embedding_types: ["float"],
+            truncate: "END",
+        };
+        let body = serde_json::to_vec(&r).map_err(|e| PortError::Malformed(format!("req: {e}")))?;
+        let bytes = self.post(body).await?;
+        let parsed: OmniEmbedResp = serde_json::from_slice(&bytes)
+            .map_err(|e| PortError::Malformed(format!("omniembed resp: {e}")))?;
+        if parsed.embeddings.float.len() != inputs.len() {
+            return Err(PortError::Malformed(format!(
+                "omniembed returned {} vectors for {} inputs",
+                parsed.embeddings.float.len(),
+                inputs.len()
+            )));
+        }
+        Ok(parsed.embeddings.float)
     }
 
     /// Embed a single text. Caches query-side calls.
@@ -484,7 +576,7 @@ mod tests {
     use serde_json::{Value, json};
     use std::sync::Arc;
 
-    fn settings() -> EmbedderSettings {
+    pub(crate) fn settings() -> EmbedderSettings {
         EmbedderSettings {
             base_url: "http://localhost:0".into(),
             model: "test-model".into(),
@@ -495,6 +587,7 @@ mod tests {
             query_prefix: String::new(),
             passage_prefix: String::new(),
             send_input_type: false,
+            format: EmbedFormat::OpenAi,
             request_timeout: Duration::from_secs(5),
         }
     }
@@ -576,7 +669,7 @@ mod tests {
 
     /// A deterministic vector per input, so a test can tell which text a
     /// returned vector belongs to.
-    fn vector_for(text: &str) -> Vec<f32> {
+    pub(crate) fn vector_for(text: &str) -> Vec<f32> {
         let sum: u32 = text.bytes().map(u32::from).sum();
         vec![
             sum as f32,
@@ -913,7 +1006,12 @@ mod dispatch_tests {
     //! proves nothing about dispatch.
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+    use super::tests::{settings, vector_for};
     use super::*;
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde_json::{Value, json};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -945,6 +1043,7 @@ mod dispatch_tests {
             query_prefix: String::new(),
             passage_prefix: String::new(),
             send_input_type: false,
+            format: EmbedFormat::OpenAi,
             request_timeout: std::time::Duration::from_secs(5),
         };
         let embedder: Arc<dyn Embedder> = Arc::new(EmbedderImpl::new(settings).unwrap());
@@ -954,5 +1053,78 @@ mod dispatch_tests {
         let second = embedder.embed_query_detailed("sama").await.unwrap();
         assert!(second.cached, "the trait object must reach the override");
         assert_eq!(second.vector, first.vector);
+    }
+
+    // ─── the OmniEmbed shape (`/v2/embed`) ──────────────────────────────────
+
+    /// One entry per request: the `input_type` and the texts it carried.
+    type OmniLog = Arc<Mutex<Vec<(String, Vec<String>)>>>;
+
+    #[derive(Clone)]
+    struct OmniFake {
+        seen: OmniLog,
+    }
+
+    async fn handle_omni(State(fake): State<OmniFake>, Json(body): Json<Value>) -> Json<Value> {
+        let input_type = body["input_type"].as_str().unwrap_or_default().to_string();
+        let texts: Vec<String> = body["inputs"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v["content"][0]["text"].as_str().map(ToString::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        fake.seen.lock().await.push((input_type, texts.clone()));
+        let vectors: Vec<Vec<f32>> = texts.iter().map(|t| vector_for(t)).collect();
+        Json(json!({"object": "list", "embeddings": {"float": vectors}}))
+    }
+
+    async fn omni_server() -> (String, OmniLog) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/v2/embed", post(handle_omni))
+            .with_state(OmniFake {
+                seen: Arc::clone(&seen),
+            });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}/v2/embed"), seen)
+    }
+
+    /// The wire shape is what an OmniEmbed-style model needs: `inputs` as
+    /// message content, the query/document instruction selected by
+    /// `input_type` in the checkpoint, the client's prefixes applied, and the
+    /// vectors read out of `embeddings.float`.
+    #[tokio::test]
+    async fn omniembed_sends_input_type_and_prefixes() {
+        let (url, seen) = omni_server().await;
+        let mut s = settings();
+        s.base_url = url;
+        s.format = EmbedFormat::OmniEmbed;
+        s.query_prefix = "query: ".into();
+        s.passage_prefix = "passage: ".into();
+        s.embed_concurrency = 1;
+        let embedder = EmbedderImpl::new(s).expect("embedder");
+
+        let q = embedder.embed_query("what is X").await.unwrap();
+        assert_eq!(q, vector_for("query: what is X"));
+
+        // Batched passages are not prefixed (`ING-9`), exactly like the OpenAI path.
+        let passages = vec!["first".to_string(), "second".to_string()];
+        let p = embedder.embed_passages(&passages).await.unwrap();
+        assert_eq!(p, vec![vector_for("first"), vector_for("second")]);
+
+        let seen = seen.lock().await;
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, "query", "queries are tagged `query`");
+        assert_eq!(seen[0].1, vec!["query: what is X".to_string()]);
+        assert_eq!(seen[1].0, "document", "passages are tagged `document`");
+        assert_eq!(seen[1].1, vec!["first".to_string(), "second".to_string()]);
     }
 }

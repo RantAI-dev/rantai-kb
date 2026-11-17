@@ -15,6 +15,12 @@
 
 ### Added
 
+- **`EmbedFormat::OmniEmbed` in `kb-inference`** — the vLLM `/v2/embed` wire shape
+  (`input_type` query/document, `inputs` as message content, `embeddings.float`), with a test that
+  asserts the request and the ordering. Selected with `KB_EMBEDDING_FORMAT=openai|omniembed`
+  (default `openai`; an unknown value is a startup error). Inert until a tier preset selects it —
+  the first half of `DEP-6` (one embedder on the GPU tiers, `docs/core/specs/dep-6.md`).
+
 - **`Nemotron-3.5-Embed-1B` measured: it reopens the one-embedder question (`EVAL-6`).**
   Same harness as `EVAL-4`: MIRACL-id text **0.826** (+0.030 [+0.012, +0.048] over
   `Qwen3-Embedding-0.6B`), and on ViDoRe HR text **0.611**, image **0.626**, one space

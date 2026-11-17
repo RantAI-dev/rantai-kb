@@ -71,7 +71,17 @@ class Embedder:
         self.path = os.path.join(cache_root, name.replace("/", "_") + ".jsonl")
         if os.path.exists(self.path):
             for line in open(self.path, encoding="utf-8"):
-                row = json.loads(line)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    # A cache written incrementally can lose its last line to a
+                    # crash or a full disk. Drop it: one vector is re-embedded,
+                    # the whole cache is not unusable.
+                    eprint(f"  {self.name}: skipping a truncated cache line")
+                    continue
                 self.mem[row["h"]] = row["d"]
         self.calls = 0
 
