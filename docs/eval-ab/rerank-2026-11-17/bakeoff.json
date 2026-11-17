@@ -1,0 +1,115 @@
+{
+  "candidates_file": "/tmp/opencode/candidates-miracl.jsonl",
+  "n_queries": 200,
+  "limit": null,
+  "baseline": {
+    "ndcg": 0.7947355499673839,
+    "mrr": 0.8180337301587302,
+    "hit1": 0.73,
+    "recall": 0.9388730158730159
+  },
+  "models": [
+    {
+      "model": "http://100.109.77.16:8122",
+      "backend": "llama",
+      "name": "qwen3-rerank-0.6b",
+      "n_queries": 200,
+      "cost_usd": 0.0,
+      "provider_tokens": 0,
+      "latency_ms": {
+        "mean": 4038.506185112933,
+        "p50": 4140.525412978604,
+        "p95": 4308.683566981927,
+        "max": 4406.24498995021
+      },
+      "metrics": {
+        "ndcg": 0.8497080701939809,
+        "mrr": 0.8603095238095239,
+        "hit1": 0.78,
+        "recall": 0.9668492063492063
+      },
+      "delta_vs_no_rerank": {
+        "ndcg": {
+          "delta": 0.054972520226596995,
+          "ci_low": 0.03140114777742029,
+          "ci_high": 0.07899462967369086
+        },
+        "mrr": {
+          "delta": 0.042275793650793654,
+          "ci_low": 0.010906746031746035,
+          "ci_high": 0.07537619047619046
+        },
+        "hit1": {
+          "delta": 0.05,
+          "ci_low": 0.005,
+          "ci_high": 0.1
+        },
+        "recall": {
+          "delta": 0.027976190476190474,
+          "ci_low": 0.006880952380952383,
+          "ci_high": 0.04975029761904761
+        }
+      }
+    },
+    {
+      "model": "http://100.109.77.16:8124",
+      "backend": "llama",
+      "name": "mxbai-rerank-base-v2",
+      "n_queries": 200,
+      "cost_usd": 0.0,
+      "provider_tokens": 0,
+      "latency_ms": {
+        "mean": 3124.1593221831135,
+        "p50": 3178.611151059158,
+        "p95": 3304.6968071721494,
+        "max": 3536.7980250157416
+      },
+      "metrics": {
+        "ndcg": 0.11402942617131018,
+        "mrr": 0.1587797619047619,
+        "hit1": 0.09,
+        "recall": 0.16796626984126983
+      },
+      "delta_vs_no_rerank": {
+        "ndcg": {
+          "delta": -0.6807061237960739,
+          "ci_low": -0.7214149668054579,
+          "ci_high": -0.639241553088951
+        },
+        "mrr": {
+          "delta": -0.6592539682539683,
+          "ci_low": -0.7141485615079365,
+          "ci_high": -0.6022963789682539
+        },
+        "hit1": {
+          "delta": -0.64,
+          "ci_low": -0.71,
+          "ci_high": -0.57
+        },
+        "recall": {
+          "delta": -0.770906746031746,
+          "ci_low": -0.8116970238095239,
+          "ci_high": -0.7273937500000001
+        }
+      }
+    }
+  ],
+  "estimates": [
+    {
+      "model": "http://100.109.77.16:8122",
+      "probe_cost_usd": 0.0,
+      "probe_chars": 27543,
+      "usd_per_1k_chars": 0.0,
+      "projected_full_run_usd": 0.0
+    },
+    {
+      "model": "http://100.109.77.16:8124",
+      "probe_cost_usd": 0.0,
+      "probe_chars": 27543,
+      "usd_per_1k_chars": 0.0,
+      "projected_full_run_usd": 0.0
+    }
+  ],
+  "total_cost_usd": 0.0,
+  "budget_usd": 0.5
+}

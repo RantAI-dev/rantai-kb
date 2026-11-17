@@ -95,6 +95,13 @@ The registry marks every prefix `TODO verify`. Do not quote either number.
 Pooled they are a tie (±0.002); split by language they are not, so "best reranker" is a
 language choice, not a ranking.
 
+**Reranker for the GPU tiers** (2026-11-17, MIRACL-id-200, dense top-50 pool, no-rerank
+0.795 nDCG@10): `Qwen3-Reranker-0.6B` **0.850** (+0.055), 1.19 GB, Apache-2.0 — the pick, replacing
+`bge-reranker-v2-m3` and the unmeasured `Qwen3-VL-Reranker-2B/8B`.
+`mxbai-rerank-base-v2` produced 0.114 at 3.2 s/query, which is a broken score read, not a bad
+model; `gte-multilingual-reranker-base` (0.61 GB) could not be served on this stack. Run:
+[`eval-ab/rerank-2026-11-17/`](eval-ab/rerank-2026-11-17/).
+
 **Page embedders: no data.** The page run's four endpoints were all down
 (`Connection refused`) and the tables are empty. The page side was measured separately — see
 [`plan-one-embedder.md`](plan-one-embedder.md).
