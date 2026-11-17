@@ -1,7 +1,8 @@
 # `DEP-6` — one embedder on the GPU tiers (`Nemotron-3.5-Embed-1B`)
 
 Decided by the product owner, 2026-11-17: **Desk, Studio and Station run one embedding model for
-text chunks and page images.** `lite` and `lite-en` keep `multilingual-e5-small` /
+text chunks and page images** — `Nemotron-3.5-Embed-1B` on Desk and Studio, and
+`Nemotron-3.5-Embed-8B` on Station (decided later the same day). `lite` and `lite-en` keep `multilingual-e5-small` /
 `all-MiniLM-L6-v2` — a 1B VL model on CPU is slower than the corpus is worth.
 
 This is the first architecture change to come out of [`EVAL-4`](../../eval-ab/one-embedder/README.md),
@@ -37,11 +38,31 @@ page reranker, and these runs have none. The claim is local-to-local: page retri
 | `kb-inference` text adapter | `EmbedFormat::OmniEmbed` — vLLM's `POST /v2/embed` (`input_type`, `inputs` as message content, `embeddings.float`). *Landed with this spec.* |
 | `kb-inference` page adapter | the same format for page images (`PageEmbedFormat::OmniEmbed`) — **not yet** |
 | `config` | `KB_EMBEDDING_FORMAT=openai|omniembed` (*landed*), `KB_PAGE_EMBEDDING_FORMAT=omniembed` (**not yet**) |
-| `tier.rs` | `desk`, `studio`, `station`: one model at 2048-d, text and pages; drop the TEI text embedder and the separate page embedder from the presets |
+| `tier.rs` | `desk`, `studio`: one model at **2048-d** (1B); `station`: the **8B at 4096-d**; text and pages per tier; drop the TEI text embedder and the separate page embedder from the presets |
 | `compose.yaml` | one `vllm-embed-<tier>` service instead of `tei-embed-*` + `vllm-page-embed-*`; one GPU reservation instead of two |
 | `setup.rs` | licence entry (`openmdw-1.1` → 🟡 opt-in), budget estimate for one 1B VL model, and the page arm becoming default-on for Desk |
 | docs | `README.md` model tables, `docs/kb-tiers.md` role table, `docs/benchmarks.md`, `CHANGELOG.md` |
 | migration | **a re-index**: text vectors go 1024-d → 2048-d, and the page vectors change model. `docs/rust-cutover.md` gets the note; `kb-server reindex` rebuilds from the S3 originals |
+
+## Why Station gets the 8B, and what it costs
+
+The 1B was distilled from the 8B, so the 8B is the quality ceiling of the family and the natural
+"station is the big box" choice. It is also the one part of this change nobody has measured yet:
+every number in this spec is the **1B**. What the 8B costs, concretely:
+
+- **A different index width.** 4096-d on Station, 2048-d on Studio and Desk. Moving a corpus
+  between tiers is a re-embed, not a vector copy — the same class of change as today's 0.6B→2B
+  page difference, and the reason `reindex` exists.
+- **~2× the Qdrant memory per chunk** on Station against Studio (4096 floats vs 2048).
+- **~8× the compute per embedding** against the 1B, on a card that also holds the chat LLM; the
+  ingest budget in `eval-ab/ingest-big-pdf` (943 pages under 200 s) has to be re-checked on the
+  8B, not assumed from the 1B.
+- **16.3 GB of bf16 weights** on disk and resident, against 2.4 GB for the 1B.
+
+The measurement that closes it is the same harness on the same pages (MIRACL-id text, ViDoRe HR
+text/image/one-space) with `Nemotron-3.5-Embed-8B`, which the GB10 can serve. If the 8B does not
+beat the 1B by more than the noise, Station should take the 1B too and keep Studio's index width —
+a cheaper box and a portable corpus for no measured loss.
 
 ## What must be measured before the preset flips
 
