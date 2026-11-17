@@ -458,7 +458,7 @@ impl Tier {
     /// `KB_EMBEDDERS`.
     #[must_use]
     pub fn presets(self) -> Vec<(&'static str, &'static str)> {
-        self.tables()
+        self.tables_with(Embedders::Two)
             .iter()
             .flat_map(|table| table.iter().copied())
             .collect()
@@ -467,7 +467,7 @@ impl Tier {
     /// The preset value for `variable`, or `None` when this tier fills nothing.
     #[must_use]
     pub fn preset(self, variable: &str) -> Option<&'static str> {
-        self.tables()
+        self.tables_with(Embedders::Two)
             .iter()
             .flat_map(|table| table.iter())
             .find(|(name, _)| *name == variable)

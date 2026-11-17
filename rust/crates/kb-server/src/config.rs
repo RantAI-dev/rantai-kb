@@ -965,7 +965,8 @@ impl Config {
                         kb_inference::PageEmbedFormat::OpenRouter => {
                             lookup("OPENROUTER_API_KEY").filter(|s| !s.trim().is_empty())
                         }
-                        kb_inference::PageEmbedFormat::VllmChat => None,
+                        kb_inference::PageEmbedFormat::VllmChat
+                        | kb_inference::PageEmbedFormat::OmniEmbed => None,
                     });
                 let vision_timeout = Duration::from_millis(
                     int_var(&lookup, "KB_PAGE_VISION_RERANK_TIMEOUT_MS", 8_000u64)?.max(100),
@@ -1090,7 +1091,10 @@ impl Config {
                             "KB_PAGE_EMBEDDING_CONCURRENCY",
                             match format {
                                 kb_inference::PageEmbedFormat::OpenRouter => 16u32,
-                                kb_inference::PageEmbedFormat::VllmChat => 4u32,
+                                // One local model serves text and pages, so it
+                                // is the shared GPU: keep the conservative 4.
+                                kb_inference::PageEmbedFormat::VllmChat
+                                | kb_inference::PageEmbedFormat::OmniEmbed => 4u32,
                             },
                         )?
                         .clamp(1, 32),
@@ -1917,6 +1921,12 @@ mod tests {
             page_format(&map),
             kb_inference::PageEmbedFormat::VllmChat,
             "the local vLLM shape is selected by name"
+        );
+        map.insert("KB_PAGE_EMBEDDING_FORMAT", "omniembed");
+        assert_eq!(
+            page_format(&map),
+            kb_inference::PageEmbedFormat::OmniEmbed,
+            "one model for text and pages is vLLM's /v2/embed"
         );
     }
 
