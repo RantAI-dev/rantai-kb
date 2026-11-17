@@ -401,12 +401,36 @@ impl Tier {
     /// `DESK-6`'s one-embedder stack is selected with `KB_EMBEDDERS=one`; the
     /// default is the two-embedder stack those tiers have shipped, because the
     /// one-embedder stack still owes four measurements (`docs/core/specs/dep-6.md`).
-    fn tables_with(self, embedders: Embedders) -> &'static [&'static [(&'static str, &'static str)]] {
+    fn tables_with(
+        self,
+        embedders: Embedders,
+    ) -> &'static [&'static [(&'static str, &'static str)]] {
         if embedders == Embedders::One {
             return match self {
-                Self::Desk => &[LOCAL, NEMOTRON_ONE, LOCAL_RERANK_QWEN3, XIAOMI_OCR_PAGES, GPU_DESCRIBE, DESK],
-                Self::Studio => &[LOCAL, NEMOTRON_ONE, LOCAL_RERANK_QWEN3, XIAOMI_OCR_PAGES, GPU_DESCRIBE, STUDIO],
-                Self::Station => &[LOCAL, NEMOTRON_ONE, LOCAL_RERANK_QWEN3, XIAOMI_OCR_PAGES, GPU_DESCRIBE, STATION],
+                Self::Desk => &[
+                    LOCAL,
+                    NEMOTRON_ONE,
+                    LOCAL_RERANK_QWEN3,
+                    XIAOMI_OCR_PAGES,
+                    GPU_DESCRIBE,
+                    DESK,
+                ],
+                Self::Studio => &[
+                    LOCAL,
+                    NEMOTRON_ONE,
+                    LOCAL_RERANK_QWEN3,
+                    XIAOMI_OCR_PAGES,
+                    GPU_DESCRIBE,
+                    STUDIO,
+                ],
+                Self::Station => &[
+                    LOCAL,
+                    NEMOTRON_ONE,
+                    LOCAL_RERANK_QWEN3,
+                    XIAOMI_OCR_PAGES,
+                    GPU_DESCRIBE,
+                    STATION,
+                ],
                 other => other.tables_with(Embedders::Two),
             };
         }
