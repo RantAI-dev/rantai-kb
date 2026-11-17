@@ -1,8 +1,7 @@
 # `DEP-6` — one embedder on the GPU tiers (`Nemotron-3.5-Embed-1B`)
 
 Decided by the product owner, 2026-11-17: **Desk, Studio and Station run one embedding model for
-text chunks and page images** — `Nemotron-3.5-Embed-1B` on Desk and Studio, and
-`Nemotron-3.5-Embed-8B` on Station (decided later the same day). `lite` and `lite-en` keep `multilingual-e5-small` /
+text chunks and page images — `Nemotron-3.5-Embed-1B`, the same one on all three tiers.** `lite` and `lite-en` keep `multilingual-e5-small` /
 `all-MiniLM-L6-v2` — a 1B VL model on CPU is slower than the corpus is worth.
 
 This is the first architecture change to come out of [`EVAL-4`](../../eval-ab/one-embedder/README.md),
@@ -38,39 +37,44 @@ page reranker, and these runs have none. The claim is local-to-local: page retri
 | `kb-inference` text adapter | `EmbedFormat::OmniEmbed` — vLLM's `POST /v2/embed` (`input_type`, `inputs` as message content, `embeddings.float`). *Landed with this spec.* |
 | `kb-inference` page adapter | the same format for page images (`PageEmbedFormat::OmniEmbed`) — **not yet** |
 | `config` | `KB_EMBEDDING_FORMAT=openai|omniembed` (*landed*), `KB_PAGE_EMBEDDING_FORMAT=omniembed` (**not yet**) |
-| `tier.rs` | `desk`, `studio`: one model at **2048-d** (1B); `station`: the **8B at 4096-d**; text and pages per tier; drop the TEI text embedder and the separate page embedder from the presets |
+| `tier.rs` | `desk`, `studio`, `station`: the 1B at **2048-d**, text and pages; drop the TEI text embedder and the separate page embedder from the presets |
 | `compose.yaml` | one `vllm-embed-<tier>` service instead of `tei-embed-*` + `vllm-page-embed-*`; one GPU reservation instead of two |
 | `setup.rs` | licence entry (`openmdw-1.1` → 🟡 opt-in), budget estimate for one 1B VL model, and the page arm becoming default-on for Desk |
 | docs | `README.md` model tables, `docs/kb-tiers.md` role table, `docs/benchmarks.md`, `CHANGELOG.md` |
 | migration | **a re-index**: text vectors go 1024-d → 2048-d, and the page vectors change model. `docs/rust-cutover.md` gets the note; `kb-server reindex` rebuilds from the S3 originals |
 
-## Why Station gets the 8B, and what it costs
+## The 8B: measured, and not the default
 
-The 1B was distilled from the 8B, so the 8B is the quality ceiling of the family and the natural
-"station is the big box" choice. It is also the one part of this change nobody has measured yet:
-every number in this spec is the **1B**. What the 8B costs, concretely:
+Station was going to take `Nemotron-3.5-Embed-8B` (the teacher the 1B was distilled from). It was
+measured on the same harness, and it is **better on pages** — one space 0.645 vs 0.621
+(+0.024 [+0.011, +0.036]), image 0.642 vs 0.626 (+0.017 [+0.002, +0.031]), text-on-pages 0.639 vs
+0.611 (+0.028 [+0.017, +0.040]), and a tie on MIRACL-id text (+0.005 [−0.008, +0.019]). Real, but
+small, and it does not fit a 48 GB Station with the rest of the stack resident:
 
-- **A different index width.** 4096-d on Station, 2048-d on Studio and Desk. Moving a corpus
-  between tiers is a re-embed, not a vector copy — the same class of change as today's 0.6B→2B
-  page difference, and the reason `reindex` exists.
+| Station, everything resident | 1B | 8B (bf16) |
+|---|---:|---:|
+| embedder | 2.4 GB | 16.3 GB |
+| reranker (Qwen3-VL-Reranker-8B, FP8) | ~8.2 | ~8.2 |
+| OCR (Xiaomi FP8 + 2 GB KV) | ~3.0 | ~3.0 |
+| vision (Qwen3-VL-2B Q4) | ~1.5 | ~1.5 |
+| the app's chat LLM | ~26 | ~26 |
+| **total** | **~41 GB** | **~55 GB** |
+
+The 8B only fits by quantising the embedder to FP8 (~8.5 GB, ~47 GB total) — an unmeasured
+quality change on the model whose 0.024 was the reason to consider it. So the default is the 1B on
+all three tiers, and the 8B stays the documented option for an 80 GB card, or for a Station
+deployment whose pages are the measured bottleneck, or once the 8B in FP8 is measured.
+
+What the 8B would cost beyond VRAM:
+
+- **A different index width.** 4096-d on Station against 2048-d on Studio and Desk: a corpus
+  would no longer move between tiers without a re-embed.
 - **~2× the Qdrant memory per chunk** on Station against Studio (4096 floats vs 2048).
-- **~8× the compute per embedding** against the 1B, on a card that also holds the chat LLM; the
-  ingest budget in `eval-ab/ingest-big-pdf` (943 pages under 200 s) has to be re-checked on the
-  8B, not assumed from the 1B.
-- **16.3 GB of bf16 weights** on disk and resident, against 2.4 GB for the 1B.
+- **~8× the compute per embedding** against the 1B, on a card that also holds the chat LLM.
+- **16.3 GB of bf16 weights** resident, against 2.4 GB.
 
-**Measured 2026-11-17 (GB10, same harness, same pages): the 8B earns Station on pages.**
-
-| Arm | 8B | 1B | Δ [95% CI] |
-|---|---:|---:|---|
-| MIRACL-id text | 0.831 | 0.826 | +0.005 [−0.008, +0.019] — a tie |
-| ViDoRe HR text | 0.639 | 0.611 | **+0.028** [+0.017, +0.040] |
-| ViDoRe HR image | 0.642 | 0.626 | **+0.017** [+0.002, +0.031] |
-| ViDoRe HR one space | **0.645** | 0.621 | **+0.024** [+0.011, +0.036] |
-
-Every page delta excludes zero, so the 4096-d index and the 16 GB buy a real +0.017 to +0.028 on
-pages; on text they buy nothing. The trade is deliberate: Station is the box where those pages
-matter, and it is the one tier whose corpus does not move to a smaller box.
+The same arithmetic applies to every tier it might touch: one width (2048-d) across Desk, Studio
+and Station is what makes a corpus portable and the image build identical.
 
 ## What must be measured before the preset flips
 
