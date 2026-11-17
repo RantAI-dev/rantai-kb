@@ -92,7 +92,7 @@ first measured this way and then confirmed live.
 | # | Step | Check |
 |---|---|---|
 | 0 | Start two pooling servers on the box: `Qwen/Qwen3-VL-Embedding-2B` and `Qwen/Qwen3-Embedding-0.6B` under vLLM, both `--runner pooling`, on separate ports | `GET /v1/models` answers for both; a 2048-d and 1024-d vector come back |
-| 1 | Add a local-endpoint mode to `page_image_arm.py` (vLLM chat shape, `--base-url`, no OpenRouter key) and a text-corpus embedder that reuses the same cache | One page and one chunk embed and land in the cache |
+| 1 | **Done 2026-11-17:** `rust/crates/kb-eval/scripts/embed_ab.py` — two models over the same items, both request shapes (OpenAI `input` and vLLM chat `messages`), one vector space option, disk cache, TREC out, paired CI. `--self-test` covers both shapes, cache reuse, an image payload, scoring and the CI. Dry run over the real ViDoRe HR set: 318 queries, 1,110 pages with text and image, `one-space` merge, `summary.json` | `python3 …/embed_ab.py --self-test` passes; the dry run wrote 1,110 page vectors and 3 runs |
 | 2 | Reproduce the committed baselines on this harness: 0.6B text on MIRACL-id-200 (0.830 with bge) and pages-only on ViDoRe HR (0.575 image-only, from the offline run) | Within 0.01 of the committed number; if not, stop and fix the harness |
 | 3 | **A — text quality.** MIRACL-id-200 and hotpot-200-test, text-only, 0.6B vs 2B, rerank off and bge on | Paired Δ and CI per set |
 | 4 | **B — unified space.** ViDoRe HR with text chunks *and* pages both embedded by the 2B into one index; query as text | Page nDCG@10 vs 0.645 text-only and 0.705 two-space |
@@ -101,6 +101,36 @@ first measured this way and then confirmed live.
 | 7 | Record: `docs/eval-ab/one-embedder/` with runs, numbers and the decision; update `docs/kb-tiers.md` §"The one-model-per-role rule" and the README model table **only** if the rule fires | The decided default is the one the preset ships |
 
 Every step is a separate commit; step 2 must pass before step 3 is believed.
+
+### Running it (once the GPU box is reachable)
+
+```sh
+# on the ThinkStation: the two embedders, one port each
+vllm serve Qwen/Qwen3-Embedding-0.6B --runner pooling --port 8201 --max-model-len 8192
+vllm serve Qwen/Qwen3-VL-Embedding-2B --runner pooling --port 8202 --max-model-len 8192 \
+     --gpu-memory-utilization 0.30
+
+# A — text quality, the engine's own chunks (MIRACL-id-200)
+python3 rust/crates/kb-eval/scripts/embed_ab.py \
+  --dataset ~/kbdata/bakeoff/datasets/miracl-id-200 --chunks ~/rkdump/chunks.jsonl --mode text \
+  --model qwen06b=http://127.0.0.1:8201/v1/embeddings#openai \
+  --model qwenvl2b=http://127.0.0.1:8202/v1/embeddings#chat \
+  --out docs/eval-ab/one-embedder/miracl --cache ~/.cache/kb-eval/embed-ab
+
+# A — the same on English (hotpot-200-test), and on ViDoRe HR page text
+# B — one space: every page's text and image with the 2B
+python3 rust/crates/kb-eval/scripts/embed_ab.py \
+  --dataset ~/kbdata/bakeoff/datasets/vidore3-hr-en \
+  --pages ~/kbdata/bakeoff/datasets/vidore3-hr-en-pages/pages.jsonl --mode both \
+  --model qwenvl2b=http://127.0.0.1:8202/v1/embeddings#chat \
+  --out docs/eval-ab/one-embedder/vidore-hr --cache ~/.cache/kb-eval/embed-ab
+```
+
+Two approximations to state in the write-up, both in the *optimistic* direction for the
+collapse: (1) experiment B ranks **pages** by their best vector, while the production text
+index holds **chunks** — so its text arm is coarser than the shipped 0.645; (2) the offline
+run has no BM25 or neighbour arm. Both are corrected by step 6, which reproduces the result in
+the engine.
 
 ## Validation
 
