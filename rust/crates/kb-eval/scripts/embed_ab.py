@@ -420,6 +420,9 @@ def main():
     ap.add_argument("--batch", type=int, default=32)
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--api-key", default=os.environ.get("KB_EMBEDDING_API_KEY", ""))
+    ap.add_argument("--doc-chars", type=int, default=0,
+                    help="cap text sent as a document (0 = no cap); page vectors in "
+                         "production carry a chunk's worth of text, not a whole page")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
 
@@ -442,7 +445,8 @@ def main():
 
     if a.pages:
         pages = page_items(a.dataset, a.pages)
-        text_items = [(pid, t.encode()) for pid, t, _ in pages if t]
+        cap = a.doc_chars
+        text_items = [(pid, (t[:cap] if cap else t).encode()) for pid, t, _ in pages if t]
         image_items = [(pid, b"img\0" + img) for pid, _, img in pages if img]
         eprint(f"pages: {len(pages)} ({len(text_items)} with text, {len(image_items)} with image)")
     else:
@@ -465,7 +469,8 @@ def main():
         if a.mode in ("image", "both"):
             vecs["image"] = emb.embed(image_items, "image")
         if a.mode == "combined":
-            both_items = [(pid, b"both\0" + t.encode() + b"\0" + img)
+            cap = a.doc_chars
+            both_items = [(pid, b"both\0" + (t[:cap] if cap else t).encode() + b"\0" + img)
                           for pid, t, img in pages if t and img]
             vecs["image+text"] = emb.embed(both_items, "image+text")
         per_label = {label: cosine_map(queries, qvec, v) for label, v in vecs.items()}
