@@ -208,6 +208,12 @@ Postgres holds documents, jobs, KBs, keys and the entity graph.
 | `station` | as studio with the 8B Qwen3-VL models in FP8 (4096-d page images) | NVIDIA 48 GB | not measured; `docker compose config` only |
 | `cloud` | none (OpenRouter: `voyage-multimodal-3.5` embeddings, `voyageai/rerank-2.5`); page-image arm on | any machine + `OPENROUTER_API_KEY` | ViDoRe HR page nDCG@10 **0.711** ([vidore3-hr-en-image](../../docs/eval-ab/vidore3-hr-en-image/)), ViDoRe CS **0.828** ([vidore3-cs-en-night](../../docs/eval-ab/vidore3-cs-en-night/)); **paid** per page and query |
 
+**One embedder or two (`KB_EMBEDDERS`, 0.4.0).** Desk, Studio and Station can run
+`Nemotron-3.5-Embed-1B` for text *and* page images in one 2048-d space, with `Qwen3-Reranker-0.6B`,
+instead of the text embedder plus a separate VL embedder. It is opt-in because it changes the index
+width, so adopting it means a re-index (`docs/rust-cutover.md` §17). The numbers and the compose
+services it needs are in [`docs/core/specs/dep-6.md`](../../docs/core/specs/dep-6.md).
+
 The measured rows come from
 [`docs/eval-ab/lite-2core`](../../docs/eval-ab/lite-2core/) (2 pinned cores; the
 MIRACL run capped the embedder at one thread, the HR runs did not).
