@@ -52,21 +52,32 @@ jobs:
         run: cargo test --manifest-path rust/Cargo.toml --workspace
 
   rust-docker:
-    name: Rust Docker build (multi-arch)
-    runs-on: ubuntu-latest
+    name: Rust Docker build (linux/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Native per-architecture builds, the same way the release does it.
+          # Building arm64 under QEMU on an x86 runner took 4-6 hours here.
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - name: Build multi-arch image (no push)
+      - name: Build linux/${{ matrix.arch }} (no push)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: rust/Dockerfile
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/${{ matrix.arch }}
           push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Same scope as the release image job, so a release starts warm.
+          cache-from: type=gha,scope=image-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.arch }}
 
   rust-smoke:
     name: Rust live end-to-end smoke test
