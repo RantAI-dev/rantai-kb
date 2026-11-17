@@ -3223,18 +3223,22 @@ mod tests {
         tier: Tier,
         lookup: &dyn Fn(&str) -> Option<String>,
     ) -> BTreeMap<String, String> {
+        let hardware = FakeRunner::linux(8, 11.7).hardware();
+        written_with(&hardware, args, tier, lookup)
+    }
+
+    /// `written` against a given machine, for tiers that need an accelerator.
+    fn written_with(
+        hardware: &Hardware,
+        args: &SetupArgs,
+        tier: Tier,
+        lookup: &dyn Fn(&str) -> Option<String>,
+    ) -> BTreeMap<String, String> {
         let dir = TempDir::new("roles");
         let env_path = dir.path.join(".env");
         let mut output = Vec::new();
-        plan_and_write(
-            args,
-            &FakeRunner::linux(8, 11.7).hardware(),
-            tier,
-            lookup,
-            &env_path,
-            &mut output,
-        )
-        .unwrap_or_else(|err| panic!("plan: {err}\n{}", String::from_utf8_lossy(&output)));
+        plan_and_write(args, hardware, tier, lookup, &env_path, &mut output)
+            .unwrap_or_else(|err| panic!("plan: {err}\n{}", String::from_utf8_lossy(&output)));
         parse_env(&std::fs::read_to_string(&env_path).expect("written"))
     }
 
@@ -3367,12 +3371,12 @@ mod tests {
     /// compose service names the tier would reach inside the stack.
     #[test]
     fn embedders_one_writes_the_endpoints_and_the_one_profile() {
-        let parsed = SetupArgs::parse(&args_of(&["--embedders", "one", "--force"])).expect("parse");
+        let parsed = SetupArgs::parse(&args_of(&["--embedders", "one"])).expect("parse");
         assert_eq!(
             compose_profiles(&parsed, Tier::Studio),
             "studio,studio-ocr,studio-vision,studio-one"
         );
-        let env = written(&parsed, Tier::Studio, &|_: &str| None);
+        let env = written_with(&nvidia_box(24.0), &parsed, Tier::Studio, &|_: &str| None);
         assert_eq!(env.get("KB_EMBEDDERS").map(String::as_str), Some("one"));
         assert_eq!(
             env.get("KB_EMBEDDING_BASE_URL").map(String::as_str),

@@ -1095,7 +1095,9 @@ mod tests {
                 "--profile",
                 "lite-ocr",
                 "--profile",
-                "lite-vision"
+                "lite-vision",
+                "--profile",
+                "lite-two"
             ]
         );
     }
