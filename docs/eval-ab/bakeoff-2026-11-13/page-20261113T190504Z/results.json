@@ -1,0 +1,120 @@
+{
+  "role": "page",
+  "datasets": [
+    "vidore3-cs-en-pages",
+    "vidore3-hr-en-pages"
+  ],
+  "models": [
+    {
+      "model": {
+        "key": "qwen3-vl-embed-2b",
+        "role": "page",
+        "base_url": "http://100.109.77.16:8160",
+        "served_name": "qwen3-vl-embed-2b",
+        "query_prefix": "",
+        "doc_prefix": "",
+        "ocr_prompt": "",
+        "licence": "apache-2.0",
+        "baseline": true,
+        "hf_repo": "Qwen/Qwen3-VL-Embedding-2B",
+        "notes": "TODO verify template. The page embedder the page rerankers are measured against; the pool of the rerank role is its top-20 in image mode.",
+        "max_input_chars": 0,
+        "kind": "embed",
+        "page_input": "image+text",
+        "query_template": "query: {query}",
+        "doc_template": "passage: {text}"
+      },
+      "status": "FAILED",
+      "error": "endpoint DOWN: <urlopen error [Errno 111] Connection refused>",
+      "datasets": []
+    },
+    {
+      "model": {
+        "key": "nemotron-embed-vl-1b-v2",
+        "role": "page",
+        "base_url": "http://100.109.77.16:8161",
+        "served_name": "nemotron-embed-vl-1b-v2",
+        "query_prefix": "",
+        "doc_prefix": "",
+        "ocr_prompt": "",
+        "licence": "other (NVIDIA Open Model License)",
+        "baseline": false,
+        "hf_repo": "nvidia/llama-nemotron-embed-vl-1b-v2",
+        "notes": "TODO verify template. NVIDIA's page embedder; its card gives a query prefix for the text side.",
+        "max_input_chars": 0,
+        "kind": "embed",
+        "page_input": "image",
+        "query_template": "query: {query}",
+        "doc_template": "passage: {text}"
+      },
+      "status": "FAILED",
+      "error": "endpoint DOWN: <urlopen error [Errno 111] Connection refused>",
+      "datasets": []
+    },
+    {
+      "model": {
+        "key": "nemotron-rerank-vl-1b-v2",
+        "role": "page",
+        "base_url": "http://100.109.77.16:8162",
+        "served_name": "nemotron-rerank-vl-1b-v2",
+        "query_prefix": "",
+        "doc_prefix": "",
+        "ocr_prompt": "",
+        "licence": "other (NVIDIA Open Model License)",
+        "baseline": false,
+        "hf_repo": "nvidia/llama-nemotron-rerank-vl-1b-v2",
+        "notes": "TODO verify template and the rerank request shape. The endpoint does not document its request shape yet: the client sends /v1/rerank with the pages as message content lists, and the shape is one function (page_rerank_request) away from being wrong.",
+        "max_input_chars": 0,
+        "kind": "rerank",
+        "page_input": "image",
+        "query_template": "query: {query}",
+        "doc_template": "passage: {text}"
+      },
+      "status": "FAILED",
+      "error": "endpoint DOWN: <urlopen error [Errno 111] Connection refused>",
+      "datasets": []
+    },
+    {
+      "model": {
+        "key": "qwen3-vl-rerank-2b",
+        "role": "page",
+        "base_url": "http://100.109.77.16:8163",
+        "served_name": "qwen3-vl-rerank-2b",
+        "query_prefix": "",
+        "doc_prefix": "",
+        "ocr_prompt": "",
+        "licence": "apache-2.0",
+        "baseline": false,
+        "hf_repo": "Qwen/Qwen3-VL-Reranker-2B",
+        "notes": "TODO verify template and the rerank request shape. The endpoint does not document its request shape yet: the client sends /v1/rerank with the pages as message content lists, and the shape is one function (page_rerank_request) away from being wrong.",
+        "max_input_chars": 0,
+        "kind": "rerank",
+        "page_input": "image",
+        "query_template": "query: {query}",
+        "doc_template": "passage: {text}"
+      },
+      "status": "FAILED",
+      "error": "endpoint DOWN: <urlopen error [Errno 111] Connection refused>",
+      "datasets": []
+    }
+  ],
+  "baseline": "qwen3-vl-embed-2b",
+  "baseline_ran": false,
+  "run": {
+    "role": "page",
+    "models": [
+      "qwen3-vl-embed-2b",
+      "nemotron-embed-vl-1b-v2",
+      "nemotron-rerank-vl-1b-v2",
+      "qwen3-vl-rerank-2b"
+    ],
+    "timestamp": "20261113T190504Z",
+    "limit": 10,
+    "corpus_limit": null,
+    "concurrency": 4,
+    "cache": "/home/shiro/kbdata/bakeoff/cache",
+    "registry": "/home/shiro/.t3/worktrees/rantai-kb/t3-b4a0303f/rust/crates/kb-eval/scripts/bakeoff_models.toml",
+    "bootstrap": 10000,
+    "seed": 42
+  }
+}

@@ -59,8 +59,13 @@ class Embedder:
     """One model at one URL, with a JSONL cache keyed by model + payload hash."""
 
     # Constructed by from_spec() so the CLI stays one flag per model.
-    def __init__(self, name, url, kind, cache_root, workers, batch, api_key=""):
+    def __init__(self, name, url, kind, cache_root, workers, batch, api_key="", served="",
+                 qprefix="", dprefix=""):
         self.name, self.url, self.kind = name, url, kind
+        self.served = served or name
+        # The model cards' instructions are client-side: the servers add none.
+        self.qprefix = qprefix.replace("\\n", "\n")
+        self.dprefix = dprefix.replace("\\n", "\n")
         self.workers, self.batch, self.api_key = workers, batch, api_key
         self.mem = {}
         self.path = os.path.join(cache_root, name.replace("/", "_") + ".jsonl")
@@ -72,22 +77,35 @@ class Embedder:
 
     @classmethod
     def from_spec(cls, spec, **kw):
-        """`name=url#kind`, e.g. `qwenvl2b=http://host:8000/v1/embeddings#chat`."""
-        left, _, kind = spec.partition("#")
+        """`name=url#kind[=>served_name]`.
+
+        The label is what the cache and the run files call the model; `=>served`
+        is the name the endpoint answers to, when they differ
+        (`qwen3vl=http://host:8202/v1/embeddings#chat=>qwen3-vl-embed-2b`).
+        """
+        left, _, tail = spec.partition("#")
+        kind, _, rest = tail.partition("=>")
+        served, _, prefixes = rest.partition("|")
+        qprefix, _, dprefix = prefixes.partition("|")
         name, _, url = left.partition("=")
         if not (name and url):
             raise SystemExit(f"--model wants name=url#kind, got {spec!r}")
         if kind not in ("openai", "chat"):
             raise SystemExit(f"--model {name}: kind must be openai or chat, got {kind!r}")
-        return cls(name, url, kind, **kw)
+        return cls(name, url, kind, served=served or name,
+                   qprefix=qprefix, dprefix=dprefix, **kw)
 
     def h(self, payload):
         return hashlib.sha256(self.name.encode() + b"\0" + payload).hexdigest()
 
-    def _body(self, payloads):
+    def _pref(self, role):
+        return self.qprefix if role == "query" else self.dprefix
+
+    def _body(self, payloads, role):
+        prefix = self._pref(role)
         if self.kind == "openai":
-            return [{"model": self.name,
-                     "input": [p.decode("utf-8", "replace") for p in payloads]}]
+            return [{"model": self.served,
+                     "input": [prefix + p.decode("utf-8", "replace") for p in payloads]}]
         # chat: one item per request, the shape vLLM answers for a page.
         out = []
         for p in payloads:
@@ -95,8 +113,8 @@ class Embedder:
                 content = [{"type": "image_url", "image_url": {"url":
                             "data:image/jpeg;base64," + base64.b64encode(p.split(b"\0", 1)[1]).decode()}}]
             else:
-                content = [{"type": "text", "text": p.decode("utf-8", "replace")}]
-            out.append({"model": self.name, "messages": [{"role": "user", "content": content}]})
+                content = [{"type": "text", "text": prefix + p.decode("utf-8", "replace")}]
+            out.append({"model": self.served, "messages": [{"role": "user", "content": content}]})
         return out
 
     def _post(self, body):
@@ -124,7 +142,7 @@ class Embedder:
                 raise
         raise SystemExit(f"{self.name}: gave up")
 
-    def embed(self, items, label):
+    def embed(self, items, label, role="doc"):
         """items: [(key, payload_bytes)] -> {key: vector}"""
         out, todo = {}, []
         for k, payload in items:
@@ -138,7 +156,7 @@ class Embedder:
             return out
 
         def work(chunk):
-            bodies = self._body([p for _, p, _ in chunk])
+            bodies = self._body([p for _, p, _ in chunk], role)
             if self.kind == "openai":
                 vecs = self._post(bodies[0])
             else:
@@ -400,7 +418,7 @@ def main():
         emb = Embedder.from_spec(spec, cache_root=a.cache, workers=a.workers,
                                  batch=a.batch, api_key=a.api_key)
         eprint(f"model {emb.name} ({emb.kind}) at {emb.url}")
-        qvec = emb.embed([(q["_id"], q["text"].encode()) for q in queries], "query")
+        qvec = emb.embed([(q["_id"], q["text"].encode()) for q in queries], "query", role="query")
         vecs = {}
         if a.mode in ("text", "both"):
             vecs["text"] = emb.embed(text_items, "text")
