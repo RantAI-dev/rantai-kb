@@ -116,8 +116,16 @@ probe and the pre-registered rule: [`eval-ab/one-embedder/`](eval-ab/one-embedde
 The text arm is at chance on whole pages because the input is long: cut to 300–2,400
 characters it scores 0.44–0.60, at full page length 0.208. The one space is worse than its own
 image arm, so the text vectors pollute rather than supplement. Two-space stays, fusion weight
-and all. The local page embedder at 0.277 image-only (against 0.575 for the cloud model on the
-same pages) is `EVAL-5`.
+and all, **for the shipped Qwen stack**.
+
+**Follow-up: `Nemotron-3.5-Embed-1B` (multimodal by design) changes the picture.** Same pages,
+same 318 queries: text **0.611**, image **0.626**, one space **0.621**, image+text in one vector
+**0.625** — every pair within ±0.015, so the modalities agree and mixing costs nothing. That is
+0.008 under a *cross-validated* two-space fusion (0.629) with nothing to tune, it beats the cloud
+page arm on image-only pages (0.626 vs voyage's 0.575), and on MIRACL-id text it is the best
+measure of the three (0.826 vs `Nemotron-3-Embed-1B` 0.823 and `Qwen3-Embedding-0.6B` 0.796,
++0.030 [+0.012, +0.048]). The shipped 0.705 includes a page reranker that these runs do not, so
+the remaining gap is the reranker, not the embedder — `EVAL-6`.
 
 ## Ingest
 

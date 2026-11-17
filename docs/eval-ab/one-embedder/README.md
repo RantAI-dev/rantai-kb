@@ -1,6 +1,6 @@
 # One embedder or two? (EVAL-4, measured 2026-11-17)
 
-**Answer: two. Do not collapse.** The pre-registered rule in
+**Answer: two — for the models that ship today.** The pre-registered rule in
 [`../../plan-one-embedder.md`](../../plan-one-embedder.md) was conjunctive and fails on every
 clause, most of all on the page arm:
 
@@ -9,6 +9,12 @@ clause, most of all on the page arm:
 | Text does not lose | within −0.015 of `Qwen3-Embedding-0.6B` | **−0.143** [−0.179, −0.108] on MIRACL-id chunks | ✗ |
 | Pages do not lose | ViDoRe HR page nDCG@10 ≥ **0.695** | **0.221** one space; **0.277** image-only | ✗ |
 | Ingest holds | ≥ 60% of the 0.6B's chunks/s | not run — the page clause already failed | — |
+
+**Read the [follow-up](#follow-up-same-day-nemotron-35-embed-1b-reopens-the-design-question) too.**
+The failure is `Qwen3-VL-Embedding-2B`, not the one-space design: `Nemotron-3.5-Embed-1B`, measured
+the same day, does text (0.611) and images (0.626) in one space with no tuning, and beats the
+cloud page arm on images. The decision above is still right for what ships; the reason is narrower
+than it first looked.
 
 ## Method
 
@@ -91,6 +97,63 @@ should keep the unit small and measure, not assume.
   `qwen3-embed-0.6b` in both November runs. It needs the prefix verified, the NVIDIA Open Model
   License accepted and a 2048-d index (a re-index), so it is its own piece of work.
 
+## Follow-up, same day: `Nemotron-3.5-Embed-1B` reopens the design question
+
+The verdict above is about the **models we ship**. The day it was written, NVIDIA published
+`Nemotron-3.5-Embed-1B-BF16` — multimodal *by design* (text and image in one space), 32k
+context, 2048-d, 34 languages — and it is not the same animal as `Qwen3-VL-Embedding-2B`:
+
+| Arm | `Nemotron-3.5-Embed-1B` | `Qwen3-VL-Embedding-2B` |
+|---|---:|---:|
+| ViDoRe HR, text (whole pages) | **0.611** | 0.058 |
+| ViDoRe HR, image | **0.626** | 0.277 |
+| ViDoRe HR, one space | **0.621** | 0.221 |
+| ViDoRe HR, image+text in one vector | **0.625** | not measured |
+
+Every delta among its own arms is inside ±0.015 (`one-space − image` = −0.004 [−0.019, +0.011];
+`image+text − image` = −0.001 [−0.011, +0.009]). That is a coherent embedding space: text and
+image agree, and mixing them costs nothing. On the same pages, `Qwen3-VL`'s text vectors
+*dragged the page arm down* by 0.056.
+
+Context for those numbers, all page nDCG@10 on the same 318 queries:
+
+| Stack | |
+|---|---:|
+| two spaces, tuned fusion, no reranker (offline, voyage pages) | 0.629 |
+| **Nemotron-3.5, one space, no reranker** | **0.621** |
+| two spaces, equal-weight fusion, no reranker | 0.601 |
+| voyage image-only (offline) | 0.575 |
+| shipped cloud: two spaces **with** page reranker | 0.705 |
+
+So the local page model now **beats the cloud one on image-only pages** (0.626 vs 0.575), and a
+single space with nothing to tune lands 0.008 under a *cross-validated* two-space fusion. The
+remaining 0.08 to the shipped 0.705 is the page reranker, which the shipped number has and these
+runs do not.
+
+Text, on MIRACL-id chunks, same harness and qrels:
+
+| Model | nDCG@10 | Δ vs `Qwen3-Embedding-0.6B` |
+|---|---:|---|
+| `Nemotron-3.5-Embed-1B` | **0.826** | **+0.030** [+0.012, +0.048] |
+| `Nemotron-3-Embed-1B` | 0.823 | +0.027 [+0.008, +0.046] |
+| `Qwen3-Embedding-0.6B` (preset) | 0.796 | — |
+| `Qwen3-VL-Embedding-2B` | 0.653 | −0.143 [−0.179, −0.108] |
+
+That also corrects two things this README said earlier, and they matter:
+
+1. **"The VL model is bad at long text" is model-specific, not a property of VL embedders.**
+   `Qwen3-VL` collapses on whole pages (0.058); `Nemotron-3.5` reads them fine (0.611).
+2. **`EVAL-5`'s premise was wrong.** The local page embedder is not weak — *Qwen3-VL-2B* is.
+   `Nemotron-3.5` at 0.626 image-only beats voyage's 0.575 on the same pages and the same
+   rendering.
+
+**Where that leaves the decision.** Two embedders remain correct for what ships today, because
+what ships is Qwen3-VL. But the design objection is gone: a single space is viable, and it is
+viable *without* a fusion weight. Adopting `Nemotron-3.5-Embed-1B` is `EVAL-6`, and it needs
+three things this measurement does not provide — the page reranker run on top of the one-space
+list (to compare like-for-like with 0.705), ingest throughput at 32k context, and the licence
+(`openmdw-1.1`, an opt-in in `setup`, not Apache-2.0) plus a 2048-d re-index.
+
 ## What would change the answer
 
 1. A local page embedder that reaches ≥ 0.55 image-only on ViDoRe HR — i.e. near the cloud
@@ -122,6 +185,8 @@ should keep the unit small and measure, not assume.
 | `vidore-hr-pages/` | 318 queries: the 2B's text, image and one-space per-query metrics |
 | `vidore-hr-06b-text/` | 318 queries: the 0.6B's text per-query metrics on the same pages |
 | `probe_text_length.py`, `probe.json` | the length probe and its output |
+| `miracl-nemo35/`, `miracl-nemotron3/` | the two nemotron text embedders on MIRACL-id chunks |
+| `vidore-hr-nemo35/`, `vidore-hr-nemo35-combined/` | Nemotron-3.5 on ViDoRe HR: text, image, one space, and image+text in one vector |
 
 The TREC runs (~9 MB of top-100 lists) are deliberately not in git; `embed_ab.py` regenerates
 them from the cache with the command in the plan.
