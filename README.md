@@ -13,338 +13,166 @@ Upload a PDF, spreadsheet, Word file or code file; get back grounded, cited chun
 
 ---
 
-Extracted from the RantAI Agents platform, where it has been running in production
-across several deployments — a campus knowledge base, a 31-book reference library,
-an on-prem GPU install. This repository is the same engine with its own database,
-its own API and no application attached, so any product can use it.
-
-The service is written in Rust. The Bun/TypeScript service that shipped as `v0.1.0` was
-removed in `v0.2.0`; its release remains at tag [`v0.1.0`](https://github.com/RantAI-dev/rantai-kb/tree/v0.1.0).
-Operators moving an old deployment should read [`docs/rust-cutover.md`](docs/rust-cutover.md).
-
-## Why a service
-
-The retrieval engine only ever needed four things: somewhere to put bytes, somewhere
-to put vectors, somewhere to put metadata, and an embedding endpoint. Everything
-else — accounts, billing, chat UI — belonged to the application around it. Splitting
-along that line means one KB can serve a Next.js app, a Rust installer and a
-partner's own frontend without any of them sharing a codebase.
+Extracted from the RantAI Agents platform, where it has been running in production across
+several deployments — a campus knowledge base, a 31-book reference library, an on-prem GPU
+install. This is the same engine with its own database, its own API and no application
+attached, so any product can use it: one KB serves a Next.js app, a Rust installer and a
+partner's frontend without sharing a codebase.
 
 ## Quick start
 
-One command installs the CLI and the stack it drives:
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/RantAI-dev/rantai-kb/main/install.sh | sh
+
+rantai-kb setup lite      # detect the hardware, write deploy/.env + deploy/.tier
+rantai-kb up lite         # start the containers and wait for /health
+rantai-kb key my-tenant   # print an API key, once
 ```
 
-The installer puts the binary in `~/.rantai-kb/bin`, links `rantai-kb` (and
-`kb-server`, the same program under its other name) into `~/.local/bin`, and
-keeps the compose stack in `~/.rantai-kb/deploy`. Add `~/.local/bin` to your
-`PATH` if it is not there already.
+The installer puts the binary in `~/.rantai-kb/bin`, links `rantai-kb` (and `kb-server`,
+the same program under its other name) into `~/.local/bin`, and keeps the compose stack in
+`~/.rantai-kb/deploy`. Add `~/.local/bin` to your `PATH` if it is not there already.
 
-Then the three commands that matter:
-
-```bash
-rantai-kb setup lite-en        # detect the hardware, write deploy/.env + deploy/.tier
-rantai-kb up lite-en           # start the containers and wait for /health
-rantai-kb key my-tenant        # print an API key, once
-```
-
-`setup` suggests the tier the machine can actually run (`lite` and `lite-en` need
-no GPU; `desk`, `studio` and `station` need an NVIDIA card or Apple silicon), checks
-the VRAM budget and the model licences, and refuses a tier that does not fit. `up`
-needs Docker and compose ≥ 2.20; the first start downloads the models, so it can
-take a few minutes.
-
-The API is then at `http://127.0.0.1:8080`. `rantai-kb up` prints where to find
-it, and — on a build that serves the OpenAPI document — its API page (every
-endpoint, with a "try it" button) at `http://127.0.0.1:8080/docs`.
-
-`rantai-kb serve` runs the stack the same way, and `rantai-kb down` stops it
-(`down -v` also wipes the data). `rantai-kb --help` lists everything; the same
-commands exist in the source checkout as `rust/scripts/kb-dev.sh`.
-
-### From a source checkout
-
-`rust/scripts/kb-dev.sh` is the same interface without the install step, and it
-runs against `rust/deploy/`:
+`setup` picks the tier the machine can actually run, checks the VRAM budget and the model
+licences, and refuses a tier that does not fit. `up` needs Docker and compose ≥ 2.20; the
+first start downloads the models, so it can take a few minutes. Then:
 
 ```bash
-rust/scripts/kb-dev.sh setup                  # detect the hardware, write .env + .tier
-rust/scripts/kb-dev.sh up lite-en             # CPU only; lite-en is the English CPU tier
-rust/scripts/kb-dev.sh key my-tenant          # copy the key it prints
-```
-
-`up` needs Docker. `setup` also needs a Rust toolchain (or `KB_SERVER_BIN` pointing at a
-`kb-server` binary); without one, copy `rust/deploy/.env.example` to
-`rust/deploy/.env` and start at `up`. Only the cloud tier needs an API key.
-
-Then upload a file and search it:
-
-```bash
-export KB_URL=http://127.0.0.1:8080
-export KB_KEY=<the key you just copied>
-
-# Ingest — POST /v1/documents, multipart field `file`. 202 means accepted, not indexed.
 curl -sS -H "Authorization: Bearer $KB_KEY" \
-  -F file=@rust/crates/kb-eval/fixtures/tiny/corpus/mission.pdf \
-  "$KB_URL/v1/documents"
-
-# Wait for the worker: GET /v1/jobs/<jobId> until status is "success".
-curl -sS -H "Authorization: Bearer $KB_KEY" "$KB_URL/v1/jobs/<jobId>"
-
-# Retrieve — POST /v1/search.
-curl -sS -H "Authorization: Bearer $KB_KEY" -H 'content-type: application/json' \
+  -F file=@mission.pdf http://127.0.0.1:8080/v1/documents        # 202 + jobId
+curl -sS -H "Authorization: Bearer $KB_KEY" \
   -d '{"query":"seven minutes of terror","maxChunks":5}' \
-  "$KB_URL/v1/search"
+  -H 'content-type: application/json' http://127.0.0.1:8080/v1/search
 ```
 
-`chunks[].content`, `documentTitle`, `page` and `similarity` carry the results;
-`degrades` is non-empty when an arm failed, because a failed arm is reported rather
-than silently dropped. `rust/deploy/README.md` has the full command list, overrides
-and troubleshooting.
+The API page (every endpoint, with a "try it" button) is at
+[`http://127.0.0.1:8080/docs`](http://127.0.0.1:8080/docs); the document behind it is
+`/openapi.json`. From a source checkout, `rust/scripts/kb-dev.sh` is the same interface
+without the install step.
 
-## Tiers
+## Tiers, hardware and models
 
-The same `kb-server` binary runs everywhere. `KB_TIER` selects which model serves each
-role, and `kb-dev.sh setup` suggests a tier from the hardware. The "Verified" column
-says what was actually run, not what is expected.
+A tier is a preset: which model serves each role, and which containers start. Any explicit
+`KB_*` setting wins over the preset, so a tier is a starting point, not a mode.
 
-| Tier | Runs on | Models and access | Verified |
+Any role can also move off the tier: `setup --ocr mistral` (hosted OCR), `--ocr <url>` (a
+shared OCR server), `--vision off|<url>`, or an external embedder and reranker.
+
+### Minimum and recommended hardware
+
+Measured for the CPU tiers, estimated for the rest (their numbers have to be measured on
+their real hardware before we claim them).
+
+| Tier | Minimum | Recommended | CPU only |
 |---|---|---|---|
-| `lite` | CPU, 1–2 cores, no GPU | `intfloat/multilingual-e5-small` text embeddings; PP-OCRv6 sidecar for scans | Retrieval measured on 2 cores; **not yet run with the OCR sidecar** |
-| `lite-en` | CPU, 1–2 cores, no GPU | `all-MiniLM-L6-v2` (English only); PP-OCRv6 sidecar | **Ran end to end 2026-10-25** |
-| `desk` | NVIDIA 8 GB, or Apple silicon 16 GB | Qwen3-Embedding-0.6B + bge-reranker-v2-m3; PaddleOCR-VL | `docker compose config` validated only; **never run on an NVIDIA GPU** |
-| `studio` | NVIDIA 24 GB, or Apple silicon 32–36 GB | Qwen3-Embedding-0.6B; Qwen3-VL page embedder and reranker; PaddleOCR-VL | `docker compose config` validated only; **never run on an NVIDIA GPU** |
-| `station` | NVIDIA 48 GB, or 128 GB unified | Studio's stack with the 8B Qwen3-VL models in FP8 | `docker compose config` validated only; **never run on an NVIDIA GPU** |
-| `cloud` | Any machine | OpenRouter: `voyage-multimodal-3.5` embeddings + `voyageai/rerank-2.5`; page-image arm on | Retrieval measured through the eval harness; requires an `OPENROUTER_API_KEY`; the compose profile itself is not run (`DEP-3`) |
+| `lite` | 2 cores, 4 GB RAM, 5 GB disk | 4 cores, 8 GB RAM, 10 GB disk | ✓ |
+| `lite-en` | 2 cores, 2 GB RAM, 5 GB disk | 4 cores, 4 GB RAM, 10 GB disk | ✓ |
+| `desk` | NVIDIA 8 GB, 4 cores, 8 GB RAM, 15 GB disk | 12 GB VRAM, 8 cores, 16 GB RAM, 25 GB disk | — |
+| `studio` | NVIDIA 24 GB, 8 cores, 16 GB RAM, 25 GB disk | 32 GB VRAM, 12 cores, 32 GB RAM, 40 GB disk | — |
+| `station` | NVIDIA 48 GB, 12 cores, 32 GB RAM, 50 GB disk | 80 GB VRAM, 16 cores, 64 GB RAM, 100 GB disk | — |
+| `cloud` | 2 cores, 2 GB RAM, 5 GB disk | 4 cores, 4 GB RAM | ✓ |
 
-Tier definitions, VRAM estimates and model choices: [`docs/kb-tiers.md`](docs/kb-tiers.md).
-Deployment details and GPU notes: [`rust/deploy/README.md`](rust/deploy/README.md).
+- **The GPU is shared with your app's chat LLM, and chat comes first.** `setup` sizes the
+  tier for that: Desk is ≈3.5 GB chat + ≈4.5 GB KB in 8 GB, with no slack; Studio ≈9 + ≈10
+  of 24; Station ≈26 + ≈20 of 48. A bigger chat model means the next tier up, or moving a
+  role to another host.
+- **Disk** is the model files the containers download plus ~2.5 GB of images and the data
+  itself. `lite` weighs ~3 GB before documents; `station` downloads ~41 GB of weights,
+  because the 8B models are stored in FP16 and quantised to FP8 when they load.
+- **Apple silicon** (Desk ≥16 GB, Studio ≥32, Station ≥128 unified memory) is detected and
+  suggested by `setup`, but compose only reserves NVIDIA GPUs: the models run outside the
+  stack, and `setup` says so.
+- **No Windows** on any tier. The container tiers need the NVIDIA driver plus
+  `nvidia-container-toolkit` on the host.
 
-## Measured results
+### What each tier runs
 
-These numbers are copied from the committed run folders. Each folder has its script,
-queries and per-query output.
+**CPU tiers.** No GPU, no paid key.
 
-**Cloud tier vs KF main** ([`docs/eval-ab/rk-cloud-vs-kf/`](docs/eval-ab/rk-cloud-vs-kf/),
-run 2026-10-31, nDCG@10, every query answered):
-
-| Dataset | Queries | KF main | rk-cloud-text | rk-cloud |
-|---|---:|---:|---:|---:|
-| MIRACL-id-200 (document) | 200 | 0.813 | — | **0.845** |
-| ViDoRe v3 HR (page) | 318 | not run yet | 0.675 | **0.710** |
-| ViDoRe v3 CS (page) | 215 | not run yet | 0.778 | **0.822** |
-
-Paired bootstrap, 95% CI: MIRACL-id-200 +0.032 [+0.006, +0.057]; ViDoRe HR
-text-only → multimodal +0.035 [+0.018, +0.052]; ViDoRe CS +0.044 [+0.030, +0.059].
-The KF comparison is against KF's default stack, and KF has no ViDoRe arm yet.
-
-**Lite on 2 CPU cores** ([`docs/eval-ab/lite-2core/`](docs/eval-ab/lite-2core/),
-2026-10-24):
-
-| Lite, MIRACL-id-50 | nDCG@10 | Recall@10 | MRR@10 | Ingest 1,485 passages | Search p50 / p95 |
-|---|---:|---:|---:|---:|---:|
-| `intfloat/multilingual-e5-small` (384-d) | 0.802 | 0.938 | 0.823 | ~126 s | 42 / 49 ms |
-
-ViDoRe HR on the same two cores: `lite` (e5-small) ingests at 1.55 pages/s with page
-nDCG@10 0.545; `lite-en` (MiniLM with a 512-character embedding cap) ingests at
-6.43 pages/s with page nDCG@10 0.517. MiniLM is English-only: on Indonesian
-MIRACL-id-50 it scores 0.679 against e5-small's 0.802.
-
-## API
-
-All routes are under `/v1` and authenticate with `Authorization: Bearer <key>` (or
-`X-Api-Key`). Health and formats are unauthenticated. Every key belongs to exactly one
-tenant; **there is no route that reads across tenants.**
-
-| Method | Path | Purpose |
+| Role | `lite` | `lite-en` |
 |---|---|---|
-| `POST` | `/v1/documents` | Upload a file (multipart field `file`). Returns `202` with a `jobId`. |
-| `GET` | `/v1/documents` | List documents. Filters: `knowledgeBaseIds`, `externalRef`, `limit`. |
-| `GET` `PATCH` `DELETE` | `/v1/documents/:id` | Read, edit or delete one document. |
-| `GET` | `/v1/documents/:id/raw` | Download the stored original. |
-| `GET` | `/v1/documents/:id/assets` | Fetch a document figure or page image. |
-| `GET` | `/v1/documents/:id/structure` | Pages, figures and the chunk → page map. |
-| `GET` | `/v1/documents/:id/intelligence` | Extracted entities and relations. |
-| `POST` | `/v1/search` | Retrieve chunks for a query. The reason this service exists. |
-| `GET` | `/v1/tables` | A document's stored tables (`?documentId=…`), or the tenant's. |
-| `GET` | `/v1/tables/:id` | One table with its manifest: columns, roles, units, subtotal rows. |
-| `POST` | `/v1/tables/:id/query` | Run a typed table query and get rows plus a receipt. |
-| `GET` | `/v1/jobs/:id` | Ingest progress: step, percentage, ETA, error. |
-| `POST` | `/v1/jobs/:id/retry` | Retry a failed ingest job. |
-| `GET` `POST` | `/v1/knowledge-bases` | List or create knowledge bases. |
-| `PATCH` `DELETE` | `/v1/knowledge-bases/:id` | Edit or delete a knowledge base. |
-| `GET` `POST` | `/v1/categories` | List or create categories. |
-| `PATCH` `DELETE` | `/v1/categories/:id` | Edit or delete a category. |
-| `GET` | `/v1/events` | Server-sent ingest progress for the tenant. |
-| `GET` | `/v1/formats` | Accepted extensions and the size limit. No auth. |
-| `GET` | `/health` · `/v1/health` | Liveness, dependency checks, build version, tier and egress hosts. No auth. |
+| Text + chunk embeddings | `intfloat/multilingual-e5-small` — 118M, 384-d, TEI (CPU), 471 MB | `sentence-transformers/all-MiniLM-L6-v2` — 22M, 384-d, TEI (CPU), 91 MB |
+| Scanned-page OCR | PP-Layout CDLA (~10M) + PP-OCRv6 tiny (family: 1.5–34.5M) + SLANet-plus tables (~7M), ONNX in the `ocr-cpu` sidecar | same |
+| Pictures → description | `Qwen3-VL-2B-Instruct`, Q4_K_M GGUF, llama.cpp (`vlm-cpu`) — 1.11 GB + 445 MB projector | same |
+| Reranker | none | none |
+| Page-image search | off | off |
 
-**Ingest options** (multipart fields): `title`, `categories`, `subcategory`,
-`knowledgeBaseIds`, `externalRef`, `figures` — `auto` (default), `force` or `skip` — and
-`tablePrivacy` — `open` (default) or `aggregate-only`.
+`lite-en` is English-only: it is ~4× faster per page and loses 0.12 nDCG on Indonesian.
+Use `lite` for a mixed or non-English corpus.
 
-**Search options** (JSON): `query` (required), `maxChunks`, `knowledgeBaseIds`,
-`documentIds`, `category`, `hybrid`, `format`, `minScore`.
+**Local GPU tiers.** One model per role, on one card (or one card per model container).
 
-**Tables.** An xlsx, CSV, DOCX or OCR/markdown table is stored as a typed grid
-(Parquet in the blob store, one record per version in `KbTable`) and indexed as two
-retrieval units, `table_summary` (title, caption, sheet or page, every header with
-its kind, role and unit, sample values) and `table_row` (`Header: value; …`, for
-tables of at most 60 rows). A search hit from either carries `tableId` and
-`tableTitle`, and the answer lists `tables: [{tableId, title, documentId}]` for its
-documents, so a caller can go straight to a number instead of adding up text:
+| Role | `desk` (8 GB) | `studio` (24 GB) | `station` (48 GB) |
+|---|---|---|---|
+| Text + chunk embeddings | `Qwen/Qwen3-Embedding-0.6B` — 596M, 1024-d, FP16, TEI CUDA, 1.19 GB | same | same |
+| Reranker | `BAAI/bge-reranker-v2-m3` — 568M, TEI CUDA, 2.27 GB | `Qwen3-VL-Reranker-2B` — 2B, vLLM, 4.26 GB | `Qwen3-VL-Reranker-8B` — 8B, FP8 on the card, 17.5 GB on disk |
+| Scanned-page OCR | `xiaomi-research/Xiaomi-OCR-0` — 0.8B, FP8, vLLM, 1.75 GB | same | same |
+| Pictures → description | `Qwen3-VL-2B-Instruct`, Q4_K_M, llama.cpp CUDA, 1.11 GB | same | same |
+| Page-image search | off (text-only embedder) | `Qwen3-VL-Embedding-2B` — 2048-d, vLLM, 4.26 GB | `Qwen3-VL-Embedding-8B` — 4096-d, FP8, 16.3 GB on disk |
 
-```json
-POST /v1/tables/doc123_t0/query
-{"select": [{"column": "Region"}, {"agg": "sum", "column": "Revenue", "as": "total"}],
- "filter": [{"column": "Tahun", "op": "=", "value": 2023}],
- "group_by": ["Region"], "order_by": [{"key": "total", "dir": "desc"}], "limit": 10}
-```
+The optional table pass (`--ocr-tables accurate`) adds the `ocr-layout` sidecar:
+PP-DocLayoutV3, ~130 MB, on the CPU — **never on the same card as the OCR model**, which
+crashed or hung vLLM in a full benchmark.
 
-The query is **typed, never SQL**: columns are checked against the manifest (a SUM
-over a phone-number column is refused), identifiers are quoted from the manifest's
-whitelist and values are bound parameters. Subtotal rows are excluded unless
-`includeDerived` is set. The answer is `{columns, rows, rows_matched,
-excluded_derived_rows, suppressed_groups, truncated, warnings}` — the receipt says what
-was computed and from which table. A refused query answers `400` with the
-`QueryError` JSON (`unknown_column` with `available`, `not_summable`, `not_grouped`,
-`restricted`, `bad_value`, `empty`). `tablePrivacy: "aggregate-only"` on upload
-restricts the document's tables to whole-group aggregates and suppresses groups
-smaller than five rows (with complementary suppression), and forbids plain rows and
-MIN/MAX. Tables are tenant-scoped and document-authorised like every other by-ID
-read; a hard delete removes them and their Parquet.
+**Cloud tier.** Nothing local; two API keys at most.
 
-**Document structure.** `GET /v1/documents/:id/structure` returns the document's
-`pages` (`number`, 0-based like every other `page` in the API), `figures` (`key`,
-`page`, `bbox`, `caption`, `assetKey`) and the `chunks` → page map, plus
-`documentId`, `externalRef` and `title`. It never re-parses the file: pages come from
-the page-image index, figures from the figure chunks a search can return and the
-document's figure records, and chunks from the text index. `hasTextLayer` and
-`ocrText` are recorded at ingest from this release on; `ocrText` is the page's stored
-text (at most 8,000 characters) and omits the visual description the caption stage
-appends. `imageAssetKey` is present only when ingest recorded that the page JPEG was
-written. A document ingested before these fields were recorded answers `null` for
-them, never a guess. The read is capped at 20,000 chunks and 2,000 pages and sets
-`truncated` when either cap is reached. Like every by-ID route it enforces the tenant
-and the key's knowledge-base limit.
+| Role | Model | Spec |
+|---|---|---|
+| Text, chunk and page embeddings | `voyageai/voyage-multimodal-3.5` | hosted, 1024-d, one vector space for text and pages |
+| Reranker | `voyageai/rerank-2.5` | hosted, Cohere-shaped rerank |
+| Scanned-page OCR | Mistral OCR | hosted, billed per page |
+| Pictures → description | `nvidia/nemotron-3.5-super-vl` | hosted |
+
+Every local model above is Apache-2.0 or MIT — no commercial opt-in, no per-page cost, and
+scans never leave the machine. Hosted models are governed by their provider's terms. The
+verdicts, and the alternatives that were rejected on licence grounds, are in
+[`docs/model-licences.md`](docs/model-licences.md); the reasoning behind each choice, the
+VRAM arithmetic and the measured OCR comparison are in [`docs/kb-tiers.md`](docs/kb-tiers.md).
+
+**How verified each tier is.** Lite and lite-en were run end to end, including OCR on two
+cores. Desk, Studio and Station are `docker compose config`-validated and unit-tested, and
+their OCR numbers were measured on a GB10 — but **never on a Desk-sized card**. Numbers per
+tier: [`docs/performance.md`](docs/performance.md).
 
 ## What it does with a file
 
-Extraction is chosen per file type. PDFs use pdfium for the text layer and a layout
-parser or OCR for scans; Office Open XML, OpenDocument, text, Markdown, code,
-CSV/TSV/JSON, HTML/XML, RTF and EPUB have native paths. About 30 file types are
-accepted. Legacy binary Office files (`.doc`, `.xls`, `.ppt`) are accepted but do not
-extract yet (`ING-1`).
+Extraction is chosen per file type: PDFs use pdfium for the text layer, with a layout parser
+or OCR for scans; Office Open XML, OpenDocument, text, Markdown, code, CSV/TSV/JSON,
+HTML/XML, RTF and EPUB have native paths. 55 extensions are accepted — `GET /v1/formats`
+lists them, with the size limit. Legacy binary Office files (`.doc`, `.xls`, `.ppt`) are
+accepted but do not extract yet (`ING-1`).
 
 Chunking is table- and code-aware: a fixed-size splitter cuts spreadsheet rows in half,
-which is the single biggest cause of weak table answers.
+which is the single biggest cause of weak table answers. Retrieved tables come back as typed
+grids you can query for numbers, not just text — see [`docs/api.md`](docs/api.md#tables).
 
-## Retrieval
+## API
 
-Per query, the pipeline is:
+Every route is under `/v1` and takes `Authorization: Bearer <key>`. The three that matter
+first are `POST /v1/documents`, `GET /v1/jobs/:id` and `POST /v1/search`; `GET /docs` is the
+Swagger UI and `GET /openapi.json` the contract. The full route table, ingest and search
+options, the table API and the structure read are in [`docs/api.md`](docs/api.md).
 
-```
-query
- ├─ query expansion → N paraphrases          (opt-in)
- ├─ dense vector search ┐
- ├─ BM25                ├─ run in parallel
- └─ entity arm          ┘
-      ↓ resolve BM25 hits through the scoped document store
-      ↓ Reciprocal Rank Fusion (k = 60)
-      ↓ cross-encoder rerank                    (opt-in, tier dependent)
-      ↓ neighbour-window expansion, ±1 adjacent chunk
-      ↓ page-image arm and figure co-retrieval
-      ↓ stable source numbering
-```
+Tenant isolation, key scopes and the knowledge-base limit are in
+[`docs/security.md`](docs/security.md). How the arms are fused, and what to tune before
+blaming recall, is in [`docs/retrieval.md`](docs/retrieval.md).
 
-Four parts are worth knowing before tuning anything.
+## Documentation
 
-**Hybrid is not an ensemble.** Dense embeddings are strong on paraphrase and weak on
-rare tokens — part numbers, regulation codes, internal acronyms — because a vector
-averages meaning and rare tokens sink. BM25 is strong exactly there and blind to
-paraphrase. The failure modes are uncorrelated; that is the reason to run both.
-
-**Fusion happens on ranks, not scores.** A cosine score and a BM25 score are not
-commensurable, and any normalisation between them has to be re-tuned every time the
-embedding model changes. RRF sidesteps that.
-
-**BM25 hits are not trustworthy until they are joined.** The full-text index has no
-notion of category, group or ownership. Every hit is resolved back to its parent
-document through the scoped document store, so a keyword arm cannot leak chunks from
-a document the caller cannot see.
-
-**A relevance floor is available but off by default.** `minScore` on the request
-(or `KB_MIN_SCORE` for the whole server) drops hits whose comparable score is
-below the threshold: the reranker score when a reranker ran, otherwise the dense
-cosine similarity — never the fused RRF score, which is rank-only. An
-exact-match / identifier query keeps a hit the keyword arm matched and whose text
-literally contains the identifier. If the arm that supplies the score fails, the
-floor is skipped and `floor_skipped` is reported, so a failed arm never becomes
-a silent empty answer. Unset means the floor does not run and the ranking is
-identical to a build without it.
-
-**Neighbour-window expansion is cheap and load-bearing.** `KB_NEIGHBOR_WINDOW=1` pulls
-±1 adjacent chunk around each hit, woven into reading order next to its anchor and
-sharing the anchor's source card, so no new citation numbers appear. A retrieved table
-travels with its explanation, and an explanation pulls in its table.
-
-**Page images.** Scans, charts, slides and tables can also be embedded as whole pages.
-On the measured cloud run the page arm adds +0.035 page nDCG@10 on ViDoRe HR and
-+0.044 on CS over text-only; both CIs are above zero. The method and its evaluation are
-published in [IKAT](https://github.com/RantAI-dev/ikat).
-
-## Security model, in plain words
-
-- **Tenants.** Every API key belongs to exactly one tenant. Every search arm, document
-  route and asset route is filtered to that tenant. A CI gate probes the retrieval arms
-  for cross-tenant leaks.
-- **Key scopes.** A key can be limited to `kb:read` and/or `kb:write`; an empty scope
-  list means full access (the CLI prints `(all)`). `kb-dev.sh key <tenant>` mints an
-  unrestricted key; `kb-server create-api-key` accepts `--scopes kb:read,kb:write` and
-  `--kb id,id` for a read-only or knowledge-base-limited key.
-- **Knowledge-base limit.** A key can be limited to a set of knowledge bases. The limit
-  applies to search, the document list, upload and metadata edits.
-- **Known gap.** The by-ID document routes check only the tenant, so a knowledge-base-
-  limited key can still open a document outside its knowledge bases if it knows the ID
-  (`SEC-1`, being fixed before the release).
-- **What it does not do.** There are no users, groups, roles or folders. Permissions
-  belong to API keys, not people; a calling app decides who may see what and hands out
-  keys or knowledge-base filters to match. There are no per-document permissions inside
-  a knowledge base. See [`docs/core/PRODUCT.md` §3](docs/core/PRODUCT.md#3-what-it-does-not-do).
-
-Report a vulnerability privately; see [`SECURITY.md`](SECURITY.md).
-
-## Configuration
-
-`rust/deploy/.env` covers the normal cases and is written by `kb-dev.sh setup`. Every
-setting the server reads, with its purpose and default, is in
-[`rust/README.md`](rust/README.md). The essentials:
-
-- `DATABASE_URL` — Postgres, for documents, jobs, knowledge bases, keys and the graph
-- `QDRANT_GRPC_URL` — Qdrant, for chunks, vectors, BM25 and page images
-- `S3_*` — any S3-compatible store (rustfs, MinIO, AWS)
-- `KB_EMBEDDING_*` — any OpenAI-compatible embeddings endpoint (OpenRouter, TEI, vLLM)
-- `KB_TIER` — the tier preset; an explicit setting always wins over it
-- `KB_CACHE_DIR` — content-addressed embedding, OCR and caption cache
-
-Defaults are deliberately quiet. Query expansion, contextual retrieval, reranking,
-citation grounding and the vision figure gate are off unless the tier or the operator
-turns them on, because each adds a model call to the answer path.
-
-## Architecture
-
-The engine talks to the outside world through ports, defined in `rust/crates/kb-ports`.
-`kb-core` holds the pure logic, `kb-engine` holds the ingest and retrieval pipelines, and
-the adapters (`kb-inference`, `kb-store-pg`, `kb-store-qdrant`, `kb-store-blob`,
-`kb-extract`) bind those ports to real infrastructure. `kb-server` is the composition
-root and the HTTP API.
-
-`kb-core` does no I/O and `kb-engine` never names an adapter. Two checks enforce that —
-`kb-server check-boundary` and the scope-token check in CI — because the boundary is what
-lets the same engine run embedded inside a host application and standalone here.
+| Document | What is in it |
+|---|---|
+| [`docs/api.md`](docs/api.md) | Every route, options, tables, document structure, keys |
+| [`docs/kb-tiers.md`](docs/kb-tiers.md) | Tier decisions, VRAM estimates, OCR recipes, ingest seats |
+| [`docs/performance.md`](docs/performance.md) | Measured retrieval, throughput and OCR numbers per tier |
+| [`docs/retrieval.md`](docs/retrieval.md) | The retrieval pipeline and every knob that changes it |
+| [`docs/security.md`](docs/security.md) | Tenants, scopes, the knowledge-base limit, known gaps |
+| [`docs/local-models.md`](docs/local-models.md) | Running the models without compose (TEI, llama.cpp, vLLM) |
+| [`rust/deploy/README.md`](rust/deploy/README.md) | The compose stack, overrides, GPU notes, troubleshooting |
+| [`rust/README.md`](rust/README.md) | Every setting the server reads, with its default |
+| [`docs/rust-cutover.md`](docs/rust-cutover.md) | Moving a v0.1.0 (Bun) deployment to Rust |
+| [`docs/core/PRODUCT.md`](docs/core/PRODUCT.md) | What it is for, what it does not do |
+| [`docs/core/BACKLOG.md`](docs/core/BACKLOG.md) | The one list of work, and what shipped |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release |
 
 ## Development
 
@@ -354,31 +182,30 @@ cargo test --manifest-path rust/Cargo.toml --workspace
 cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets -- -D warnings
 cargo fmt --all --manifest-path rust/Cargo.toml --check
 cargo run --manifest-path rust/Cargo.toml -p kb-server -- check-boundary
-```
 
-Live checks:
-
-```bash
 rust/scripts/smoke.sh          # ingest, search, isolation, deletes against a live stack
 rust/scripts/ci-eval-gate.sh   # retrieval-quality and cross-scope leak gate
 ```
 
-Contributions: [`CONTRIBUTING.md`](CONTRIBUTING.md). Work is tracked in
-[`docs/core/BACKLOG.md`](docs/core/BACKLOG.md).
+The engine talks to the outside world through ports (`rust/crates/kb-ports`): `kb-core`
+holds the pure logic, `kb-engine` the pipelines, and the adapters bind those ports to
+Postgres, Qdrant, S3, the models and the extractors. `kb-core` does no I/O and `kb-engine`
+never names an adapter; two checks enforce that, because the boundary is what lets the same
+engine run embedded in a host application and standalone here.
+
+Contributions: [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Releases
 
-Tagging `v*` builds the Rust image from `rust/Dockerfile` for amd64 and arm64, publishes
-it to `ghcr.io/rantai-dev/rantai-kb`, publishes the OCR sidecar images, packages the
-binary for Linux (x86_64, aarch64) and macOS (arm64) as release tarballs with their
-checksums, and cuts a GitHub release. `/health` reports the build version. `v0.2.0` is
-the first Rust release; `v0.1.0` is the last Bun release. Changes are in
-[`CHANGELOG.md`](CHANGELOG.md).
+Tagging `v*` builds the image for amd64 and arm64 on native runners, publishes it to
+`ghcr.io/rantai-dev/rantai-kb` with the OCR sidecar images, packages the binary for Linux
+(x86_64, aarch64) and macOS (arm64) as tarballs with their checksums, cuts a GitHub release,
+and then installs that release with the one-liner on Linux and macOS to prove it works.
+`/health` reports the build version. `v0.3.0` is the current release; `v0.1.0` is the last
+Bun one ([`docs/rust-cutover.md`](docs/rust-cutover.md)).
 
-The release tarballs are what `install.sh` downloads; the image is what the compose
-stack runs. An installed bundle has no source, so its `deploy/.env` points at the
-published images (`KB_IMAGE`, `KB_OCR_CPU_IMAGE`, `KB_OCR_LAYOUT_IMAGE`) instead of
-building them.
+An installed bundle has no source, so its `deploy/.env` points at the published images
+(`KB_IMAGE`, `KB_OCR_CPU_IMAGE`, `KB_OCR_LAYOUT_IMAGE`) instead of building them.
 
 ## License
 
