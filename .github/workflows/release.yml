@@ -261,9 +261,10 @@ jobs:
             echo "$tarballs tarballs but $sums checksum lines" >&2
             exit 1
           fi
-          # The installer itself is a release asset: the one-liner points at
-          # the tag, not at a file that may move.
-          cp install.sh .
+          # install.sh is already at the workspace root (the checkout), and the
+          # release's `files:` picks it up from there — copying it onto itself
+          # failed on the first run that got this far.
+          test -f install.sh
 
       - name: Release notes
         id: notes
