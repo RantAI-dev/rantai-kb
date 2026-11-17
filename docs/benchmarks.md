@@ -127,6 +127,12 @@ measure of the three (0.826 vs `Nemotron-3-Embed-1B` 0.823 and `Qwen3-Embedding-
 +0.030 [+0.012, +0.048]). The shipped 0.705 includes a page reranker that these runs do not, so
 the remaining gap is the reranker, not the embedder — `EVAL-6`.
 
+The **8B** (Station's model) beats the 1B on pages and ties it on text: ViDoRe HR one space
+**0.645** vs 0.621 (+0.024 [+0.011, +0.036]), image 0.642 vs 0.626 (+0.017 [+0.002, +0.031]),
+text 0.639 vs 0.611 (+0.028 [+0.017, +0.040]), MIRACL-id 0.831 vs 0.826 (+0.005 [−0.008, +0.019]).
+Real but modest, at 8× the compute and a 4096-d index — the reason `DEP-6` puts it on Station
+only.
+
 ## Ingest
 
 | When | What changed | Result | Shipped | Run |

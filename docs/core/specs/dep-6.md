@@ -59,10 +59,18 @@ every number in this spec is the **1B**. What the 8B costs, concretely:
   8B, not assumed from the 1B.
 - **16.3 GB of bf16 weights** on disk and resident, against 2.4 GB for the 1B.
 
-The measurement that closes it is the same harness on the same pages (MIRACL-id text, ViDoRe HR
-text/image/one-space) with `Nemotron-3.5-Embed-8B`, which the GB10 can serve. If the 8B does not
-beat the 1B by more than the noise, Station should take the 1B too and keep Studio's index width —
-a cheaper box and a portable corpus for no measured loss.
+**Measured 2026-11-17 (GB10, same harness, same pages): the 8B earns Station on pages.**
+
+| Arm | 8B | 1B | Δ [95% CI] |
+|---|---:|---:|---|
+| MIRACL-id text | 0.831 | 0.826 | +0.005 [−0.008, +0.019] — a tie |
+| ViDoRe HR text | 0.639 | 0.611 | **+0.028** [+0.017, +0.040] |
+| ViDoRe HR image | 0.642 | 0.626 | **+0.017** [+0.002, +0.031] |
+| ViDoRe HR one space | **0.645** | 0.621 | **+0.024** [+0.011, +0.036] |
+
+Every page delta excludes zero, so the 4096-d index and the 16 GB buy a real +0.017 to +0.028 on
+pages; on text they buy nothing. The trade is deliberate: Station is the box where those pages
+matter, and it is the one tier whose corpus does not move to a smaller box.
 
 ## What must be measured before the preset flips
 
