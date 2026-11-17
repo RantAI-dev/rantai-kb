@@ -76,9 +76,9 @@ Open source under Apache-2.0. There is no paid edition and no hosted version.
 
 | Module | What a calling app does with it | State |
 | --- | --- | --- |
-| **Ingest** | Uploads a file (`POST /v1/documents`, 202 and a job). It is extracted, OCR'd if scanned, chunked, embedded and indexed, with progress on `/v1/jobs/:id` and `/v1/events` | Built. About 30 file types (PDF, images, Office Open XML, OpenDocument, text, Markdown, code, CSV/TSV/JSON, HTML/XML, RTF, EPUB; `kb-extract/src/mime.rs`). Legacy `.doc/.xls/.ppt` are accepted but fail to extract (`ING-1`). A 943-page PDF ingests in 71 s with simulated provider latency (`docs/eval-ab/ingest-big-pdf/`) |
+| **Ingest** | Uploads a file (`POST /v1/documents`, 202 and a job). It is extracted, OCR'd if scanned, chunked, embedded and indexed, with progress on `/v1/jobs/:id` and `/v1/events` | Built. 55 extensions (PDF, images, Office Open XML, OpenDocument, text, Markdown, code, CSV/TSV/JSON, HTML/XML, RTF, EPUB; `kb-core/src/policy.rs`). Legacy `.doc/.xls/.ppt` are accepted but fail to extract (`ING-1`). A 943-page PDF ingests in 71 s with simulated provider latency (`docs/eval-ab/ingest-big-pdf/`) |
 | **Retrieval** | `POST /v1/search` returns chunks with document, page, score, figures, the arms that found each hit, and `degrades` when an arm failed | Built. Dense + BM25 fused, reranker, page-image arm, neighbour chunks and an entity graph. Measured numbers are in section 1 |
-| **Access & Security** | Tenants, API keys (scopes `kb:read` / `kb:write`, optional knowledge-base limit), knowledge bases and categories | Partial. The tenant wall is tested in CI. The knowledge-base limit is not applied to by-ID document routes (`SEC-1`). There are no users, roles, folders or per-document permissions |
+| **Access & Security** | Tenants, API keys (scopes `kb:read` / `kb:write`, optional knowledge-base limit), knowledge bases and categories | Partial. The tenant wall is tested in CI. The knowledge-base limit is applied to search and to the by-ID document routes (`SEC-1`, done 2026-11-04). There are no users, roles, folders or per-document permissions |
 | **Deployment** | `kb-dev.sh setup` → `up <tier>` → `key`. Tiers: lite, lite-en (CPU), desk, studio, station (NVIDIA), cloud (OpenRouter key) | Partial. lite-en ran end to end on 2026-10-25. The GPU tiers are checked by `docker compose config` only. Cloud is measured through the eval harness, not through compose (`DEP-1` to `DEP-3`) |
 | **Platform** | Postgres (documents, jobs, keys, graph), Qdrant (chunks, vectors, BM25, page images) and S3 for originals. `kb-server reindex` rebuilds the index from S3 | Built in Rust. Bun was removed in `v0.2.0` (`DEC-3`); `v0.1.0` is the last Bun release |
 
@@ -94,14 +94,14 @@ The capabilities someone comparing us would check, and where we stand.
 | --- | --- | --- | --- |
 | Self-host, open licence | **Have.** Apache-2.0; CPU-only to GPU to cloud APIs | Open source: RAGFlow (Apache-2.0), Onyx (MIT community edition), R2R (MIT), Dify (Apache-2.0 with extra terms) [F1, O1, S1, D1]. Managed: Azure, Vertex and Bedrock are cloud-only; Vectara and Ragie offer private deployments, closed source [V1, R1] | — |
 | Retrieval over page images (scans, charts, slides) | **Have.** Whole pages embedded as images; +0.035 / +0.044 page nDCG@10 over text-only on ViDoRe v3 HR / CS | Azure (image embeddings) and Bedrock (Nova multimodal, 2025-11) yes [A4, B3]. The open-source four embed extracted images or captions, not whole pages [F2, O5, S1, D4] | Not measured head to head against Azure or Bedrock |
-| OCR of scanned documents | **Partial.** PaddleOCR-VL locally (desk and up), Mistral OCR on cloud, PP-OCRv6 on lite (sidecar never built, `DEP-1`) | RAGFlow: DeepDoc plus MinerU / Docling / PaddleOCR-VL [F1]; Azure and Vertex: layout and OCR parsers [A4, G4] | Prove lite OCR (`DEP-1`) |
+| OCR of scanned documents | **Have.** PP-OCRv6 + SLANet-plus in the `ocr-cpu` sidecar (lite), Xiaomi-OCR-0 under vLLM (desk and up), Mistral OCR on cloud; measured on olmOCR-bench (`docs/eval-ab/ocr-tiers`) | RAGFlow: DeepDoc plus MinerU / Docling / PaddleOCR-VL [F1]; Azure and Vertex: layout and OCR parsers [A4, G4] | Prove lite OCR (`DEP-1`) |
 | Hybrid search and reranking | **Have.** Dense + BM25 fused, local or hosted reranker | Every competitor has both [A5, G5, B5, V6, F4, O6, S1, D6] | — |
 | Published retrieval numbers | **Have.** MIRACL-id-200, ViDoRe v3 HR / CS and HotpotQA runs committed with scripts (`docs/eval-ab/`) | Azure publishes nDCG@10 79.3 on MIRACL and 56.3 on BEIR [A6], on different sets from ours, so not comparable. RAGFlow ships a harness without scores [F2]. Others: none found | — |
 | Tenant isolation | **Have.** One tenant per key; a CI gate probes every arm for cross-tenant leaks | Azure: index or service per tenant [A8]; Bedrock: silo, pool or bridge [B7]; Vectara: corpus per tenant [V3]; Onyx cloud: schema per tenant [O8] | — |
-| Per-document permissions at search time | **Missing.** Only a key's knowledge-base limit, which is not yet applied to by-ID routes (`SEC-1`) | Vertex AI Search: per-document user / group ACLs [G2]; Azure: ACL trimming, in preview [A2]; Bedrock: SharePoint / OneDrive ACLs [B2]; Onyx: permission sync, enterprise edition only [O2] | `SEC-1`, `ACC-3` |
+| Per-document permissions at search time | **Missing.** Only a key's knowledge-base limit, applied to search and to the by-ID routes (`SEC-1`, done) | | Vertex AI Search: per-document user / group ACLs [G2]; Azure: ACL trimming, in preview [A2]; Bedrock: SharePoint / OneDrive ACLs [B2]; Onyx: permission sync, enterprise edition only [O2] | `SEC-1`, `ACC-3` |
 | Users, groups and roles | **Missing.** Key scopes `kb:read` / `kb:write` only | Vertex: IAM viewer / editor / admin [G2]; Dify: owner / admin / editor / normal [D3]; RAGFlow: owner / member [F2]; R2R: owner / member [S2] | `ACC-2` |
 | Folders | **Missing.** Flat knowledge bases | RAGFlow: nested folders [F3]; Onyx: document sets, not nested [O4]; R2R: flat collections [S3] | `ACC-1` |
-| File types | **Partial.** About 30 (`kb-extract/src/mime.rs`); legacy `.doc/.xls/.ppt` accepted but not extracted | R2R about 34 extensions [S1]; Azure about 30 [A3]; Onyx 16 [O7]; Dify 14 built in [D7] | `ING-1` |
+| File types | **Partial.** 55 extensions (`kb-core/src/policy.rs`); legacy `.doc/.xls/.ppt` accepted but not extracted | R2R about 34 extensions [S1]; Azure about 30 [A3]; Onyx 16 [O7]; Dify 14 built in [D7] | `ING-1` |
 | Connectors (Drive, SharePoint, …) | **Missing.** The calling app uploads files | Onyx 58 [O2]; RAGFlow about 40 [F5]; Vertex about 28 [G7]; Azure 11 [A7] | `ING-2`, Later |
 | A UI for managing documents | **Missing.** HTTP API and CLI only | The open-source four all ship one | Not a goal while it is a shared engine |
 
@@ -116,8 +116,6 @@ Stated plainly, for anyone trying it.
   calling app decides who may see what and hands out keys or knowledge-base filters to match.
 - There are no folders. Knowledge bases are flat, and a document may be in several.
 - There are no per-document permissions inside a knowledge base.
-- A key limited to some knowledge bases can still open a document outside them if it has the
-  ID (`SEC-1`, being fixed before the release).
 
 **Ingest**
 - It does not sync from Drive, SharePoint or other sources. The calling app uploads every
@@ -136,9 +134,12 @@ Stated plainly, for anyone trying it.
 "Released" means: an outside user can follow the README, bring up a tier, upload a scanned
 PDF and search it, without help from us.
 
+**Status 2026-11-17: cleared — v0.3.0 shipped on 2026-11-16.** `SEC-1` (2026-11-04),
+`REL-1`, `DEP-1` and `DEC-1` are done; the table stays as the record of what they were.
+
 | # | Blocker | What clears it |
 | --- | --- | --- |
-| 1 | By-ID document routes ignore a key's knowledge-base limit, and the repo is public | `SEC-1` |
+| 1 | ~~By-ID document routes ignore a key's knowledge-base limit, and the repo is public~~ | Cleared 2026-11-04: `SEC-1` done — every by-ID route applies the limit and answers `404` |
 | 2 | PR #3's retrieval gate is red (hit@1 −0.083 on the 12-query CI set) | `REL-1`: fix, or refresh the baseline with the reason |
 | 3 | The lite tiers, the ones most outsiders will try first, are unproven on a fresh build with the new OCR sidecar | `DEP-1` |
 | 4 | The Rust port is not on `main` | `DEC-1`, then merge PR #3 |
@@ -155,7 +156,7 @@ The Likelihood and Impact ratings are the planner's estimate.
 | Risk | Why it matters | Likelihood | Impact | Mitigation |
 | --- | --- | --- | --- | --- |
 | A tier we document fails for the first outside user | Open-source first impressions stick | High for GPU tiers | Medium | Mark each tier's verified status in the README; `DEP-1` to `DEP-3` |
-| A permission hole in a public repo | Users trust key limits that do not hold | Medium | High | `SEC-1` before release; `SECURITY.md` for reports |
+| A permission hole in a public repo | Users trust key limits that do not hold | Medium | High | The CI scope gate, the `SEC-1` regression test, `SECURITY.md` for reports |
 | A retrieval claim that does not reproduce | Our main selling point is measured quality | Low | High | Every number links to a committed run folder with its script |
 | One owner plus AI agents | Decisions must be written down | High | Medium | This folder |
 

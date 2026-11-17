@@ -27,8 +27,8 @@ fix and disclosure with you.
 - **Tenant scope leaks.** Any route or retrieval arm that returns a document, chunk,
   figure, page image, job or event belonging to another tenant.
 - **Knowledge-base scope leaks.** A key limited with `--kb` reading or changing a
-  document outside its knowledge bases. The known by-ID gap is tracked as `SEC-1` in
-  `docs/core/BACKLOG.md`; report it if you find a path that is not covered there.
+  document outside its knowledge bases. Every by-ID route applies the limit and answers
+  `404` for a document outside it (`SEC-1`, fixed in v0.2.0); report any path that does not.
 - **Authentication or authorisation bypass.** Using no key, a revoked key, or a key
   with the wrong scope to reach a protected route.
 - **Secret exposure.** API keys, embedding keys or store credentials leaked through a

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Changed
+
+- **The README is a front page; the detail moved into docs.** It now carries the hardware
+  (minimum and recommended) and the model inventory for every tier — params, dimensions,
+  precision, runtime and weights on disk — and links out. The API reference is
+  `docs/api.md`, the retrieval pipeline `docs/retrieval.md`, the security model
+  `docs/security.md` and the measured numbers `docs/performance.md`. The claim that a
+  knowledge-base-limited key could still read by-ID has been removed: `SEC-1` shipped in
+  v0.2.0.
+
 ## 0.3.0 — 2026-11-16
 
 ### Added

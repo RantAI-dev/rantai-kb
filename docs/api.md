@@ -1,0 +1,94 @@
+# The HTTP API
+
+All routes are under `/v1` and authenticate with `Authorization: Bearer <key>` (or
+`X-Api-Key`). Health and formats are unauthenticated. Every key belongs to exactly one
+tenant; **there is no route that reads across tenants.**
+
+The contract is machine-readable: `GET /openapi.json` serves an OpenAPI 3.1 document and
+`GET /docs` renders it with a "try it" button. Both are unauthenticated, like `/health`,
+because the contract has to be readable before the caller has one.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/documents` | Upload a file (multipart field `file`). Returns `202` with a `jobId`. |
+| `GET` | `/v1/documents` | List documents. Filters: `knowledgeBaseIds`, `externalRef`, `limit`. |
+| `GET` `PATCH` `DELETE` | `/v1/documents/:id` | Read, edit or delete one document. |
+| `GET` | `/v1/documents/:id/raw` | Download the stored original. |
+| `GET` | `/v1/documents/:id/assets` | Fetch a document figure or page image. |
+| `GET` | `/v1/documents/:id/structure` | Pages, figures and the chunk → page map. |
+| `GET` | `/v1/documents/:id/intelligence` | Extracted entities and relations. |
+| `POST` | `/v1/search` | Retrieve chunks for a query. The reason this service exists. |
+| `GET` | `/v1/tables` | A document's stored tables (`?documentId=…`), or the tenant's. |
+| `GET` | `/v1/tables/:id` | One table with its manifest: columns, roles, units, subtotal rows. |
+| `POST` | `/v1/tables/:id/query` | Run a typed table query and get rows plus a receipt. |
+| `GET` | `/v1/jobs/:id` | Ingest progress: step, percentage, ETA, error. |
+| `POST` | `/v1/jobs/:id/retry` | Retry a failed ingest job. |
+| `GET` `POST` | `/v1/knowledge-bases` | List or create knowledge bases. |
+| `PATCH` `DELETE` | `/v1/knowledge-bases/:id` | Edit or delete a knowledge base. |
+| `GET` `POST` | `/v1/categories` | List or create categories. |
+| `PATCH` `DELETE` | `/v1/categories/:id` | Edit or delete a category. |
+| `GET` | `/v1/events` | Server-sent ingest progress for the tenant. |
+| `GET` | `/v1/formats` | Accepted extensions and the size limit. No auth. |
+| `GET` | `/health` · `/v1/health` | Liveness, dependency checks, build version, tier and egress hosts. No auth. |
+
+**Ingest options** (multipart fields): `title`, `categories`, `subcategory`,
+`knowledgeBaseIds`, `externalRef`, `figures` — `auto` (default), `force` or `skip` — and
+`tablePrivacy` — `open` (default) or `aggregate-only`.
+
+**Search options** (JSON): `query` (required), `maxChunks`, `knowledgeBaseIds`,
+`documentIds`, `category`, `hybrid`, `format`, `minScore`.
+
+`chunks[].content`, `documentTitle`, `page` and `similarity` carry the results; `degrades`
+is non-empty when an arm failed, because a failed arm is reported rather than silently
+dropped.
+
+## Tables
+
+An xlsx, CSV, DOCX or OCR/markdown table is stored as a typed grid (Parquet in the blob
+store, one record per version in `KbTable`) and indexed as two retrieval units,
+`table_summary` (title, caption, sheet or page, every header with its kind, role and unit,
+sample values) and `table_row` (`Header: value; …`, for tables of at most 60 rows). A
+search hit from either carries `tableId` and `tableTitle`, and the answer lists
+`tables: [{tableId, title, documentId}]` for its documents, so a caller can go straight to
+a number instead of adding up text:
+
+```json
+POST /v1/tables/doc123_t0/query
+{"select": [{"column": "Region"}, {"agg": "sum", "column": "Revenue", "as": "total"}],
+ "filter": [{"column": "Tahun", "op": "=", "value": 2023}],
+ "group_by": ["Region"], "order_by": [{"key": "total", "dir": "desc"}], "limit": 10}
+```
+
+The query is **typed, never SQL**: columns are checked against the manifest (a SUM over a
+phone-number column is refused), identifiers are quoted from the manifest's whitelist and
+values are bound parameters. Subtotal rows are excluded unless `includeDerived` is set.
+The answer is `{columns, rows, rows_matched, excluded_derived_rows, suppressed_groups,
+truncated, warnings}` — the receipt says what was computed and from which table. A refused
+query answers `400` with the `QueryError` JSON (`unknown_column` with `available`,
+`not_summable`, `not_grouped`, `restricted`, `bad_value`, `empty`). `tablePrivacy:
+"aggregate-only"` on upload restricts the document's tables to whole-group aggregates and
+suppresses groups smaller than five rows (with complementary suppression), and forbids
+plain rows and MIN/MAX. Tables are tenant-scoped and document-authorised like every other
+by-ID read; a hard delete removes them and their Parquet.
+
+## Document structure
+
+`GET /v1/documents/:id/structure` returns the document's `pages` (`number`, 0-based like
+every other `page` in the API), `figures` (`key`, `page`, `bbox`, `caption`, `assetKey`)
+and the `chunks` → page map, plus `documentId`, `externalRef` and `title`. It never
+re-parses the file: pages come from the page-image index, figures from the figure chunks a
+search can return and the document's figure records, and chunks from the text index.
+`hasTextLayer` and `ocrText` are recorded at ingest from the 0.3 release on; `ocrText` is
+the page's stored text (at most 8,000 characters) and omits the visual description the
+caption stage appends. `imageAssetKey` is present only when ingest recorded that the page
+JPEG was written. A document ingested before these fields were recorded answers `null` for
+them, never a guess. The read is capped at 20,000 chunks and 2,000 pages and sets
+`truncated` when either cap is reached. Like every by-ID route it enforces the tenant and
+the key's knowledge-base limit.
+
+## Keys
+
+`rantai-kb key <tenant>` (or `kb-dev.sh key`) mints an unrestricted key. For anything
+narrower, `kb-server create-api-key` takes `--scopes kb:read,kb:write` and
+`--kb id,id`. The tenant string is the scope boundary: a key sees its own tenant's
+documents and nothing else.
