@@ -38,6 +38,7 @@ page reranker, and these runs have none. The claim is local-to-local: page retri
 | `kb-inference` page adapter | the same format for page images (`PageEmbedFormat::OmniEmbed`) — **not yet** |
 | `config` | `KB_EMBEDDING_FORMAT=openai|omniembed` (*landed*), `KB_PAGE_EMBEDDING_FORMAT=omniembed` (**not yet**) |
 | `tier.rs` | `desk`, `studio`, `station`: the 1B at **2048-d**, text and pages; drop the TEI text embedder and the separate page embedder from the presets |
+| reranker | `Qwen3-Reranker-0.6B` on every GPU tier, replacing `bge-reranker-v2-m3` (Desk) and `Qwen3-VL-Reranker-2B/8B` (Studio/Station). Measured on MIRACL-id: nDCG@10 **0.795 → 0.850** (+0.055) over no-rerank, at 1.19 GB against 4.26 GB and 17.5 GB. The two VL rerankers it replaces had never been measured — [`eval-ab/rerank-2026-11-17`](../eval-ab/rerank-2026-11-17/README.md) |
 | `compose.yaml` | one `vllm-embed-<tier>` service instead of `tei-embed-*` + `vllm-page-embed-*`; one GPU reservation instead of two |
 | `setup.rs` | licence entry (`openmdw-1.1` → 🟡 opt-in), budget estimate for one 1B VL model, and the page arm becoming default-on for Desk |
 | docs | `README.md` model tables, `docs/kb-tiers.md` role table, `docs/benchmarks.md`, `CHANGELOG.md` |

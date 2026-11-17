@@ -15,6 +15,14 @@
 
 ### Added
 
+- **The GPU tiers' reranker: `Qwen3-Reranker-0.6B`.** Measured on MIRACL-id (200 queries, dense
+  top-50 pool): nDCG@10 **0.795 → 0.850** (+0.055) over no-rerank, at 1.19 GB and Apache-2.0.
+  It replaces `bge-reranker-v2-m3` on Desk and the never-measured `Qwen3-VL-Reranker-2B/8B` on
+  Studio/Station — 4.26 GB and 17.5 GB become 1.19 GB, one reranker for every GPU tier.
+  `eval-ab/rerank-2026-11-17/`; two tools came out of it, `make_candidates.py` (rebuild a rerank
+  pool from the engine's chunks) and `serve_cross_encoder.py` (serve an HF cross-encoder as
+  `/v1/rerank`, for checkpoints whose GGUF this llama.cpp cannot load).
+
 - **`EmbedFormat::OmniEmbed` in `kb-inference`** — the vLLM `/v2/embed` wire shape
   (`input_type` query/document, `inputs` as message content, `embeddings.float`), with a test that
   asserts the request and the ordering. Selected with `KB_EMBEDDING_FORMAT=openai|omniembed`
