@@ -43,31 +43,36 @@ measurement.
   on this box (a CUDA fault this machine has produced before with several models resident).
   The 0.61 GB challenger therefore stays unmeasured, not rejected.
 
-## The bigger ones, and why they are not numbers yet
+## The bigger ones: three serving paths, no number yet
 
-The obvious follow-up is "does a 4B or 8B reranker beat the 0.6B enough to justify 4–17 GB?". It
-cannot be answered through this serving path, and the failure mode is informative:
+The obvious follow-up is "does a 4B or 8B beat the 0.6B enough to justify 4–17 GB?". Three
+serving paths were tried on `Qwen3-Reranker-4B`, and the failures are all tooling — which is
+worth writing down, because each one looks like a result if you only read the number.
 
-| Model | GGUF source | nDCG@10 | p50 | Read |
-|---|---|---:|---:|---|
-| `Qwen3-Reranker-0.6B` | ggml-org | **0.850** | 4.1 s | valid |
-| `Qwen3-Reranker-4B` | dean2155 | 0.184 | 10.2 s | **invalid** |
-| `mxbai-rerank-base-v2` | mradermacher | 0.114 | 3.2 s | **invalid** |
+| Path | What happened | Read |
+|---|---|---|
+| llama.cpp `--reranking` + dean2155 GGUF | nDCG@10 **0.184** at 10.2 s/query | invalid: that GGUF's classification head is not what `--reranking` expects |
+| vLLM 0.33, `--hf-overrides` `Qwen3ForSequenceClassification` + `classifier_from_token` | **0.186**, then flat scores (0.9664 / 0.9658 / 0.9658 on a relevant/irrelevant/relevant triple) | invalid: the head is not discriminating |
+| vLLM + the official Qwen3 rerank `--chat-template` | still flat | invalid |
+| transformers shim, official template, scored on `logit(yes) − logit(no)` | **discriminates correctly** (4.63 / 5.06 relevant, 1.81 irrelevant) | valid read, but the process faults the GPU after a few hundred batches on this box |
 
-Three independent runs landing 0.61–0.68 *below* no-rerank, with latencies that make no sense for
-the model size, is a broken score read: those GGUFs' classification heads are not what llama.cpp's
-`--reranking` expects. The one that works is the ggml-org conversion, which an earlier run of this
-same harness also used successfully (November, 0.8792 on a different pool).
+So the 4B *can* be read — the shim proves the model and the template are fine — but this machine
+cannot sustain the run, and the two fast paths read the head wrongly. `ggml-org`, whose conversion
+is the one that works, publishes only `Qwen3-Reranker-0.6B-Q8_0-GGUF`.
 
-**So the 4B and 8B stay unmeasured, not rejected.** Measuring them needs the serving path Studio's
-preset already uses for `Qwen3-VL-Reranker-2B` — vLLM with the sequence-classification head
-(`--hf-overrides` + the rerank chat template) rather than a GGUF — or an `AutoModelForSequenceClassification`
-shim against the full-precision checkpoint, which is a download and a CUDA-fault risk on this box
-(it took the GPU down once already).
+**What would close it**, in order of effort:
 
-What the broken runs do say, and what is safe to quote: **cost scales the way the sizes suggest.**
-The 4B took 10.2 s per query against the 0.6B's 4.1 s on the same 50 candidates, i.e. a 4B reranker
-buys nothing for free even before its quality is known.
+1. A GGUF conversion of the 4B/8B that carries the rerank template (convert with llama.cpp's own
+   script and verify one known-good pair first, as `ggml-org`'s does);
+2. a stable GPU for the transformers shim — the shim is the reference implementation and needs no
+   conversion, it just needs a box that does not fault under it;
+3. vLLM's newer `--task score` path, if this build had it.
+
+Until then the 4B and 8B are **unmeasured, not rejected**, and the pick stands on the one model
+measured through a path that produces sensible scores.
+
+What the attempts *do* establish: **size is not free.** The 4B took 10.2 s per query against the
+0.6B's 4.1 s on the identical 50 candidates, at 4.3 GB against 1.19 GB.
 
 ## Files
 

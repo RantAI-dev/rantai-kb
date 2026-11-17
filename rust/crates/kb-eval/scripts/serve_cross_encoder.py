@@ -16,7 +16,7 @@ import argparse
 import json
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -26,11 +26,29 @@ ap.add_argument("--model", required=True)
 ap.add_argument("--port", type=int, default=8125)
 ap.add_argument("--api-key", default="")
 ap.add_argument("--max-length", type=int, default=2048)
+ap.add_argument("--template", choices=("pair", "qwen3"), default="pair",
+                help="pair: tokenizer(query, doc) for a classic cross-encoder. "
+                     "qwen3: the Qwen3-Reranker chat template, scored on the "
+                     "'yes' token minus 'no', which is how that model is meant to be used")
 a = ap.parse_args()
 
 tokenizer = AutoTokenizer.from_pretrained(a.model, trust_remote_code=True)
-model = AutoModelForSequenceClassification.from_pretrained(
-    a.model, trust_remote_code=True, torch_dtype=torch.bfloat16).eval().to("cuda")
+if a.template == "qwen3":
+    from transformers import AutoModelForCausalLM
+    model = AutoModelForCausalLM.from_pretrained(
+        a.model, trust_remote_code=True, torch_dtype=torch.bfloat16).eval().to("cuda")
+    YES = tokenizer.convert_tokens_to_ids("yes")
+    NO = tokenizer.convert_tokens_to_ids("no")
+else:
+    model = AutoModelForSequenceClassification.from_pretrained(
+        a.model, trust_remote_code=True, torch_dtype=torch.bfloat16).eval().to("cuda")
+
+QWEN3_PREFIX = (
+    "<|im_start|>system\nJudge whether the Document meets the requirements based on the "
+    "Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>\n"
+    "<|im_start|>user\n<Instruct>: Given a web search query, retrieve relevant passages that "
+    "answer the query\n<Query>: {query}\n<Document>: {doc}<|im_end|>\n<|im_start|>assistant\n"
+)
 lock = threading.Lock()
 
 
@@ -64,13 +82,23 @@ class Handler(BaseHTTPRequestHandler):
             return
         scores = []
         with lock, torch.inference_mode():
-            for d in docs:
-                inputs = tokenizer(query, d, truncation=True, max_length=a.max_length,
-                                   return_tensors="pt").to("cuda")
-                logits = model(**inputs).logits.view(-1)
-                # Single-logit rerankers are already a score; Qwen3-style ones
-                # emit (no, yes) and the answer is the second column.
-                scores.append(float(logits[-1] if logits.numel() > 1 else logits[0]))
+            if a.template == "qwen3":
+                # One batch, not one forward per document: 50 pair forwards per
+                # query is minutes per query, and the batch is the same work at
+                # GPU occupancy.
+                prompts = [QWEN3_PREFIX.format(query=query, doc=d) for d in docs]
+                enc = tokenizer(prompts, return_tensors="pt", padding=True,
+                                truncation=True, max_length=a.max_length).to("cuda")
+                logits = model(**enc).logits
+                last = enc["attention_mask"].sum(dim=1) - 1
+                rows = logits[torch.arange(logits.shape[0]), last, :]
+                scores = [float(r[YES] - r[NO]) for r in rows]
+            else:
+                for d in docs:
+                    inputs = tokenizer(query, d, truncation=True, max_length=a.max_length,
+                                       return_tensors="pt").to("cuda")
+                    logits = model(**inputs).logits.view(-1)
+                    scores.append(float(logits[-1] if logits.numel() > 1 else logits[0]))
         order = sorted(range(len(docs)), key=lambda i: -scores[i])
         self._send(200, {"results": [{"index": i, "relevance_score": scores[i]} for i in order]})
 
@@ -80,4 +108,4 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"serving {a.model} on :{a.port}", file=sys.stderr, flush=True)
-    HTTPServer(("0.0.0.0", a.port), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", a.port), Handler).serve_forever()
