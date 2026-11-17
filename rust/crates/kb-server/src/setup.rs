@@ -3402,7 +3402,10 @@ mod tests {
             compose_profiles(&plain, Tier::Studio),
             "studio,studio-ocr,studio-vision,studio-two"
         );
-        assert!(!written(&plain, Tier::Studio, &|_: &str| None).contains_key("KB_EMBEDDERS"));
+        assert!(
+            !written_with(&nvidia_box(24.0), &plain, Tier::Studio, &|_: &str| None)
+                .contains_key("KB_EMBEDDERS")
+        );
     }
 
     #[test]
