@@ -5,6 +5,11 @@ the queries and the per-query output. This page is the index: what was asked, wh
 what the answer was, and whether it changed a default. If a measurement does not exist, it is
 listed under [Not measured](#not-measured) rather than implied.
 
+The 2026-11-13 bake-off (text embedders, text rerankers, page embedders) came from the
+ThinkStation's own harness, which lives on that machine, not in this repo: its run folders are
+committed under [`eval-ab/bakeoff-2026-11-13/`](eval-ab/bakeoff-2026-11-13/) but it cannot be
+re-run from a checkout yet.
+
 Confidence intervals are 95% paired bootstrap unless stated. "Shipped" means the change is in
 today's defaults.
 
@@ -58,6 +63,41 @@ today's defaults.
 | 11-04 | `RET-4` recency boost | Dated-versions set 0.3455 → **0.9909** (+0.6455 [+0.6212, +0.6636]); MIRACL +0.0001 (neutral) | opt-in | [`retrieval-gaps`](eval-ab/retrieval-gaps/) |
 | 11-04 | `EVAL-2` tree arm (navigate a document's outline) | 41 structural queries: +0.163 ungated, **+0.086 gated** by RET-5's classifier; regular HR unchanged when gated, **−0.193 if left ungated** | off (`KB_TREE_ARM`) — it needs the gate | [`retrieval-gaps`](eval-ab/retrieval-gaps/) |
 | 11-04 | `EVAL-3` graph community summaries | **A loss** on aggregative questions: HR −0.045 to −0.067, CS −0.091 to −0.103, even with an oracle gate | off (`KB_GLOBAL_ARM`) | [`retrieval-gaps`](eval-ab/retrieval-gaps/) |
+
+## Models chosen, per role (the November bake-off)
+
+The registry-driven bake-off on the ThinkStation (2026-11-13) compared candidate models behind
+one protocol. Run folders: [`eval-ab/bakeoff-2026-11-13/`](eval-ab/bakeoff-2026-11-13/).
+
+**Text embedders**, pooled nDCG@10 over hotpot-200 + MIRACL-id-200, baseline
+`qwen3-embed-0.6b` (today's preset):
+
+| Model | Pooled | hotpot | MIRACL | Licence |
+|---|---:|---:|---:|---|
+| `nemotron3-embed-1b` | **0.8671** | +0.0857 [+0.0594, +0.1135] | +0.0351 [+0.0158, +0.0544] | NVIDIA Open Model License |
+| `qwen3-embed-4b` | 0.8658 | +0.0569 | +0.0476 [+0.0294, +0.0664] | Apache-2.0 |
+| `bge-m3` | 0.8362 | +0.0258 | +0.0186 | MIT |
+| `qwen3-embed-0.6b` | 0.8151 | — | — | Apache-2.0 |
+| `granite-embed-ml-r2` | 0.7854 | −0.0144 | −0.0374 | Apache-2.0 |
+
+`nemotron-embed-1b-v2` scored 0.7423 in that run and 0.8516 in a re-run eight hours later —
+**unresolved**, almost certainly the per-model prefix (`query: ` / `passage: `) in one of them.
+The registry marks every prefix `TODO verify`. Do not quote either number.
+
+**Text rerankers**, same pool, top 50 of the 0.6B:
+
+| Model | Pooled | Δ vs no rerank | hotpot | MIRACL |
+|---|---:|---:|---:|---:|
+| `qwen3-rerank-0.6b` | 0.8792 | +0.0664 | 0.9062 | **0.8657** (+0.0250 over bge) |
+| `bge-reranker-v2-m3` (preset) | 0.8781 | +0.0653 | **0.9530** (+0.0468 over qwen3) | 0.8407 |
+| `nemotron-rerank-1b-v2` | 0.8769 | +0.0641 | 0.9577 | 0.8366 |
+
+Pooled they are a tie (±0.002); split by language they are not, so "best reranker" is a
+language choice, not a ranking.
+
+**Page embedders: no data.** The page run's four endpoints were all down
+(`Connection refused`) and the tables are empty. The page side was measured separately — see
+[`plan-one-embedder.md`](plan-one-embedder.md).
 
 ## Ingest
 

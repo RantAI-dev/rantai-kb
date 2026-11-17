@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+- **The November bake-off runs are in the repo.** `docs/eval-ab/bakeoff-2026-11-13/` carries the
+  text-embedder, text-reranker and page-embedder runs from the ThinkStation's registry harness,
+  with their per-query output, the per-model protocol (query/document prefixes) and an honest
+  account of what did not run: the page embedders' endpoints were down, so that run has no data,
+  and `nemotron-embed-1b-v2` disagrees between two runs by 0.11 nDCG on MIRACL — unresolved, most
+  likely a prefix bug. `docs/benchmarks.md` indexes them.
+
 ### Changed
 
 - **The README is a front page; the detail moved into docs.** It now carries the hardware
