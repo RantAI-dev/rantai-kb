@@ -217,11 +217,15 @@ async def rerank_llama(client: httpx.AsyncClient, base: str, query: str, documen
     """POST {base}/v1/rerank: llama.cpp's server (`--reranking`), e.g. the LAN
     RX 590. The key is LLAMA_GPU_API_KEY. One request per query, every
     candidate in it, as the engine would send them.
+
+    llama.cpp accepts any model name; vLLM validates it, so a target may carry
+    one after `#`: `llama:http://host:8127#qwen3-rerank-4b`.
     """
+    base, _, model = base.partition("#")
     resp = await client.post(
         base.rstrip("/") + "/v1/rerank",
         headers={"Authorization": f"Bearer {os.environ.get('LLAMA_GPU_API_KEY', '')}"},
-        json={"model": "x", "query": query, "documents": documents},
+        json={"model": model or "x", "query": query, "documents": documents},
     )
     if resp.status_code != 200:
         raise RuntimeError(f"llama rerank failed: {resp.status_code} {resp.text[:200]}")
