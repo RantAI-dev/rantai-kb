@@ -164,6 +164,7 @@ blaming recall, is in [`docs/retrieval.md`](docs/retrieval.md).
 | [`docs/api.md`](docs/api.md) | Every route, options, tables, document structure, keys |
 | [`docs/kb-tiers.md`](docs/kb-tiers.md) | Tier decisions, VRAM estimates, OCR recipes, ingest seats |
 | [`docs/performance.md`](docs/performance.md) | Measured retrieval, throughput and OCR numbers per tier |
+| [`docs/benchmarks.md`](docs/benchmarks.md) | Every benchmark we have run, its result and its run folder |
 | [`docs/retrieval.md`](docs/retrieval.md) | The retrieval pipeline and every knob that changes it |
 | [`docs/security.md`](docs/security.md) | Tenants, scopes, the knowledge-base limit, known gaps |
 | [`docs/local-models.md`](docs/local-models.md) | Running the models without compose (TEI, llama.cpp, vLLM) |

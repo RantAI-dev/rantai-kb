@@ -1,5 +1,9 @@
 # Measured results
 
+The headline numbers per tier, and the ones a person choosing a machine needs. **Every
+measurement the repo has** — including the ones that changed no default, and the ones
+that failed — is indexed in [`benchmarks.md`](benchmarks.md).
+
 Every number here was run and is copied from the committed run folder next to it. Each
 folder has its script, queries and per-query output. Nothing in this file is an estimate;
 where a tier has not been measured on its real hardware, it says so.

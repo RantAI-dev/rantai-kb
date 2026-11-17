@@ -11,6 +11,10 @@
   `docs/security.md` and the measured numbers `docs/performance.md`. The claim that a
   knowledge-base-limited key could still read by-ID has been removed: `SEC-1` shipped in
   v0.2.0.
+- **`docs/benchmarks.md` indexes every benchmark we have run** — retrieval on ViDoRe and
+  MIRACL, the KF V-plane comparison, the cloud tier, ingest and OCR, pictures, tables —
+  with the result, the arm that was measured and the committed run folder, plus what was
+  measured and *not* shipped and what has not been measured at all.
 
 ## 0.3.0 — 2026-11-16
 
