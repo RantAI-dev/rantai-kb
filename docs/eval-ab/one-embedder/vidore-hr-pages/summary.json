@@ -1,0 +1,63 @@
+{
+  "dataset": "vidore3-hr-en",
+  "mode": "both",
+  "queries": 318,
+  "models": [
+    {
+      "model": "qwen3vl2b",
+      "dim": 2048,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.05778768044216944,
+            "MRR@10": 0.10689440466972243,
+            "Hit@1": 0.06289308176100629,
+            "Recall@10": 0.06365453383386672
+          },
+          "trec": "/tmp/opencode/ab-hr/qwen3vl2b.text.trec"
+        },
+        "image": {
+          "metrics": {
+            "nDCG@10": 0.277034079766454,
+            "MRR@10": 0.3903742635595603,
+            "Hit@1": 0.2830188679245283,
+            "Recall@10": 0.3201752934934126
+          },
+          "trec": "/tmp/opencode/ab-hr/qwen3vl2b.image.trec"
+        },
+        "one-space": {
+          "metrics": {
+            "nDCG@10": 0.22099304401847678,
+            "MRR@10": 0.3051366750724569,
+            "Hit@1": 0.1792452830188679,
+            "Recall@10": 0.2719742373618406
+          },
+          "trec": "/tmp/opencode/ab-hr/qwen3vl2b.one-space.trec"
+        }
+      }
+    }
+  ],
+  "deltas": [
+    {
+      "a": "qwen3vl2b/text",
+      "b": "qwen3vl2b/image",
+      "dnDCG10": -0.21924639932428458,
+      "lo": -0.2538329147863214,
+      "hi": -0.18471315224383694
+    },
+    {
+      "a": "qwen3vl2b/text",
+      "b": "qwen3vl2b/one-space",
+      "dnDCG10": -0.1632053635763073,
+      "lo": -0.19253718325090297,
+      "hi": -0.13524856310621947
+    },
+    {
+      "a": "qwen3vl2b/image",
+      "b": "qwen3vl2b/one-space",
+      "dnDCG10": 0.056041035747977204,
+      "lo": 0.03965531290538162,
+      "hi": 0.07280174073412818
+    }
+  ]
+}

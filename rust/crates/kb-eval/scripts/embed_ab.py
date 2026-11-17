@@ -221,16 +221,33 @@ def page_items(dataset, pages_jsonl):
 
 
 def chunk_items(chunks_jsonl):
-    """[(doc_id, embedding_text)] from an `rkdump` dump (the engine's own chunks)."""
-    out = {}
-    for line in open(chunks_jsonl, encoding="utf-8"):
+    """([(unit_id, embedding_text)], {unit_id: doc_id}) from an `rkdump` dump.
+
+    The retrieval unit is the chunk, as in the engine; scoring is at the document
+    level, where the qrels are, so a document keeps its best-ranked chunk.
+    """
+    items, owner = {}, {}
+    for n, line in enumerate(open(chunks_jsonl, encoding="utf-8")):
         c = json.loads(line)
         text = f"{c.get('title') or ''}\n\n{c['content']}".strip()
-        doc = c["doc"]
-        # One vector per document: the engine's best-scoring chunk represents it.
-        if doc not in out or len(text) > len(out[doc]):
-            out[doc] = text
-    return [(doc, text) for doc, text in out.items()]
+        uid = f"{c['doc']}#c{n}"
+        items[uid] = text
+        owner[uid] = c["doc"]
+    return [(uid, t) for uid, t in items.items()], owner
+
+
+def to_documents(run, owner):
+    """Rank units -> rank documents (the first, best-placed unit represents a doc)."""
+    out = {}
+    for qid, ids in run.items():
+        seen, docs = set(), []
+        for uid in ids:
+            doc = owner.get(uid, uid)
+            if doc not in seen:
+                seen.add(doc)
+                docs.append(doc)
+        out[qid] = docs
+    return out
 
 
 # ─── Scoring ───────────────────────────────────────────────────────────────
@@ -406,10 +423,10 @@ def main():
         image_items = [(pid, b"img\0" + img) for pid, _, img in pages if img]
         eprint(f"pages: {len(pages)} ({len(text_items)} with text, {len(image_items)} with image)")
     else:
-        chunks = chunk_items(a.chunks)
-        text_items = [(doc, t.encode()) for doc, t in chunks]
+        chunks, owner = chunk_items(a.chunks)
+        text_items = [(uid, t.encode()) for uid, t in chunks]
         image_items = []
-        eprint(f"documents: {len(chunks)}")
+        eprint(f"chunk units: {len(chunks)} across {len(set(owner.values()))} documents")
 
     summary = {"dataset": os.path.basename(a.dataset.rstrip("/")), "mode": a.mode,
                "queries": len(queries), "models": []}
@@ -428,6 +445,8 @@ def main():
         runs = {label: rank_from_scores(scores) for label, scores in per_label.items()}
         if len(per_label) > 1:
             runs["one-space"] = one_space_runs(per_label)
+        if not a.pages:
+            runs = {label: to_documents(run, owner) for label, run in runs.items()}
         entry = {"model": emb.name, "dim": emb.dim(), "runs": {}}
         for label, run in runs.items():
             path = os.path.join(out, f"{emb.name.replace('/', '_')}.{label}.trec")

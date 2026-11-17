@@ -99,6 +99,26 @@ language choice, not a ranking.
 (`Connection refused`) and the tables are empty. The page side was measured separately — see
 [`plan-one-embedder.md`](plan-one-embedder.md).
 
+## One embedder or two (EVAL-4)
+
+Should Studio/Station embed text and pages with `Qwen3-VL-Embedding-2B` alone? **No.** Runs,
+probe and the pre-registered rule: [`eval-ab/one-embedder/`](eval-ab/one-embedder/).
+
+| Arm | Dataset | nDCG@10 |
+|---|---|---:|
+| `Qwen3-Embedding-0.6B`, text chunks | MIRACL-id-200 | **0.796** |
+| `Qwen3-VL-Embedding-2B`, text chunks | MIRACL-id-200 | 0.653 (−0.143 [−0.179, −0.108]) |
+| `Qwen3-Embedding-0.6B`, page text | ViDoRe HR | **0.488** |
+| `Qwen3-VL-Embedding-2B`, page text | ViDoRe HR | 0.058 |
+| `Qwen3-VL-Embedding-2B`, page images | ViDoRe HR | 0.277 |
+| `Qwen3-VL-Embedding-2B`, one space | ViDoRe HR | 0.221 |
+
+The text arm is at chance on whole pages because the input is long: cut to 300–2,400
+characters it scores 0.44–0.60, at full page length 0.208. The one space is worse than its own
+image arm, so the text vectors pollute rather than supplement. Two-space stays, fusion weight
+and all. The local page embedder at 0.277 image-only (against 0.575 for the cloud model on the
+same pages) is `EVAL-5`.
+
 ## Ingest
 
 | When | What changed | Result | Shipped | Run |
