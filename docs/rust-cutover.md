@@ -822,3 +822,20 @@ Response additions, all present only when the arm ran and found nodes:
 `POST /v1/search` gains no request field and no response field changes for a
 deployment that leaves `KB_TREE_ARM` unset. A failed outline or page read adds
 the `tree_arm_failed` degrade; the other arms answer unchanged.
+
+### 17. Optional: one embedder for text and pages (0.4.0)
+
+`KB_EMBEDDERS=one` on `desk`, `studio` or `station` embeds text chunks and page images with one
+model (`Nemotron-3.5-Embed-1B`, 2048-d) and reranks with `Qwen3-Reranker-0.6B`. The default is
+unchanged: leaving it unset keeps `Qwen3-Embedding-0.6B` for text and the VL embedder for pages.
+
+**Adopting it is a re-index, not a config change.** The text vectors go from 1024 to 2048
+dimensions and the page vectors change model, and Qdrant fixes a collection's width when it is
+created. Wipe and rebuild from the S3 originals:
+
+    kb-server down -v
+    kb-server up <tier>
+    kb-server reindex
+
+The measured numbers behind the option are in `docs/eval-ab/one-embedder/` and
+`docs/eval-ab/rerank-2026-11-17/`; the spec is `docs/core/specs/dep-6.md`.
