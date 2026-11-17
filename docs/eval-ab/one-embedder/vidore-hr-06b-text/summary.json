@@ -1,0 +1,22 @@
+{
+  "dataset": "vidore3-hr-en",
+  "mode": "text",
+  "queries": 318,
+  "models": [
+    {
+      "model": "qwen06b",
+      "dim": 1024,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.48761014381744816,
+            "MRR@10": 0.6349545049700269,
+            "Hit@1": 0.5220125786163522,
+            "Recall@10": 0.5486710046549483
+          },
+          "trec": "/tmp/opencode/ab-hr-06b/qwen06b.text.trec"
+        }
+      }
+    }
+  ]
+}

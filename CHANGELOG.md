@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Changed
+
+- **One embedder vs two on Studio and Station: measured, and the answer is two (`EVAL-4`).**
+  `Qwen3-VL-Embedding-2B` loses **0.143** [−0.179, −0.108] nDCG@10 to `Qwen3-Embedding-0.6B` on
+  MIRACL-id text chunks (0.653 vs 0.796), and a single text+page space scores **0.221** on
+  ViDoRe HR against the 0.695 floor — worse than its own image-only arm (0.277), so the text
+  vectors pollute the page arm rather than supplement it. The fusion weight stays, now with a
+  measured reason. Two findings out of it: the VL model's text arm collapses on long input
+  (0.208 on whole pages, 0.44–0.60 cut to 300–2,400 characters), and the local page embedder is
+  far weaker than the cloud one (0.277 vs 0.575 image-only) — `EVAL-5`.
+
 ### Added
 
 - **The November bake-off runs are in the repo.** `docs/eval-ab/bakeoff-2026-11-13/` carries the

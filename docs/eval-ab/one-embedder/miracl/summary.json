@@ -1,0 +1,46 @@
+{
+  "dataset": "miracl-id-200",
+  "mode": "text",
+  "queries": 200,
+  "models": [
+    {
+      "model": "qwen06b",
+      "dim": 1024,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.795792028239292,
+            "MRR@10": 0.821719507101086,
+            "Hit@1": 0.74,
+            "Recall@10": 0.9397063492063492
+          },
+          "trec": "/tmp/opencode/ab-miracl/qwen06b.text.trec"
+        }
+      }
+    },
+    {
+      "model": "qwen3vl2b",
+      "dim": 2048,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.6530371091279076,
+            "MRR@10": 0.6796545599284995,
+            "Hit@1": 0.555,
+            "Recall@10": 0.8047698412698412
+          },
+          "trec": "/tmp/opencode/ab-miracl/qwen3vl2b.text.trec"
+        }
+      }
+    }
+  ],
+  "deltas": [
+    {
+      "a": "qwen06b/text",
+      "b": "qwen3vl2b/text",
+      "dnDCG10": 0.1427549191113843,
+      "lo": 0.1079188073460618,
+      "hi": 0.17922308540471282
+    }
+  ]
+}

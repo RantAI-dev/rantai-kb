@@ -2,6 +2,22 @@
 
 Plan for `EVAL-4`. Written 2026-11-17, before measuring.
 
+## Result (2026-11-17): keep two embedders
+
+Measured, and the rule above fires against collapsing on every clause. Write-up and runs:
+[`eval-ab/one-embedder/`](eval-ab/one-embedder/README.md).
+
+| Clause | Required | Measured |
+|---|---|---|
+| Text | within −0.015 of the 0.6B | **−0.143** [−0.179, −0.108] on MIRACL-id chunks (0.653 vs 0.796) |
+| Pages | ViDoRe HR ≥ 0.695 | **0.221** one space, **0.277** image-only, against 0.705 shipped |
+| Ingest | ≥ 60% of the 0.6B's chunks/s | not run — the page clause had already failed |
+
+Two findings came out of it that are worth more than the answer itself: the VL model's text
+arm collapses on *long* inputs (0.208 on whole pages, 0.44–0.60 once cut to 300–2,400
+characters), and the local page embedder is much weaker than the cloud one on pages
+(0.277 vs 0.575 image-only) — tracked as `EVAL-5`.
+
 ## Goal
 
 **Literal ask.** Should the upper tiers embed text chunks and page images with one model
