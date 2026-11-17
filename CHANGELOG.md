@@ -15,6 +15,14 @@
 
 ### Added
 
+- **`KB_EMBEDDERS=one` — one embedder for text and pages on Desk, Studio and Station (`DEP-6`).**
+  `Nemotron-3.5-Embed-1B` at 2048-d puts both modalities in one space and `Qwen3-Reranker-0.6B`
+  replaces the VL rerankers. Measured: MIRACL-id text **0.826** vs 0.796, ViDoRe HR pages
+  **0.621** one space vs 0.277 for the Qwen3-VL stack, reranker **+0.055**; 4.26 GB + 17.5 GB of
+  reranker become 1.19 GB, and the tuned fusion weight disappears. Opt-in until the page-reranker
+  run and one live tier run land — the default stack is unchanged. New wire shapes:
+  `EmbedFormat::OmniEmbed` and `PageEmbedFormat::OmniEmbed` (vLLM `/v2/embed`).
+
 - **The GPU tiers' reranker: `Qwen3-Reranker-0.6B`.** Measured on MIRACL-id (200 queries, dense
   top-50 pool): nDCG@10 **0.795 → 0.850** (+0.055) over no-rerank, at 1.19 GB and Apache-2.0.
   It replaces `bge-reranker-v2-m3` on Desk and the never-measured `Qwen3-VL-Reranker-2B/8B` on

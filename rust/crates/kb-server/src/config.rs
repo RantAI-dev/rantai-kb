@@ -951,8 +951,9 @@ impl Config {
                         kb_inference::PageEmbedFormat::OpenRouter
                     }
                     Some("vllm") => kb_inference::PageEmbedFormat::VllmChat,
+                    Some("omniembed") => kb_inference::PageEmbedFormat::OmniEmbed,
                     Some(other) => bail!(
-                        "KB_PAGE_EMBEDDING_FORMAT must be \"openrouter\" or \"vllm\", got {other:?}"
+                        "KB_PAGE_EMBEDDING_FORMAT must be \"openrouter\", \"vllm\" or \"omniembed\", got {other:?}"
                     ),
                 };
                 // The OpenRouter key only ever goes to the OpenRouter shape: a

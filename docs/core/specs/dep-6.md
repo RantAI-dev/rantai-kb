@@ -34,10 +34,10 @@ page reranker, and these runs have none. The claim is local-to-local: page retri
 
 | Area | Change |
 |---|---|
-| `kb-inference` text adapter | `EmbedFormat::OmniEmbed` — vLLM's `POST /v2/embed` (`input_type`, `inputs` as message content, `embeddings.float`). *Landed with this spec.* |
-| `kb-inference` page adapter | the same format for page images (`PageEmbedFormat::OmniEmbed`) — **not yet** |
-| `config` | `KB_EMBEDDING_FORMAT=openai|omniembed` (*landed*), `KB_PAGE_EMBEDDING_FORMAT=omniembed` (**not yet**) |
-| `tier.rs` | `desk`, `studio`, `station`: the 1B at **2048-d**, text and pages; drop the TEI text embedder and the separate page embedder from the presets |
+| `kb-inference` text adapter | `EmbedFormat::OmniEmbed` — vLLM's `POST /v2/embed` (`input_type`, `inputs` as message content, `embeddings.float`). **Landed.** |
+| `kb-inference` page adapter | `PageEmbedFormat::OmniEmbed`, the same shape for page images. **Landed.** |
+| `config` | `KB_EMBEDDING_FORMAT=openai|omniembed` and `KB_PAGE_EMBEDDING_FORMAT=openrouter|vllm|omniembed`. **Landed.** |
+| `tier.rs` | `KB_EMBEDDERS=one` selects the 1B at **2048-d** for text and pages plus `Qwen3-Reranker-0.6B`, on Desk, Studio and Station; unset keeps the shipped two-embedder stack. **Landed** as an option, not a default |
 | reranker | `Qwen3-Reranker-0.6B` on every GPU tier, replacing `bge-reranker-v2-m3` (Desk) and `Qwen3-VL-Reranker-2B/8B` (Studio/Station). Measured on MIRACL-id: nDCG@10 **0.795 → 0.850** (+0.055) over no-rerank, at 1.19 GB against 4.26 GB and 17.5 GB. The two VL rerankers it replaces had never been measured — [`eval-ab/rerank-2026-11-17`](../eval-ab/rerank-2026-11-17/README.md) |
 | `compose.yaml` | one `vllm-embed-<tier>` service instead of `tei-embed-*` + `vllm-page-embed-*`; one GPU reservation instead of two |
 | `setup.rs` | licence entry (`openmdw-1.1` → 🟡 opt-in), budget estimate for one 1B VL model, and the page arm becoming default-on for Desk |

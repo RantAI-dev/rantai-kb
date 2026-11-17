@@ -36,6 +36,11 @@ pub enum PageEmbedFormat {
     OpenRouter,
     /// vLLM Chat Embeddings (`messages`, one page per request, no `input_type`).
     VllmChat,
+    /// vLLM `/v2/embed`: `inputs` of message content, the query/document
+    /// instruction carried by `input_type` in the checkpoint, and the vectors
+    /// under `embeddings.float`. The shape an OmniEmbed-style multimodal model
+    /// needs to put pages and text chunks in one space (`DEP-6`).
+    OmniEmbed,
 }
 
 /// Settings for [`HttpPageEmbedder`]. Defaults live in `kb-server`.
@@ -123,7 +128,11 @@ impl HttpPageEmbedder {
                     "page embed http {status}: {msg}"
                 )));
             }
-            let vecs = parse_openai_ordered(&bytes, expected)?;
+            let vecs = if self.settings.format == PageEmbedFormat::OmniEmbed {
+                parse_omniembed(&bytes, expected)?
+            } else {
+                parse_openai_ordered(&bytes, expected)?
+            };
             let want = self.settings.dimension as usize;
             if let Some(bad) = vecs.iter().find(|v| v.len() != want) {
                 return Err(PortError::Malformed(format!(
@@ -135,6 +144,27 @@ impl HttpPageEmbedder {
         }
         Err(last.unwrap_or_else(|| PortError::Unavailable("page embed failed".into())))
     }
+}
+
+/// `{"embeddings": {"float": [[...], ...]}}` — vLLM's `/v2/embed` answer.
+fn parse_omniembed(bytes: &[u8], expected: usize) -> Result<Vec<Vec<f32>>, PortError> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        embeddings: Vectors,
+    }
+    #[derive(serde::Deserialize)]
+    struct Vectors {
+        float: Vec<Vec<f32>>,
+    }
+    let parsed: Resp = serde_json::from_slice(bytes)
+        .map_err(|e| PortError::Malformed(format!("omniembed resp: {e}")))?;
+    if parsed.embeddings.float.len() != expected {
+        return Err(PortError::Malformed(format!(
+            "omniembed returned {} vectors for {expected} inputs",
+            parsed.embeddings.float.len()
+        )));
+    }
+    Ok(parsed.embeddings.float)
 }
 
 fn page_content(page: &PageImage) -> Vec<serde_json::Value> {
@@ -184,6 +214,24 @@ impl HttpPageEmbedder {
                     )
                 })
                 .collect(),
+            PageEmbedFormat::OmniEmbed => pages
+                .chunks(self.settings.batch_size.max(1) as usize)
+                .map(|chunk| {
+                    (
+                        json!({
+                            "model": self.settings.model,
+                            "input_type": "document",
+                            "inputs": chunk
+                                .iter()
+                                .map(|page| json!({"content": page_content(page)}))
+                                .collect::<Vec<_>>(),
+                            "embedding_types": ["float"],
+                            "truncate": "END",
+                        }),
+                        chunk.len(),
+                    )
+                })
+                .collect(),
         }
     }
 
@@ -196,6 +244,13 @@ impl HttpPageEmbedder {
                 "model": self.settings.model,
                 "messages": [{"role": "user", "content": [{"type": "text", "text": text}]}],
                 "encoding_format": "float",
+            }),
+            PageEmbedFormat::OmniEmbed => json!({
+                "model": self.settings.model,
+                "input_type": "query",
+                "inputs": [{"content": [{"type": "text", "text": text}]}],
+                "embedding_types": ["float"],
+                "truncate": "END",
             }),
         }
     }

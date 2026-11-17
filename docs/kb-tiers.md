@@ -435,6 +435,7 @@ numbers and how to override a setting.
 | Setting | Values | Default |
 |---|---|---|
 | `KB_TIER` | `lite`, `lite-en`, `desk`, `studio`, `station`, `cloud` | unset: today's explicit per-role settings |
+| `KB_EMBEDDERS` | `two` (default) or `one` (`DEP-6`): on the GPU tiers, `one` embeds text **and** pages with `Nemotron-3.5-Embed-1B` at 2048-d in a single space, and reranks with `Qwen3-Reranker-0.6B`. Measured in [`eval-ab/one-embedder`](eval-ab/one-embedder/README.md) and [`eval-ab/rerank-2026-11-17`](eval-ab/rerank-2026-11-17/README.md): text 0.826 vs 0.796, pages 0.621 one space vs 0.277 for the Qwen3-VL stack, reranker +0.055. It points at `http://127.0.0.1:8081/v2/embed` and `:8082/v1/rerank`, so a bare-metal install or any operator-supplied endpoint can run it today; the compose services land with the flip ([`specs/dep-6.md`](core/specs/dep-6.md)) |
 | `KB_PARSE_RESIDENCY` | `on-demand`, `always` | Desk `on-demand`, Studio and up `always` |
 | `KB_PARSE_IDLE_UNLOAD_S` | seconds | 300 |
 | `KB_CAPTION_RESIDENCY` | `on-demand`, `always` | same as parse |
