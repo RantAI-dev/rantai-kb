@@ -1,0 +1,22 @@
+{
+  "dataset": "miracl-id-200",
+  "mode": "text",
+  "queries": 200,
+  "models": [
+    {
+      "model": "nemotron3",
+      "dim": 2048,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.8230939696931843,
+            "MRR@10": 0.8432448246198245,
+            "Hit@1": 0.77,
+            "Recall@10": 0.9548075396825396
+          },
+          "trec": "/tmp/opencode/ab-miracl-nemo/nemotron3.text.trec"
+        }
+      }
+    }
+  ]
+}

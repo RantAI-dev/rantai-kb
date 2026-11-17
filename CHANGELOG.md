@@ -15,6 +15,17 @@
 
 ### Added
 
+- **`Nemotron-3.5-Embed-1B` measured: it reopens the one-embedder question (`EVAL-6`).**
+  Same harness as `EVAL-4`: MIRACL-id text **0.826** (+0.030 [+0.012, +0.048] over
+  `Qwen3-Embedding-0.6B`), and on ViDoRe HR text **0.611**, image **0.626**, one space
+  **0.621**, image+text in one vector **0.625** — every pair inside ±0.015, so the space is
+  coherent and mixing costs nothing. That is 0.008 under a cross-validated two-space fusion
+  (0.629) with no fusion to tune, and it beats the cloud page arm on images (0.626 vs voyage's
+  0.575). Corrects two earlier claims: `Qwen3-VL-Embedding-2B`'s long-text collapse is
+  model-specific, not a property of VL embedders, and local page embedding is not weak —
+  `Qwen3-VL-2B` is (`EVAL-5`). Adopting it needs a page-reranker run, throughput at 32k
+  context, the `openmdw-1.1` opt-in and a 2048-d re-index.
+
 - **The November bake-off runs are in the repo.** `docs/eval-ab/bakeoff-2026-11-13/` carries the
   text-embedder, text-reranker and page-embedder runs from the ThinkStation's registry harness,
   with their per-query output, the per-model protocol (query/document prefixes) and an honest

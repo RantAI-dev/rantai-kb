@@ -1,0 +1,63 @@
+{
+  "dataset": "vidore3-hr-en",
+  "mode": "both",
+  "queries": 318,
+  "models": [
+    {
+      "model": "nemo35",
+      "dim": 2048,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.6109887482313856,
+            "MRR@10": 0.7396075906050691,
+            "Hit@1": 0.6352201257861635,
+            "Recall@10": 0.6575286100892342
+          },
+          "trec": "/tmp/opencode/ab-hr-nemo35/nemo35.text.trec"
+        },
+        "image": {
+          "metrics": {
+            "nDCG@10": 0.6256367956159793,
+            "MRR@10": 0.7465621965458923,
+            "Hit@1": 0.6415094339622641,
+            "Recall@10": 0.6678433096869928
+          },
+          "trec": "/tmp/opencode/ab-hr-nemo35/nemo35.image.trec"
+        },
+        "one-space": {
+          "metrics": {
+            "nDCG@10": 0.6213032379337291,
+            "MRR@10": 0.7453757800210572,
+            "Hit@1": 0.6415094339622641,
+            "Recall@10": 0.6729640525293937
+          },
+          "trec": "/tmp/opencode/ab-hr-nemo35/nemo35.one-space.trec"
+        }
+      }
+    }
+  ],
+  "deltas": [
+    {
+      "a": "nemo35/text",
+      "b": "nemo35/image",
+      "dnDCG10": -0.014648047384593594,
+      "lo": -0.031587500099869714,
+      "hi": 0.0023750570621033193
+    },
+    {
+      "a": "nemo35/text",
+      "b": "nemo35/one-space",
+      "dnDCG10": -0.010314489702343499,
+      "lo": -0.016310363836402147,
+      "hi": -0.005130266271855489
+    },
+    {
+      "a": "nemo35/image",
+      "b": "nemo35/one-space",
+      "dnDCG10": 0.004333557682250096,
+      "lo": -0.011096884971837136,
+      "hi": 0.019374122622345082
+    }
+  ]
+}

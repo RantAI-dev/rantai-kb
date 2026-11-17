@@ -1,0 +1,22 @@
+{
+  "dataset": "vidore3-hr-en",
+  "mode": "combined",
+  "queries": 318,
+  "models": [
+    {
+      "model": "nemo35",
+      "dim": 2048,
+      "runs": {
+        "image+text": {
+          "metrics": {
+            "nDCG@10": 0.6246884039007121,
+            "MRR@10": 0.7339872872518285,
+            "Hit@1": 0.6132075471698113,
+            "Recall@10": 0.6786124597557737
+          },
+          "trec": "/tmp/opencode/ab-hr-nemo35-comb/nemo35.image+text.trec"
+        }
+      }
+    }
+  ]
+}

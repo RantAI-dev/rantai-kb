@@ -90,8 +90,8 @@ class Embedder:
         name, _, url = left.partition("=")
         if not (name and url):
             raise SystemExit(f"--model wants name=url#kind, got {spec!r}")
-        if kind not in ("openai", "chat"):
-            raise SystemExit(f"--model {name}: kind must be openai or chat, got {kind!r}")
+        if kind not in ("openai", "chat", "nemo"):
+            raise SystemExit(f"--model {name}: kind must be openai, chat or nemo, got {kind!r}")
         return cls(name, url, kind, served=served or name,
                    qprefix=qprefix, dprefix=dprefix, **kw)
 
@@ -103,6 +103,27 @@ class Embedder:
 
     def _body(self, payloads, role):
         prefix = self._pref(role)
+        if self.kind == "nemo":
+            # vLLM's /v2/embed: the checkpoint carries the query/document prefix,
+            # selected with `input_type`, and it batches several inputs per call.
+            inputs = []
+            for p in payloads:
+                tag, _, rest = p.partition(b"\0")
+                content = []
+                if tag == b"img":
+                    content.append({"type": "image_url", "image_url": {"url":
+                                    "data:image/jpeg;base64," + base64.b64encode(rest).decode()}})
+                elif tag == b"both":
+                    text, _, img = rest.partition(b"\0")
+                    content.append({"type": "image_url", "image_url": {"url":
+                                    "data:image/jpeg;base64," + base64.b64encode(img).decode()}})
+                    content.append({"type": "text", "text": prefix + text.decode("utf-8", "replace")})
+                else:
+                    content.append({"type": "text", "text": prefix + p.decode("utf-8", "replace")})
+                inputs.append({"content": content})
+            return [{"model": self.served,
+                     "input_type": "query" if role == "query" else "document",
+                     "inputs": inputs, "embedding_types": ["float"], "truncate": "END"}]
         if self.kind == "openai":
             return [{"model": self.served,
                      "input": [prefix + p.decode("utf-8", "replace") for p in payloads]}]
@@ -126,6 +147,8 @@ class Embedder:
             try:
                 self.calls += 1
                 r = json.load(urllib.request.urlopen(req, timeout=600))
+                if self.kind == "nemo":
+                    return r["embeddings"]["float"]
                 return [d["embedding"] for d in sorted(r["data"], key=lambda d: d.get("index", 0))]
             except urllib.error.HTTPError as e:
                 body_txt = e.read()[:200]
@@ -157,7 +180,7 @@ class Embedder:
 
         def work(chunk):
             bodies = self._body([p for _, p, _ in chunk], role)
-            if self.kind == "openai":
+            if self.kind in ("openai", "nemo"):
                 vecs = self._post(bodies[0])
             else:
                 vecs = []
@@ -390,7 +413,7 @@ def main():
     ap.add_argument("--dataset", help="dir with queries.jsonl and qrels/")
     ap.add_argument("--pages", help="pages.jsonl (pre-rendered pages with text)")
     ap.add_argument("--chunks", help="rkdump chunks.jsonl (the engine's own chunks)")
-    ap.add_argument("--mode", choices=("text", "image", "both"), default="text")
+    ap.add_argument("--mode", choices=("text", "image", "both", "combined"), default="text")
     ap.add_argument("--model", action="append", default=[], help="name=url#openai|chat")
     ap.add_argument("--out", default="")
     ap.add_argument("--cache", default=os.path.expanduser("~/.cache/kb-eval/embed-ab"))
@@ -406,8 +429,8 @@ def main():
         raise SystemExit("--dataset and at least one --model are required")
     if a.mode in ("text", "both") and not (a.pages or a.chunks):
         raise SystemExit("--mode text needs --pages or --chunks")
-    if a.mode in ("image", "both") and not a.pages:
-        raise SystemExit("--mode image/both needs --pages")
+    if a.mode in ("image", "both", "combined") and not a.pages:
+        raise SystemExit("--mode image/both/combined needs --pages")
     out = a.out or os.path.join("/tmp", "embed-ab")
     os.makedirs(out, exist_ok=True)
     os.makedirs(a.cache, exist_ok=True)
@@ -441,6 +464,10 @@ def main():
             vecs["text"] = emb.embed(text_items, "text")
         if a.mode in ("image", "both"):
             vecs["image"] = emb.embed(image_items, "image")
+        if a.mode == "combined":
+            both_items = [(pid, b"both\0" + t.encode() + b"\0" + img)
+                          for pid, t, img in pages if t and img]
+            vecs["image+text"] = emb.embed(both_items, "image+text")
         per_label = {label: cosine_map(queries, qvec, v) for label, v in vecs.items()}
         runs = {label: rank_from_scores(scores) for label, scores in per_label.items()}
         if len(per_label) > 1:
