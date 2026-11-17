@@ -100,22 +100,28 @@ their real hardware before we claim them).
 `lite-en` is English-only: it is ~4× faster per page and loses 0.12 nDCG on Indonesian.
 Use `lite` for a mixed or non-English corpus.
 
-**Local GPU tiers.** One model per role, on one card (or one card per model container).
+**Local GPU tiers.** **One embedder for text and pages** — not two — and one reranker.
 
 | Role | `desk` (8 GB) | `studio` (24 GB) | `station` (48 GB) |
 |---|---|---|---|
-| Text + chunk embeddings | `Qwen/Qwen3-Embedding-0.6B` — 596M, 1024-d, FP16, TEI CUDA, 1.19 GB | same | same |
-| Reranker | `BAAI/bge-reranker-v2-m3` — 568M, TEI CUDA, 2.27 GB | `Qwen3-VL-Reranker-2B` — 2B, vLLM, 4.26 GB | `Qwen3-VL-Reranker-8B` — 8B, FP8 on the card, 17.5 GB on disk |
+| **Embeddings: text chunks *and* page images** | `nvidia/Nemotron-3.5-Embed-1B-BF16` — 1B, **2048-d, one vector space**, vLLM, 2.4 GB | same | same |
+| Reranker | `Qwen/Qwen3-Reranker-0.6B` — 0.6B, llama.cpp `/v1/rerank`, 1.19 GB | same | same |
 | Scanned-page OCR | `xiaomi-research/Xiaomi-OCR-0` — 0.8B, FP8, vLLM, 1.75 GB | same | same |
 | Pictures → description | `Qwen3-VL-2B-Instruct`, Q4_K_M, llama.cpp CUDA, 1.11 GB | same | same |
-| Page-image search | off (text-only embedder) | `Qwen3-VL-Embedding-2B` — 2048-d, vLLM, 4.26 GB | `Qwen3-VL-Embedding-8B` — 4096-d, FP8, 16.3 GB on disk |
 
-`KB_EMBEDDERS=one` switches Desk, Studio and Station to a single embedder
-(`Nemotron-3.5-Embed-1B`, 2048-d) that puts text and page images in one space, with
-`Qwen3-Reranker-0.6B` as the reranker. Measured: text **0.826** against 0.796, pages **0.621**
-one space against 0.277 for the Qwen3-VL stack, and the reranker **+0.055** on Indonesian at 1.19 GB
-instead of 4.26/17.5 GB. It is opt-in until the page-reranker run and one live tier run land
-([`docs/core/specs/dep-6.md`](docs/core/specs/dep-6.md)).
+One model serves both modalities, so there is **no text encoder beside an image encoder and no
+fusion weight to tune**: a page and a paragraph are vectors in the same space, and one query
+embedding searches both. Measured on ViDoRe HR: text 0.611, image 0.626, one space **0.621** —
+every arm within ±0.015, against 0.277 for the two-encoder Qwen3-VL stack, and text on
+MIRACL-id **0.826** against 0.796 ([`docs/eval-ab/one-embedder`](docs/eval-ab/one-embedder/README.md)).
+The reranker replaces the VL rerankers that were 4.26 GB and 17.5 GB and had never been measured;
+at 1.19 GB it lifts nDCG@10 **0.795 → 0.850** on Indonesian
+([`docs/eval-ab/rerank-2026-11-17`](docs/eval-ab/rerank-2026-11-17/README.md)).
+
+**How to select it.** `KB_EMBEDDERS=one` (documented in the bundle's `.env.example`). The 0.4.0
+default is still the previous two-model stack until the last two gate measurements land — the page
+reranker on top of the one-space list and ingest throughput at 32k context — so the switch is
+explicit rather than silent ([`docs/core/specs/dep-6.md`](docs/core/specs/dep-6.md)).
 
 The optional table pass (`--ocr-tables accurate`) adds the `ocr-layout` sidecar:
 PP-DocLayoutV3, ~130 MB, on the CPU — **never on the same card as the OCR model**, which
@@ -137,9 +143,10 @@ verdicts, and the alternatives that were rejected on licence grounds, are in
 VRAM arithmetic and the measured OCR comparison are in [`docs/kb-tiers.md`](docs/kb-tiers.md).
 
 **How verified each tier is.** Lite and lite-en were run end to end, including OCR on two
-cores. Desk, Studio and Station are `docker compose config`-validated and unit-tested, and
-their OCR numbers were measured on a GB10 — but **never on a Desk-sized card**. Numbers per
-tier: [`docs/performance.md`](docs/performance.md).
+cores. The GPU tiers' embedding and reranking were measured on a GB10 through the same harness
+the eval runs use (the numbers above), and their compose profiles are `docker compose config`-
+validated and unit-tested — but **never run on a Desk-sized card**. Numbers per tier:
+[`docs/performance.md`](docs/performance.md).
 
 ## What it does with a file
 

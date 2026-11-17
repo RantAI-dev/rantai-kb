@@ -31,8 +31,8 @@ Metal); that is accepted for the chat model only.
 | Role | Lite | Desk (8 GB) | Studio (24 GB) | Station | Cloud |
 |---|---|---|---|---|---|
 | Chat LLM (the app's) | elsewhere | Bonsai-2-9B (2.0–2.6 GB + 0.6 GB vision), 5 users | Bonsai-2-27B (6.0–7.2 GB + 0.6 GB vision), 5 users | 32–35B × 5 users, or 8–9B × 20 users | API |
-| Embedding (text + page images, one space) | multilingual-e5-small on CPU (measured: `docs/eval-ab/lite-2core`) | Qwen3-Embedding-0.6B, text only (decided 2026-10-26) | Qwen3-VL-Embedding-2B, full precision | Qwen3-VL-Embedding-8B | voyage-multimodal-3.5 or gemini-embedding-2 |
-| Reranker | tiny text reranker, or none | bge-reranker-v2-m3 (text) | Qwen3-VL-Reranker-2B, full precision | Qwen3-VL-Reranker-8B | voyage rerank-2.5 / cohere rerank-4 / qwen3-reranker-8b |
+| Embedding (text + page images, one space) | multilingual-e5-small on CPU (measured: `docs/eval-ab/lite-2core`) | **`Nemotron-3.5-Embed-1B`, 2048-d, text and pages** (`KB_EMBEDDERS=one`; measured 2026-11-17) | same | same | voyage-multimodal-3.5 or gemini-embedding-2 |
+| Reranker | tiny text reranker, or none | **Qwen3-Reranker-0.6B**, 1.19 GB (measured 2026-11-17: +0.055) | same | same | voyage rerank-2.5 / cohere rerank-4 / qwen3-reranker-8b |
 | Digital PDF text | pdfium text layer | text layer | text layer | text layer | text layer |
 | Scans / complex pages | CPU document OCR sidecar: PP-Layout + PP-OCRv6 tiny + SLANet-plus tables (0.69 pages/s on 2 cores) | Xiaomi-OCR-0, vLLM fp8 (1.35 pages/s, 4.4 GB peak) | Xiaomi-OCR-0 (1.5 pages/s), table pass optional | Xiaomi-OCR-0 + layout table pass | Mistral OCR |
 | Pictures (photos, charts, diagrams, embedded images; `ING-5`) | Qwen3-VL-2B-Instruct Q4 on CPU (llama.cpp sidecar `vlm-cpu`) | Qwen3-VL-2B-Instruct on GPU (`vlm-gpu`, ~2.5 GB) | same | same | nemotron-3.5-super-vl (API) |
