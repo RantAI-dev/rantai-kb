@@ -43,9 +43,35 @@ measurement.
   on this box (a CUDA fault this machine has produced before with several models resident).
   The 0.61 GB challenger therefore stays unmeasured, not rejected.
 
+## The bigger ones, and why they are not numbers yet
+
+The obvious follow-up is "does a 4B or 8B reranker beat the 0.6B enough to justify 4–17 GB?". It
+cannot be answered through this serving path, and the failure mode is informative:
+
+| Model | GGUF source | nDCG@10 | p50 | Read |
+|---|---|---:|---:|---|
+| `Qwen3-Reranker-0.6B` | ggml-org | **0.850** | 4.1 s | valid |
+| `Qwen3-Reranker-4B` | dean2155 | 0.184 | 10.2 s | **invalid** |
+| `mxbai-rerank-base-v2` | mradermacher | 0.114 | 3.2 s | **invalid** |
+
+Three independent runs landing 0.61–0.68 *below* no-rerank, with latencies that make no sense for
+the model size, is a broken score read: those GGUFs' classification heads are not what llama.cpp's
+`--reranking` expects. The one that works is the ggml-org conversion, which an earlier run of this
+same harness also used successfully (November, 0.8792 on a different pool).
+
+**So the 4B and 8B stay unmeasured, not rejected.** Measuring them needs the serving path Studio's
+preset already uses for `Qwen3-VL-Reranker-2B` — vLLM with the sequence-classification head
+(`--hf-overrides` + the rerank chat template) rather than a GGUF — or an `AutoModelForSequenceClassification`
+shim against the full-precision checkpoint, which is a download and a CUDA-fault risk on this box
+(it took the GPU down once already).
+
+What the broken runs do say, and what is safe to quote: **cost scales the way the sizes suggest.**
+The 4B took 10.2 s per query against the 0.6B's 4.1 s on the same 50 candidates, i.e. a 4B reranker
+buys nothing for free even before its quality is known.
+
 ## Files
 
-- `bakeoff.json` — every metric, the baseline and the per-model latency this report is built from.
+- `bakeoff.json` — every metric of the 0.6B/mxbai run, the baseline and the per-model latency.
 - `../../../rust/crates/kb-eval/scripts/make_candidates.py` — builds the pool.
 - `../../../rust/crates/kb-eval/scripts/serve_cross_encoder.py` — serves an HF cross-encoder as
   `/v1/rerank`, which is what made a GGUF-less checkpoint measurable at all.
