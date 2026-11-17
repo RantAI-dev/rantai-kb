@@ -708,6 +708,18 @@ pub const LICENCES: &[LicenceEntry] = &[
         "picture reading (ING-5), every local tier",
     ),
     entry(
+        "nvidia/Nemotron-3.5-Embed-1B-BF16",
+        "openmdw-1.1 (Open Model Weights licence)",
+        LicenceClass::Yellow,
+        "one embedder for text and pages (DEP-6, KB_EMBEDDERS=one); opt-in like any \u{1f7e1} model",
+    ),
+    entry(
+        "Qwen/Qwen3-Reranker-0.6B",
+        "Apache-2.0",
+        LicenceClass::Green,
+        "chunk reranker for the one-embedder stack (DEP-6)",
+    ),
+    entry(
         "nvidia/nemotron-3.5-super-vl",
         "hosted service, provider terms",
         LicenceClass::Yellow,
@@ -922,6 +934,9 @@ pub struct SetupArgs {
     pub ocr_key_env: Option<String>,
     /// `--ocr-tables accurate`: the layout table pass on a GPU tier.
     pub ocr_tables_accurate: bool,
+    /// `--embedders one|two` (`DEP-6`): one embedder for text and pages, or
+    /// the two-model stack. `None` keeps whatever the env file already says.
+    pub embedders: Option<crate::tier::Embedders>,
     /// `--vision`; `None` is the tier's default.
     pub vision: Option<VisionChoice>,
     /// `--vision-model` for `--vision <url>`.
@@ -1027,6 +1042,18 @@ impl SetupArgs {
                             )));
                         }
                     };
+                }
+                "--embedders" => {
+                    let value = value_of(args, &mut index, "--embedders")?;
+                    parsed.embedders = Some(match value.as_str() {
+                        "one" => crate::tier::Embedders::One,
+                        "two" => crate::tier::Embedders::Two,
+                        other => {
+                            return Err(CliError::Usage(format!(
+                                "--embedders must be one or two, got {other:?}"
+                            )));
+                        }
+                    });
                 }
                 "--vision" => {
                     let value = value_of(args, &mut index, "--vision")?;
@@ -1216,6 +1243,7 @@ MODEL ROLES (each defaults to the tier's own local model)
     --ocr-key-env <NAME>          Read the --ocr <URL> server's key from $NAME
     --ocr-tables <fast|accurate>  accurate adds the layout table pass (GPU tiers; ~+10
                                   points on tables, slower; detector on the CPU)
+    --embedders <one|two>         One embedder for text and pages (DEP-6) or two; one is a re-index
     --vision <local|off|URL>      Where pictures are read (ING-5); off keeps them undescribed
     --vision-model <NAME>         Model name at --vision <URL>
     --set KEY=VALUE               Write any setting into .env (repeatable), e.g.
@@ -1568,6 +1596,15 @@ pub fn compose_profiles(args: &SetupArgs, tier: Tier) -> String {
         if effective_vision(args, tier) == VisionChoice::Local {
             profiles.push(format!("{name}-vision"));
         }
+        // One embedder or two (`DEP-6`): the model services live behind
+        // `<tier>-one` / `<tier>-two` so exactly one stack starts. An unset
+        // flag keeps the stack the env file already runs, defaulting to two.
+        let one = match args.embedders {
+            Some(crate::tier::Embedders::One) => true,
+            Some(crate::tier::Embedders::Two) => false,
+            None => false,
+        };
+        profiles.push(format!("{name}-{}", if one { "one" } else { "two" }));
     }
     profiles.join(",")
 }
@@ -1610,6 +1647,35 @@ fn env_changes(
         "Deployment tier (docs/kb-tiers.md). The preset fills the model roles; an \
          explicit KB_* setting still wins.",
     )];
+    if let Some(embedders) = args.embedders {
+        if embedders == crate::tier::Embedders::One {
+            changes.push(EnvChange::plain("KB_EMBEDDERS", "one").with_comment(
+                "One embedder for text and pages (DEP-6): Nemotron-3.5-Embed-1B in a \
+                     single 2048-d space, with Qwen3-Reranker-0.6B. Adopting it is a \
+                     re-index; adopting or leaving it needs no other change.",
+            ));
+            // Inside compose the model services are named, not loopback.
+            changes.push(EnvChange::plain(
+                "KB_EMBEDDING_BASE_URL",
+                "http://vllm-embed:8000/v2/embed",
+            ));
+            changes.push(EnvChange::plain(
+                "KB_PAGE_EMBEDDING_BASE_URL",
+                "http://vllm-embed:8000/v2/embed",
+            ));
+            changes.push(EnvChange::plain("KB_RERANK_PROVIDER", "cohere"));
+            changes.push(EnvChange::plain(
+                "KB_RERANK_BASE_URL",
+                "http://llama-rerank:8082/v1/rerank",
+            ));
+            changes.push(EnvChange::plain("KB_RERANK_API_KEY", "local"));
+        } else {
+            changes.push(EnvChange::plain("KB_EMBEDDERS", "two").with_comment(
+                "Two embedders: Qwen3-Embedding-0.6B for text, Qwen3-VL-Embedding-* \
+                 for pages (the 0.3/0.4 default).",
+            ));
+        }
+    }
     if let Some(port) = args.port {
         changes.push(EnvChange::plain("KB_PORT", port.to_string()));
     }
@@ -3194,7 +3260,7 @@ mod tests {
         );
         assert_eq!(
             env.get("COMPOSE_PROFILES").map(String::as_str),
-            Some("desk,desk-ocr,desk-vision")
+            Some("desk,desk-ocr,desk-vision,desk-two")
         );
         assert!(
             !env.contains_key("KB_OCR_BASE_URL"),
@@ -3247,7 +3313,7 @@ mod tests {
         );
         assert_eq!(
             env.get("COMPOSE_PROFILES").map(String::as_str),
-            Some("lite,lite-vision")
+            Some("lite,lite-vision,lite-two")
         );
     }
 
@@ -3270,7 +3336,7 @@ mod tests {
         );
         assert_eq!(
             env.get("COMPOSE_PROFILES").map(String::as_str),
-            Some("lite,lite-vision")
+            Some("lite,lite-vision,lite-two")
         );
         assert!(
             SetupArgs::parse(&args_of(&["--ocr-model", "x"])).is_err(),
@@ -3290,8 +3356,46 @@ mod tests {
         assert!(!env.contains_key("KB_IMAGE_DESCRIBE_BASE_URL"));
         assert_eq!(
             env.get("COMPOSE_PROFILES").map(String::as_str),
-            Some("lite,lite-ocr")
+            Some("lite,lite-ocr,lite-two")
         );
+    }
+
+    /// `--embedders one`: `DEP-6`'s single model for text and pages, with the
+    /// compose service names the tier would reach inside the stack.
+    #[test]
+    fn embedders_one_writes_the_endpoints_and_the_one_profile() {
+        let parsed = SetupArgs::parse(&args_of(&["--embedders", "one"])).expect("parse");
+        assert_eq!(
+            compose_profiles(&parsed, Tier::Studio),
+            "studio,studio-ocr,studio-vision,studio-one"
+        );
+        let env = written(&parsed, Tier::Studio, &|_: &str| None);
+        assert_eq!(env.get("KB_EMBEDDERS").map(String::as_str), Some("one"));
+        assert_eq!(
+            env.get("KB_EMBEDDING_BASE_URL").map(String::as_str),
+            Some("http://vllm-embed:8000/v2/embed")
+        );
+        assert_eq!(
+            env.get("KB_PAGE_EMBEDDING_BASE_URL").map(String::as_str),
+            Some("http://vllm-embed:8000/v2/embed"),
+            "pages use the same endpoint as text"
+        );
+        assert_eq!(
+            env.get("KB_RERANK_PROVIDER").map(String::as_str),
+            Some("cohere")
+        );
+        assert_eq!(
+            env.get("KB_RERANK_BASE_URL").map(String::as_str),
+            Some("http://llama-rerank:8082/v1/rerank")
+        );
+
+        // Without the flag the two-model stack and its profile stay.
+        let plain = SetupArgs::parse(&args_of(&[])).expect("parse");
+        assert_eq!(
+            compose_profiles(&plain, Tier::Studio),
+            "studio,studio-ocr,studio-vision,studio-two"
+        );
+        assert!(!written(&plain, Tier::Studio, &|_: &str| None).contains_key("KB_EMBEDDERS"));
     }
 
     #[test]
@@ -3301,7 +3405,7 @@ mod tests {
         assert!(check_roles(&parsed, Tier::Desk).is_ok());
         assert_eq!(
             compose_profiles(&parsed, Tier::Studio),
-            "studio,studio-ocr,studio-ocr-layout,studio-vision"
+            "studio,studio-ocr,studio-ocr-layout,studio-vision,studio-two"
         );
         let env = written(
             &SetupArgs {
