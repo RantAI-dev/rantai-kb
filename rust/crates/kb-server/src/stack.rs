@@ -1076,14 +1076,15 @@ mod tests {
     // ─── profiles ───────────────────────────────────────────────────────────
 
     #[test]
-    fn without_compose_profiles_the_tier_owns_three_profiles() {
+    fn without_compose_profiles_the_tier_owns_four_profiles() {
         let profiles = resolve_profiles(Tier::Lite, None, false);
         assert_eq!(
             profiles,
             Profiles::Tier(vec![
                 "lite".to_string(),
                 "lite-ocr".to_string(),
-                "lite-vision".to_string()
+                "lite-vision".to_string(),
+                "lite-two".to_string()
             ])
         );
         assert_eq!(

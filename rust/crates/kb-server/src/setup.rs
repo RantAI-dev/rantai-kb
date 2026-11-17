@@ -3243,11 +3243,11 @@ mod tests {
         let args = SetupArgs::default();
         assert_eq!(
             compose_profiles(&args, Tier::Lite),
-            "lite,lite-ocr,lite-vision"
+            "lite,lite-ocr,lite-vision,lite-two"
         );
         assert_eq!(
             compose_profiles(&args, Tier::Desk),
-            "desk,desk-ocr,desk-vision"
+            "desk,desk-ocr,desk-vision,desk-two"
         );
         assert_eq!(compose_profiles(&args, Tier::Cloud), "cloud");
         let env = written(
@@ -3277,7 +3277,10 @@ mod tests {
             "MY_MISTRAL",
         ]))
         .expect("parse");
-        assert_eq!(compose_profiles(&parsed, Tier::Lite), "lite,lite-vision");
+        assert_eq!(
+            compose_profiles(&parsed, Tier::Lite),
+            "lite,lite-vision,lite-two"
+        );
         // Pages leave the machine: refused without --accept-licence.
         let dir = TempDir::new("mistral-refused");
         let mut output = Vec::new();
@@ -3364,7 +3367,7 @@ mod tests {
     /// compose service names the tier would reach inside the stack.
     #[test]
     fn embedders_one_writes_the_endpoints_and_the_one_profile() {
-        let parsed = SetupArgs::parse(&args_of(&["--embedders", "one"])).expect("parse");
+        let parsed = SetupArgs::parse(&args_of(&["--embedders", "one", "--force"])).expect("parse");
         assert_eq!(
             compose_profiles(&parsed, Tier::Studio),
             "studio,studio-ocr,studio-vision,studio-one"
