@@ -37,10 +37,10 @@ page reranker, and these runs have none. The claim is local-to-local: page retri
 | `kb-inference` text adapter | `EmbedFormat::OmniEmbed` — vLLM's `POST /v2/embed` (`input_type`, `inputs` as message content, `embeddings.float`). **Landed.** |
 | `kb-inference` page adapter | `PageEmbedFormat::OmniEmbed`, the same shape for page images. **Landed.** |
 | `config` | `KB_EMBEDDING_FORMAT=openai|omniembed` and `KB_PAGE_EMBEDDING_FORMAT=openrouter|vllm|omniembed`. **Landed.** |
-| `tier.rs` | `KB_EMBEDDERS=one` selects the 1B at **2048-d** for text and pages plus `Qwen3-Reranker-0.6B`, on Desk, Studio and Station; unset keeps the shipped two-embedder stack. **Landed** as an option, not a default |
+| `tier.rs` | the 1B at **2048-d** for text and pages plus `Qwen3-Reranker-0.6B` on Desk, Studio and Station. **The default since 0.6.0**; `KB_EMBEDDERS=two` keeps the 0.3–0.5 stack. 0.6.0 also fixed the config overlay, which in 0.5.0 read the two-embedder table whatever `KB_EMBEDDERS` said |
 | reranker | `Qwen3-Reranker-0.6B` on every GPU tier, replacing `bge-reranker-v2-m3` (Desk) and `Qwen3-VL-Reranker-2B/8B` (Studio/Station). Measured on MIRACL-id: nDCG@10 **0.795 → 0.850** (+0.055) over no-rerank, at 1.19 GB against 4.26 GB and 17.5 GB. The two VL rerankers it replaces had never been measured — [`eval-ab/rerank-2026-11-17`](../eval-ab/rerank-2026-11-17/README.md) |
 | `compose.yaml` | one `vllm-embed-<tier>` service instead of `tei-embed-*` + `vllm-page-embed-*`; one GPU reservation instead of two |
-| `setup.rs` | licence entry (`openmdw-1.1` → 🟡 opt-in), budget estimate for one 1B VL model, and the page arm becoming default-on for Desk |
+| `setup.rs` | licence entry (OpenMDW-1.1, 🟢 after reading the licence: permissive, notice-keeping and a patent-suit clause only), the GPU tiers' model list, and the page arm default-on for Desk |
 | docs | `README.md` model tables, `docs/kb-tiers.md` role table, `docs/benchmarks.md`, `CHANGELOG.md` |
 | migration | **a re-index**: text vectors go 1024-d → 2048-d, and the page vectors change model. `docs/rust-cutover.md` gets the note; `kb-server reindex` rebuilds from the S3 originals |
 
@@ -89,14 +89,16 @@ and Station is what makes a corpus portable and the image build identical.
 4. **One end-to-end Studio/Station run** — the `DEP-2` shape: health, upload, search — because the
    presets change, and a preset that cannot start is worse than a slower one.
 
-Until (1)–(4) are in, the presets stay as they are and this model is documented as `EVAL-6`'s
-candidate. The adapter and config flag landing first is deliberate: they are inert until a preset
-selects them.
+**Decision, 2026-11-18:** the product owner flipped the default without waiting for (1)–(4)
+(0.6.0). They remain open as follow-ups, and the numbers above are still the only ones measured;
+none of (1)–(4) is claimed.
 
 ## Risks
 
-- **Licence.** `openmdw-1.1`, an opt-in in `setup`, not Apache-2.0. A deployment that cannot accept
-  it keeps the Qwen pair, so the presets need an escape hatch rather than a replacement.
+- **Licence.** OpenMDW-1.1, read in full on 2026-11-18: permission "to deal in the Model Materials
+  without restriction", keep the licence and notices when redistributing, rights end for a party
+  that sues over the weights, nothing on outputs. That is Apache-2.0-like, so it is 🟢 and needs no
+  opt-in. `--embedders two` stays as the escape hatch for a deployment that cannot re-index.
 - **One model serves everything.** An embedder outage now costs retrieval on every arm, text
   included, instead of one role. `degrades` covers it, but the blast radius is larger.
 - **Re-index cost.** 2048-d vectors for text chunks: roughly twice the Qdrant memory per chunk, and

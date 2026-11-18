@@ -152,16 +152,21 @@ pub fn resolve_profiles(
 ) -> Profiles {
     match compose_profiles.map(str::trim) {
         Some(value) if !value.is_empty() => Profiles::FromEnvFile(value.to_string()),
-        _ => Profiles::Tier(vec![
-            tier.as_str().to_string(),
-            format!("{}-ocr", tier.as_str()),
-            format!("{}-vision", tier.as_str()),
-            format!(
-                "{}-{}",
-                tier.as_str(),
-                if embedders_one { "one" } else { "two" }
-            ),
-        ]),
+        _ => {
+            let mut profiles = vec![
+                tier.as_str().to_string(),
+                format!("{}-ocr", tier.as_str()),
+                format!("{}-vision", tier.as_str()),
+            ];
+            if tier.has_embedder_stacks() {
+                profiles.push(format!(
+                    "{}-{}",
+                    tier.as_str(),
+                    if embedders_one { "one" } else { "two" }
+                ));
+            }
+            Profiles::Tier(profiles)
+        }
     }
 }
 
@@ -281,10 +286,11 @@ impl Stack {
     #[must_use]
     pub fn profiles(&self, tier: Tier) -> Profiles {
         let from_file = self.read_env_file().get("COMPOSE_PROFILES").cloned();
-        let embedders_one = self
+        // Unset is the one-embedder stack, the default since 0.6.0.
+        let embedders_one = !self
             .read_env_file()
             .get("KB_EMBEDDERS")
-            .is_some_and(|v| v.trim().eq_ignore_ascii_case("one"));
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("two"));
         resolve_profiles(tier, from_file.as_deref(), embedders_one)
     }
 
@@ -1076,15 +1082,14 @@ mod tests {
     // ─── profiles ───────────────────────────────────────────────────────────
 
     #[test]
-    fn without_compose_profiles_the_tier_owns_four_profiles() {
-        let profiles = resolve_profiles(Tier::Lite, None, false);
+    fn without_compose_profiles_the_tier_owns_its_profiles() {
+        let profiles = resolve_profiles(Tier::Lite, None, true);
         assert_eq!(
             profiles,
             Profiles::Tier(vec![
                 "lite".to_string(),
                 "lite-ocr".to_string(),
                 "lite-vision".to_string(),
-                "lite-two".to_string()
             ])
         );
         assert_eq!(
@@ -1095,10 +1100,24 @@ mod tests {
                 "--profile",
                 "lite-ocr",
                 "--profile",
-                "lite-vision",
-                "--profile",
-                "lite-two"
+                "lite-vision"
             ]
+        );
+
+        // A GPU tier also picks its embedding stack.
+        let desk = resolve_profiles(Tier::Desk, None, true);
+        assert_eq!(
+            desk,
+            Profiles::Tier(vec![
+                "desk".to_string(),
+                "desk-ocr".to_string(),
+                "desk-vision".to_string(),
+                "desk-one".to_string()
+            ])
+        );
+        let desk_two = resolve_profiles(Tier::Desk, None, false);
+        assert!(
+            matches!(desk_two, Profiles::Tier(p) if p.last().map(String::as_str) == Some("desk-two"))
         );
     }
 

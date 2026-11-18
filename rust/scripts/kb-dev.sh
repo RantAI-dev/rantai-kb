@@ -157,15 +157,21 @@ compose_for() {
   local from_file
   from_file="$(env_file_value COMPOSE_PROFILES || true)"
   if [ -z "$from_file" ]; then
-    # KB_EMBEDDERS=one starts one embedder instead of two (DEP-6); the model
-    # services live under <tier>-one / <tier>-two so exactly one pair starts.
+    # The GPU tiers start one embedder (DEP-6, the default since 0.6.0) or,
+    # with KB_EMBEDDERS=two, the older pair; the model services live under
+    # <tier>-one / <tier>-two so exactly one stack starts. Lite has one stack.
     local embedders
     embedders="$(env_file_value KB_EMBEDDERS || true)"
-    if [ "${embedders}" = "one" ]; then
-      profiles=(--profile "$tier" --profile "$tier-ocr" --profile "$tier-vision" --profile "$tier-one")
-    else
-      profiles=(--profile "$tier" --profile "$tier-ocr" --profile "$tier-vision" --profile "$tier-two")
-    fi
+    profiles=(--profile "$tier" --profile "$tier-ocr" --profile "$tier-vision")
+    case "$tier" in
+      desk|studio|station)
+        if [ "${embedders}" = "two" ]; then
+          profiles+=(--profile "$tier-two")
+        else
+          profiles+=(--profile "$tier-one")
+        fi
+        ;;
+    esac
   fi
   if [ "${#profiles[@]}" -gt 0 ]; then
     docker compose "${files[@]}" -p "$PROJECT" "${profiles[@]}" "$@"

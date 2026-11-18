@@ -13,7 +13,7 @@ change; MinerU's did.
 
 **Verdicts.**
 
-- 🟢 Permissive (Apache-2.0 / MIT), with no extra terms found.
+- 🟢 Permissive (Apache-2.0 / MIT / OpenMDW-1.1), with no extra terms found.
 - 🟡 Commercial use allowed, with conditions.
 - 🔴 Non-commercial, or blocked for us.
 
@@ -21,6 +21,7 @@ change; MinerU's did.
 
 | Model | Size | Licence | Verdict |
 |---|---|---|---|
+| nvidia/Nemotron-3.5-Embed-1B-BF16 | 1B | OpenMDW-1.1 (Linux Foundation; checked 2026-11-18) | 🟢 — "deal in the Model Materials without restriction"; keep the licence and notices when redistributing; rights end for whoever sues over the weights; no restriction on outputs. The GPU tiers' text and page embedder since 0.6.0 |
 | Qwen/Qwen3-Embedding-0.6B / 4B / 8B | 0.6–8B | Apache-2.0 | 🟢 |
 | intfloat/multilingual-e5-small / base / large-instruct | 118M–560M | MIT | 🟢 |
 | sentence-transformers/all-MiniLM-L6-v2 | 22M | Apache-2.0 | 🟢 (English only; Lite-en) |
