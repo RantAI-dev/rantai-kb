@@ -1,0 +1,22 @@
+{
+  "dataset": "miracl-id-200-chunks",
+  "mode": "text",
+  "queries": 200,
+  "models": [
+    {
+      "model": "granite-r2",
+      "dim": 384,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.7562336192440776,
+            "MRR@10": 0.7930678824196298,
+            "Hit@1": 0.695,
+            "Recall@10": 0.8861011904761905
+          },
+          "trec": "out/miracl-id-200-granite-r2/granite-r2.text.trec"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "dataset": "miracl-vision-en",
+  "mode": "text",
+  "queries": 447,
+  "models": [
+    {
+      "model": "granite-r2",
+      "dim": 384,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.716051273634186,
+            "MRR@10": 0.7073119885207144,
+            "Hit@1": 0.5995525727069351,
+            "Recall@10": 0.8468040907638223
+          },
+          "trec": "out/miracl-vision-en-granite-r2/granite-r2.text.trec"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "dataset": "miracl-vision-id",
+  "mode": "text",
+  "queries": 603,
+  "models": [
+    {
+      "model": "nemo35",
+      "dim": 2048,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.7691745819682091,
+            "MRR@10": 0.7798882069695244,
+            "Hit@1": 0.6849087893864013,
+            "Recall@10": 0.8915988838874412
+          },
+          "trec": "out/paired-id-b/nemo35.text.trec"
+        }
+      }
+    },
+    {
+      "model": "e5-small",
+      "dim": 384,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.7111124568479104,
+            "MRR@10": 0.7349141005312919,
+            "Hit@1": 0.6401326699834162,
+            "Recall@10": 0.8230540419595146
+          },
+          "trec": "out/paired-id-b/e5-small.text.trec"
+        }
+      }
+    }
+  ],
+  "deltas": [
+    {
+      "a": "nemo35/text",
+      "b": "e5-small/text",
+      "dnDCG10": 0.05806212512029867,
+      "lo": 0.04117166767615401,
+      "hi": 0.07572832198911
+    }
+  ]
+}

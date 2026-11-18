@@ -1,0 +1,22 @@
+{
+  "dataset": "miracl-vision-id",
+  "mode": "text",
+  "queries": 603,
+  "models": [
+    {
+      "model": "e5-small",
+      "dim": 384,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.7111124568479104,
+            "MRR@10": 0.7349141005312919,
+            "Hit@1": 0.6401326699834162,
+            "Recall@10": 0.8230540419595146
+          },
+          "trec": "out/miracl-vision-id-e5-small/e5-small.text.trec"
+        }
+      }
+    }
+  ]
+}

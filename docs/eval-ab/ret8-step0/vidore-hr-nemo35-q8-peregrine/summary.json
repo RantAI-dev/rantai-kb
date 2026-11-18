@@ -1,0 +1,22 @@
+{
+  "dataset": "vidore3-hr-en",
+  "mode": "text",
+  "queries": 318,
+  "models": [
+    {
+      "model": "nemo35-q8-peregrine",
+      "dim": 2048,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.6113230815227736,
+            "MRR@10": 0.7387803294477073,
+            "Hit@1": 0.6320754716981132,
+            "Recall@10": 0.6578625470403802
+          },
+          "trec": "out/vidore-hr-nemo35-q8-peregrine/nemo35-q8-peregrine.text.trec"
+        }
+      }
+    }
+  ]
+}

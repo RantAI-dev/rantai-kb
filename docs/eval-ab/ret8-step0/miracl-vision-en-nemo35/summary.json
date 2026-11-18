@@ -1,0 +1,63 @@
+{
+  "dataset": "miracl-vision-en",
+  "mode": "both",
+  "queries": 447,
+  "models": [
+    {
+      "model": "nemo35",
+      "dim": 2048,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.8086001820390712,
+            "MRR@10": 0.8015559896317243,
+            "Hit@1": 0.7181208053691275,
+            "Recall@10": 0.9124480664749121
+          },
+          "trec": "/home/rismana/ret8/out/miracl-vision-en-nemo35/nemo35.text.trec"
+        },
+        "image": {
+          "metrics": {
+            "nDCG@10": 0.7353189432073826,
+            "MRR@10": 0.7309705898343413,
+            "Hit@1": 0.6308724832214765,
+            "Recall@10": 0.862405454351763
+          },
+          "trec": "/home/rismana/ret8/out/miracl-vision-en-nemo35/nemo35.image.trec"
+        },
+        "one-space": {
+          "metrics": {
+            "nDCG@10": 0.8115969906890723,
+            "MRR@10": 0.8064082968955969,
+            "Hit@1": 0.7248322147651006,
+            "Recall@10": 0.9131937786300202
+          },
+          "trec": "/home/rismana/ret8/out/miracl-vision-en-nemo35/nemo35.one-space.trec"
+        }
+      }
+    }
+  ],
+  "deltas": [
+    {
+      "a": "nemo35/text",
+      "b": "nemo35/image",
+      "dnDCG10": 0.07328123883168856,
+      "lo": 0.05120962098023695,
+      "hi": 0.09511510534203907
+    },
+    {
+      "a": "nemo35/text",
+      "b": "nemo35/one-space",
+      "dnDCG10": -0.002996808650001112,
+      "lo": -0.01019378025196097,
+      "hi": 0.00328789466680282
+    },
+    {
+      "a": "nemo35/image",
+      "b": "nemo35/one-space",
+      "dnDCG10": -0.07627804748168969,
+      "lo": -0.09691458663813393,
+      "hi": -0.05602172237461621
+    }
+  ]
+}

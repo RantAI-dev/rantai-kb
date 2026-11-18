@@ -1,0 +1,22 @@
+{
+  "dataset": "miracl-id-200-chunks",
+  "mode": "text",
+  "queries": 200,
+  "models": [
+    {
+      "model": "nemo35",
+      "dim": 2048,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.8294617966921382,
+            "MRR@10": 0.8366011904761905,
+            "Hit@1": 0.755,
+            "Recall@10": 0.9621468253968254
+          },
+          "trec": "out/miracl-id-200-nemo35/nemo35.text.trec"
+        }
+      }
+    }
+  ]
+}

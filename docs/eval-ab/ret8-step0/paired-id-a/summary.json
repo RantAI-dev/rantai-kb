@@ -1,0 +1,75 @@
+{
+  "dataset": "miracl-vision-id",
+  "mode": "text",
+  "queries": 603,
+  "models": [
+    {
+      "model": "nemo35",
+      "dim": 2048,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.7691867484856145,
+            "MRR@10": 0.7798902493030129,
+            "Hit@1": 0.6849087893864013,
+            "Recall@10": 0.8915988838874412
+          },
+          "trec": "out/paired-id-a/nemo35.text.trec"
+        }
+      }
+    },
+    {
+      "model": "bge-m3",
+      "dim": 1024,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.739625970186363,
+            "MRR@10": 0.7620176458506005,
+            "Hit@1": 0.6550580431177446,
+            "Recall@10": 0.8461877122324883
+          },
+          "trec": "out/paired-id-a/bge-m3.text.trec"
+        }
+      }
+    },
+    {
+      "model": "granite-r2",
+      "dim": 384,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.6714372441804395,
+            "MRR@10": 0.6914536191709321,
+            "Hit@1": 0.5854063018242123,
+            "Recall@10": 0.7924780857616678
+          },
+          "trec": "out/paired-id-a/granite-r2.text.trec"
+        }
+      }
+    }
+  ],
+  "deltas": [
+    {
+      "a": "nemo35/text",
+      "b": "bge-m3/text",
+      "dnDCG10": 0.029560778299251626,
+      "lo": 0.015204213399604528,
+      "hi": 0.044086372669841806
+    },
+    {
+      "a": "nemo35/text",
+      "b": "granite-r2/text",
+      "dnDCG10": 0.09774950430517507,
+      "lo": 0.07971569325020667,
+      "hi": 0.11566135062068075
+    },
+    {
+      "a": "bge-m3/text",
+      "b": "granite-r2/text",
+      "dnDCG10": 0.06818872600592345,
+      "lo": 0.0498967395642188,
+      "hi": 0.0863627583067689
+    }
+  ]
+}

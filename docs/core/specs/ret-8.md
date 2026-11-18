@@ -38,8 +38,9 @@ this plan rests on were re-checked against the primary sources, see "Verified" b
 
 At 2 cores that is about 40× slower than Lite's ingest. It is the reason for this project.
 
-**Baseline, not yet measured.** The teacher on MIRACL-Vision Indonesian and English pages
-(step 0).
+**Baseline, measured in step 0.** The teacher on MIRACL-Vision: Indonesian image **0.654**, text
+0.769; English image **0.735**, text 0.809. The target row "share of the teacher's image score"
+uses these image numbers. See "Step 0 results" below.
 
 | | Target | Stretch |
 |---|---|---|
@@ -100,6 +101,65 @@ At 2 cores that is about 40× slower than Lite's ingest. It is the reason for th
 | S0, granite-97m-r2 (≈ 28M non-embedding parameters) over ~1,150 tokens | ≈ 65 GFLOP | ≈ 0.7 s |
 | S1, adds SigLIP2-B at 576 patches | ≈ 180 GFLOP | ≈ 2 s |
 | S2, SigLIP2-B at 2,048 patches | ≈ 450+ GFLOP | ≈ 5 s, over budget unless it earns it |
+
+## Step 0 results (measured 2026-11-18, GB10)
+
+Run by GLM-5.3 on the ThinkStation. The raw `summary.json` files were re-read and the page counts
+re-checked by Claude. Full report, scripts and metrics:
+[`docs/eval-ab/ret8-step0/`](../../eval-ab/ret8-step0/STEP0.md).
+
+**The serving setup reproduces the earlier GPU eval exactly.** ViDoRe HR scored text 0.611, image
+0.626 and one-space 0.621, the same as the committed numbers.
+
+**MIRACL-Vision, page nDCG@10, full corpora (no pages dropped):**
+
+| Model, input | Indonesian (603 queries, 23,842 pages) | English (447 queries, 42,971 pages) |
+|---|---:|---:|
+| Teacher, page text | **0.769** | **0.809** |
+| Teacher, one space (text + image) | 0.762 | 0.812 |
+| Teacher, page image | 0.654 | 0.735 |
+| bge-m3, page text | 0.740 | 0.767 |
+| multilingual-e5-small, page text (Lite's model) | 0.711 | 0.729 |
+| granite-embedding-97m-multilingual-r2, page text | 0.671 | 0.716 |
+
+**Text passages, MIRACL-id-200:** teacher **0.829** against granite **0.756**, paired
+Δ **+0.073** [+0.052, +0.095].
+
+**Assumption 1 holds.** The teacher's text arm beats bge-m3 on Indonesian by
+**+0.030** [+0.015, +0.044], and on English by +0.042.
+
+**Caveat on what the text arm measured.** MIRACL-Vision's page text is a clean Wikipedia passage
+(median 375 characters), not OCR output. "Text beats image" here therefore says little about Lite's
+scanned pages. The image arm (0.654 Indonesian) is the honest pixel-only number, and it is below
+every text model on clean text. On scans, where Lite's text is worse, that ordering can flip. This
+is why `IndoDocEval-v0` must include `ocr-cpu` text for scans.
+
+**What this changes in the plan:**
+
+- **The student's text tower is not granite.** It is 0.07–0.10 behind the teacher on Indonesian, and
+  Peregrine 0.3.0 cannot load it (unsupported pre-tokenizer; this run served it with llama-server).
+  The candidates now are mmBERT-small or mmBERT-base (ModernBERT, which Peregrine runs) and
+  multilingual-e5-small (0.711, already in Lite).
+- **Grade the students against the teacher's text arm too.** On clean text it is the strongest
+  arm, so the S0 student (text only) has a high, real target.
+
+**Teacher cost on the GB10.** Throughput measured on 200 ViDoRe HR pages, with the model holding
+11.4 GB of GPU memory:
+
+| Input | Pages/s | Requests in flight |
+|---|---:|---:|
+| Text | 50.6 | 8 or more |
+| Image | 5.38 | 8 |
+
+At those rates, 300k pages with both text and image take ≈ **17 GB10-hours**: 1.65 h for text and
+15.5 h for images. Step 1's targets cost a day of the box, not a week.
+
+**CPU parity: Peregrine runs the teacher faithfully, so speed is the only problem.**
+
+- Peregrine 0.3.0 Q8_0 scores 0.611 on ViDoRe HR page text, the same as the GPU's 0.611.
+- Cosine against the GPU vectors over 20 pages: mean **0.99987**, min 0.99976.
+- The vectors came from two machines (800 pages on x86, the rest on ARM), which shows the result
+  does not depend on the CPU.
 
 ## Range
 

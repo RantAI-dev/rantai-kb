@@ -1,0 +1,22 @@
+{
+  "dataset": "miracl-vision-en",
+  "mode": "text",
+  "queries": 447,
+  "models": [
+    {
+      "model": "bge-m3",
+      "dim": 1024,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.7665849349795476,
+            "MRR@10": 0.751480514788855,
+            "Hit@1": 0.639821029082774,
+            "Recall@10": 0.8828273143709385
+          },
+          "trec": "out/miracl-vision-en-bge-m3/bge-m3.text.trec"
+        }
+      }
+    }
+  ]
+}

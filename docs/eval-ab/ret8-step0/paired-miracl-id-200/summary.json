@@ -1,0 +1,46 @@
+{
+  "dataset": "miracl-id-200-chunks",
+  "mode": "text",
+  "queries": 200,
+  "models": [
+    {
+      "model": "nemo35",
+      "dim": 2048,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.8294617966921382,
+            "MRR@10": 0.8366011904761905,
+            "Hit@1": 0.755,
+            "Recall@10": 0.9621468253968254
+          },
+          "trec": "out/paired-miracl-id-200/nemo35.text.trec"
+        }
+      }
+    },
+    {
+      "model": "granite-r2",
+      "dim": 384,
+      "runs": {
+        "text": {
+          "metrics": {
+            "nDCG@10": 0.7562336192440776,
+            "MRR@10": 0.7930678824196298,
+            "Hit@1": 0.695,
+            "Recall@10": 0.8861011904761905
+          },
+          "trec": "out/paired-miracl-id-200/granite-r2.text.trec"
+        }
+      }
+    }
+  ],
+  "deltas": [
+    {
+      "a": "nemo35/text",
+      "b": "granite-r2/text",
+      "dnDCG10": 0.07322817744806048,
+      "lo": 0.05162148126731622,
+      "hi": 0.09529631588558142
+    }
+  ]
+}
