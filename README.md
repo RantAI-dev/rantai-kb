@@ -217,8 +217,8 @@ Tagging `v*` builds the image for amd64 and arm64 on native runners, publishes i
 `ghcr.io/rantai-dev/rantai-kb` with the OCR sidecar images, packages the binary for Linux
 (x86_64, aarch64) and macOS (arm64) as tarballs with their checksums, cuts a GitHub release,
 and then installs that release with the one-liner on Linux and macOS to prove it works.
-`/health` reports the build version. `v0.5.0` is the current release (it adds `setup --embedders one`, which wires the
-one-embedder stack into compose); `v0.1.0` is the last
+`/health` reports the build version. `v0.6.0` is the current release (one embedder, `Nemotron-3.5-Embed-1B`, is the default on
+the GPU tiers); `v0.1.0` is the last
 Bun one ([`docs/rust-cutover.md`](docs/rust-cutover.md)).
 
 An installed bundle has no source, so its `deploy/.env` points at the published images
