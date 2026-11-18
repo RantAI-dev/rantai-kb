@@ -203,24 +203,22 @@ Postgres holds documents, jobs, KBs, keys and the entity graph.
 |---|---|---|---|
 | `lite` | TEI CPU, `intfloat/multilingual-e5-small` (384-d); `ocr-cpu` (layout + PP-OCRv6 tiny + SLANet-plus tables, CPU) for scanned pages | CPU, 1–2 cores, no GPU | MIRACL-id-50 nDCG@10 **0.802**, recall@10 0.938, MRR@10 0.823; 1,485 passages ingest ~126 s; search p50 42 ms / p95 49 ms. ViDoRe HR: 1.55 pages/s at page nDCG@10 0.545 |
 | `lite-en` | TEI CPU, `sentence-transformers/all-MiniLM-L6-v2` (384-d, English only); `ocr-cpu` | CPU, 1–2 cores, no GPU | ViDoRe HR: **6.43 pages/s** at page nDCG@10 0.517. English only: 0.679 vs 0.802 for `lite` on Indonesian MIRACL-id |
-| `desk` | TEI CUDA, `Qwen/Qwen3-Embedding-0.6B` (1024-d) + `BAAI/bge-reranker-v2-m3`; `vllm-ocr-desk` (Xiaomi-OCR-0, vLLM fp8) | NVIDIA 8 GB | OCR measured on a GB10 at a Desk-sized share ([ocr-tiers](../../docs/eval-ab/ocr-tiers/)); the rest **not measured on this hardware** |
-| `studio` | TEI CUDA Qwen3-Embedding-0.6B; vLLM: `vllm-page-embed-studio` (Qwen3-VL-Embedding-2B, 2048-d page images), `vllm-rerank-studio` (Qwen3-VL-Reranker-2B), `vllm-ocr-studio` (Xiaomi-OCR-0) | NVIDIA 24 GB | not measured; `docker compose config` only |
-| `station` | as studio with the 8B Qwen3-VL models in FP8 (4096-d page images) | NVIDIA 48 GB | not measured; `docker compose config` only |
+| `desk` | vLLM `vllm-embed` (`Nemotron-3.5-Embed-1B`, 2048-d, text *and* pages), llama.cpp `llama-rerank` (`Qwen3-Reranker-0.6B`); `vllm-ocr-desk` (Xiaomi-OCR-0, vLLM fp8) | NVIDIA 8 GB | OCR measured on a GB10 at a Desk-sized share ([ocr-tiers](../../docs/eval-ab/ocr-tiers/)); embedder and reranker quality measured on the GB10 ([one-embedder](../../docs/eval-ab/one-embedder/)); the 8 GB fit **not measured** |
+| `studio` | the same `vllm-embed` + `llama-rerank`; `vllm-ocr-studio` (Xiaomi-OCR-0) | NVIDIA 24 GB | not measured on this hardware; `docker compose config` only |
+| `station` | the same `vllm-embed` + `llama-rerank`; `vllm-ocr-station` (Xiaomi-OCR-0) | NVIDIA 48 GB | not measured on this hardware; `docker compose config` only |
 | `cloud` | none (OpenRouter: `voyage-multimodal-3.5` embeddings, `voyageai/rerank-2.5`); page-image arm on | any machine + `OPENROUTER_API_KEY` | ViDoRe HR page nDCG@10 **0.711** ([vidore3-hr-en-image](../../docs/eval-ab/vidore3-hr-en-image/)), ViDoRe CS **0.828** ([vidore3-cs-en-night](../../docs/eval-ab/vidore3-cs-en-night/)); **paid** per page and query |
 
-**One embedder or two (`KB_EMBEDDERS`).** `rantai-kb setup --embedders one` (or
-`KB_EMBEDDERS=one` in `.env`) starts `vllm-embed` (Nemotron-3.5-Embed-1B, text *and* pages in one
-2048-d space) and `llama-rerank` (Qwen3-Reranker-0.6B) instead of the tier's TEI embedder, page
-embedder and reranker. The model services live behind `<tier>-one` / `<tier>-two`, so exactly one
-stack starts; `COMPOSE_PROFILES` written by `setup` names the one it wants. One consequence worth
-knowing on a first start: `up` waits on the stores, OCR and vision containers but not on the
-embedder, so if the embedder is still downloading its 2.4 GB the first upload can fail with a
-connection error while it finishes — retry it, or run `setup --check` first.
+**One embedder or two (`KB_EMBEDDERS`).** The GPU tiers start `vllm-embed` (Nemotron-3.5-Embed-1B,
+text *and* pages in one 2048-d space) and `llama-rerank` (Qwen3-Reranker-0.6B) by default since
+0.6.0. `rantai-kb setup <tier> --embedders two` (`KB_EMBEDDERS=two`) starts the 0.3–0.5 stack
+instead: the tier's TEI embedder, page embedder and reranker. The model services live behind
+`<tier>-one` / `<tier>-two`, so exactly one stack starts; `COMPOSE_PROFILES` written by `setup`
+names the one it wants. kb-server waits for the embedder and reranker to report healthy, so the
+first start takes as long as their download (2.4 GB for the embedder).
 
-**The same option, measured.** Desk, Studio and Station can run
-`Nemotron-3.5-Embed-1B` for text *and* page images in one 2048-d space, with `Qwen3-Reranker-0.6B`,
-instead of the text embedder plus a separate VL embedder. It is opt-in because it changes the index
-width, so adopting it means a re-index (`docs/rust-cutover.md` §17). The numbers and the compose
+**Measured.** `Nemotron-3.5-Embed-1B` in one 2048-d space scores text 0.826 against 0.796 and pages
+0.621 against 0.277 for the two-model stack. Switching stacks changes the index width, so it is a
+re-index (`docs/rust-cutover.md` §17). The numbers and the compose
 services it needs are in [`docs/core/specs/dep-6.md`](../../docs/core/specs/dep-6.md).
 
 The measured rows come from

@@ -9,9 +9,10 @@
 //! module existed.
 //!
 //! Every role in the `docs/kb-tiers.md` table that has an adapter is filled:
-//! text embedding, reranker, scanned-page OCR (`KB_OCR_*`) and, on Studio and
-//! Station, the page-image arm (Qwen3-VL-Embedding on vLLM). Lite and Desk keep
-//! the page arm off, as the table says. Each local service has a fixed
+//! text embedding, reranker, scanned-page OCR (`KB_OCR_*`) and picture
+//! reading. Desk, Studio and Station embed text and page images with one model,
+//! `Nemotron-3.5-Embed-1B` (`DEP-6`; `KB_EMBEDDERS=two` keeps the older
+//! two-model stack); Lite keeps the page arm off. Each local service has a fixed
 //! loopback port (below) so a bare-metal install and `rust/deploy/compose.yaml`
 //! agree; compose overrides the host part with the service name.
 
@@ -98,6 +99,15 @@ const QWEN3_QUERY_PREFIX: &str =
 /// page arm on.
 const LOCAL: &[(&str, &str)] = &[
     ("KB_EMBEDDING_BASE_URL", LOCAL_EMBEDDINGS),
+    ("KB_EMBEDDING_TIMEOUT_MS", "120000"),
+    ("KB_PAGE_RERANK", "false"),
+    ("KB_ENTITY_EXTRACTION_ENABLED", "false"),
+];
+
+/// [`LOCAL`] without the OpenAI-shape embedding endpoint, for the
+/// one-embedder stack, whose own table names its `/v2/embed` endpoint. A
+/// variable named in two tables would resolve to the first one.
+const LOCAL_SHARED: &[(&str, &str)] = &[
     ("KB_EMBEDDING_TIMEOUT_MS", "120000"),
     ("KB_PAGE_RERANK", "false"),
     // The default extractor is a paid OpenRouter call per document, and its
@@ -244,6 +254,9 @@ const LOCAL_RERANK_QWEN3: &[(&str, &str)] = &[
     ("KB_RERANK_PROVIDER", "cohere"),
     ("KB_RERANK_BASE_URL", "http://127.0.0.1:8082/v1/rerank"),
     ("KB_RERANK_MODEL", "Qwen/Qwen3-Reranker-0.6B"),
+    // The `cohere` provider requires a key; a local llama.cpp server checks it
+    // only when started with `--api-key` (compose starts it with `local`).
+    ("KB_RERANK_API_KEY", "local"),
 ];
 
 /// Lite and Lite-en: pictures read by Qwen3-VL-2B on the CPU, one at a time
@@ -333,6 +346,13 @@ const CLOUD: &[(&str, &str)] = &[
 ];
 
 impl Tier {
+    /// Whether the tier chooses between embedding stacks (`KB_EMBEDDERS`):
+    /// the GPU tiers. Lite and Cloud have one stack each.
+    #[must_use]
+    pub fn has_embedder_stacks(self) -> bool {
+        matches!(self, Self::Desk | Self::Studio | Self::Station)
+    }
+
     /// The tier's `KB_TIER` name.
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -398,9 +418,9 @@ impl Tier {
 
     /// The preset tables that apply to this tier, most general first.
     ///
-    /// `DESK-6`'s one-embedder stack is selected with `KB_EMBEDDERS=one`; the
-    /// default is the two-embedder stack those tiers have shipped, because the
-    /// one-embedder stack still owes four measurements (`docs/core/specs/dep-6.md`).
+    /// The GPU tiers run `DEP-6`'s one-embedder stack unless `KB_EMBEDDERS=two`
+    /// selects the two-embedder stack they shipped until 0.5.0
+    /// (`docs/core/specs/dep-6.md`).
     fn tables_with(
         self,
         embedders: Embedders,
@@ -408,7 +428,7 @@ impl Tier {
         if embedders == Embedders::One {
             return match self {
                 Self::Desk => &[
-                    LOCAL,
+                    LOCAL_SHARED,
                     NEMOTRON_ONE,
                     LOCAL_RERANK_QWEN3,
                     XIAOMI_OCR_PAGES,
@@ -416,7 +436,7 @@ impl Tier {
                     DESK,
                 ],
                 Self::Studio => &[
-                    LOCAL,
+                    LOCAL_SHARED,
                     NEMOTRON_ONE,
                     LOCAL_RERANK_QWEN3,
                     XIAOMI_OCR_PAGES,
@@ -424,7 +444,7 @@ impl Tier {
                     STUDIO,
                 ],
                 Self::Station => &[
-                    LOCAL,
+                    LOCAL_SHARED,
                     NEMOTRON_ONE,
                     LOCAL_RERANK_QWEN3,
                     XIAOMI_OCR_PAGES,
@@ -477,21 +497,18 @@ impl Tier {
             .collect()
     }
 
-    /// Every `(variable, value)` pair this tier could fill, in table order.
-    /// The two-embedder stack; `presets_for` is the one that honours
-    /// `KB_EMBEDDERS`.
+    /// Every `(variable, value)` pair this tier fills with the default
+    /// embedding stack, in table order.
     #[must_use]
     pub fn presets(self) -> Vec<(&'static str, &'static str)> {
-        self.tables_with(Embedders::Two)
-            .iter()
-            .flat_map(|table| table.iter().copied())
-            .collect()
+        self.presets_for(Embedders::default())
     }
 
-    /// The preset value for `variable`, or `None` when this tier fills nothing.
+    /// The preset value for `variable` under an embedding stack, or `None`
+    /// when this tier fills nothing.
     #[must_use]
-    pub fn preset(self, variable: &str) -> Option<&'static str> {
-        self.tables_with(Embedders::Two)
+    pub fn preset(self, embedders: Embedders, variable: &str) -> Option<&'static str> {
+        self.tables_with(embedders)
             .iter()
             .flat_map(|table| table.iter())
             .find(|(name, _)| *name == variable)
@@ -505,7 +522,7 @@ impl Tier {
     where
         F: Fn(&str) -> Option<String>,
     {
-        let embedders = Embedders::from_lookup(lookup).unwrap_or(Embedders::Two);
+        let embedders = Embedders::from_lookup(lookup).unwrap_or_default();
         self.presets_for(embedders)
             .into_iter()
             .filter(|(name, _)| lookup(name).is_none())
@@ -516,24 +533,49 @@ impl Tier {
 /// Which embedding stack a GPU tier runs (`KB_EMBEDDERS`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Embedders {
-    /// Text and pages with two models, the stack those tiers have shipped.
+    /// `DEP-6`, the default since 0.6.0: one model in one 2048-d space
+    /// (`Nemotron-3.5-Embed-1B`) for text and pages, with
+    /// `Qwen3-Reranker-0.6B`.
     #[default]
-    Two,
-    /// `DEP-6`: one model in one space (`Nemotron-3.5-Embed-1B`).
     One,
+    /// The 0.3–0.5 stack: `Qwen3-Embedding-0.6B` for text, a Qwen3-VL
+    /// embedder for pages, and a separate reranker. Kept as an escape hatch.
+    Two,
 }
 
 impl Embedders {
-    /// `KB_EMBEDDERS=one|two`; unset or empty is `two`. Anything else is an
+    /// `KB_EMBEDDERS=one|two`; unset or empty is `one`. Anything else is an
     /// error naming both, so a typo cannot silently select the other stack.
+    ///
+    /// An unset `KB_EMBEDDERS` next to a `COMPOSE_PROFILES` that starts a
+    /// `<tier>-two` stack is an env file written by 0.5.0 or earlier, when
+    /// unset meant `two`. Taking the new default there would point the
+    /// server at a model nobody started and at a different index, so it is
+    /// an error that says how to choose.
     pub fn from_lookup<F>(lookup: &F) -> anyhow::Result<Self>
     where
         F: Fn(&str) -> Option<String>,
     {
         match lookup("KB_EMBEDDERS").map(|v| v.trim().to_lowercase()) {
-            None => Ok(Self::Two),
-            Some(v) if v.is_empty() || v == "two" => Ok(Self::Two),
-            Some(v) if v == "one" => Ok(Self::One),
+            None => {
+                let old_stack = lookup("COMPOSE_PROFILES").is_some_and(|profiles| {
+                    profiles.split(',').any(|profile| {
+                        matches!(profile.trim(), "desk-two" | "studio-two" | "station-two")
+                    })
+                });
+                if old_stack {
+                    anyhow::bail!(
+                        "KB_EMBEDDERS is unset but COMPOSE_PROFILES starts the two-embedder \
+                         stack (an env file from 0.5.0 or earlier). Since 0.6.0 the GPU tiers \
+                         default to one embedder (Nemotron-3.5-Embed-1B, 2048-d). Re-run \
+                         `rantai-kb setup <tier>` and then `kb-server reindex` to move to it, \
+                         or `rantai-kb setup <tier> --embedders two` to keep the old stack."
+                    );
+                }
+                Ok(Self::One)
+            }
+            Some(v) if v.is_empty() || v == "one" => Ok(Self::One),
+            Some(v) if v == "two" => Ok(Self::Two),
             Some(other) => anyhow::bail!("KB_EMBEDDERS must be \"one\" or \"two\", got {other:?}"),
         }
     }
@@ -608,11 +650,22 @@ fn is_secret(name: &str) -> bool {
 /// Wrap an environment lookup so an unset variable takes the tier's preset
 /// value. This is what the composition root reads from, so a preset-filled
 /// value behaves exactly like one written in the environment.
+///
+/// The preset is the one for the embedding stack `KB_EMBEDDERS` selects, so
+/// the model names and widths the server runs with are the ones the tier
+/// plan reports. An invalid `KB_EMBEDDERS` falls back to the default here;
+/// [`Embedders::from_lookup`] is what reports it (`Config` calls it first).
 pub fn with_preset<'a, F>(tier: Option<Tier>, lookup: &'a F) -> impl Fn(&str) -> Option<String> + 'a
 where
     F: Fn(&str) -> Option<String>,
 {
-    move |name| lookup(name).or_else(|| tier.and_then(|tier| tier.preset(name)).map(str::to_string))
+    let embedders = Embedders::from_lookup(lookup).unwrap_or_default();
+    move |name| {
+        lookup(name).or_else(|| {
+            tier.and_then(|tier| tier.preset(embedders, name))
+                .map(str::to_string)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -637,13 +690,15 @@ mod tests {
         // A duplicate would silently shadow the earlier row.
         for name in TIER_NAMES {
             let tier = Tier::parse(name).expect("known tier");
-            let presets = tier.presets();
-            let mut seen = std::collections::HashSet::new();
-            for (variable, _) in &presets {
-                assert!(
-                    seen.insert(*variable),
-                    "{name} fills {variable} more than once"
-                );
+            for embedders in [Embedders::One, Embedders::Two] {
+                let presets = tier.presets_for(embedders);
+                let mut seen = std::collections::HashSet::new();
+                for (variable, _) in &presets {
+                    assert!(
+                        seen.insert(*variable),
+                        "{name} ({embedders:?}) fills {variable} more than once"
+                    );
+                }
             }
         }
     }
@@ -765,8 +820,9 @@ mod tests {
 
     #[test]
     fn the_plan_stays_on_one_line_even_for_a_multiline_value() {
-        // Desk carries the multiline Qwen3 instruction.
-        let plan = TierPlan::resolve(Tier::Desk, &|_: &str| None);
+        // Desk's two-embedder stack carries the multiline Qwen3 instruction.
+        let two = |name: &str| (name == "KB_EMBEDDERS").then(|| "two".to_string());
+        let plan = TierPlan::resolve(Tier::Desk, &two);
         let line = plan.describe();
         assert!(!line.contains('\n'), "the log must stay one line: {line}");
         assert!(
@@ -812,7 +868,8 @@ mod tests {
 
     #[test]
     fn studio_and_station_run_the_vl_page_arm_and_vl_reranker() {
-        let none = |_: &str| None;
+        // The two-embedder stack (`KB_EMBEDDERS=two`).
+        let none = |name: &str| (name == "KB_EMBEDDERS").then(|| "two".to_string());
         for (name, embed, dim, rerank) in [
             (
                 "studio",
@@ -878,14 +935,93 @@ mod tests {
             assert_eq!(value("KB_RERANK_MODEL"), Some("Qwen/Qwen3-Reranker-0.6B"));
         }
 
-        // Unset keeps the two-embedder stack those tiers ship today.
-        let two = TierPlan::resolve(Tier::Studio, &|_: &str| None);
-        let text = two
-            .filled
-            .iter()
-            .find(|(name, _)| *name == "KB_EMBEDDING_MODEL")
-            .map(|(_, v)| *v);
-        assert_eq!(text, Some("Qwen/Qwen3-Embedding-0.6B"));
+        // Unset is the one-embedder stack too: it is the default since 0.6.0.
+        for tier in [Tier::Desk, Tier::Studio, Tier::Station] {
+            let plan = TierPlan::resolve(tier, &|_: &str| None);
+            let text = plan
+                .filled
+                .iter()
+                .find(|(name, _)| *name == "KB_EMBEDDING_MODEL")
+                .map(|(_, v)| *v);
+            assert_eq!(text, Some("nvidia/Nemotron-3.5-Embed-1B-BF16"), "{tier:?}");
+        }
+    }
+
+    /// `KB_EMBEDDERS=two` keeps the stack the GPU tiers shipped until 0.5.0.
+    #[test]
+    fn embedders_two_keeps_the_qwen_stack() {
+        let two = |name: &str| (name == "KB_EMBEDDERS").then(|| "two".to_string());
+        let resolved = with_preset(Some(Tier::Studio), &two);
+        assert_eq!(
+            resolved("KB_EMBEDDING_MODEL").as_deref(),
+            Some("Qwen/Qwen3-Embedding-0.6B")
+        );
+        assert_eq!(resolved("KB_EMBEDDING_DIM").as_deref(), Some("1024"));
+        assert_eq!(
+            resolved("KB_PAGE_EMBEDDING_MODEL").as_deref(),
+            Some("Qwen/Qwen3-VL-Embedding-2B")
+        );
+    }
+
+    /// The overlay the server reads its config through resolves the same
+    /// stack the tier plan reports. In 0.5.0 it always read the two-embedder
+    /// table, so `KB_EMBEDDERS=one` logged Nemotron and ran Qwen at 1024-d.
+    #[test]
+    fn the_config_overlay_follows_the_selected_stack() {
+        let none = |_: &str| None;
+        for tier in [Tier::Desk, Tier::Studio, Tier::Station] {
+            let resolved = with_preset(Some(tier), &none);
+            assert_eq!(
+                resolved("KB_EMBEDDING_MODEL").as_deref(),
+                Some("nvidia/Nemotron-3.5-Embed-1B-BF16"),
+                "{tier:?}"
+            );
+            assert_eq!(resolved("KB_EMBEDDING_DIM").as_deref(), Some("2048"));
+            assert_eq!(
+                resolved("KB_EMBEDDING_FORMAT").as_deref(),
+                Some("omniembed")
+            );
+            assert_eq!(resolved("KB_PAGE_EMBEDDING_DIM").as_deref(), Some("2048"));
+            assert_eq!(
+                resolved("KB_RERANK_MODEL").as_deref(),
+                Some("Qwen/Qwen3-Reranker-0.6B")
+            );
+        }
+        // Lite has no one-embedder stack: it keeps e5-small either way.
+        let lite = with_preset(Some(Tier::Lite), &none);
+        assert_eq!(
+            lite("KB_EMBEDDING_MODEL").as_deref(),
+            Some("intfloat/multilingual-e5-small")
+        );
+    }
+
+    /// An env file from 0.5.0 (no `KB_EMBEDDERS`, a `-two` compose profile)
+    /// stops with instructions instead of switching models under its index.
+    #[test]
+    fn an_old_two_stack_env_file_must_choose() {
+        let old = |name: &str| match name {
+            "COMPOSE_PROFILES" => Some("desk,desk-ocr,desk-vision,desk-two".to_string()),
+            _ => None,
+        };
+        let err = Embedders::from_lookup(&old).unwrap_err().to_string();
+        assert!(err.contains("--embedders two"), "{err}");
+        assert!(err.contains("reindex"), "{err}");
+
+        let chose = |name: &str| match name {
+            "COMPOSE_PROFILES" => Some("desk,desk-two".to_string()),
+            "KB_EMBEDDERS" => Some("two".to_string()),
+            _ => None,
+        };
+        assert_eq!(Embedders::from_lookup(&chose).unwrap(), Embedders::Two);
+
+        let new = |name: &str| (name == "COMPOSE_PROFILES").then(|| "desk,desk-one".to_string());
+        assert_eq!(Embedders::from_lookup(&new).unwrap(), Embedders::One);
+
+        // A Lite env file from 0.5.0 also listed `lite-two`, a profile with no
+        // services; Lite has one stack, so it is not a choice to make.
+        let lite =
+            |name: &str| (name == "COMPOSE_PROFILES").then(|| "lite,lite-ocr,lite-two".to_string());
+        assert_eq!(Embedders::from_lookup(&lite).unwrap(), Embedders::One);
     }
 
     /// A typo in the selector is an error, not a quiet fallback.

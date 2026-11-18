@@ -640,6 +640,11 @@ impl Config {
         // then read everything through the overlay, so a preset-filled value
         // behaves exactly like one written in the environment.
         let tier = crate::tier::Tier::from_lookup(&lookup)?;
+        if tier.is_some() {
+            // An invalid or ambiguous `KB_EMBEDDERS` stops the boot here; the
+            // overlay below would otherwise fall back to the default stack.
+            crate::tier::Embedders::from_lookup(&lookup)?;
+        }
         let tier_plan = tier.map(|tier| crate::tier::TierPlan::resolve(tier, &lookup));
         let lookup = crate::tier::with_preset(tier, &lookup);
 
@@ -2136,6 +2141,56 @@ mod tests {
         );
     }
 
+    /// `DEP-6`, the default since 0.6.0: the GPU tiers resolve to one
+    /// embedder for text and pages and Qwen3-Reranker-0.6B — in the config the
+    /// server runs with, not only in the logged plan (0.5.0 logged one stack
+    /// and ran the other).
+    #[test]
+    fn test_gpu_tiers_default_to_one_embedder() {
+        for tier in ["desk", "studio", "station"] {
+            let mut map = tier_map();
+            map.insert("KB_TIER", tier);
+            let cfg = resolved(&map);
+            assert_eq!(
+                cfg.embedder.model, "nvidia/Nemotron-3.5-Embed-1B-BF16",
+                "{tier}"
+            );
+            assert_eq!(cfg.embedder.dimension, 2048, "{tier}");
+            assert_eq!(
+                cfg.embedder.base_url, "http://127.0.0.1:8081/v2/embed",
+                "{tier}"
+            );
+            assert_eq!(
+                cfg.embedder.query_prefix, "",
+                "{tier}: no client-side prefix"
+            );
+            let pages = cfg.pages.as_ref().expect("page arm on, Desk included");
+            assert_eq!(pages.embedder.model, "nvidia/Nemotron-3.5-Embed-1B-BF16");
+            assert_eq!(pages.embedder.dimension, 2048);
+            match &cfg.reranker {
+                RerankerConfig::Cohere {
+                    model, endpoint, ..
+                } => {
+                    assert_eq!(model, "Qwen/Qwen3-Reranker-0.6B");
+                    assert_eq!(endpoint.as_deref(), Some("http://127.0.0.1:8082/v1/rerank"));
+                }
+                other => panic!("{tier}: wrong reranker {other:?}"),
+            }
+        }
+    }
+
+    /// A 0.5.0 env file (two-stack profile, no `KB_EMBEDDERS`) stops the boot.
+    #[test]
+    fn test_an_old_two_stack_env_file_stops_the_boot() {
+        let mut map = tier_map();
+        map.insert("KB_TIER", "desk");
+        map.insert("COMPOSE_PROFILES", "desk,desk-ocr,desk-vision,desk-two");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect_err("must choose a stack")
+            .to_string();
+        assert!(err.contains("KB_EMBEDDERS"), "{err}");
+    }
+
     #[test]
     fn test_each_tier_fills_its_role_defaults() {
         // (tier, embedding concurrency, chunk-rerank candidates, page arm on)
@@ -2152,6 +2207,8 @@ mod tests {
                 map.insert("OPENROUTER_API_KEY", "test-key");
             }
             map.insert("KB_TIER", tier);
+            // The 0.3-0.5 stack; the default (one embedder) has its own test.
+            map.insert("KB_EMBEDDERS", "two");
             let cfg = resolved(&map);
             let plan = cfg.tier.as_ref().expect("tier plan recorded");
             assert_eq!(plan.tier.as_str(), tier);

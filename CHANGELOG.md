@@ -1,5 +1,36 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **One embedder is the default on Desk, Studio and Station (`DEP-6`).** `rantai-kb setup desk`
+  (and `studio`, `station`) now runs `Nemotron-3.5-Embed-1B` for text chunks *and* page images in one
+  2048-d space, with `Qwen3-Reranker-0.6B`, and no flag. Measured: text 0.826 vs 0.796 (MIRACL-id),
+  pages 0.621 vs 0.277 (ViDoRe HR), reranker +0.055 at 1.19 GB. Desk gains page-image search.
+  `--embedders two` (`KB_EMBEDDERS=two`) keeps the 0.3–0.5 stack. Not yet measured (`DEP-7`): a page
+  reranker on top, ingest throughput at 32k context, the fit on a real 8 GB card, a live Studio run.
+- Compose's `kb-desk`, `kb-studio` and `kb-station` default to the `vllm-embed` and `llama-rerank`
+  endpoints and wait for them to be healthy; `setup --embedders two` writes the TEI/vLLM endpoints
+  of the old stack to `.env`.
+- `Nemotron-3.5-Embed-1B` is 🟢: OpenMDW-1.1 was read in full and is permissive (keep the licence
+  and notices; rights end for a party that sues over the weights), so it needs no `--accept-licence`.
+- Lite and Cloud no longer get a `<tier>-two` compose profile; they have one embedding stack.
+
+### Fixed
+
+- **`KB_EMBEDDERS=one` ran the old models.** In 0.5.0 the tier plan logged Nemotron, but the config
+  overlay read the two-embedder table, so the server embedded with `Qwen3-Embedding-0.6B` at 1024-d
+  against the one-embedder endpoint. The overlay now resolves the same stack the plan reports.
+
+### Upgrading
+
+- **A GPU-tier deployment from 0.5.0 or earlier must choose.** Its `.env` has no `KB_EMBEDDERS`,
+  which now means `one`; kb-server refuses to start while `COMPOSE_PROFILES` still names a
+  `<tier>-two` profile and says how to choose: `rantai-kb setup <tier>` then `kb-server reindex`
+  (text vectors go 1024 → 2048), or `rantai-kb setup <tier> --embedders two` to keep the old index
+  (`docs/rust-cutover.md` §17). Lite and Cloud are unaffected.
+
 ## 0.5.0 — 2026-11-17
 
 ### Added

@@ -31,12 +31,12 @@ Metal); that is accepted for the chat model only.
 | Role | Lite | Desk (8 GB) | Studio (24 GB) | Station | Cloud |
 |---|---|---|---|---|---|
 | Chat LLM (the app's) | elsewhere | Bonsai-2-9B (2.0–2.6 GB + 0.6 GB vision), 5 users | Bonsai-2-27B (6.0–7.2 GB + 0.6 GB vision), 5 users | 32–35B × 5 users, or 8–9B × 20 users | API |
-| Embedding (text + page images, one space) | multilingual-e5-small on CPU (measured: `docs/eval-ab/lite-2core`) | **`Nemotron-3.5-Embed-1B`, 2048-d, text and pages** (`KB_EMBEDDERS=one`; measured 2026-11-17) | same | same | voyage-multimodal-3.5 or gemini-embedding-2 |
+| Embedding (text + page images, one space) | multilingual-e5-small on CPU (measured: `docs/eval-ab/lite-2core`) | **`Nemotron-3.5-Embed-1B`, 2048-d, text and pages** (the default since 0.6.0; `--embedders two` keeps the Qwen pair) | same | same | voyage-multimodal-3.5 or gemini-embedding-2 |
 | Reranker | tiny text reranker, or none | **Qwen3-Reranker-0.6B**, 1.19 GB (measured 2026-11-17: +0.055) | same | same | voyage rerank-2.5 / cohere rerank-4 / qwen3-reranker-8b |
 | Digital PDF text | pdfium text layer | text layer | text layer | text layer | text layer |
 | Scans / complex pages | CPU document OCR sidecar: PP-Layout + PP-OCRv6 tiny + SLANet-plus tables (0.69 pages/s on 2 cores) | Xiaomi-OCR-0, vLLM fp8 (1.35 pages/s, 4.4 GB peak) | Xiaomi-OCR-0 (1.5 pages/s), table pass optional | Xiaomi-OCR-0 + layout table pass | Mistral OCR |
 | Pictures (photos, charts, diagrams, embedded images; `ING-5`) | Qwen3-VL-2B-Instruct Q4 on CPU (llama.cpp sidecar `vlm-cpu`) | Qwen3-VL-2B-Instruct on GPU (`vlm-gpu`, ~2.5 GB) | same | same | nemotron-3.5-super-vl (API) |
-| Page-image search | optional tiny model (colSmol-256M), off by default | off (text-only embedder) | yes | yes | yes |
+| Page-image search | optional tiny model (colSmol-256M), off by default | yes (the same embedder) | yes | yes | yes |
 | Est. VRAM chat / KB | — | ~3.5 / ~4.5 GB (tight) | ~9 / ~10 GB | ~26 / ~20 GB on 48 GB | — |
 
 ### Lite: cheapest tool per page
@@ -58,13 +58,15 @@ On 1–2 cores no model is fast enough to run on every page, so ingest routes **
 |---|---:|
 | Bonsai-2-9B + vision | 2.6–3.2 GB |
 | KV cache, 5 users (hybrid attention, 8 of 32 layers keep KV) | ~0.5–1 GB |
-| Qwen3-Embedding-0.6B fp16 (TEI CUDA, incl. runtime) | ~2 GB |
-| bge-reranker-v2-m3 fp16 (TEI CUDA, incl. runtime) | ~1.7 GB |
-| **Total** | **~6.8–7.9 GB** |
+| Nemotron-3.5-Embed-1B bf16, text and pages (vLLM; weights 2.4 GB, plus runtime) | ~3 GB |
+| Qwen3-Reranker-0.6B Q8 (llama.cpp; measured 1.19 GB) | ~1.2 GB |
+| **Total** | **~7.3–8.4 GB** |
 
-Desk keeps the text-only Qwen3-Embedding-0.6B (decided 2026-10-26): it is what the compose
-profile ships, it runs on TEI, and it leaves ~0.7 GB more slack than the 2B multimodal pair.
-The cost is no page-image search on Desk; Studio and Station keep the multimodal plan.
+Desk runs the same one embedder as Studio and Station (`DEP-6`, decided 2026-11-17, the
+default since 0.6.0), which gives it the page-image search it could not afford with two
+models. It is ~0.5 GB heavier than the 0.5.0 Desk stack (Qwen3-Embedding-0.6B + bge, ~3.7 GB)
+and **has not been measured on a real 8 GB card**. Xiaomi-OCR-0 (4.4 GB peak) does not fit
+on the same 8 GB beside the chat model and the embedder either; that was already true in 0.5.0.
 
 If it doesn't fit when measured: reranker at 6-bit first, then fewer rerank candidates. The
 parser does not stay resident unless the operator asks for it.

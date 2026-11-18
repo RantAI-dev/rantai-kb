@@ -118,10 +118,11 @@ The reranker replaces the VL rerankers that were 4.26 GB and 17.5 GB and had nev
 at 1.19 GB it lifts nDCG@10 **0.795 → 0.850** on Indonesian
 ([`docs/eval-ab/rerank-2026-11-17`](docs/eval-ab/rerank-2026-11-17/README.md)).
 
-**How to select it.** `KB_EMBEDDERS=one` (documented in the bundle's `.env.example`). The 0.4.0
-default is still the previous two-model stack until the last two gate measurements land — the page
-reranker on top of the one-space list and ingest throughput at 32k context — so the switch is
-explicit rather than silent ([`docs/core/specs/dep-6.md`](docs/core/specs/dep-6.md)).
+**It is the default since 0.6.0** on `desk`, `studio` and `station`: `rantai-kb setup desk` runs
+it with no flag. `--embedders two` keeps the 0.3–0.5 stack (`Qwen3-Embedding-0.6B` for text plus a
+Qwen3-VL page embedder) for a deployment that does not want to re-index. Not yet measured: the page
+reranker on top of the one-space list, ingest throughput at 32k context, the fit on a real 8 GB card
+and a live Studio run ([`docs/core/specs/dep-6.md`](docs/core/specs/dep-6.md)).
 
 The optional table pass (`--ocr-tables accurate`) adds the `ocr-layout` sidecar:
 PP-DocLayoutV3, ~130 MB, on the CPU — **never on the same card as the OCR model**, which

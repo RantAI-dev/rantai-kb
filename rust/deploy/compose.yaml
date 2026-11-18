@@ -437,9 +437,11 @@ services:
 
   # ─── desk / studio / station: GPU tiers ────────────────────────────────────
   #
-  # Text embedding is Qwen3-Embedding-0.6B on TEI everywhere (the measured
-  # local text stack). Desk adds bge on TEI; Studio and Station run the
-  # Qwen3-VL embedder (page images) and reranker. Every GPU tier OCRs scans
+  # The GPU tiers embed text and pages with one model, Nemotron-3.5-Embed-1B
+  # (`vllm-embed`, profile `<tier>-one`, the default since 0.6.0). The
+  # `<tier>-two` services below are the 0.3-0.5 stack, kept for
+  # `--embedders two`: Qwen3-Embedding-0.6B on TEI, bge on Desk, the Qwen3-VL
+  # embedder and reranker on Studio and Station. Every GPU tier OCRs scans
   # with Xiaomi-OCR-0 on vLLM (the best measured local OCR, ahead of Mistral
   # OCR on olmOCR-bench) and can add the PP-DocLayoutV3 table pass on the CPU. The TEI tags without a suffix are the CUDA
   # images (`cpu-…`, `turing-…`, `rocm-…` are the alternatives).
@@ -502,11 +504,11 @@ services:
     <<: *ocr-layout
     profiles: ["desk-ocr-layout", "studio-ocr-layout", "station-ocr-layout"]
 
-  # ─── DEP-6: one embedder for text and pages ──────────────────────────────
-  # Selected by `KB_EMBEDDERS=one` (or `rantai-kb setup --embedders one`), which
-  # also switches the tier's model services to the `-one` profile. One model in
-  # one space, so the tier runs these two containers instead of a text embedder,
-  # a page embedder and a reranker.
+  # ─── DEP-6: one embedder for text and pages (the default) ───────────────
+  # The `<tier>-one` profile, which `rantai-kb setup` turns on unless it is
+  # given `--embedders two`. One model in one 2048-d space, so the tier runs
+  # these two containers instead of a text embedder, a page embedder and a
+  # reranker.
   vllm-embed:
     <<: *vllm
     profiles: ["desk-one", "studio-one", "station-one"]
@@ -564,10 +566,15 @@ services:
       <<: *kb-local-env
       KB_TIER: desk
       KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL-http://vlm-gpu:8000/v1/chat/completions}
-      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-embed-desk:80/v1/embeddings}
-      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
-      KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-tei}
-      KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://tei-rerank-desk:80}
+      # DEP-6, the default since 0.6.0: one embedder (vllm-embed) for text and
+      # pages, Qwen3-Reranker-0.6B (llama-rerank). `rantai-kb setup <tier>
+      # --embedders two` writes the 0.3-0.5 stack's endpoints to .env instead.
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://vllm-embed:8000/v2/embed}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local}
+      KB_PAGE_EMBEDDING_BASE_URL: ${KB_PAGE_EMBEDDING_BASE_URL-http://vllm-embed:8000/v2/embed}
+      KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-cohere}
+      KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://llama-rerank:8082/v1/rerank}
+      KB_RERANK_API_KEY: ${KB_RERANK_API_KEY:-local}
       KB_OCR_BASE_URL: ${KB_OCR_BASE_URL-http://vllm-ocr-desk:8000/v1/chat/completions}
       # The table pass is off unless `rantai-kb setup --ocr-tables accurate`
       # turns on the layout profile and sets this to http://ocr-layout:8193.
@@ -578,6 +585,12 @@ services:
         condition: service_healthy
         required: false
       vllm-ocr-desk:
+        condition: service_healthy
+        required: false
+      vllm-embed:
+        condition: service_healthy
+        required: false
+      llama-rerank:
         condition: service_healthy
         required: false
       ocr-layout:
@@ -660,21 +673,31 @@ services:
       <<: *kb-local-env
       KB_TIER: studio
       KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL-http://vlm-gpu:8000/v1/chat/completions}
-      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-embed-studio:80/v1/embeddings}
-      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
-      KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-vllm}
-      KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://vllm-rerank-studio:8000}
+      # DEP-6, the default since 0.6.0: one embedder (vllm-embed) for text and
+      # pages, Qwen3-Reranker-0.6B (llama-rerank). `rantai-kb setup <tier>
+      # --embedders two` writes the 0.3-0.5 stack's endpoints to .env instead.
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://vllm-embed:8000/v2/embed}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local}
+      KB_PAGE_EMBEDDING_BASE_URL: ${KB_PAGE_EMBEDDING_BASE_URL-http://vllm-embed:8000/v2/embed}
+      KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-cohere}
+      KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://llama-rerank:8082/v1/rerank}
+      KB_RERANK_API_KEY: ${KB_RERANK_API_KEY:-local}
       KB_OCR_BASE_URL: ${KB_OCR_BASE_URL-http://vllm-ocr-studio:8000/v1/chat/completions}
       # The table pass is off unless `rantai-kb setup --ocr-tables accurate`
       # turns on the layout profile and sets this to http://ocr-layout:8193.
       KB_OCR_LAYOUT_URL: ${KB_OCR_LAYOUT_URL-}
-      KB_PAGE_EMBEDDING_BASE_URL: ${KB_PAGE_EMBEDDING_BASE_URL:-http://vllm-page-embed-studio:8000/v1/embeddings}
     depends_on:
       <<: *kb-stores
       vlm-gpu:
         condition: service_healthy
         required: false
       vllm-ocr-studio:
+        condition: service_healthy
+        required: false
+      vllm-embed:
+        condition: service_healthy
+        required: false
+      llama-rerank:
         condition: service_healthy
         required: false
       ocr-layout:
@@ -762,21 +785,31 @@ services:
       <<: *kb-local-env
       KB_TIER: station
       KB_IMAGE_DESCRIBE_BASE_URL: ${KB_IMAGE_DESCRIBE_BASE_URL-http://vlm-gpu:8000/v1/chat/completions}
-      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://tei-embed-station:80/v1/embeddings}
-      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local-tei}
-      KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-vllm}
-      KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://vllm-rerank-station:8000}
+      # DEP-6, the default since 0.6.0: one embedder (vllm-embed) for text and
+      # pages, Qwen3-Reranker-0.6B (llama-rerank). `rantai-kb setup <tier>
+      # --embedders two` writes the 0.3-0.5 stack's endpoints to .env instead.
+      KB_EMBEDDING_BASE_URL: ${KB_EMBEDDING_BASE_URL:-http://vllm-embed:8000/v2/embed}
+      KB_EMBEDDING_API_KEY: ${KB_EMBEDDING_API_KEY:-local}
+      KB_PAGE_EMBEDDING_BASE_URL: ${KB_PAGE_EMBEDDING_BASE_URL-http://vllm-embed:8000/v2/embed}
+      KB_RERANK_PROVIDER: ${KB_RERANK_PROVIDER:-cohere}
+      KB_RERANK_BASE_URL: ${KB_RERANK_BASE_URL:-http://llama-rerank:8082/v1/rerank}
+      KB_RERANK_API_KEY: ${KB_RERANK_API_KEY:-local}
       KB_OCR_BASE_URL: ${KB_OCR_BASE_URL-http://vllm-ocr-station:8000/v1/chat/completions}
       # The table pass is off unless `rantai-kb setup --ocr-tables accurate`
       # turns on the layout profile and sets this to http://ocr-layout:8193.
       KB_OCR_LAYOUT_URL: ${KB_OCR_LAYOUT_URL-}
-      KB_PAGE_EMBEDDING_BASE_URL: ${KB_PAGE_EMBEDDING_BASE_URL:-http://vllm-page-embed-station:8000/v1/embeddings}
     depends_on:
       <<: *kb-stores
       vlm-gpu:
         condition: service_healthy
         required: false
       vllm-ocr-station:
+        condition: service_healthy
+        required: false
+      vllm-embed:
+        condition: service_healthy
+        required: false
+      llama-rerank:
         condition: service_healthy
         required: false
       ocr-layout:

@@ -709,15 +709,15 @@ pub const LICENCES: &[LicenceEntry] = &[
     ),
     entry(
         "nvidia/Nemotron-3.5-Embed-1B-BF16",
-        "openmdw-1.1 (Open Model Weights licence)",
-        LicenceClass::Yellow,
-        "one embedder for text and pages (DEP-6, KB_EMBEDDERS=one); opt-in like any \u{1f7e1} model",
+        "OpenMDW-1.1 (permissive: keep the licence and notices; patent-suit termination)",
+        LicenceClass::Green,
+        "text and page embedder on desk, studio and station (DEP-6, the default since 0.6.0)",
     ),
     entry(
         "Qwen/Qwen3-Reranker-0.6B",
         "Apache-2.0",
         LicenceClass::Green,
-        "chunk reranker for the one-embedder stack (DEP-6)",
+        "chunk reranker on desk, studio and station (DEP-6)",
     ),
     entry(
         "nvidia/nemotron-3.5-super-vl",
@@ -772,10 +772,26 @@ pub fn licence_entry(model: &str) -> Option<&'static LicenceEntry> {
     LICENCES.iter().find(|entry| entry.model == model)
 }
 
-/// The models a tier can load, from `docs/kb-tiers.md` "What each tier runs".
-/// Cloud also gets `mistral-ocr-latest` when the operator supplies its key.
+/// The models a tier loads with its default embedding stack, from
+/// `docs/kb-tiers.md` "What each tier runs".
 #[must_use]
 pub fn tier_models(tier: Tier) -> Vec<&'static str> {
+    tier_models_for(tier, crate::tier::Embedders::default())
+}
+
+/// The models a tier loads with an embedding stack. The GPU tiers' default is
+/// one embedder (`DEP-6`); `--embedders two` is the 0.3–0.5 stack. Cloud also
+/// gets `mistral-ocr-latest` when the operator supplies its key.
+#[must_use]
+pub fn tier_models_for(tier: Tier, embedders: crate::tier::Embedders) -> Vec<&'static str> {
+    if embedders == crate::tier::Embedders::One && tier.has_embedder_stacks() {
+        return vec![
+            "nvidia/Nemotron-3.5-Embed-1B-BF16",
+            "Qwen/Qwen3-Reranker-0.6B",
+            "xiaomi-research/Xiaomi-OCR-0",
+            "Qwen/Qwen3-VL-2B-Instruct",
+        ];
+    }
     match tier {
         Tier::Lite => vec![
             "intfloat/multilingual-e5-small",
@@ -1596,15 +1612,13 @@ pub fn compose_profiles(args: &SetupArgs, tier: Tier) -> String {
         if effective_vision(args, tier) == VisionChoice::Local {
             profiles.push(format!("{name}-vision"));
         }
-        // One embedder or two (`DEP-6`): the model services live behind
-        // `<tier>-one` / `<tier>-two` so exactly one stack starts. An unset
-        // flag keeps the stack the env file already runs, defaulting to two.
-        let one = match args.embedders {
-            Some(crate::tier::Embedders::One) => true,
-            Some(crate::tier::Embedders::Two) => false,
-            None => false,
-        };
-        profiles.push(format!("{name}-{}", if one { "one" } else { "two" }));
+        // One embedder or two (`DEP-6`): a GPU tier's model services live
+        // behind `<tier>-one` / `<tier>-two` so exactly one stack starts.
+        // Unset is one, the default since 0.6.0.
+        if tier.has_embedder_stacks() {
+            let one = args.embedders.unwrap_or_default() == crate::tier::Embedders::One;
+            profiles.push(format!("{name}-{}", if one { "one" } else { "two" }));
+        }
     }
     profiles.join(",")
 }
@@ -1647,12 +1661,15 @@ fn env_changes(
         "Deployment tier (docs/kb-tiers.md). The preset fills the model roles; an \
          explicit KB_* setting still wins.",
     )];
-    if let Some(embedders) = args.embedders {
-        if embedders == crate::tier::Embedders::One {
+    if tier.has_embedder_stacks() {
+        // Written either way, so the file says which stack it runs and the
+        // endpoints match the compose services that stack starts.
+        if args.embedders.unwrap_or_default() == crate::tier::Embedders::One {
             changes.push(EnvChange::plain("KB_EMBEDDERS", "one").with_comment(
-                "One embedder for text and pages (DEP-6): Nemotron-3.5-Embed-1B in a \
-                     single 2048-d space, with Qwen3-Reranker-0.6B. Adopting it is a \
-                     re-index; adopting or leaving it needs no other change.",
+                "One embedder for text and pages (DEP-6, the default since 0.6.0): \
+                     Nemotron-3.5-Embed-1B in a single 2048-d space, with \
+                     Qwen3-Reranker-0.6B. Moving to it from the two-embedder stack is \
+                     a re-index (kb-server reindex).",
             ));
             // Inside compose the model services are named, not loopback.
             changes.push(EnvChange::plain(
@@ -1671,8 +1688,33 @@ fn env_changes(
             changes.push(EnvChange::plain("KB_RERANK_API_KEY", "local"));
         } else {
             changes.push(EnvChange::plain("KB_EMBEDDERS", "two").with_comment(
-                "Two embedders: Qwen3-Embedding-0.6B for text, Qwen3-VL-Embedding-* \
-                 for pages (the 0.3/0.4 default).",
+                "Two embedders (the 0.3-0.5 stack): Qwen3-Embedding-0.6B for text, \
+                 Qwen3-VL-Embedding-* for pages on studio and station.",
+            ));
+            let (rerank_provider, rerank_url, page_url) = match tier {
+                Tier::Desk => ("tei", "http://tei-rerank-desk:80", None),
+                Tier::Studio => (
+                    "vllm",
+                    "http://vllm-rerank-studio:8000",
+                    Some("http://vllm-page-embed-studio:8000/v1/embeddings"),
+                ),
+                _ => (
+                    "vllm",
+                    "http://vllm-rerank-station:8000",
+                    Some("http://vllm-page-embed-station:8000/v1/embeddings"),
+                ),
+            };
+            changes.push(EnvChange::plain(
+                "KB_EMBEDDING_BASE_URL",
+                format!("http://tei-embed-{}:80/v1/embeddings", tier.as_str()),
+            ));
+            changes.push(EnvChange::plain("KB_RERANK_PROVIDER", rerank_provider));
+            changes.push(EnvChange::plain("KB_RERANK_BASE_URL", rerank_url));
+            // Desk's two-embedder stack has no page arm; an empty value keeps
+            // the preset from filling one.
+            changes.push(EnvChange::plain(
+                "KB_PAGE_EMBEDDING_BASE_URL",
+                page_url.unwrap_or_default(),
             ));
         }
     }
@@ -1967,7 +2009,7 @@ fn models_for(
     lookup: &dyn Fn(&str) -> Option<String>,
 ) -> Vec<&'static str> {
     let _ = lookup;
-    let mut models = tier_models(tier);
+    let mut models = tier_models_for(tier, args.embedders.unwrap_or_default());
     let ocr = effective_ocr(args, tier);
     if ocr != OcrChoice::Local {
         // The tier's own OCR model does not run.
@@ -3247,11 +3289,11 @@ mod tests {
         let args = SetupArgs::default();
         assert_eq!(
             compose_profiles(&args, Tier::Lite),
-            "lite,lite-ocr,lite-vision,lite-two"
+            "lite,lite-ocr,lite-vision"
         );
         assert_eq!(
             compose_profiles(&args, Tier::Desk),
-            "desk,desk-ocr,desk-vision,desk-two"
+            "desk,desk-ocr,desk-vision,desk-one"
         );
         assert_eq!(compose_profiles(&args, Tier::Cloud), "cloud");
         let env = written(
@@ -3264,7 +3306,7 @@ mod tests {
         );
         assert_eq!(
             env.get("COMPOSE_PROFILES").map(String::as_str),
-            Some("desk,desk-ocr,desk-vision,desk-two")
+            Some("desk,desk-ocr,desk-vision,desk-one")
         );
         assert!(
             !env.contains_key("KB_OCR_BASE_URL"),
@@ -3281,10 +3323,7 @@ mod tests {
             "MY_MISTRAL",
         ]))
         .expect("parse");
-        assert_eq!(
-            compose_profiles(&parsed, Tier::Lite),
-            "lite,lite-vision,lite-two"
-        );
+        assert_eq!(compose_profiles(&parsed, Tier::Lite), "lite,lite-vision");
         // Pages leave the machine: refused without --accept-licence.
         let dir = TempDir::new("mistral-refused");
         let mut output = Vec::new();
@@ -3320,7 +3359,7 @@ mod tests {
         );
         assert_eq!(
             env.get("COMPOSE_PROFILES").map(String::as_str),
-            Some("lite,lite-vision,lite-two")
+            Some("lite,lite-vision")
         );
     }
 
@@ -3343,7 +3382,7 @@ mod tests {
         );
         assert_eq!(
             env.get("COMPOSE_PROFILES").map(String::as_str),
-            Some("lite,lite-vision,lite-two")
+            Some("lite,lite-vision")
         );
         assert!(
             SetupArgs::parse(&args_of(&["--ocr-model", "x"])).is_err(),
@@ -3363,7 +3402,7 @@ mod tests {
         assert!(!env.contains_key("KB_IMAGE_DESCRIBE_BASE_URL"));
         assert_eq!(
             env.get("COMPOSE_PROFILES").map(String::as_str),
-            Some("lite,lite-ocr,lite-two")
+            Some("lite,lite-ocr")
         );
     }
 
@@ -3396,15 +3435,58 @@ mod tests {
             Some("http://llama-rerank:8082/v1/rerank")
         );
 
-        // Without the flag the two-model stack and its profile stay.
+        // Without the flag it is the same: one embedder is the default.
         let plain = SetupArgs::parse(&args_of(&[])).expect("parse");
         assert_eq!(
             compose_profiles(&plain, Tier::Studio),
-            "studio,studio-ocr,studio-vision,studio-two"
+            "studio,studio-ocr,studio-vision,studio-one"
         );
-        assert!(
-            !written_with(&nvidia_box(24.0), &plain, Tier::Studio, &|_: &str| None)
-                .contains_key("KB_EMBEDDERS")
+        let env = written_with(&nvidia_box(24.0), &plain, Tier::Studio, &|_: &str| None);
+        assert_eq!(env.get("KB_EMBEDDERS").map(String::as_str), Some("one"));
+
+        // Lite has one stack: no selector, no embedder profile.
+        let lite = written_with(&nvidia_box(4.0), &plain, Tier::Lite, &|_: &str| None);
+        assert!(!lite.contains_key("KB_EMBEDDERS"));
+    }
+
+    /// `--embedders two` writes the 0.3-0.5 stack's compose endpoints, which
+    /// the compose file no longer defaults to.
+    #[test]
+    fn embedders_two_writes_the_old_stack_endpoints() {
+        let parsed = SetupArgs::parse(&args_of(&["--embedders", "two"])).expect("parse");
+        assert_eq!(
+            compose_profiles(&parsed, Tier::Desk),
+            "desk,desk-ocr,desk-vision,desk-two"
+        );
+        let desk = written_with(&nvidia_box(8.0), &parsed, Tier::Desk, &|_: &str| None);
+        assert_eq!(desk.get("KB_EMBEDDERS").map(String::as_str), Some("two"));
+        assert_eq!(
+            desk.get("KB_EMBEDDING_BASE_URL").map(String::as_str),
+            Some("http://tei-embed-desk:80/v1/embeddings")
+        );
+        assert_eq!(
+            desk.get("KB_RERANK_PROVIDER").map(String::as_str),
+            Some("tei")
+        );
+        assert_eq!(
+            desk.get("KB_RERANK_BASE_URL").map(String::as_str),
+            Some("http://tei-rerank-desk:80")
+        );
+        assert_eq!(
+            desk.get("KB_PAGE_EMBEDDING_BASE_URL").map(String::as_str),
+            Some("")
+        );
+
+        let station = written_with(&nvidia_box(48.0), &parsed, Tier::Station, &|_: &str| None);
+        assert_eq!(
+            station
+                .get("KB_PAGE_EMBEDDING_BASE_URL")
+                .map(String::as_str),
+            Some("http://vllm-page-embed-station:8000/v1/embeddings")
+        );
+        assert_eq!(
+            station.get("KB_RERANK_BASE_URL").map(String::as_str),
+            Some("http://vllm-rerank-station:8000")
         );
     }
 
@@ -3415,7 +3497,7 @@ mod tests {
         assert!(check_roles(&parsed, Tier::Desk).is_ok());
         assert_eq!(
             compose_profiles(&parsed, Tier::Studio),
-            "studio,studio-ocr,studio-ocr-layout,studio-vision,studio-two"
+            "studio,studio-ocr,studio-ocr-layout,studio-vision,studio-one"
         );
         let env = written(
             &SetupArgs {

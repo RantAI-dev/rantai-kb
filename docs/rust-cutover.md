@@ -823,13 +823,20 @@ Response additions, all present only when the arm ran and found nodes:
 deployment that leaves `KB_TREE_ARM` unset. A failed outline or page read adds
 the `tree_arm_failed` degrade; the other arms answer unchanged.
 
-### 17. Optional: one embedder for text and pages (0.4.0)
+### 17. One embedder for text and pages (opt-in in 0.4.0, the default since 0.6.0)
 
-`KB_EMBEDDERS=one` on `desk`, `studio` or `station` embeds text chunks and page images with one
-model (`Nemotron-3.5-Embed-1B`, 2048-d) and reranks with `Qwen3-Reranker-0.6B`. The default is
-unchanged: leaving it unset keeps `Qwen3-Embedding-0.6B` for text and the VL embedder for pages.
+`desk`, `studio` and `station` embed text chunks and page images with one model
+(`Nemotron-3.5-Embed-1B`, 2048-d) and rerank with `Qwen3-Reranker-0.6B`. `KB_EMBEDDERS=two`
+(`rantai-kb setup <tier> --embedders two`) keeps `Qwen3-Embedding-0.6B` for text and the VL embedder
+for pages, the default until 0.5.0.
 
-**Adopting it is a re-index, not a config change.** The text vectors go from 1024 to 2048
+**Upgrading a GPU-tier deployment from 0.5.0 or earlier.** Its `.env` has no `KB_EMBEDDERS`, and in
+0.6.0 unset means `one`. So that the server never runs a new model against the old index, kb-server
+refuses to start when `KB_EMBEDDERS` is unset and `COMPOSE_PROFILES` still names a `<tier>-two`
+profile, and says to choose: re-run `rantai-kb setup <tier>` and re-index (below), or
+`rantai-kb setup <tier> --embedders two` to keep the old stack and index.
+
+**Moving to it is a re-index, not a config change.** The text vectors go from 1024 to 2048
 dimensions and the page vectors change model, and Qdrant fixes a collection's width when it is
 created. Wipe and rebuild from the S3 originals:
 
