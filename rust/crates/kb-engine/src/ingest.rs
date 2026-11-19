@@ -180,6 +180,14 @@ pub struct IngestSettings {
     /// e5-small at 128 tokens embeds ~2x the chunks/s of a full ~234-token chunk
     /// (`docs/eval-ab/lite-2core`).
     pub embedding_max_chars: usize,
+    /// Fill every chunk's `contextual_prefix` with
+    /// `<title> > <chapter> > <section>` from the document's outline, and
+    /// include it in the text that is embedded and BM25-indexed
+    /// (`KB_CONTEXTUAL_HEADERS`, default on). The stored `content` is never
+    /// modified; the header is metadata the consumers prepend. Off restores the
+    /// pre-header behaviour byte for byte: no prefix written, embed text and
+    /// sparse text built from the title, heading path and content as before.
+    pub contextual_headers: bool,
     /// How many seats each stage of the pipeline has (`KB_SEATS`).
     pub seats: crate::seats::SeatCapacity,
     /// The extraction quality gate (`KB_EXTRACT_QUALITY_GATE`), when it is on.
@@ -222,6 +230,7 @@ impl Default for IngestSettings {
             strip_page_furniture: false,
             entity_extraction_enabled: true,
             embedding_max_chars: 0,
+            contextual_headers: true,
             seats: crate::seats::SeatCapacity::default(),
             quality: None,
             ocr_wait_backoff: DEFAULT_OCR_WAIT_BACKOFF,
@@ -731,7 +740,13 @@ impl IngestWorker {
         } else {
             None
         };
-        if let Some(outline) = extraction.outline.as_ref().or(fallback_outline.as_ref()) {
+        // One outline for every consumer below: the stored `metadata.outline`
+        // the tree arm and the structure read, and the contextual chunk
+        // headers. Bookmarks first, numbered headings as the fallback, exactly
+        // as `kb_extract::outline` produced them.
+        let document_outline: Option<kb_core::tree::Outline> =
+            extraction.outline.clone().or(fallback_outline);
+        if let Some(outline) = &document_outline {
             let mut outline = outline.clone();
             outline.document_title = Some(title.clone());
             let patch = json!({ "outline": outline });
@@ -1001,6 +1016,23 @@ impl IngestWorker {
             .await;
         }
 
+        // Contextual chunk headers (`KB_CONTEXTUAL_HEADERS`): every chunk now
+        // assembled — text, table units, figure chunks — carries
+        // `<title> > <chapter> > <section>` in `contextual_prefix`, placed by
+        // its page in the outline the extraction already produced. `content`
+        // is not modified; the embedder, the BM25 encoder and the reranker
+        // prepend the header themselves (`embed_and_store`,
+        // `kb_engine::retrieval`). The page-image visual descriptions are
+        // written later and separately: they describe one page, not a passage
+        // of the document, and keep no header.
+        if self.settings.contextual_headers {
+            kb_core::chunk::assign_contextual_prefixes(
+                &mut chunks,
+                &title,
+                document_outline.as_ref(),
+            );
+        }
+
         // Chunk ids are fixed before embedding, so the page arm can run next to
         // text embedding instead of after it: on a 943-page PDF the two were
         // 211 s and 205 s back to back.
@@ -1263,15 +1295,34 @@ impl IngestWorker {
         // first lost the document's heading entirely, because the title was
         // only ever the file's name. Both are fixed here
         // (`docs/kf-vplane-eval.md`).
+        //
+        // With contextual headers on (`KB_CONTEXTUAL_HEADERS`), the chunk's
+        // `contextual_prefix` stands in for the title line: it already
+        // begins with the title, then says which chapter and section the
+        // passage sits in — the line a textbook's repeated activity template
+        // needs before two near-identical chunks can be told apart.
         let max_chars = self.settings.embedding_max_chars;
+        let headers = self.settings.contextual_headers;
         let texts: Vec<String> = chunks
             .iter()
             .map(|c| {
-                let text = kb_core::title::embedding_text(
-                    title,
-                    c.metadata.heading_path.as_deref(),
+                // The prefix begins with the title, then says which chapter
+                // and section the passage sits in — the line a textbook's
+                // repeated activity template needs before two near-identical
+                // chunks can be told apart. Prepending the title line as well
+                // would say the title twice.
+                let text = match contextual_text(
+                    headers,
+                    c.metadata.contextual_prefix.as_deref(),
                     &c.content,
-                );
+                ) {
+                    Some(with_header) => with_header,
+                    None => kb_core::title::embedding_text(
+                        title,
+                        c.metadata.heading_path.as_deref(),
+                        &c.content,
+                    ),
+                };
                 if max_chars > 0 && text.chars().count() > max_chars {
                     text.chars().take(max_chars).collect()
                 } else {
@@ -1338,7 +1389,17 @@ impl IngestWorker {
                     Some("table_row") => ChunkType::TableRow,
                     _ => ChunkType::Text,
                 };
-                let sparse = kb_core::sparse::encode_document(&chunk.content);
+                // The BM25 text carries the same header the dense vector sees:
+                // a chapter title is the term that separates one textbook
+                // page's boilerplate from another's, and a corpus that
+                // matches only the dense arm loses it.
+                let sparse_text = contextual_text(
+                    headers,
+                    chunk.metadata.contextual_prefix.as_deref(),
+                    &chunk.content,
+                )
+                .unwrap_or_else(|| chunk.content.clone());
+                let sparse = kb_core::sparse::encode_document(&sparse_text);
                 IndexUnit {
                     id: ChunkId(format!("{}_{}", document_id.0, chunk.metadata.chunk_index)),
                     document_id: document_id.clone(),
@@ -2615,6 +2676,20 @@ fn role_word(role: kb_core::tables::ColumnRole) -> &'static str {
         ColumnRole::Label => "label",
         ColumnRole::Date => "date",
     }
+}
+
+/// `<prefix>\n\n<content>` — the passage with its contextual header in front —
+/// when headers are on and the chunk carries one. `None` otherwise, so the
+/// caller falls back to the header-less text it has always built.
+///
+/// One helper, three consumers: the embedder's passage text, the BM25 sparse
+/// text and (in `kb_engine::retrieval`) the reranker input all prepend the
+/// same stored prefix, and none of them fold it into `content`.
+fn contextual_text(headers: bool, prefix: Option<&str>, content: &str) -> Option<String> {
+    headers
+        .then(|| prefix.map(str::trim).filter(|p| !p.is_empty()))
+        .flatten()
+        .map(|prefix| format!("{prefix}\n\n{content}"))
 }
 
 /// The metadata object stored on each chunk, with the field names the Bun

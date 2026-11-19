@@ -31,6 +31,7 @@ use axum::extract::{Path, State};
 use serde::Serialize;
 
 use kb_core::outline::{OutlineChunk, build_outline, estimated_chars, has_spans};
+use kb_core::tree::{Outline, node_number};
 use kb_ports::{
     ChunkType, DocumentFilter, DocumentMeta, DocumentScope, ScopeRequest, page_image_path,
 };
@@ -59,6 +60,13 @@ pub struct DocumentStructureResponse {
     pub title: String,
     /// The document's pages, by page number.
     pub pages: Vec<PageStructure>,
+    /// The document's detected chapters, from the outline ingest stored in
+    /// `Document.metadata.outline` (DEC-4). Absent — not `null`, and not an
+    /// empty list — when the document has no outline or no top-level
+    /// sections, including every document ingested before the outline was
+    /// stored. A document gets one by re-ingesting.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub chapters: Vec<ChapterStructure>,
     /// The document's figures.
     pub figures: Vec<FigureStructure>,
     /// The document's chunks and the pages they sit on.
@@ -139,6 +147,25 @@ pub struct PageStructure {
     pub ocr_text: Option<String>,
     /// The stored page JPEG's blob key, when ingest recorded that it exists.
     pub image_asset_key: Option<String>,
+}
+
+/// One detected chapter of the document: a top-level node of the stored
+/// outline. `BAB`/`Chapter`/`Unit`/… headings are chapters; `A.`/`1.1`
+/// sections are not.
+///
+/// `page` is the page the chapter **starts on**, 0-based like every page in
+/// this response. It is the extractor's own answer, which skips
+/// table-of-contents pages, so it is never the contents page that merely
+/// lists the chapter.
+#[derive(Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChapterStructure {
+    /// The chapter's heading as printed, e.g. "BAB IV Kewirausahaan".
+    pub title: String,
+    /// The chapter's own number ("IV", "2"), when the heading carries one.
+    pub number: Option<String>,
+    /// The 0-based page the chapter starts on.
+    pub page: u32,
 }
 
 /// One figure. `key` is the searchable figure chunk's id when the figure has a
@@ -388,6 +415,7 @@ async fn structure_for(
         external_ref: doc.external_ref.clone(),
         title: doc.title.clone(),
         pages: pages.into_values().collect(),
+        chapters: read_stored_chapters(doc.metadata.as_ref()),
         figures,
         chunks,
         truncated,
@@ -396,6 +424,33 @@ async fn structure_for(
         estimated_chars: estimated_chars(&outline_chunks),
         has_spans: has_spans(&outline_chunks),
     })
+}
+
+/// The document's chapters from `Document.metadata.outline`, in document
+/// order: the top-level (`level == 1`) nodes. A chapter word in the title
+/// ("BAB", "Chapter", "Unit", …) is where `number` is read from, but any
+/// top-level outline node is a chapter of its document — a report's
+/// "1. Introduction" is as much one as a textbook's "BAB IV". An outline
+/// that is missing, unreadable or empty yields no chapters, and the field is
+/// omitted entirely rather than sent as an empty list.
+fn read_stored_chapters(metadata: Option<&serde_json::Value>) -> Vec<ChapterStructure> {
+    let outline = metadata
+        .and_then(|m| m.get("outline"))
+        .cloned()
+        .and_then(|value| serde_json::from_value::<Outline>(value).ok());
+    let Some(outline) = outline else {
+        return Vec::new();
+    };
+    outline
+        .nodes
+        .iter()
+        .filter(|node| node.level == 1)
+        .map(|node| ChapterStructure {
+            title: node.title.clone(),
+            number: node_number(&node.title),
+            page: node.start_page,
+        })
+        .collect()
 }
 
 /// The page's stored text without the visual description the caption stage
@@ -539,7 +594,10 @@ fn read_bbox(value: &serde_json::Value) -> Option<[f32; 4]> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
-    use super::{collect_figures, page_ocr_text, read_bbox, read_stored_figures};
+    use super::{
+        ChapterStructure, collect_figures, page_ocr_text, read_bbox, read_stored_chapters,
+        read_stored_figures,
+    };
 
     #[test]
     fn a_page_without_ocr_text_is_null_not_empty() {
@@ -605,5 +663,57 @@ mod tests {
             json.get("description").is_none(),
             "absent, not null: {json}"
         );
+    }
+
+    #[test]
+    fn chapters_come_from_the_stored_outline_top_level_only() {
+        // An outline as ingest stores it: BAB chapters, a subtema and a
+        // lettered section inside them. Only the level-1 nodes are chapters,
+        // and the page is the page the chapter starts on — the contents page
+        // that lists it (page 0) is never reported.
+        let metadata = serde_json::json!({"outline": {
+            "documentTitle": "Ekonomi",
+            "method": "headings",
+            "nodes": [
+                {"title": "BAB I Kewirausahaan", "level": 1, "start_page": 4, "end_page": 24},
+                {"title": "A. Pengertian wirausaha", "level": 2, "start_page": 5, "end_page": 9},
+                {"title": "Subtema 1 Kebutuhanku", "level": 2, "start_page": 10, "end_page": 14},
+                {"title": "BAB II Pasar dan Uang", "level": 1, "start_page": 25, "end_page": 44}
+            ]
+        }});
+        let chapters = read_stored_chapters(Some(&metadata));
+        assert_eq!(
+            chapters,
+            vec![
+                ChapterStructure {
+                    title: "BAB I Kewirausahaan".to_string(),
+                    number: Some("I".to_string()),
+                    page: 4,
+                },
+                ChapterStructure {
+                    title: "BAB II Pasar dan Uang".to_string(),
+                    number: Some("II".to_string()),
+                    page: 25,
+                },
+            ]
+        );
+        // Omitted, not an empty array, when there is no outline at all —
+        // the response keeps the shape it had before the field existed.
+        assert!(read_stored_chapters(None).is_empty());
+        assert!(read_stored_chapters(Some(&serde_json::json!({}))).is_empty());
+        // A report's numbered top-level section is a chapter of its own too,
+        // and carries its own number.
+        let report = serde_json::json!({"outline": {
+            "method": "headings",
+            "nodes": [
+                {"title": "1. Introduction", "level": 1, "start_page": 0, "end_page": 3},
+                {"title": "2.1 Background", "level": 2, "start_page": 4, "end_page": 7}
+            ]
+        }});
+        let chapters = read_stored_chapters(Some(&report));
+        assert_eq!(chapters.len(), 1);
+        assert_eq!(chapters[0].title, "1. Introduction");
+        assert_eq!(chapters[0].number.as_deref(), Some("1"));
+        assert_eq!(chapters[0].page, 0);
     }
 }

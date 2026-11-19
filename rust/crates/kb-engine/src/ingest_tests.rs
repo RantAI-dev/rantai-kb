@@ -2659,6 +2659,257 @@ async fn embedding_max_chars_caps_the_embedder_input_but_not_the_stored_chunk() 
     assert!(longest > 40, "stored chunks keep their full text");
 }
 
+// ------------------------------------------------- contextual chunk headers
+
+/// The activity boilerplate every page of the textbook repeats.
+const BOILERPLATE: &str = "Bagas BENI Here are what we will do. First, we will \
+                           read the text aloud. Second, we will discuss it in groups.";
+
+/// A textbook extraction: four pages whose text is the same repeated activity
+/// template, and a bookmark outline that says which chapter each page is in.
+/// The chapters exist only as outline nodes — the pages never print them —
+/// which is the production shape the contextual headers exist for: the
+/// outline knows where a passage sits, the text alone cannot say.
+fn textbook_extraction() -> ExtractionResult {
+    let pages: Vec<(u32, String)> = vec![
+        (0, "Kata pengantar buku.".to_string()),
+        (1, BOILERPLATE.to_string()),
+        (2, BOILERPLATE.to_string()),
+        (3, BOILERPLATE.to_string()),
+    ];
+    ExtractionResult {
+        content: pages
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        file_type: "pdf".to_string(),
+        page_map: Some(
+            pages
+                .iter()
+                .map(|(page, text)| PageText {
+                    page: *page,
+                    text: text.clone(),
+                })
+                .collect(),
+        ),
+        outline: Some(kb_core::tree::Outline {
+            document_title: None,
+            method: kb_core::tree::OutlineMethod::Bookmarks,
+            nodes: vec![
+                kb_core::tree::OutlineNode {
+                    title: "BAB I Kewirausahaan".into(),
+                    level: 1,
+                    start_page: 1,
+                    end_page: 2,
+                },
+                kb_core::tree::OutlineNode {
+                    title: "BAB II Pasar dan Uang".into(),
+                    level: 1,
+                    start_page: 3,
+                    end_page: 3,
+                },
+            ],
+        }),
+        ..ExtractionResult::default()
+    }
+}
+
+const BAB_ONE_PREFIX: &str = "Quarterly report > BAB I Kewirausahaan";
+const BAB_TWO_PREFIX: &str = "Quarterly report > BAB II Pasar dan Uang";
+
+#[tokio::test]
+async fn textbook_chunks_carry_the_chapter_in_their_prefix_not_their_content() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let embedder = Arc::new(RecordingEmbedder::default());
+    let worker = worker_with(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        Arc::new(FakeExtractor::returning_result(textbook_extraction())),
+        embedder.clone(),
+    );
+    assert!(
+        matches!(worker.run_job(job()).await, JobOutcome::Ready { .. }),
+        "the ingest should succeed"
+    );
+
+    let stored = chunks.stored_chunks.read().unwrap();
+    let units: Vec<&ChunkToStore> = stored.values().flatten().collect();
+    assert!(units.len() >= 4, "one chunk per page: {}", units.len());
+
+    let by_prefix = |prefix: &str| -> Vec<&ChunkToStore> {
+        units
+            .iter()
+            .filter(|c| c.contextual_prefix.as_deref() == Some(prefix))
+            .copied()
+            .collect()
+    };
+    let bab_one = by_prefix(BAB_ONE_PREFIX);
+    let bab_two = by_prefix(BAB_TWO_PREFIX);
+    assert_eq!(
+        bab_one.len(),
+        2,
+        "pages 1 and 2 are in BAB I: {:?}",
+        units
+            .iter()
+            .map(|c| c.contextual_prefix.as_deref())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(bab_two.len(), 1, "page 3 is in BAB II");
+
+    // The two chapters' passages are byte-identical — only the header says
+    // where each one sits.
+    assert_eq!(bab_one[0].content, bab_two[0].content);
+    assert_ne!(bab_one[0].contextual_prefix, bab_two[0].contextual_prefix);
+
+    // The header never lands in the content: the stored passage is what the
+    // answer cites, and it stays verbatim.
+    for unit in &units {
+        assert!(
+            !unit.content.contains(" > "),
+            "no header separator in the content: {:?}",
+            unit.content
+        );
+        assert!(!unit.content.contains("Kewirausahaan"));
+        // The stored metadata carries the header under the wire field name.
+        assert_eq!(
+            unit.metadata["contextualPrefix"],
+            serde_json::json!(unit.contextual_prefix),
+            "the payload field and the metadata agree"
+        );
+    }
+
+    // The embedder saw the header in front of the passage, once, with the
+    // title said once.
+    let seen = embedder.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), units.len(), "one passage per chunk");
+    let bab_one_text = seen
+        .iter()
+        .find(|t| t.starts_with(&format!("{BAB_ONE_PREFIX}\n\n")))
+        .expect("a BAB I passage was embedded with its header");
+    assert!(
+        bab_one_text.starts_with(&format!("{BAB_ONE_PREFIX}\n\n{BOILERPLATE}")),
+        "{bab_one_text:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|t| t.starts_with(&format!("{BAB_TWO_PREFIX}\n\n{BOILERPLATE}"))),
+        "a BAB II passage was embedded with its header"
+    );
+}
+
+#[tokio::test]
+async fn kb_contextual_headers_off_restores_the_headerless_behaviour() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let embedder = Arc::new(RecordingEmbedder::default());
+    let worker = IngestWorker::new(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        Arc::new(FakeExtractor::returning_result(textbook_extraction())),
+        embedder.clone(),
+        IngestSettings {
+            embedding_model: Some("bge-m3".to_string()),
+            contextual_headers: false,
+            ..IngestSettings::default()
+        },
+    );
+    assert!(
+        matches!(worker.run_job(job()).await, JobOutcome::Ready { .. }),
+        "the ingest should succeed"
+    );
+
+    let stored = chunks.stored_chunks.read().unwrap();
+    let units: Vec<&ChunkToStore> = stored.values().flatten().collect();
+    for unit in &units {
+        assert!(
+            unit.contextual_prefix.is_none(),
+            "no header is written when the feature is off"
+        );
+        assert!(
+            unit.metadata.get("contextualPrefix").is_none(),
+            "the payload keeps the shape it had before the field"
+        );
+    }
+    // The embed text is exactly what it was before the feature: the title
+    // line, then the passage — no chapter, and no header.
+    let seen = embedder.seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), units.len());
+    for text in &seen {
+        assert!(text.starts_with("Quarterly report\n\n"), "{text:?}");
+        assert!(
+            !text.contains("Kewirausahaan"),
+            "no chapter reached the embedder"
+        );
+    }
+}
+
+#[tokio::test]
+async fn bm25_tells_identical_passages_apart_by_their_chapter_header() {
+    let (jobs, documents, _chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let index = Arc::new(crate::in_memory_index::InMemoryIndex::new(4));
+    let worker = worker_with_text_index(
+        jobs.clone(),
+        documents.clone(),
+        index.clone(),
+        blobs,
+        Arc::new(FakeExtractor::returning_result(textbook_extraction())),
+        Arc::new(FakeEmbedder::default()),
+    );
+    assert!(
+        matches!(worker.run_job(job()).await, JobOutcome::Ready { .. }),
+        "the ingest should succeed"
+    );
+
+    // The three passages are byte-identical; only their sparse text — the
+    // chapter header in front of the passage — says which is which. A BM25
+    // query for a chapter term must reach the right passage.
+    let scope = crate::fakes::make_fake_scope(tenant(), vec![DocumentId::new_unchecked(DOC)]);
+    for (term, chapter) in [
+        ("kewirausahaan", BAB_ONE_PREFIX),
+        ("pasar dan uang", BAB_TWO_PREFIX),
+    ] {
+        let hits = index
+            .search(
+                &kb_ports::HybridQuery {
+                    dense: None,
+                    sparse: Some(kb_ports::KeywordQuery::from_text(term)),
+                    per_arm_k: 10,
+                    k: 4,
+                    fusion: kb_ports::Fusion::None,
+                },
+                &scope,
+            )
+            .await
+            .unwrap();
+        assert!(!hits.is_empty(), "BM25 found nothing for {term:?}");
+        assert_eq!(
+            hits[0].contextual_prefix.as_deref(),
+            Some(chapter),
+            "the {term:?} query put the right chapter's passage first: {:?}",
+            hits[0].unit_id
+        );
+    }
+}
+
 // ---------------------------------------------------------------- ING-6 seats
 
 /// An extractor that holds `big.pdf` until the test opens the gate, and
