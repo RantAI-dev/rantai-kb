@@ -161,6 +161,15 @@ x-vllm: &vllm
 x-vllm-xiaomi-ocr: &vllm-xiaomi-ocr
   <<: *vllm
   image: ${VLLM_OCR_IMAGE:-vllm/vllm-openai:v0.33.0}
+  # `#36`: on an NVIDIA GB10 (arm64, sm_121) the OCR model crashed inside a
+  # torch.compile/Triton kernel while it started, and `--enforce-eager` fixed
+  # it. The flag costs throughput, so it is off by default and the switch is
+  # an env variable: `KB_OCR_VLLM_EXTRA_ARGS=--enforce-eager` in `.env`.
+  #
+  # The command goes through a shell so the extra flags can be appended
+  # without a flag vLLM would refuse. `$$@` is the model and its own flags;
+  # `$$0` is the placeholder after the script.
+  entrypoint: ["/bin/sh", "-c"]
 
 # The table pass of the Xiaomi recipe: PP-DocLayoutV3 on the CPU. Keep it off
 # the vLLM GPU: sharing the card crashed or hung the engine (docs/kb-tiers.md).
@@ -475,6 +484,8 @@ services:
     <<: *vllm-xiaomi-ocr
     profiles: ["desk-ocr"]
     command:
+      - 'exec vllm serve "$$@" ${KB_OCR_VLLM_EXTRA_ARGS:-}'
+      - --
       - xiaomi-research/Xiaomi-OCR-0
       - --quantization
       - fp8
@@ -606,6 +617,8 @@ services:
     <<: *vllm-xiaomi-ocr
     profiles: ["studio-ocr"]
     command:
+      - 'exec vllm serve "$$@" ${KB_OCR_VLLM_EXTRA_ARGS:-}'
+      - --
       - xiaomi-research/Xiaomi-OCR-0
       - --quantization
       - fp8
@@ -714,6 +727,8 @@ services:
     <<: *vllm-xiaomi-ocr
     profiles: ["station-ocr"]
     command:
+      - 'exec vllm serve "$$@" ${KB_OCR_VLLM_EXTRA_ARGS:-}'
+      - --
       - xiaomi-research/Xiaomi-OCR-0
       - --quantization
       - fp8
