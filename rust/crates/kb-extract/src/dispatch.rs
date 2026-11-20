@@ -183,7 +183,17 @@ async fn extract_document_raw(
                         } else {
                             format!("{prefix}{reason}")
                         };
-                        Ok(ExtractionResult::failed("pdf", error_msg))
+                        match err {
+                            // The OCR backend was down or its breaker was
+                            // open: the file may be perfectly fine, so the
+                            // reason travels as an *unavailable* error and the
+                            // job queue parks the job instead of failing it
+                            // (`#35`, `#36`).
+                            ExtractError::Unavailable(_) => {
+                                Err(ExtractError::Unavailable(error_msg))
+                            }
+                            _ => Ok(ExtractionResult::failed("pdf", error_msg)),
+                        }
                     }
                 };
             }
@@ -229,13 +239,16 @@ async fn extract_document_raw(
                     Ok(res) => return Ok(res),
                     Err(ExtractError::Unsupported(_)) => {}
                     Err(err) => {
-                        return Ok(ExtractionResult::failed(
-                            "image",
-                            format!(
-                                "Image OCR failed for \"{filename}\": {}",
-                                clip_reason(&err.to_string())
-                            ),
-                        ));
+                        let message = format!(
+                            "Image OCR failed for \"{filename}\": {}",
+                            clip_reason(&err.to_string())
+                        );
+                        // The OCR backend was down or its breaker was open:
+                        // the job is parked instead of failed (`#36`).
+                        return match err {
+                            ExtractError::Unavailable(_) => Err(ExtractError::Unavailable(message)),
+                            _ => Ok(ExtractionResult::failed("image", message)),
+                        };
                     }
                 }
             }

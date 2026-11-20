@@ -17,7 +17,7 @@ use kb_extract::ocr_router::{
     OcrBreaker, OcrCallError, OcrPageAnswer, OcrPageProvider, OcrPageRead, OcrRouter,
     OcrRouterSettings, OcrTransport,
 };
-use kb_extract::{ExtractConfig, OcrMode};
+use kb_extract::{ExtractConfig, ExtractError, OcrMode};
 use kb_ports::{ExtractionOptions, OcrPageCache};
 use pdfium_render::prelude::*;
 
@@ -151,7 +151,7 @@ struct FakeProvider {
     /// Relative page indices the document path fails.
     fail_pages: Mutex<Vec<u32>>,
     /// Whether every call fails, and whether the failure is transient.
-    fail_all: Option<bool>,
+    fail_all: Mutex<Option<bool>>,
 }
 
 impl FakeProvider {
@@ -162,7 +162,7 @@ impl FakeProvider {
             calls: AtomicU32::new(0),
             images: AtomicU32::new(0),
             fail_pages: Mutex::new(Vec::new()),
-            fail_all: None,
+            fail_all: Mutex::new(None),
         })
     }
 
@@ -173,7 +173,7 @@ impl FakeProvider {
             calls: AtomicU32::new(0),
             images: AtomicU32::new(0),
             fail_pages: Mutex::new(Vec::new()),
-            fail_all: None,
+            fail_all: Mutex::new(None),
         })
     }
 
@@ -184,14 +184,23 @@ impl FakeProvider {
     }
 
     fn always_failing(transient: bool) -> Arc<Self> {
+        Self::failing_with(OcrTransport::Image, transient)
+    }
+
+    fn failing_with(transport: OcrTransport, transient: bool) -> Arc<Self> {
         Arc::new(Self {
             id: "chat",
-            transport: OcrTransport::Image,
+            transport,
             calls: AtomicU32::new(0),
             images: AtomicU32::new(0),
             fail_pages: Mutex::new(Vec::new()),
-            fail_all: Some(transient),
+            fail_all: Mutex::new(Some(transient)),
         })
+    }
+
+    /// The backend comes back: the next call answers normally.
+    fn recover(&self) {
+        *self.fail_all.lock().unwrap() = None;
     }
 
     fn calls(&self) -> u32 {
@@ -231,7 +240,7 @@ impl OcrPageProvider for FakeProvider {
         include_figures: bool,
     ) -> Result<Vec<OcrPageRead>, OcrCallError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(transient) = self.fail_all {
+        if let Some(transient) = *self.fail_all.lock().unwrap() {
             return Err(if transient {
                 OcrCallError::transient("fake outage")
             } else {
@@ -264,7 +273,7 @@ impl OcrPageProvider for FakeProvider {
 
     async fn read_image(&self, _image: &[u8], _mime: &str) -> Result<OcrPageAnswer, OcrCallError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        if let Some(transient) = self.fail_all {
+        if let Some(transient) = *self.fail_all.lock().unwrap() {
             return Err(if transient {
                 OcrCallError::transient("fake outage")
             } else {
@@ -328,6 +337,25 @@ fn router(
         cache,
         Some(Arc::new(OcrBreaker::new(3, Duration::from_secs(60)))),
     )
+}
+
+/// A router whose breaker is already open: the state a job retried inside the
+/// outage cooldown of an earlier job finds (`#35`). The breaker is
+/// process-wide, so one document's outage refuses every later document's
+/// pages too.
+fn router_with_open_breaker(
+    mode: OcrMode,
+    provider: Option<Arc<FakeProvider>>,
+    cache: Option<Arc<MemoryCache>>,
+) -> OcrRouter {
+    let breaker = Arc::new(OcrBreaker::new(3, Duration::from_secs(60)));
+    for _ in 0..3 {
+        breaker.record_failure();
+    }
+    assert!(!breaker.allows(), "the breaker is open");
+    let provider = provider.map(|p| p as Arc<dyn OcrPageProvider>);
+    let cache = cache.map(|c| c as Arc<dyn OcrPageCache>);
+    OcrRouter::new(settings(mode), provider, cache, Some(breaker))
 }
 
 async fn extract(router: &OcrRouter, pdf: &[u8]) -> kb_ports::ExtractionResult {
@@ -519,6 +547,120 @@ async fn case_the_breaker_opens_after_three_consecutive_failures() {
     assert!(out.content.contains("Digital page 1"));
 }
 
+/// `#35`: a job retried inside the outage cooldown of an earlier job finds
+/// the process-wide breaker open. The old code skipped every page and then
+/// reported "the OCR provider returned no text for any page", which reads
+/// like a broken document and hides the real cause. The retry must name the
+/// breaker and be retryable.
+async fn case_a_retry_inside_the_breaker_cooldown_says_the_breaker_is_open() {
+    let pdf = mixed_pdf(0, 3);
+    let provider = FakeProvider::chat();
+    let cache = Arc::new(MemoryCache::default());
+    let err = router_with_open_breaker(
+        OcrMode::Full,
+        Some(Arc::clone(&provider)),
+        Some(Arc::clone(&cache)),
+    )
+    .extract_pdf(&pdf, "scan.pdf", &ExtractionOptions::default())
+    .await
+    .expect_err("nothing could be read");
+
+    let message = err.to_string();
+    assert!(
+        matches!(&err, ExtractError::Unavailable(_)),
+        "the job must be retryable, not failed: {err:?}"
+    );
+    assert!(message.contains("breaker"), "{message}");
+    assert!(
+        !message.contains("no text for any page"),
+        "the old message hid the real cause: {message}"
+    );
+    assert_eq!(
+        provider.calls(),
+        0,
+        "no page is sent to a provider that is in its cooldown"
+    );
+    assert_eq!(
+        cache.puts.load(Ordering::SeqCst),
+        0,
+        "a skipped page is not cached"
+    );
+}
+
+/// `#35`: a transport error (the provider could not be reached) is never
+/// cached. A cached empty answer would make every later retry read
+/// "nothing" and the document would stay broken for good.
+async fn case_a_transport_error_is_never_cached() {
+    let pdf = mixed_pdf(0, 1);
+    let provider = FakeProvider::always_failing(true);
+    let cache = Arc::new(MemoryCache::default());
+    let router = router(
+        OcrMode::Full,
+        Some(Arc::clone(&provider)),
+        Some(Arc::clone(&cache)),
+    );
+
+    let err = router
+        .extract_pdf(&pdf, "scan.pdf", &ExtractionOptions::default())
+        .await
+        .expect_err("the provider is down");
+    let message = err.to_string();
+    assert!(
+        matches!(&err, ExtractError::Unavailable(_)),
+        "an unreachable provider is retryable: {err:?}"
+    );
+    assert!(message.contains("unreachable"), "{message}");
+    assert_eq!(
+        cache.puts.load(Ordering::SeqCst),
+        0,
+        "a failed read is not cached"
+    );
+
+    // The backend comes back and the same job runs again: the page is read
+    // for real, because nothing was cached under its key.
+    provider.recover();
+    let out = router
+        .extract_pdf(&pdf, "scan.pdf", &ExtractionOptions::default())
+        .await
+        .expect("the provider is back");
+    assert!(out.used_ocr, "the retry really read the page");
+    assert!(out.content.contains("IMG-page-"), "{}", out.content);
+}
+
+/// The same rule on the document transport: a failed batch is not cached.
+async fn case_a_failed_document_batch_is_not_cached() {
+    let pdf = mixed_pdf(0, 3);
+    let provider = FakeProvider::failing_with(OcrTransport::Pdf { batch: 8 }, true);
+    let cache = Arc::new(MemoryCache::default());
+    let router = router(
+        OcrMode::Full,
+        Some(Arc::clone(&provider)),
+        Some(Arc::clone(&cache)),
+    );
+
+    let err = router
+        .extract_pdf(&pdf, "scan.pdf", &ExtractionOptions::default())
+        .await
+        .expect_err("the provider is down");
+    assert!(
+        matches!(&err, ExtractError::Unavailable(_)),
+        "an unreachable provider is retryable: {err:?}"
+    );
+    assert_eq!(
+        cache.puts.load(Ordering::SeqCst),
+        0,
+        "a failed batch is not cached"
+    );
+
+    provider.recover();
+    let out = router
+        .extract_pdf(&pdf, "scan.pdf", &ExtractionOptions::default())
+        .await
+        .expect("the provider is back");
+    assert!(out.used_ocr, "the retry really read the pages");
+    assert!(out.content.contains("DOC-page-0"), "{}", out.content);
+}
+
 async fn case_figures_keep_the_document_page_and_survive_the_cache() {
     let pdf = mixed_pdf(1, 0);
     let provider = FakeProvider::document(8);
@@ -633,6 +775,9 @@ async fn the_page_router_meets_its_contract() {
     case_one_failed_page_is_marked().await;
     case_every_page_failing_fails_the_document().await;
     case_the_breaker_opens_after_three_consecutive_failures().await;
+    case_a_retry_inside_the_breaker_cooldown_says_the_breaker_is_open().await;
+    case_a_transport_error_is_never_cached().await;
+    case_a_failed_document_batch_is_not_cached().await;
     case_the_page_cap().await;
     case_an_image_upload_uses_the_same_page_path().await;
     case_a_tiff_page_is_one_ocr_page().await;
