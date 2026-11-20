@@ -139,6 +139,9 @@ pub struct Config {
     /// The deployment tier preset that shaped this config (`KB_TIER`), with
     /// the variables it filled. `None` when no tier is set.
     pub tier: Option<crate::tier::TierPlan>,
+    /// What the upload route does with a file the tenant already has
+    /// (`KB_UPLOAD_DEDUPE`). `reject` by default.
+    pub upload_dedupe: kb_core::policy::UploadDedupe,
 }
 
 /// The table store (`TBL-1`). On by default: a document with no tables is
@@ -1167,6 +1170,18 @@ impl Config {
                 kb_core::tables::QUERY_TIMEOUT_MS,
             )?,
         };
+        // The upload dedupe decides whether an upload of bytes the tenant
+        // already has is refused. An unknown value stops the boot: a typo in
+        // this toggle must not read as "off".
+        let upload_dedupe = match lookup(kb_core::policy::UploadDedupe::ENV_VAR) {
+            None => kb_core::policy::UploadDedupe::default(),
+            Some(value) => kb_core::policy::UploadDedupe::parse(&value).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} must be \"reject\" or \"off\", got {value:?}",
+                    kb_core::policy::UploadDedupe::ENV_VAR
+                )
+            })?,
+        };
         Ok(Config {
             pages,
             visuals,
@@ -1192,6 +1207,7 @@ impl Config {
             version,
             request_timeout: Duration::from_secs(30),
             tier: tier_plan,
+            upload_dedupe,
         })
     }
 

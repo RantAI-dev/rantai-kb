@@ -35,6 +35,20 @@ pub struct ErrorBody {
     pub error: String,
 }
 
+/// The body a duplicate-upload `409` answers with.
+///
+/// The usual `error` message plus the id of the document that already holds
+/// these bytes, so a caller can point at it instead of uploading the file
+/// again to find out.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct DuplicateDocumentBody {
+    /// What went wrong, in the words the service has always used.
+    pub error: String,
+    /// The id of the document that already holds these bytes.
+    #[serde(rename = "existingDocumentId")]
+    pub existing_document_id: String,
+}
+
 #[derive(Debug)]
 pub enum ApiError {
     /// 401. No key, or a key that does not resolve to a tenant.
@@ -49,6 +63,13 @@ pub enum ApiError {
     NoStoredFile,
     /// 409. The resource is in a state this route cannot act on.
     Conflict(&'static str),
+    /// 409. The upload's bytes are already in this tenant (`KB_UPLOAD_DEDUPE=reject`).
+    DuplicateDocument {
+        /// What went wrong, in the words the service has always used.
+        message: String,
+        /// The id of the document that already holds these bytes.
+        existing_document_id: String,
+    },
     /// 413. The upload is larger than the accepted limit.
     PayloadTooLarge(String),
     /// 415. The file extension is not on the accepted list.
@@ -65,6 +86,23 @@ impl ApiError {
     #[must_use]
     pub fn missing_scope(scope: &'static str) -> Self {
         Self::Forbidden(scope)
+    }
+
+    /// The upload's bytes are already in the tenant under `existing_document_id`.
+    ///
+    /// The message names the toggle, because the caller that wants the file
+    /// stored twice has to know there is a switch for it — and the id, because
+    /// the caller wants to know *which* document already holds them.
+    #[must_use]
+    pub fn duplicate_document(existing_document_id: impl Into<String>) -> Self {
+        let existing_document_id = existing_document_id.into();
+        Self::DuplicateDocument {
+            message: format!(
+                "This file has already been uploaded as document {existing_document_id}. \
+                 Set KB_UPLOAD_DEDUPE=off to upload the same file again."
+            ),
+            existing_document_id,
+        }
     }
 }
 
@@ -95,6 +133,23 @@ impl From<PortError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        // The duplicate-upload answer carries one field more than every other
+        // error: the id of the document that already holds these bytes. A
+        // client that only reads `error` is unaffected.
+        if let Self::DuplicateDocument {
+            message,
+            existing_document_id,
+        } = self
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(DuplicateDocumentBody {
+                    error: message,
+                    existing_document_id,
+                }),
+            )
+                .into_response();
+        }
         let (status, message) = match self {
             Self::Unauthorized => (StatusCode::UNAUTHORIZED, UNAUTHORIZED.to_string()),
             Self::Forbidden(scope) => (
@@ -118,6 +173,8 @@ impl IntoResponse for ApiError {
                     "Internal error".to_string(),
                 )
             }
+            // Handled above: the duplicate-upload answer has its own body.
+            Self::DuplicateDocument { message, .. } => (StatusCode::CONFLICT, message),
         };
         (status, Json(ErrorBody { error: message })).into_response()
     }

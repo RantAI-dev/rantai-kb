@@ -155,6 +155,7 @@ async fn serve() -> String {
             events: Arc::clone(&events),
             tables: None,
             version: "test".to_string(),
+            upload_dedupe: kb_core::policy::UploadDedupe::default(),
         },
         Arc::new(FakeReranker::default()),
         engine_settings(),

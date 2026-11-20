@@ -1,13 +1,17 @@
 //! SQL query templates and limits for Postgres store.
 
 /// Largest page the document list will return.
-pub const MAX_LIMIT: u32 = 200;
+///
+/// One number, shared with the HTTP layer, so the route and the store cannot
+/// disagree about what a page is.
+pub const MAX_LIMIT: u32 = kb_core::pagination::MAX_PAGE_SIZE;
 
 pub const SELECT_BY_ID: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
            d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
+           d."sha256" AS sha256,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
@@ -25,6 +29,7 @@ pub const SELECT_BY_ID_WITH_DELETED: &str = r#"
            d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
+           d."sha256" AS sha256,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
@@ -40,6 +45,7 @@ pub const SELECT_ALIVE_BY_IDS: &str = r#"
            d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
+           d."sha256" AS sha256,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
@@ -69,13 +75,26 @@ pub const SELECT_OUTLINES: &str = r#"
        AND jsonb_typeof(d.metadata -> 'outline') = 'object'
 "#;
 
+/// One page of a tenant's documents, newest first.
+///
+/// The order is total — `(createdAt, id)` — so the cursor predicate
+/// `(createdAt, id) < ($4, $5)` can start a page strictly after the last row
+/// of the previous one without repeating or skipping a row. `$4` is the
+/// cursor's timestamp and `$5` its id; both are NULL when the page is the
+/// first one, and the predicate is then true for every row.
+///
+/// `created_at_ts` is the raw `TIMESTAMP(3)` column: the cursor is built from
+/// it, so the walk continues from the *same* value the ordering uses, whatever
+/// the database session's time zone is.
 pub const SELECT_DOCS_TENANT_ONLY: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
            d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
+           d."sha256" AS sha256,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+           d."createdAt" AS created_at_ts,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
            COALESCE((SELECT array_agg(g2."knowledgeBaseId" ORDER BY g2."knowledgeBaseId")
                        FROM "DocumentGroup" g2 WHERE g2."documentId" = d.id), '{}') AS knowledge_base_ids,
@@ -83,17 +102,23 @@ pub const SELECT_DOCS_TENANT_ONLY: &str = r#"
       FROM "Document" d
      WHERE d."tenantId" = $1 AND d."deletedAt" IS NULL
        AND ($3::text IS NULL OR d."externalRef" = $3)
-     ORDER BY d."createdAt" DESC
+       AND ($4::timestamp IS NULL OR (d."createdAt", d.id) < ($4::timestamp, $5::text))
+     ORDER BY d."createdAt" DESC, d.id DESC
      LIMIT $2
 "#;
 
+/// The same page, restricted to documents in one of the caller's knowledge
+/// bases. The parameters are the tenant, the knowledge bases, the limit, the
+/// external reference and the cursor.
 pub const SELECT_DOCS_WITH_KB: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
            d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
+           d."sha256" AS sha256,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+           d."createdAt" AS created_at_ts,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
            COALESCE((SELECT array_agg(g2."knowledgeBaseId" ORDER BY g2."knowledgeBaseId")
                        FROM "DocumentGroup" g2 WHERE g2."documentId" = d.id), '{}') AS knowledge_base_ids,
@@ -104,8 +129,59 @@ pub const SELECT_DOCS_WITH_KB: &str = r#"
        AND ($4::text IS NULL OR d."externalRef" = $4)
        AND EXISTS (SELECT 1 FROM "DocumentGroup" gf
                     WHERE gf."documentId" = d.id AND gf."knowledgeBaseId" = ANY($2::text[]))
-     ORDER BY d."createdAt" DESC
+       AND ($5::timestamp IS NULL OR (d."createdAt", d.id) < ($5::timestamp, $6::text))
+     ORDER BY d."createdAt" DESC, d.id DESC
      LIMIT $3
+"#;
+
+/// How many documents match the filter — the whole result set, not the page.
+///
+/// The cursor is not applied: `total` is the size of the set a caller walks
+/// through, so it is the same on every page.
+pub const COUNT_DOCS_TENANT_ONLY: &str = r#"
+    SELECT COUNT(*) FROM "Document" d
+     WHERE d."tenantId" = $1 AND d."deletedAt" IS NULL
+       AND ($2::text IS NULL OR d."externalRef" = $2)
+"#;
+
+/// The same count, restricted to documents in one of the caller's knowledge
+/// bases.
+pub const COUNT_DOCS_WITH_KB: &str = r#"
+    SELECT COUNT(*) FROM "Document" d
+     WHERE d."tenantId" = $1
+       AND d."deletedAt" IS NULL
+       AND ($3::text IS NULL OR d."externalRef" = $3)
+       AND EXISTS (SELECT 1 FROM "DocumentGroup" gf
+                    WHERE gf."documentId" = d.id AND gf."knowledgeBaseId" = ANY($2::text[]))
+"#;
+
+/// The document that already holds these bytes, if any.
+///
+/// The upload dedupe (`KB_UPLOAD_DEDUPE`) runs this before it stores
+/// anything. Every clause is a scope clause: the tenant, the hash, and the
+/// knowledge bases. A soft-deleted document and a failed one do not block an
+/// upload — a document that failed to ingest is exactly the one a caller
+/// wants to try again.
+///
+/// `$3` is the list of knowledge bases the upload is filed under. An empty
+/// list means the whole tenant: the same bytes anywhere in the tenant block
+/// the upload. A non-empty list means the existing document has to be filed
+/// under one of them.
+pub const SELECT_DUPLICATE_BY_SHA256: &str = r#"
+    SELECT d.id
+      FROM "Document" d
+     WHERE d."tenantId" = $1
+       AND d."sha256" = $2
+       AND d."deletedAt" IS NULL
+       AND d.status <> 'failed'
+       AND (
+           cardinality($3::text[]) = 0
+           OR EXISTS (SELECT 1 FROM "DocumentGroup" g
+                       WHERE g."documentId" = d.id
+                         AND g."knowledgeBaseId" = ANY($3::text[]))
+       )
+     ORDER BY d."createdAt" DESC, d.id DESC
+     LIMIT 1
 "#;
 
 pub const SELECT_KNOWLEDGE_BASES: &str = r#"
@@ -290,9 +366,9 @@ pub const INSERT_DOCUMENT: &str = r#"
     INSERT INTO "Document" (
         id, "tenantId", title, content, categories, "subcategory",
         "s3Key", "fileSize", "mimeType", status, "externalRef", metadata,
-        "createdAt", "updatedAt"
+        sha256, "createdAt", "updatedAt"
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now()
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now()
     )
 "#;
 

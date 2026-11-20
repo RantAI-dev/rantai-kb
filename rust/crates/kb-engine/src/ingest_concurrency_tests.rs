@@ -39,6 +39,7 @@ fn blob_key(n: u32) -> String {
 /// A document row for job `n`.
 fn document(n: u32) -> DocumentMeta {
     DocumentMeta {
+        sha256: None,
         id: doc_id(n),
         title: format!("Document {n}"),
         categories: vec!["finance".to_string()],

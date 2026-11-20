@@ -50,9 +50,11 @@ pub mod taxonomy;
 pub mod upload;
 
 /// Largest accepted upload, in bytes: `KB_MAX_FILE_BYTES`, read once per
-/// process, defaulting to Bun's 50 MB (`src/lib/files/mime-types.ts`) so an
-/// unset variable keeps the two runtimes identical. Large manuals and
-/// textbooks (ViDoRe's 943-page computer science book is 50.9 MB) need more.
+/// process. The default is 256 MiB (see [`MimeRegistry::kb_max_file_bytes`]).
+/// Large manuals and textbooks need more: ViDoRe's 943-page computer science
+/// book is 50.9 MB, and the 50 MB the Bun service accepted (`src/lib/files/
+/// mime-types.ts`) was its own inherited default rather than a considered
+/// limit.
 pub fn max_file_bytes() -> u64 {
     static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| parse_max_file_bytes(std::env::var("KB_MAX_FILE_BYTES").ok().as_deref()))
@@ -66,6 +68,29 @@ fn parse_max_file_bytes(value: Option<&str>) -> u64 {
         .unwrap_or_else(MimeRegistry::kb_max_file_bytes)
 }
 
+/// The body a `413` answers with.
+///
+/// A caller that is told only "too large" can do nothing but guess; one that
+/// is told the limit in bytes, the limit in MiB and the name of the variable
+/// that moves it can act. So the message names all three, and the file that
+/// was refused when the route knows it.
+pub fn payload_too_large_message(file_name: Option<&str>, size: Option<u64>) -> String {
+    let max = max_file_bytes();
+    let max_mib = max.div_ceil(1024 * 1024);
+    let subject = match file_name {
+        Some(name) => format!("\"{name}\""),
+        None => "The upload".to_string(),
+    };
+    let size_text = match size {
+        Some(bytes) => format!(" is {:.1} MiB", bytes as f64 / (1024.0 * 1024.0)),
+        None => String::new(),
+    };
+    format!(
+        "{subject}{size_text} — the limit is {max_mib} MiB ({max} bytes). \
+         Raise KB_MAX_FILE_BYTES to accept a larger file."
+    )
+}
+
 /// Upper bound on a multipart upload body. The file itself is capped at
 /// [`max_file_bytes`] by the upload route; the slack covers the part headers,
 /// the form fields and the multipart framing around a file exactly at the limit.
@@ -75,15 +100,41 @@ pub fn upload_body_limit() -> usize {
 
 #[cfg(test)]
 mod max_file_bytes_tests {
-    use super::parse_max_file_bytes;
+    use super::{parse_max_file_bytes, payload_too_large_message};
 
     #[test]
-    fn unset_or_invalid_keeps_buns_50_mb() {
-        let bun = 50 * 1024 * 1024;
-        assert_eq!(parse_max_file_bytes(None), bun);
-        assert_eq!(parse_max_file_bytes(Some("lots")), bun);
-        assert_eq!(parse_max_file_bytes(Some("0")), bun);
+    fn unset_or_invalid_keeps_the_256_mib_default() {
+        let default = 256 * 1024 * 1024;
+        assert_eq!(parse_max_file_bytes(None), default);
+        assert_eq!(parse_max_file_bytes(Some("lots")), default);
+        assert_eq!(parse_max_file_bytes(Some("0")), default);
         assert_eq!(parse_max_file_bytes(Some(" 104857600 ")), 104_857_600);
+    }
+
+    #[test]
+    fn the_413_body_names_the_limit_in_bytes_and_mib_and_the_variable() {
+        // The limit is the process-wide default here (no `KB_MAX_FILE_BYTES`
+        // in the test environment), so the message is checked against it.
+        let message = payload_too_large_message(Some("book.pdf"), Some(300 * 1024 * 1024));
+        assert!(message.contains("KB_MAX_FILE_BYTES"), "{message}");
+        assert!(message.contains("256 MiB"), "{message}");
+        assert!(
+            message.contains(&(256 * 1024 * 1024).to_string()),
+            "{message}"
+        );
+        assert!(message.contains("300.0 MiB"), "{message}");
+        assert!(message.contains("book.pdf"), "{message}");
+    }
+
+    #[test]
+    fn the_413_body_works_without_a_file_name() {
+        let message = payload_too_large_message(None, None);
+        assert!(message.contains("KB_MAX_FILE_BYTES"), "{message}");
+        assert!(message.contains("256 MiB"), "{message}");
+        assert!(
+            message.contains(&(256 * 1024 * 1024).to_string()),
+            "{message}"
+        );
     }
 }
 
@@ -1137,7 +1188,7 @@ pub(crate) fn restrict_kbs(
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListDocumentsQuery {
-    /// How many documents to return. 1–500; anything else is the default (100).
+    /// How many documents to return. 1–200; anything else is the default (100).
     // Kept as a string so an unparsable value degrades to the default instead
     // of rejecting the request with a body the API never produces.
     pub limit: Option<String>,
@@ -1150,12 +1201,25 @@ pub struct ListDocumentsQuery {
     // the caller's tenant and to live rows, like every other list filter.
     #[serde(rename = "externalRef")]
     pub external_ref: Option<String>,
+    /// The cursor of the previous page, as `nextCursor` returned it. Send it
+    /// back unchanged to get the next page.
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentListResponse {
     /// The documents, newest first.
     pub documents: Vec<DocumentSummary>,
+    /// The cursor for the next page; null on the last page.
+    #[serde(rename = "nextCursor")]
+    pub next_cursor: Option<String>,
+    /// How many documents match the filter, over every page.
+    pub total: u64,
+    /// The page size that was applied.
+    pub limit: u32,
+    /// True when the requested limit was above the cap and was clamped to it.
+    #[serde(rename = "limitClamped")]
+    pub limit_clamped: bool,
 }
 
 /// `GET /v1/documents` row, field for field as `listDocuments` selects it.
@@ -1186,12 +1250,21 @@ pub struct DocumentSummary {
     /// The knowledge bases the document belongs to.
     #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Vec<String>,
+    /// The SHA-256 of the uploaded bytes, when the document was stored with
+    /// one. Null for a document uploaded before the hash was recorded.
+    #[serde(rename = "sha256")]
+    pub sha256: Option<String>,
 }
 
 /// List the caller's documents.
 ///
 /// `GET /v1/documents` — the caller's documents. Needs the `kb:read` scope. A
 /// key bound to some knowledge bases sees only the documents in them.
+///
+/// The list is paged: the response carries `nextCursor` and `total`, and the
+/// caller sends the cursor back to continue. A `limit` above the cap is
+/// clamped, never refused — and the response says so (`limitClamped`), because
+/// a caller that asked for 500 and got 200 has to know which it got.
 #[utoipa::path(
     get,
     path = "/v1/documents",
@@ -1199,6 +1272,7 @@ pub struct DocumentSummary {
     params(ListDocumentsQuery),
     responses(
         (status = 200, description = "The documents", body = DocumentListResponse),
+        (status = 400, description = "The cursor is not one this server issued", body = ErrorBody),
         (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
         (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
         (status = 500, description = "The store could not be read", body = ErrorBody),
@@ -1213,12 +1287,22 @@ pub async fn list_documents(
     if !crate::auth::has_scope(&auth, "kb:read") {
         return Err(ApiError::missing_scope("kb:read"));
     }
-    let limit = q
+    // A limit above the cap is clamped, not refused: the callers that ask for
+    // 500 documents keep working. `clamped` says the request had to change,
+    // so the response can report the limit that was actually applied.
+    let requested_limit = q
         .limit
         .as_deref()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(100)
-        .clamp(1, 500);
+        .and_then(|v| v.trim().parse::<u32>().ok());
+    let page_size = kb_core::pagination::resolve_page_size(requested_limit);
+    // A cursor this server did not issue is a `400`, not an empty page: an
+    // empty page is a valid answer that would look like the end of the list.
+    let cursor = match q.cursor.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        Some(token) => Some(kb_core::pagination::decode(token).ok_or_else(|| {
+            ApiError::BadRequest("Invalid 'cursor': not a cursor this server issued.".to_string())
+        })?),
+        None => None,
+    };
     let raw_kbs: Vec<String> = q
         .knowledge_base_ids
         .as_deref()
@@ -1234,23 +1318,29 @@ pub async fn list_documents(
                 // hand it documents it may not see.
                 return Ok(Json(DocumentListResponse {
                     documents: Vec::new(),
+                    next_cursor: None,
+                    total: 0,
+                    limit: page_size.limit,
+                    limit_clamped: page_size.clamped,
                 }));
             }
             v.into_iter().map(KnowledgeBaseId::new_unchecked).collect()
         }
         None => Vec::new(),
     };
-    let docs = state
+    let page = state
         .documents
-        .list(
+        .list_page(
             &auth.tenant_id,
-            limit,
+            page_size.limit,
             &kb_filter,
             q.external_ref.as_deref(),
+            cursor.as_ref(),
         )
         .await
         .map_err(ApiError::from)?;
-    let documents = docs
+    let documents = page
+        .documents
         .into_iter()
         .map(|d| DocumentSummary {
             id: d.id.0,
@@ -1263,9 +1353,16 @@ pub async fn list_documents(
             external_ref: d.external_ref,
             created_at: d.created_at,
             knowledge_base_ids: d.knowledge_base_ids,
+            sha256: d.sha256,
         })
         .collect();
-    Ok(Json(DocumentListResponse { documents }))
+    Ok(Json(DocumentListResponse {
+        documents,
+        next_cursor: page.next_cursor,
+        total: page.total,
+        limit: page_size.limit,
+        limit_clamped: page_size.clamped,
+    }))
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1366,6 +1463,10 @@ pub struct DocumentDetail {
     pub chunk_count: u32,
     /// The document's figures.
     pub figures: Vec<FigureView>,
+    /// The SHA-256 of the uploaded bytes, when the document was stored with
+    /// one. Null for a document uploaded before the hash was recorded.
+    #[serde(rename = "sha256")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1452,6 +1553,7 @@ pub async fn get_document(
             knowledge_base_ids: meta.knowledge_base_ids,
             chunk_count,
             figures: read_document_figures(meta.metadata.as_ref()),
+            sha256: meta.sha256,
         },
         chunks: chunk_views,
     }))

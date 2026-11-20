@@ -52,12 +52,12 @@ pub use traits::{
 pub use types::{
     AuthContext, CategoryRecord, Chunk, ChunkMetadata, ChunkToStore, ChunkType, CreateCategory,
     CreateJobInput, CreateKnowledgeBase, DocumentDownloadMeta, DocumentIntelligenceData,
-    DocumentMeta, Entity, EntityView, ExtractedFigure, ExtractionOptions, ExtractionResult,
-    FigureGateCandidate, JobRecord, JobView, KnowledgeBaseRecord, KnowledgeBaseSummary,
-    NewDocument, PageBlock, PageBlockKind, PageText, PatchCategory, PatchDocument,
-    PatchKnowledgeBase, ProvenanceArm, ReapableJob, Relation, RelationView, RerankCandidate,
-    RerankResult, RerankScore, RetrievalProvenance, RetryJobOutcome, SearchHit, SeatRelease,
-    StoredChunk,
+    DocumentMeta, DocumentPage, Entity, EntityView, ExtractedFigure, ExtractionOptions,
+    ExtractionResult, FigureGateCandidate, JobRecord, JobView, KnowledgeBaseRecord,
+    KnowledgeBaseSummary, NewDocument, PageBlock, PageBlockKind, PageText, PatchCategory,
+    PatchDocument, PatchKnowledgeBase, ProvenanceArm, ReapableJob, Relation, RelationView,
+    RerankCandidate, RerankResult, RerankScore, RetrievalProvenance, RetryJobOutcome, SearchHit,
+    SeatRelease, StoredChunk,
 };
 pub use visuals::{
     ImageDescriber, ImageReading, NormalizedImage, Visual, VisualCollector, VisualKind,
