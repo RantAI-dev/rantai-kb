@@ -76,6 +76,14 @@ Qwen3 against bge, both top 20: **−0.038** [−0.059, −0.020].
   is reverted. The offline sweep (`docs/eval-tune/miracl-id-200`) puts every RRF k from 20 to
   60 within 0.002, and the best score blend within noise of k=60 on the held-out half.
 
+## How wide the reranked head is
+
+`KB_RERANK_MAX_K` sets how many of the top candidates come back with a `rerankScore` and are
+ordered by it; the candidates past it keep the fused order. The default (10) was chosen from
+the measurement in [`rerank-max-k/README.md`](rerank-max-k/README.md): the reranker's ordering
+beats the fused order to about ten and no further, and widening the head costs no compute and
+no spend (a cross-encoder scores every document it is sent either way).
+
 ## Caveats
 
 - **Latency is the RX 590's.** It has no fp16 or int-dot support; pp512 is 1,407 tok/s. A

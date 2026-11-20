@@ -101,4 +101,10 @@ impl Reranker for CachedReranker {
         }
         Ok(results)
     }
+
+    /// The decorator is as wide as the reranker it wraps: a cache hit returns
+    /// exactly what the inner reranker returned for the same call.
+    fn scores_every_candidate(&self) -> bool {
+        self.inner.scores_every_candidate()
+    }
 }

@@ -1,0 +1,140 @@
+########## depth 20 :: voyageai/rerank-3
+model: voyageai/rerank-3
+pool: /home/shiro/kfv-cache/abl-current/candidates.jsonl
+cache: /home/shiro/kfv-cache/bakeoff-current/rerank-cache.jsonl
+queries: 200   pool vs cache keys verified: 200/200
+pool depth: 20-20   scored depth: [20]   k: 10
+
+=== scored pool: 20 candidates per query (200 queries)
+    arm                          nDCG@10  MRR@10  Hit@1  Recall@10
+    head 5 + fused tail              0.839     0.850   0.775      0.959
+    head 10 + fused tail             0.842     0.851   0.775      0.966
+    head 20 + fused tail             0.841     0.851   0.775      0.963
+    all 20 by score                  0.841     0.851   0.775      0.963
+    fused only (no rerank)           0.801     0.797   0.685      0.955
+    delta vs head 5 + fused tail: head 10 + fused tail
+      nDCG    +0.0028 [-0.0022, +0.0084]
+      MRR     +0.0005 [-0.0004, +0.0020]
+      Hit@1   +0.0000 [+0.0000, +0.0000]
+      Recall  +0.0070 [-0.0039, +0.0210]
+    delta vs head 5 + fused tail: head 20 + fused tail
+      nDCG    +0.0014 [-0.0041, +0.0073]
+      MRR     +0.0005 [-0.0004, +0.0020]
+      Hit@1   +0.0000 [+0.0000, +0.0000]
+      Recall  +0.0037 [-0.0081, +0.0182]
+    delta vs head 5 + fused tail: all 20 by score
+      nDCG    +0.0014 [-0.0041, +0.0073]
+      MRR     +0.0005 [-0.0004, +0.0020]
+      Hit@1   +0.0000 [+0.0000, +0.0000]
+      Recall  +0.0037 [-0.0081, +0.0182]
+    delta vs head 5 + fused tail: fused only (no rerank)
+      nDCG    -0.0385 [-0.0634, -0.0144]
+      MRR     -0.0529 [-0.0918, -0.0150]
+      Hit@1   -0.0900 [-0.1550, -0.0250]
+      Recall  -0.0048 [-0.0123, +0.0025]
+
+########## depth 30 :: voyageai/rerank-3
+model: voyageai/rerank-3
+pool: /home/shiro/kfv-cache/abl/candidates.jsonl
+cache: /home/shiro/kfv-cache/bakeoff/rerank-cache.jsonl
+queries: 200   pool vs cache keys verified: 200/200
+pool depth: 30-30   scored depth: [30]   k: 10
+
+=== scored pool: 30 candidates per query (200 queries)
+    arm                          nDCG@10  MRR@10  Hit@1  Recall@10
+    head 5 + fused tail              0.841     0.850   0.775      0.964
+    head 10 + fused tail             0.841     0.850   0.775      0.967
+    head 20 + fused tail             0.841     0.850   0.775      0.964
+    all 30 by score                  0.841     0.850   0.775      0.964
+    fused only (no rerank)           0.818     0.831   0.740      0.959
+    delta vs head 5 + fused tail: head 10 + fused tail
+      nDCG    +0.0005 [-0.0061, +0.0073]
+      MRR     +0.0002 [-0.0009, +0.0016]
+      Hit@1   +0.0000 [+0.0000, +0.0000]
+      Recall  +0.0030 [-0.0116, +0.0189]
+    delta vs head 5 + fused tail: head 20 + fused tail
+      nDCG    -0.0000 [-0.0073, +0.0074]
+      MRR     +0.0002 [-0.0009, +0.0016]
+      Hit@1   +0.0000 [+0.0000, +0.0000]
+      Recall  +0.0003 [-0.0156, +0.0178]
+    delta vs head 5 + fused tail: all 30 by score
+      nDCG    -0.0000 [-0.0073, +0.0074]
+      MRR     +0.0002 [-0.0009, +0.0016]
+      Hit@1   +0.0000 [+0.0000, +0.0000]
+      Recall  +0.0003 [-0.0156, +0.0178]
+    delta vs head 5 + fused tail: fused only (no rerank)
+      nDCG    -0.0228 [-0.0473, +0.0020]
+      MRR     -0.0189 [-0.0540, +0.0171]
+      Hit@1   -0.0350 [-0.0950, +0.0250]
+      Recall  -0.0046 [-0.0103, -0.0001]
+
+########## depth 20 :: nvidia/nemotron-3.5-rerank-8b:free
+model: nvidia/nemotron-3.5-rerank-8b:free
+pool: /home/shiro/kfv-cache/abl-current/candidates.jsonl
+cache: /home/shiro/kfv-cache/bakeoff-current/rerank-cache.jsonl
+queries: 200   pool vs cache keys verified: 200/200
+pool depth: 20-20   scored depth: [20]   k: 10
+
+=== scored pool: 20 candidates per query (200 queries)
+    arm                          nDCG@10  MRR@10  Hit@1  Recall@10
+    head 5 + fused tail              0.837     0.847   0.770      0.956
+    head 10 + fused tail             0.847     0.848   0.770      0.980
+    head 20 + fused tail             0.846     0.848   0.770      0.979
+    all 20 by score                  0.846     0.848   0.770      0.979
+    fused only (no rerank)           0.801     0.797   0.685      0.955
+    delta vs head 5 + fused tail: head 10 + fused tail
+      nDCG    +0.0101 [+0.0030, +0.0182]
+      MRR     +0.0006 [-0.0013, +0.0027]
+      Hit@1   +0.0000 [+0.0000, +0.0000]
+      Recall  +0.0246 [+0.0078, +0.0449]
+    delta vs head 5 + fused tail: head 20 + fused tail
+      nDCG    +0.0094 [+0.0021, +0.0177]
+      MRR     +0.0006 [-0.0013, +0.0027]
+      Hit@1   +0.0000 [+0.0000, +0.0000]
+      Recall  +0.0230 [+0.0057, +0.0435]
+    delta vs head 5 + fused tail: all 20 by score
+      nDCG    +0.0094 [+0.0021, +0.0177]
+      MRR     +0.0006 [-0.0013, +0.0027]
+      Hit@1   +0.0000 [+0.0000, +0.0000]
+      Recall  +0.0230 [+0.0057, +0.0435]
+    delta vs head 5 + fused tail: fused only (no rerank)
+      nDCG    -0.0357 [-0.0587, -0.0134]
+      MRR     -0.0501 [-0.0867, -0.0152]
+      Hit@1   -0.0850 [-0.1450, -0.0250]
+      Recall  -0.0010 [-0.0077, +0.0067]
+
+########## depth 30 :: nvidia/nemotron-3.5-rerank-8b:free
+model: nvidia/nemotron-3.5-rerank-8b:free
+pool: /home/shiro/kfv-cache/abl/candidates.jsonl
+cache: /home/shiro/kfv-cache/bakeoff/rerank-cache.jsonl
+queries: 200   pool vs cache keys verified: 200/200
+pool depth: 30-30   scored depth: [30]   k: 10
+
+=== scored pool: 30 candidates per query (200 queries)
+    arm                          nDCG@10  MRR@10  Hit@1  Recall@10
+    head 5 + fused tail              0.839     0.848   0.770      0.962
+    head 10 + fused tail             0.844     0.848   0.770      0.972
+    head 20 + fused tail             0.844     0.848   0.770      0.973
+    all 30 by score                  0.844     0.848   0.770      0.973
+    fused only (no rerank)           0.818     0.831   0.740      0.959
+    delta vs head 5 + fused tail: head 10 + fused tail
+      nDCG    +0.0044 [-0.0026, +0.0116]
+      MRR     -0.0002 [-0.0018, +0.0013]
+      Hit@1   +0.0000 [+0.0000, +0.0000]
+      Recall  +0.0103 [-0.0053, +0.0275]
+    delta vs head 5 + fused tail: head 20 + fused tail
+      nDCG    +0.0047 [-0.0023, +0.0118]
+      MRR     -0.0002 [-0.0018, +0.0013]
+      Hit@1   +0.0000 [+0.0000, +0.0000]
+      Recall  +0.0108 [-0.0048, +0.0280]
+    delta vs head 5 + fused tail: all 30 by score
+      nDCG    +0.0047 [-0.0023, +0.0118]
+      MRR     -0.0002 [-0.0018, +0.0013]
+      Hit@1   +0.0000 [+0.0000, +0.0000]
+      Recall  +0.0108 [-0.0048, +0.0280]
+    delta vs head 5 + fused tail: fused only (no rerank)
+      nDCG    -0.0215 [-0.0444, +0.0013]
+      MRR     -0.0167 [-0.0498, +0.0158]
+      Hit@1   -0.0300 [-0.0850, +0.0200]
+      Recall  -0.0024 [-0.0099, +0.0054]
+
