@@ -1,4 +1,5 @@
 | `KB_MAX_FILE_BYTES` | Largest accepted upload, in bytes. A `413` names this variable, the limit in bytes and the limit in MiB | `268435456` (256 MiB) |
+| `KB_MAX_FILE_BYTES` | Largest accepted upload, in bytes. A `413` names this variable, the limit in bytes and the limit in MiB | `268435456` (256 MiB) |
 | `KB_FIGURE_VLM_TOPN` | Top candidate figures evaluated by figure gate | `5` |
 | `KB_FIGURE_VLM_MAX` | Maximum number of candidate figures accepted | `2` |
 | `KB_FIGURE_VLM_TIMEOUT_MS` | Figure gate evaluation timeout in ms | `15000` |

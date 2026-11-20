@@ -32,7 +32,7 @@ use kb_ports::{
     ArmRanks, ArmScores, AuthContext, BlobStore, Candidate, CategoryRecord, Chunk, ChunkId,
     ChunkMetadata, ChunkStore, ChunkToStore, ChunkType, CreateCategory, CreateJobInput,
     CreateKnowledgeBase, DocumentDownloadMeta, DocumentId, DocumentIntelligenceData, DocumentMeta,
-    DocumentScope, DocumentStore, Embedder, Entity, EntityExtractor, EntityStore,
+    DocumentPage, DocumentScope, DocumentStore, Embedder, Entity, EntityExtractor, EntityStore,
     ExtractionOptions, ExtractionResult, Extractor, FigureGate, FigureGateCandidate, Fusion,
     HybridQuery, IndexCapabilities, IndexUnit, JobRecord, JobStore, JobView, KnowledgeBaseId,
     KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor, NewDocument, PatchCategory,
@@ -383,13 +383,14 @@ impl DocumentStore for FakeDocumentStore {
             .collect())
     }
 
-    async fn list(
+    async fn list_page(
         &self,
         tenant: &TenantId,
         limit: u32,
         knowledge_base_ids: &[KnowledgeBaseId],
         external_ref: Option<&str>,
-    ) -> Result<Vec<DocumentMeta>, PortError> {
+        cursor: Option<&kb_core::pagination::Cursor>,
+    ) -> Result<DocumentPage, PortError> {
         let map = self.docs.read().unwrap();
         let list = map.get(tenant).cloned().unwrap_or_default();
         // An empty filter is no filter, matching `SELECT_DOCS_WITH_KB` only
@@ -404,7 +405,45 @@ impl DocumentStore for FakeDocumentStore {
             })
             .filter(|d| external_ref.is_none_or(|r| d.external_ref.as_deref() == Some(r)))
             .collect();
-        Ok(filtered.into_iter().take(limit as usize).collect())
+        // The same total order the Postgres adapter uses: newest first, the id
+        // breaking the tie. Without the tie-break two rows created in the same
+        // millisecond could swap places between pages and be listed twice.
+        let mut ordered = filtered;
+        ordered.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| b.id.0.cmp(&a.id.0))
+        });
+        let total = ordered.len() as u64;
+        // The cursor continues the walk: everything strictly before its
+        // position in this order is what the previous page already showed.
+        let remaining: Vec<DocumentMeta> = match cursor {
+            Some(c) => ordered
+                .into_iter()
+                .filter(|d| {
+                    (d.created_at.as_str(), d.id.0.as_str())
+                        < (c.created_at.as_str(), c.id.as_str())
+                })
+                .collect(),
+            None => ordered,
+        };
+        let has_more = remaining.len() > limit as usize;
+        let page: Vec<DocumentMeta> = remaining.into_iter().take(limit as usize).collect();
+        let next_cursor = if has_more {
+            page.last().map(|last| {
+                kb_core::pagination::encode(&kb_core::pagination::Cursor::new(
+                    last.created_at.clone(),
+                    last.id.0.clone(),
+                ))
+            })
+        } else {
+            None
+        };
+        Ok(DocumentPage {
+            documents: page,
+            total,
+            next_cursor,
+        })
     }
 
     async fn list_knowledge_bases(

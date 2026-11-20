@@ -575,6 +575,22 @@ pub struct DocumentMeta {
     pub metadata: Option<serde_json::Value>,
 }
 
+/// One page of the documents list: the rows, the size of the whole result
+/// set, and the cursor that continues the walk.
+///
+/// `total` counts the documents that match the **filter**, not the page: it is
+/// the same on every page, so a caller can show "17 of 340" without counting
+/// rows itself. `next_cursor` is `None` on the last page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentPage {
+    /// The page's documents, newest first.
+    pub documents: Vec<DocumentMeta>,
+    /// How many documents match the filter, over every page.
+    pub total: u64,
+    /// The cursor that continues the walk; `None` when this is the last page.
+    pub next_cursor: Option<String>,
+}
+
 /// Summary of a knowledge base, as returned by the document store list path.
 /// Mirrors the shape the Bun service emits ({ id, name, description, color,
 /// documentCount }).

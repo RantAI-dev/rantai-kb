@@ -13,10 +13,11 @@ use crate::ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 use crate::scope::DocumentScope;
 use crate::types::{
     AuthContext, CategoryRecord, ChunkToStore, CreateCategory, CreateJobInput, CreateKnowledgeBase,
-    DocumentDownloadMeta, DocumentIntelligenceData, DocumentMeta, Entity, ExtractionOptions,
-    ExtractionResult, FigureGateCandidate, JobRecord, JobView, KnowledgeBaseRecord,
-    KnowledgeBaseSummary, NewDocument, PatchCategory, PatchDocument, PatchKnowledgeBase,
-    ReapableJob, Relation, RerankCandidate, RerankResult, RetryJobOutcome, SearchHit, StoredChunk,
+    DocumentDownloadMeta, DocumentIntelligenceData, DocumentMeta, DocumentPage, Entity,
+    ExtractionOptions, ExtractionResult, FigureGateCandidate, JobRecord, JobView,
+    KnowledgeBaseRecord, KnowledgeBaseSummary, NewDocument, PatchCategory, PatchDocument,
+    PatchKnowledgeBase, ReapableJob, Relation, RerankCandidate, RerankResult, RetryJobOutcome,
+    SearchHit, StoredChunk,
 };
 
 /// What the chunk store is allowed to look at. Currently the empty case is
@@ -142,19 +143,30 @@ pub trait DocumentStore: Send + Sync {
         scope: &DocumentScope,
     ) -> Result<Vec<(DocumentId, kb_core::tree::Outline)>, PortError>;
 
-    /// List documents visible to the tenant (optionally filtered). Used by
-    /// `GET /v1/documents`.
+    /// List one page of documents visible to the tenant (optionally filtered).
+    /// Used by `GET /v1/documents`.
     ///
     /// `external_ref` filters on an exact match of `Document.externalRef`; the
     /// filter is always combined with the tenant and soft-delete filters, so a
     /// caller can never see another tenant's document by guessing its ref.
-    async fn list(
+    ///
+    /// `cursor` continues a walk that started without one: it names the last
+    /// row of the previous page, and the page returned starts strictly after
+    /// it in the `(createdAt, id)` order. It is a *position*, not a grant: the
+    /// tenant, knowledge-base and soft-delete filters are applied to the
+    /// continued page exactly as they were to the first one, so a cursor can
+    /// never reach a document the caller could not already list.
+    ///
+    /// The store clamps `limit` to its own cap and returns the page it
+    /// actually served; `next_cursor` is `None` on the last page.
+    async fn list_page(
         &self,
         tenant: &TenantId,
         limit: u32,
         knowledge_base_ids: &[KnowledgeBaseId],
         external_ref: Option<&str>,
-    ) -> Result<Vec<DocumentMeta>, PortError>;
+        cursor: Option<&kb_core::pagination::Cursor>,
+    ) -> Result<DocumentPage, PortError>;
 
     /// List knowledge bases visible to the tenant.
     async fn list_knowledge_bases(

@@ -359,13 +359,13 @@
           "documents"
         ],
         "summary": "List the caller's documents.",
-        "description": "`GET /v1/documents` — the caller's documents. Needs the `kb:read` scope. A\nkey bound to some knowledge bases sees only the documents in them.",
+        "description": "`GET /v1/documents` — the caller's documents. Needs the `kb:read` scope. A\nkey bound to some knowledge bases sees only the documents in them.\n\nThe list is paged: the response carries `nextCursor` and `total`, and the\ncaller sends the cursor back to continue. A `limit` above the cap is\nclamped, never refused — and the response says so (`limitClamped`), because\na caller that asked for 500 and got 200 has to know which it got.",
         "operationId": "list_documents",
         "parameters": [
           {
             "name": "limit",
             "in": "query",
-            "description": "How many documents to return. 1–500; anything else is the default (100).",
+            "description": "How many documents to return. 1–200; anything else is the default (100).",
             "required": false,
             "schema": {
               "type": "string"
@@ -388,6 +388,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The cursor of the previous page, as `nextCursor` returned it. Send it\nback unchanged to get the next page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -397,6 +406,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DocumentListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The cursor is not one this server issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -2589,7 +2608,10 @@
       "DocumentListResponse": {
         "type": "object",
         "required": [
-          "documents"
+          "documents",
+          "total",
+          "limit",
+          "limitClamped"
         ],
         "properties": {
           "documents": {
@@ -2598,6 +2620,29 @@
               "$ref": "#/components/schemas/DocumentSummary"
             },
             "description": "The documents, newest first."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The page size that was applied.",
+            "minimum": 0
+          },
+          "limitClamped": {
+            "type": "boolean",
+            "description": "True when the requested limit was above the cap and was clamped to it."
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cursor for the next page; null on the last page."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many documents match the filter, over every page.",
+            "minimum": 0
           }
         }
       },

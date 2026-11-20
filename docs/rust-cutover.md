@@ -863,3 +863,53 @@ reads:
 The bytes are exact, the MiB is the limit rounded up, and the variable is named so an operator can
 find the knob. The status code, the JSON shape (`{"error": "…"}`) and every other field are
 unchanged, so no client has to change to read the new message.
+
+### 23. The upload limit is 256 MiB, and a `413` says how to move it
+
+`KB_MAX_FILE_BYTES` defaults to `268435456` bytes (256 MiB). The Bun service it replaced defaulted to
+50 MB (`src/lib/files/mime-types.ts`) — an inherited default rather than a considered limit: a 50.9 MB
+computer-science textbook (ViDoRe's) already did not fit. A deployment that sets the variable keeps
+its own limit; an unset one is now 256 MiB. Nothing else changes: the same files are accepted, the
+same ones are refused.
+
+The `413` body changed shape. It used to read `"<file>" is 300.0MB — the limit is 50MB.`; it now
+reads:
+
+    "<file>" is 300.0 MiB — the limit is 256 MiB (268435456 bytes). Raise KB_MAX_FILE_BYTES to accept a larger file.
+
+The bytes are exact, the MiB is the limit rounded up, and the variable is named so an operator can
+find the knob. The status code, the JSON shape (`{"error": "…"}`) and every other field are
+unchanged, so no client has to change to read the new message.
+
+### 24. `GET /v1/documents` is paged
+
+The response grew four fields and the request grew one parameter. Everything that existed before
+still works: the `documents` array, the `limit`, `knowledgeBaseIds` and `externalRef` parameters, and
+the `{"documents": [...]}` shape.
+
+    GET /v1/documents?limit=50
+    {
+      "documents": [ ... ],
+      "nextCursor": "MjAyNi0xMS0yMFQwNToyODowMC4wMDB8ZG9jLTE",
+      "total": 340,
+      "limit": 50,
+      "limitClamped": false
+    }
+
+- `nextCursor` is an opaque token (`null` on the last page). Send it back as `?cursor=` to get the
+  next page. It is base64url over a private encoding: a caller cannot read the order out of it, and it
+  is not a document id, so it cannot be edited into a position in another tenant's list.
+- `total` is how many documents match the **filter**, over every page — the same number on every
+  page, so a client can show "17 of 340" without counting rows itself.
+- `limit` is the page size that was applied, and `limitClamped` says whether it was the one that was
+  asked for. A `limit` above the cap of 200 is clamped, never refused: a caller that asks for 500
+  keeps working, and now knows it got 200.
+- The list is ordered by `(createdAt, id)`, newest first. The id breaks the tie, so a walk over many
+  documents created in the same millisecond lists each of them exactly once.
+
+A cursor this server did not issue is a `400` (`Invalid 'cursor': not a cursor this server issued.`),
+not an empty page: an empty page is a valid answer that would look like the end of the list.
+
+The cursor never widens what a caller can see. The tenant, the knowledge-base and the soft-delete
+filters are applied by the same query that reads the cursor, so a cursor is a position and never a
+grant.

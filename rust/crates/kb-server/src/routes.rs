@@ -1183,7 +1183,7 @@ pub(crate) fn restrict_kbs(
 #[derive(Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct ListDocumentsQuery {
-    /// How many documents to return. 1–500; anything else is the default (100).
+    /// How many documents to return. 1–200; anything else is the default (100).
     // Kept as a string so an unparsable value degrades to the default instead
     // of rejecting the request with a body the API never produces.
     pub limit: Option<String>,
@@ -1196,12 +1196,25 @@ pub struct ListDocumentsQuery {
     // the caller's tenant and to live rows, like every other list filter.
     #[serde(rename = "externalRef")]
     pub external_ref: Option<String>,
+    /// The cursor of the previous page, as `nextCursor` returned it. Send it
+    /// back unchanged to get the next page.
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentListResponse {
     /// The documents, newest first.
     pub documents: Vec<DocumentSummary>,
+    /// The cursor for the next page; null on the last page.
+    #[serde(rename = "nextCursor")]
+    pub next_cursor: Option<String>,
+    /// How many documents match the filter, over every page.
+    pub total: u64,
+    /// The page size that was applied.
+    pub limit: u32,
+    /// True when the requested limit was above the cap and was clamped to it.
+    #[serde(rename = "limitClamped")]
+    pub limit_clamped: bool,
 }
 
 /// `GET /v1/documents` row, field for field as `listDocuments` selects it.
@@ -1238,6 +1251,11 @@ pub struct DocumentSummary {
 ///
 /// `GET /v1/documents` — the caller's documents. Needs the `kb:read` scope. A
 /// key bound to some knowledge bases sees only the documents in them.
+///
+/// The list is paged: the response carries `nextCursor` and `total`, and the
+/// caller sends the cursor back to continue. A `limit` above the cap is
+/// clamped, never refused — and the response says so (`limitClamped`), because
+/// a caller that asked for 500 and got 200 has to know which it got.
 #[utoipa::path(
     get,
     path = "/v1/documents",
@@ -1245,6 +1263,7 @@ pub struct DocumentSummary {
     params(ListDocumentsQuery),
     responses(
         (status = 200, description = "The documents", body = DocumentListResponse),
+        (status = 400, description = "The cursor is not one this server issued", body = ErrorBody),
         (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
         (status = 403, description = "The key lacks the kb:read scope", body = ErrorBody),
         (status = 500, description = "The store could not be read", body = ErrorBody),
@@ -1259,12 +1278,22 @@ pub async fn list_documents(
     if !crate::auth::has_scope(&auth, "kb:read") {
         return Err(ApiError::missing_scope("kb:read"));
     }
-    let limit = q
+    // A limit above the cap is clamped, not refused: the callers that ask for
+    // 500 documents keep working. `clamped` says the request had to change,
+    // so the response can report the limit that was actually applied.
+    let requested_limit = q
         .limit
         .as_deref()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .unwrap_or(100)
-        .clamp(1, 500);
+        .and_then(|v| v.trim().parse::<u32>().ok());
+    let page_size = kb_core::pagination::resolve_page_size(requested_limit);
+    // A cursor this server did not issue is a `400`, not an empty page: an
+    // empty page is a valid answer that would look like the end of the list.
+    let cursor = match q.cursor.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        Some(token) => Some(kb_core::pagination::decode(token).ok_or_else(|| {
+            ApiError::BadRequest("Invalid 'cursor': not a cursor this server issued.".to_string())
+        })?),
+        None => None,
+    };
     let raw_kbs: Vec<String> = q
         .knowledge_base_ids
         .as_deref()
@@ -1280,23 +1309,29 @@ pub async fn list_documents(
                 // hand it documents it may not see.
                 return Ok(Json(DocumentListResponse {
                     documents: Vec::new(),
+                    next_cursor: None,
+                    total: 0,
+                    limit: page_size.limit,
+                    limit_clamped: page_size.clamped,
                 }));
             }
             v.into_iter().map(KnowledgeBaseId::new_unchecked).collect()
         }
         None => Vec::new(),
     };
-    let docs = state
+    let page = state
         .documents
-        .list(
+        .list_page(
             &auth.tenant_id,
-            limit,
+            page_size.limit,
             &kb_filter,
             q.external_ref.as_deref(),
+            cursor.as_ref(),
         )
         .await
         .map_err(ApiError::from)?;
-    let documents = docs
+    let documents = page
+        .documents
         .into_iter()
         .map(|d| DocumentSummary {
             id: d.id.0,
@@ -1311,7 +1346,13 @@ pub async fn list_documents(
             knowledge_base_ids: d.knowledge_base_ids,
         })
         .collect();
-    Ok(Json(DocumentListResponse { documents }))
+    Ok(Json(DocumentListResponse {
+        documents,
+        next_cursor: page.next_cursor,
+        total: page.total,
+        limit: page_size.limit,
+        limit_clamped: page_size.clamped,
+    }))
 }
 
 #[derive(Debug, Serialize, ToSchema)]
