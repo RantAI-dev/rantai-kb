@@ -182,13 +182,22 @@ impl JobStore for PgJobStore {
         if message.is_empty() {
             message = "the backend was unavailable".to_string();
         }
-        sqlx::query(PARK_JOB)
+        let rows = sqlx::query(PARK_JOB)
             .bind(job_id)
             .bind(&message)
             .bind(resume_at_ms)
             .execute(&self.pool)
             .await
             .map_err(|e| PortError::Unavailable(format!("pg job park: {e}")))?;
+        // The statement only parks a job that is still `processing`. A row that
+        // was not updated is a job somebody else moved on (the stale reclaim,
+        // an operator's retry), and the caller has to know: a job that is
+        // nowhere is a job that is lost.
+        if rows.rows_affected() == 0 {
+            return Err(PortError::Storage(format!(
+                "pg job park: the job {job_id} is not processing any more"
+            )));
+        }
         Ok(())
     }
 
@@ -474,5 +483,42 @@ mod tests {
             assert!(CLAIM_NEXT_PENDING.contains(column), "missing {column}");
         }
         let _: fn(&PgRow) -> Result<JobRecord, PortError> = read_job;
+    }
+
+    #[test]
+    fn a_waiting_job_holds_no_worker_slot() {
+        // The queue claims `pending` rows only, so a job that waits for a
+        // backend is not claimed and does not take the place of a document
+        // that arrived after it (`#36`).
+        assert!(CLAIM_NEXT_PENDING.contains("WHERE status = 'pending'"));
+        assert!(PARK_JOB.contains("status = 'waiting_for_ocr'"));
+        assert!(PARK_JOB.contains("AND status = 'processing'"));
+        // The park counts the attempt, so a job that keeps meeting an
+        // unavailable backend runs out of tries instead of waiting forever.
+        assert!(PARK_JOB.contains("attempt = attempt + 1"));
+    }
+
+    #[test]
+    fn a_waiting_job_comes_back_when_its_wait_is_over() {
+        assert!(RESUME_PARKED_JOBS.contains("WHERE status = 'waiting_for_ocr'"));
+        assert!(RESUME_PARKED_JOBS.contains("SET status = 'pending'"));
+        assert!(RESUME_PARKED_JOBS.contains("\"resumeAt\" <="));
+        // The resume does not count a new attempt: the park already did, and
+        // counting it twice would end the job's waiting early.
+        assert!(!RESUME_PARKED_JOBS.contains("attempt ="));
+        // A job that goes back to the queue looks like a job that was never
+        // parked: no wait time, no error, no half-finished step.
+        assert!(RESUME_PARKED_JOBS.contains("\"resumeAt\" = NULL"));
+        assert!(RESUME_PARKED_JOBS.contains("error = NULL"));
+        assert!(RESUME_PARKED_JOBS.contains("progress = 0"));
+    }
+
+    #[test]
+    fn a_requeued_job_forgets_its_wait() {
+        // The stale reclaim and the operator's retry both put a job back in
+        // the queue; neither may leave a wait time behind (`#36`).
+        for statement in [REQUEUE_JOB, RESET_JOB_FOR_RETRY] {
+            assert!(statement.contains("\"resumeAt\" = NULL"), "{statement}");
+        }
     }
 }

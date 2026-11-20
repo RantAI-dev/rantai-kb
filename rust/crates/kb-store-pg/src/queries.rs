@@ -258,11 +258,14 @@ pub const PARK_JOB: &str = r#"
 /// Move the parked jobs whose wait is over back to `pending` (`#36`).
 ///
 /// The worker calls this before it claims a job, so a job that waited for an
-/// OCR provider comes back on its own.
+/// OCR provider comes back on its own. The attempt counter is *not* touched:
+/// it went up when the job was parked, and it is what stops a job from
+/// waiting forever.
 pub const RESUME_PARKED_JOBS: &str = r#"
     UPDATE "IngestJob"
        SET status = 'pending', "resumeAt" = NULL, error = NULL,
-           step = 'queued', progress = 0, "startedAt" = NULL, "updatedAt" = now()
+           step = 'queued', progress = 0, "stepCurrent" = NULL, "stepTotal" = NULL,
+           "etaSeconds" = NULL, "startedAt" = NULL, "updatedAt" = now()
      WHERE status = 'waiting_for_ocr'
        AND "resumeAt" IS NOT NULL
        AND "resumeAt" <= to_timestamp($1::double precision / 1000.0)
@@ -283,7 +286,7 @@ pub const SELECT_STALE_JOBS: &str = r#"
 pub const REQUEUE_JOB: &str = r#"
     UPDATE "IngestJob"
        SET status = 'pending', attempt = attempt + 1, "startedAt" = NULL,
-           step = 'queued', progress = 0, "updatedAt" = now()
+           "resumeAt" = NULL, step = 'queued', progress = 0, "updatedAt" = now()
      WHERE id = $1 AND status = 'processing'
        AND "updatedAt" < now() - make_interval(secs => $2::double precision)
 "#;
@@ -459,7 +462,7 @@ pub const RESET_JOB_FOR_RETRY: &str = r#"
     UPDATE "IngestJob"
        SET status = 'pending', attempt = attempt + 1, error = NULL, step = 'queued',
            progress = 0, "stepCurrent" = NULL, "stepTotal" = NULL, "etaSeconds" = NULL,
-           "startedAt" = NULL, "updatedAt" = now()
+           "startedAt" = NULL, "resumeAt" = NULL, "updatedAt" = now()
      WHERE id = $1
 "#;
 
