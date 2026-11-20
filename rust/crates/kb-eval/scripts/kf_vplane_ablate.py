@@ -49,10 +49,16 @@ import numpy as np
 
 MODEL = "intfloat/multilingual-e5-large"
 
-# The config whose candidate list the reranker bake-off reranks: the best
-# measured one after the 2026-10-22 change (Qdrant's own RRF, the engine's
-# embedding text, 50 candidates per arm, the live tie-break).
-BEST_CONFIG = "new: k=2 + emb text + pool 50, live tie-break"
+# The config whose candidate list the reranker bake-off reranks: the engine's
+# own configuration, as it stands.
+#
+# It was the k=2 fusion until 4c01a7d reverted it: a live A/B with
+# Qwen3-Embedding-0.6B showed the k=2 fusion *loses* (-0.021 nDCG@10,
+# docs/eval-ab/miracl-id-200/README.md), so the engine is back to the k=60
+# re-sort. The bake-off therefore reranks what the engine actually produces:
+# the new embedding text, the k=60 re-sort, and the engine's own pool of 20
+# candidates per arm.
+BEST_CONFIG = "new: emb text, k=60 re-sort (pool 20)"
 
 
 # ---------- embeddings (OpenRouter, disk cache keyed by model + text hash) ----------
@@ -226,6 +232,10 @@ async def main() -> int:
     ap.add_argument(
         "--candidates", type=int, default=30,
         help="chunks per query to write for the reranker bake-off (default 30)",
+    )
+    ap.add_argument(
+        "--best-config", default=BEST_CONFIG,
+        help="the config whose candidate list is written for the bake-off",
     )
     args = ap.parse_args()
     key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -469,8 +479,8 @@ async def main() -> int:
     # fused list, at chunk granularity, with the chunk's own text. The engine
     # hands the reranker `chunk.content` (not the embedding text), so that is
     # what a reranker would see.
-    if BEST_CONFIG in configs_by_name:
-        cand_cfg = configs_by_name[BEST_CONFIG]
+    if args.best_config in configs_by_name:
+        cand_cfg = configs_by_name[args.best_config]
         chunk_lists: dict[str, list[int]] = {}
         run(*cand_cfg, keep_chunks=chunk_lists)
         with (args.out / "candidates.jsonl").open("w", encoding="utf-8") as fh:
@@ -485,7 +495,7 @@ async def main() -> int:
                 ]
                 fh.write(json.dumps({"qid": qid, "candidates": items}) + "\n")
         print(
-            f"candidates: {BEST_CONFIG} -> {args.candidates} chunks per query "
+            f"candidates: {args.best_config} -> {args.candidates} chunks per query "
             f"({len(chunk_lists)} queries) in {args.out / 'candidates.jsonl'}",
             file=sys.stderr,
         )
