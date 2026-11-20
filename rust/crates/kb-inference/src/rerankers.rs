@@ -154,6 +154,13 @@ impl Reranker for TeiReranker {
         }
         Ok(out)
     }
+
+    /// TEI scores every document it is sent: the request carries no `top_n`
+    /// (the whole `texts` list goes up), and `final_k` only decides how many of
+    /// the returned scores this client keeps. Asking for more of them is free.
+    fn scores_every_candidate(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -336,6 +343,13 @@ impl Reranker for VllmReranker {
         let endpoint = self.endpoint.clone();
         rerank_cohere_shape(&client, &endpoint, None, &model, query, candidates, final_k).await
     }
+
+    /// The vLLM reranker speaks the Cohere shape: it scores every document it
+    /// is sent, and `top_n` decides how many results the response keeps, not
+    /// how many documents are scored.
+    fn scores_every_candidate(&self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -396,6 +410,12 @@ impl Reranker for CohereReranker {
             final_k,
         )
         .await
+    }
+
+    /// The Cohere shape scores every document it is sent: `top_n` decides how
+    /// many results the response keeps, not how many documents are scored.
+    fn scores_every_candidate(&self) -> bool {
+        true
     }
 }
 
@@ -496,6 +516,31 @@ mod tests {
             return;
         };
         assert_eq!(r.name, "TEI bge");
+    }
+
+    /// Every cross-encoder scores each document it is sent, so the engine may
+    /// widen the reranked head for them for free (issue #31). The LLM
+    /// reranker returns ranks instead, and says so.
+    #[test]
+    fn the_cross_encoders_score_every_candidate_and_the_llm_one_does_not() {
+        use crate::llm_reranker::LlmReranker;
+
+        let Ok(tei) = TeiReranker::new("http://localhost:80", "bge") else {
+            return;
+        };
+        let Ok(vllm) = VllmReranker::new("http://localhost:8200", "nemotron") else {
+            return;
+        };
+        let Ok(cohere) = CohereReranker::new("rerank-v3.5", "http://localhost", Some("key")) else {
+            return;
+        };
+        assert!(tei.scores_every_candidate());
+        assert!(vllm.scores_every_candidate());
+        assert!(cohere.scores_every_candidate());
+        let Ok(llm) = LlmReranker::new("m", "key") else {
+            return;
+        };
+        assert!(!llm.scores_every_candidate());
     }
 
     #[test]

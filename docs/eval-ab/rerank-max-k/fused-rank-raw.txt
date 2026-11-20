@@ -1,0 +1,26 @@
+== fused-old
+   run: /home/shiro/kfv-cache/abl-current/new_emb_text_k60_re-sort_pool_20.trec
+   queries with qrels: 200  answered: 200  no answer: 0  max depth: 20
+   queries whose best relevant chunk was found: 200 (1.000 of the queries with qrels)
+   recall@5   0.960  (192/200)
+   recall@10  0.990  (198/200)
+   recall@20  1.000  (200/200)
+   recall@30  n/a  (the run is only 20 deep)
+   rank    1-5:  192 (0.960)
+   rank   6-10:    6 (0.030)
+   rank  11-20:    2 (0.010)
+   rank  21-30:    0 (0.000)
+   rank    31+:    0 (0.000)
+== fused-new
+   run: /home/shiro/kfv-cache/abl/new_k2_p_emb_text_p_pool_50_live_tie-break.trec
+   queries with qrels: 200  answered: 200  no answer: 0  max depth: 50
+   queries whose best relevant chunk was found: 200 (1.000 of the queries with qrels)
+   recall@5   0.950  (190/200)
+   recall@10  0.990  (198/200)
+   recall@20  1.000  (200/200)
+   recall@30  1.000  (200/200)
+   rank    1-5:  190 (0.950)
+   rank   6-10:    8 (0.040)
+   rank  11-20:    2 (0.010)
+   rank  21-30:    0 (0.000)
+   rank    31+:    0 (0.000)
