@@ -684,6 +684,10 @@ impl Config {
             // An invalid or ambiguous `KB_EMBEDDERS` stops the boot here; the
             // overlay below would otherwise fall back to the default stack.
             crate::tier::Embedders::from_lookup(&lookup)?;
+            // The same for `KB_EMBED_PRECISION`: a typo must not silently
+            // serve the other build of the embedder (and against the wrong
+            // index).
+            crate::tier::EmbedPrecision::from_lookup(&lookup)?;
         }
         let tier_plan = tier.map(|tier| crate::tier::TierPlan::resolve(tier, &lookup));
         let lookup = crate::tier::with_preset(tier, &lookup);
@@ -734,6 +738,23 @@ impl Config {
             .unwrap_or_else(|| "https://openrouter.ai/api/v1/embeddings".into());
         let embedding_model =
             lookup("KB_EMBEDDING_MODEL").unwrap_or_else(|| "qwen/qwen3-embedding-8b".into());
+        // The model server serves one checkpoint (`KB_EMBED_MODEL`) and the
+        // server asks for it by the name in `KB_EMBEDDING_MODEL`, which the
+        // tier preset fills from `KB_EMBED_PRECISION`. When the two name
+        // different builds, every embedding request fails against a model
+        // server that serves the other one: say so at boot.
+        if let Some(served) = lookup("KB_EMBED_MODEL")
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+        {
+            if served != embedding_model {
+                tracing::warn!(
+                    "KB_EMBED_MODEL={served} but the server asks for \
+                     KB_EMBEDDING_MODEL={embedding_model}; the model server and the \
+                     server must name the same build of the embedder"
+                );
+            }
+        }
         let embedding_dim = Self::embedding_dim(&lookup);
 
         let port: u16 = lookup("PORT").and_then(|v| v.parse().ok()).unwrap_or(8080);

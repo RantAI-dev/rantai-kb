@@ -12,7 +12,10 @@
 //! text embedding, reranker, scanned-page OCR (`KB_OCR_*`) and picture
 //! reading. Desk, Studio and Station embed text and page images with one model,
 //! `Nemotron-3.5-Embed-1B` (`DEP-6`; `KB_EMBEDDERS=two` keeps the older
-//! two-model stack); Lite keeps the page arm off. Each local service has a fixed
+//! two-model stack); Lite keeps the page arm off. The checkpoint has two
+//! builds — BF16, which the preset names because it runs on every CUDA GPU,
+//! and NVFP4, which needs a Blackwell card with native FP4; `kb-server setup`
+//! picks the one the hardware can run ([`EmbedPrecision`]). Each local service has a fixed
 //! loopback port (below) so a bare-metal install and `rust/deploy/compose.yaml`
 //! agree; compose overrides the host part with the service name.
 
@@ -118,7 +121,16 @@ const LOCAL_SHARED: &[(&str, &str)] = &[
 /// `DEP-6`: one embedder for text and page images on the GPU tiers. The
 /// instruction lives in the checkpoint and is selected with `input_type`, so
 /// there are no client-side prefixes and one vector space serves both.
-const NEMOTRON_EMBED_ID: &str = "nvidia/Nemotron-3.5-Embed-1B-BF16";
+///
+/// Two builds of the same checkpoint ship: **BF16** runs on every CUDA GPU and
+/// is what the tier preset names, so a bare-metal install works anywhere;
+/// **NVFP4** is the same model in 4-bit and needs a card with native FP4
+/// tensor cores (Blackwell: sm_100, sm_120, sm_121). `kb-server setup` picks
+/// the build the hardware can run and writes it into the env file.
+pub const NEMOTRON_EMBED_BF16: &str = "nvidia/Nemotron-3.5-Embed-1B-BF16";
+/// The NVFP4 build of [`NEMOTRON_EMBED_BF16`]: the same weights in 4-bit, for
+/// Blackwell cards with native FP4.
+pub const NEMOTRON_EMBED_NVFP4: &str = "nvidia/Nemotron-3.5-Embed-1B-NVFP4";
 const LOCAL_EMBED_OMNI: &str = "http://127.0.0.1:8081/v2/embed";
 
 /// Desk and up embed text with Qwen3-Embedding-0.6B on a GPU.
@@ -235,11 +247,11 @@ const VL_PAGES_8B: &[(&str, &str)] = &[
 /// `VL_PAGES_*` arm, and needs `KB_EMBEDDING_FORMAT=omniembed`: the endpoint is
 /// vLLM's `/v2/embed`, not `/v1/embeddings`.
 const NEMOTRON_ONE: &[(&str, &str)] = &[
-    ("KB_EMBEDDING_MODEL", NEMOTRON_EMBED_ID),
+    ("KB_EMBEDDING_MODEL", NEMOTRON_EMBED_BF16),
     ("KB_EMBEDDING_DIM", "2048"),
     ("KB_EMBEDDING_FORMAT", "omniembed"),
     ("KB_EMBEDDING_BASE_URL", LOCAL_EMBED_OMNI),
-    ("KB_PAGE_EMBEDDING_MODEL", NEMOTRON_EMBED_ID),
+    ("KB_PAGE_EMBEDDING_MODEL", NEMOTRON_EMBED_BF16),
     ("KB_PAGE_EMBEDDING_FORMAT", "omniembed"),
     ("KB_PAGE_EMBEDDING_BASE_URL", LOCAL_EMBED_OMNI),
     ("KB_PAGE_EMBEDDING_DIM", "2048"),
@@ -488,31 +500,44 @@ impl Tier {
     }
 
     /// Every `(variable, value)` pair this tier could fill for a given
-    /// embedding stack, in table order.
+    /// embedding stack and embedder build, in table order.
+    ///
+    /// The build only moves the one-embedder checkpoint: the two-embedder
+    /// stack's models have no NVFP4 build, so their values pass through.
     #[must_use]
-    pub fn presets_for(self, embedders: Embedders) -> Vec<(&'static str, &'static str)> {
+    pub fn presets_for(
+        self,
+        embedders: Embedders,
+        precision: EmbedPrecision,
+    ) -> Vec<(&'static str, &'static str)> {
         self.tables_with(embedders)
             .iter()
             .flat_map(|table| table.iter().copied())
+            .map(|(name, value)| (name, precision.checkpoint_for(value)))
             .collect()
     }
 
     /// Every `(variable, value)` pair this tier fills with the default
-    /// embedding stack, in table order.
+    /// embedding stack and the BF16 build, in table order.
     #[must_use]
     pub fn presets(self) -> Vec<(&'static str, &'static str)> {
-        self.presets_for(Embedders::default())
+        self.presets_for(Embedders::default(), EmbedPrecision::default())
     }
 
-    /// The preset value for `variable` under an embedding stack, or `None`
-    /// when this tier fills nothing.
+    /// The preset value for `variable` under an embedding stack and an
+    /// embedder build, or `None` when this tier fills nothing.
     #[must_use]
-    pub fn preset(self, embedders: Embedders, variable: &str) -> Option<&'static str> {
+    pub fn preset(
+        self,
+        embedders: Embedders,
+        precision: EmbedPrecision,
+        variable: &str,
+    ) -> Option<&'static str> {
         self.tables_with(embedders)
             .iter()
             .flat_map(|table| table.iter())
             .find(|(name, _)| *name == variable)
-            .map(|(_, value)| *value)
+            .map(|(_, value)| precision.checkpoint_for(value))
     }
 
     /// The variables this tier fills for an operator who set none of them, as
@@ -523,7 +548,8 @@ impl Tier {
         F: Fn(&str) -> Option<String>,
     {
         let embedders = Embedders::from_lookup(lookup).unwrap_or_default();
-        self.presets_for(embedders)
+        let precision = EmbedPrecision::from_lookup(lookup).unwrap_or_default();
+        self.presets_for(embedders, precision)
             .into_iter()
             .filter(|(name, _)| lookup(name).is_none())
             .collect()
@@ -577,6 +603,111 @@ impl Embedders {
             Some(v) if v.is_empty() || v == "one" => Ok(Self::One),
             Some(v) if v == "two" => Ok(Self::Two),
             Some(other) => anyhow::bail!("KB_EMBEDDERS must be \"one\" or \"two\", got {other:?}"),
+        }
+    }
+}
+
+/// Which build of the one-embedder stack's checkpoint a GPU tier runs.
+///
+/// **NVFP4** is the same model in 4-bit: it needs a GPU with native FP4 tensor
+/// cores (Blackwell: sm_100, sm_120, sm_121) and holds far less memory, which
+/// matters on a card shared with the chat LLM, the OCR model and kb-server
+/// itself. **BF16** runs on every CUDA GPU and is what the tier preset names,
+/// so an install that does not know its hardware still works.
+///
+/// The product owner decided (2026-11-20) that the tiers below the top one
+/// (Desk, Studio) run NVFP4 where the hardware allows it and that Station
+/// keeps BF16.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EmbedPrecision {
+    /// The 4-bit build: Blackwell cards only.
+    Nvfp4,
+    /// The 16-bit build: every CUDA GPU.
+    #[default]
+    Bf16,
+}
+
+impl EmbedPrecision {
+    /// The checkpoint's Hugging Face id.
+    #[must_use]
+    pub fn model_id(self) -> &'static str {
+        match self {
+            Self::Nvfp4 => NEMOTRON_EMBED_NVFP4,
+            Self::Bf16 => NEMOTRON_EMBED_BF16,
+        }
+    }
+
+    /// The name `--embed-precision` and the docs use.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nvfp4 => "nvfp4",
+            Self::Bf16 => "bf16",
+        }
+    }
+
+    /// Parse a build name; `None` when it names neither.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "nvfp4" | "fp4" => Some(Self::Nvfp4),
+            "bf16" | "bfloat16" => Some(Self::Bf16),
+            _ => None,
+        }
+    }
+
+    /// The build a checkpoint id names, or `None` when it is neither.
+    #[must_use]
+    pub fn of_model(model: &str) -> Option<Self> {
+        match model.trim() {
+            NEMOTRON_EMBED_BF16 => Some(Self::Bf16),
+            NEMOTRON_EMBED_NVFP4 => Some(Self::Nvfp4),
+            _ => None,
+        }
+    }
+
+    /// The build a tier prefers, before the hardware has a say: NVFP4 below
+    /// the top tier, BF16 on Station.
+    #[must_use]
+    pub fn for_tier(tier: Tier) -> Self {
+        match tier {
+            Tier::Desk | Tier::Studio => Self::Nvfp4,
+            _ => Self::Bf16,
+        }
+    }
+
+    /// `KB_EMBED_PRECISION=nvfp4|bf16`; unset or empty is BF16, the build
+    /// that runs on every CUDA GPU.
+    ///
+    /// An unknown value is an error naming both, so a typo cannot silently
+    /// select the other build.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the value names neither build.
+    pub fn from_lookup<F>(lookup: &F) -> anyhow::Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        match lookup("KB_EMBED_PRECISION").map(|v| v.trim().to_lowercase()) {
+            None => Ok(Self::default()),
+            Some(value) if value.is_empty() => Ok(Self::default()),
+            Some(value) => Self::parse(&value).ok_or_else(|| {
+                anyhow::anyhow!("KB_EMBED_PRECISION must be \"nvfp4\" or \"bf16\", got {value:?}")
+            }),
+        }
+    }
+
+    /// The checkpoint this build serves, when the value is one of ours.
+    ///
+    /// A value that names another model (the two-embedder stack's Qwen3-VL
+    /// embedder, a cloud model) is left alone: only the one-embedder
+    /// checkpoint has two builds.
+    #[must_use]
+    pub fn checkpoint_for(self, value: &'static str) -> &'static str {
+        match Self::of_model(value) {
+            Some(_) => self.model_id(),
+            None => value,
         }
     }
 }
@@ -653,16 +784,21 @@ fn is_secret(name: &str) -> bool {
 ///
 /// The preset is the one for the embedding stack `KB_EMBEDDERS` selects, so
 /// the model names and widths the server runs with are the ones the tier
-/// plan reports. An invalid `KB_EMBEDDERS` falls back to the default here;
-/// [`Embedders::from_lookup`] is what reports it (`Config` calls it first).
+/// plan reports. `KB_EMBED_PRECISION` picks the build of the one-embedder
+/// checkpoint (BF16 unless it says NVFP4), because the server cannot see the
+/// GPU and the tier preset has to name one build. An invalid `KB_EMBEDDERS`
+/// or `KB_EMBED_PRECISION` falls back to the default here;
+/// [`Embedders::from_lookup`] and [`EmbedPrecision::from_lookup`] are what
+/// report it (`Config` calls them first).
 pub fn with_preset<'a, F>(tier: Option<Tier>, lookup: &'a F) -> impl Fn(&str) -> Option<String> + 'a
 where
     F: Fn(&str) -> Option<String>,
 {
     let embedders = Embedders::from_lookup(lookup).unwrap_or_default();
+    let precision = EmbedPrecision::from_lookup(lookup).unwrap_or_default();
     move |name| {
         lookup(name).or_else(|| {
-            tier.and_then(|tier| tier.preset(embedders, name))
+            tier.and_then(|tier| tier.preset(embedders, precision, name))
                 .map(str::to_string)
         })
     }
@@ -691,7 +827,7 @@ mod tests {
         for name in TIER_NAMES {
             let tier = Tier::parse(name).expect("known tier");
             for embedders in [Embedders::One, Embedders::Two] {
-                let presets = tier.presets_for(embedders);
+                let presets = tier.presets_for(embedders, EmbedPrecision::default());
                 let mut seen = std::collections::HashSet::new();
                 for (variable, _) in &presets {
                     assert!(
@@ -793,6 +929,81 @@ mod tests {
             "an explicit value is not reported as filled"
         );
         assert!(plan.filled.iter().any(|(n, _)| *n == "KB_EMBEDDING_DIM"));
+    }
+
+    /// The preset names the BF16 build, because the server cannot see the
+    /// GPU; `KB_EMBED_PRECISION` moves it to the 4-bit one.
+    #[test]
+    fn the_precision_picks_the_build_the_one_embedder_stack_names() {
+        let none = |_: &str| None;
+        let bf16 = with_preset(Some(Tier::Desk), &none);
+        assert_eq!(
+            bf16("KB_EMBEDDING_MODEL").as_deref(),
+            Some(NEMOTRON_EMBED_BF16)
+        );
+        assert_eq!(
+            bf16("KB_PAGE_EMBEDDING_MODEL").as_deref(),
+            Some(NEMOTRON_EMBED_BF16)
+        );
+
+        let nvfp4 = |name: &str| (name == "KB_EMBED_PRECISION").then(|| "nvfp4".to_string());
+        let resolved = with_preset(Some(Tier::Desk), &nvfp4);
+        assert_eq!(
+            resolved("KB_EMBEDDING_MODEL").as_deref(),
+            Some(NEMOTRON_EMBED_NVFP4)
+        );
+        assert_eq!(
+            resolved("KB_PAGE_EMBEDDING_MODEL").as_deref(),
+            Some(NEMOTRON_EMBED_NVFP4)
+        );
+        // The width does not change with the build.
+        assert_eq!(resolved("KB_EMBEDDING_DIM").as_deref(), Some("2048"));
+        assert_eq!(resolved("KB_PAGE_EMBEDDING_DIM").as_deref(), Some("2048"));
+
+        // The two-embedder stack has no 4-bit build: its models pass through.
+        let two = |name: &str| (name == "KB_EMBEDDERS").then(|| "two".to_string());
+        let resolved = with_preset(Some(Tier::Desk), &two);
+        assert_eq!(
+            resolved("KB_EMBEDDING_MODEL").as_deref(),
+            Some("Qwen/Qwen3-Embedding-0.6B")
+        );
+    }
+
+    /// A typo in `KB_EMBED_PRECISION` is an error, not the other build.
+    #[test]
+    fn an_unknown_precision_is_an_error() {
+        let bad = |name: &str| (name == "KB_EMBED_PRECISION").then(|| "fp8".to_string());
+        let error = EmbedPrecision::from_lookup(&bad).expect_err("must fail");
+        assert!(error.to_string().contains("nvfp4"), "{error}");
+
+        // Unset or blank is BF16: the build that runs on every CUDA GPU.
+        let none = |_: &str| None;
+        assert_eq!(
+            EmbedPrecision::from_lookup(&none).expect("default"),
+            EmbedPrecision::Bf16
+        );
+        let blank = |name: &str| (name == "KB_EMBED_PRECISION").then(|| "  ".to_string());
+        assert_eq!(
+            EmbedPrecision::from_lookup(&blank).expect("default"),
+            EmbedPrecision::Bf16
+        );
+    }
+
+    /// The tier's own preference: NVFP4 below the top tier, BF16 on Station.
+    #[test]
+    fn the_tier_preference_is_nvfp4_below_the_top_tier() {
+        assert_eq!(EmbedPrecision::for_tier(Tier::Desk), EmbedPrecision::Nvfp4);
+        assert_eq!(
+            EmbedPrecision::for_tier(Tier::Studio),
+            EmbedPrecision::Nvfp4
+        );
+        assert_eq!(
+            EmbedPrecision::for_tier(Tier::Station),
+            EmbedPrecision::Bf16
+        );
+        // Lite and Cloud run no local embedder at all.
+        assert_eq!(EmbedPrecision::for_tier(Tier::Lite), EmbedPrecision::Bf16);
+        assert_eq!(EmbedPrecision::for_tier(Tier::Cloud), EmbedPrecision::Bf16);
     }
 
     #[test]

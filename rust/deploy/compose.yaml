@@ -520,19 +520,51 @@ services:
   # given `--embedders two`. One model in one 2048-d space, so the tier runs
   # these two containers instead of a text embedder, a page embedder and a
   # reranker.
+  #
+  # The checkpoint has two builds: BF16 (every CUDA GPU) and NVFP4 (the same
+  # weights in 4-bit, Blackwell cards with native FP4). `KB_EMBED_MODEL` says
+  # which one is served and `KB_EMBED_PRECISION` is what the tier preset turns
+  # into `KB_EMBEDDING_MODEL`, the name the server asks for: the two must
+  # name the same build. vLLM reads the build from the checkpoint's own
+  # metadata, so there is no `--quantization` and no `--dtype` here.
+  #
+  # The three flags below are sized from the card by `kb-server setup`, which
+  # writes them into the env file (KB_EMBED_MAX_MODEL_LEN,
+  # KB_EMBED_MAX_NUM_SEQS, KB_EMBED_GPU_FRACTION). With the old fixed flags the
+  # embedder took ~13.8 GB on a GB10; with the sized flags ~3.7 GB (issue #37).
+  #
+  # The fallbacks are the flags this service ran with before setup sized
+  # them (`--max-model-len 32768`, fraction 0.15), so an upgraded install
+  # whose env file predates the sizing keeps exactly the memory share it had;
+  # `--max-num-seqs` falls back high enough not to throttle it. They are not a
+  # good fit for any card: run `kb-server setup <tier>` once to size them, or
+  # set the three variables yourself.
   vllm-embed:
     <<: *vllm
     profiles: ["desk-one", "studio-one", "station-one"]
+    # The 4-bit build tunes FP4 GEMMs and captures CUDA graphs on the first
+    # start, which takes minutes; the model card's VLLM_CACHE_ROOT keeps
+    # those artifacts across restarts. The anchor's own keys are repeated
+    # because a merge key does not merge maps.
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      VLLM_CACHE_ROOT: /root/.cache/vllm
+    volumes:
+      - hf-models:/root/.cache/huggingface
+      - ./vllm:/templates:ro
+      - vllm-cache:/root/.cache/vllm
     command:
-      - nvidia/Nemotron-3.5-Embed-1B-BF16
+      - ${KB_EMBED_MODEL:-nvidia/Nemotron-3.5-Embed-1B-BF16}
       - --served-model-name
-      - nvidia/Nemotron-3.5-Embed-1B-BF16
-      - --dtype
-      - bfloat16
+      - ${KB_EMBED_MODEL:-nvidia/Nemotron-3.5-Embed-1B-BF16}
       - --max-model-len
-      - "32768"
+      - ${KB_EMBED_MAX_MODEL_LEN:-32768}
+      - --max-num-seqs
+      - ${KB_EMBED_MAX_NUM_SEQS:-256}
       - --chat-template-content-format
       - openai
+      - --compilation-config
+      - '{"compile_mm_encoder":true}'
       - --gpu-memory-utilization
       - ${KB_EMBED_GPU_FRACTION:-0.15}
       - --port
@@ -858,4 +890,6 @@ volumes:
   llama-models:
   # Content-addressed embeddings/extraction (KB_CACHE_DIR), survives `down`.
   kb-cache:
+  # vLLM's compilation and FP4 GEMM autotuning artifacts (VLLM_CACHE_ROOT).
+  vllm-cache:
 
