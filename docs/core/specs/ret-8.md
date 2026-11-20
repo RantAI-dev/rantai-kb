@@ -161,6 +161,26 @@ At those rates, 300k pages with both text and image take ≈ **17 GB10-hours**: 
 - The vectors came from two machines (800 pages on x86, the rest on ARM), which shows the result
   does not depend on the CPU.
 
+## Schedule (estimate, 2026-11-20; not measured)
+
+About 4–6 weeks of wall-clock time until Lite ships the page arm. The only measured cost is the
+teacher cache: about 17 GB10-hours for 300k pages.
+
+| Step | Estimate | What bounds it |
+|---|---|---|
+| 0, rest (CPU timing of S0/S1/S2, text tower) | 1 day | — |
+| 1. Data + `IndoDocEval-v0` | 1–2 weeks | PDF fetch and render (FinePDFs dead-link rate unknown), 17 GB10-hours, the 200-query human check |
+| 2. Pilot, 20k pages | 2–3 days | a few training hours per student, plus eval |
+| 3. Full training, 300k pages | 3–5 days | 1–2 GPU days, eval, likely one rerun |
+| 4. Query side | 1 day if the teacher meets 300 ms; about 1 week for a query student | — |
+| 5. Peregrine | S0: a few days; S1/S2: 1–2 weeks (NaFlex ViT, image input) | the Peregrine developer's time; starts in parallel once step 2 picks the student |
+| 6. rantai-kb | about 1 week | — |
+
+- **Faster:** S0 wins (almost no new Peregrine work), giving about 3 weeks.
+- **Slower:**
+  - Xiaomi OCR must be off while the GB10 runs the teacher or training (one model role at a time).
+  - A failed step-2 gate (below 80% retention) adds about 1 week.
+
 ## Range
 
 | Field | Method borrowed |
