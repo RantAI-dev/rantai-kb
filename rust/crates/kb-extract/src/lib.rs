@@ -90,7 +90,7 @@ pub use pdfium::{
     MINIMAL_BLANK_PDF, MINIMAL_PDF_HELLO_WORLD, extract_pdf_text_layer, get_pdf_page_count,
     get_pdfium, init_pdfium, render_pdf_page_to_png, split_pdf_by_page_count,
 };
-pub use scanned::{is_pdf_scanned, page_is_scan, read_page_facts};
+pub use scanned::{is_pdf_scanned, page_needs_ocr, read_page_facts};
 pub use smart_router::SmartRouterExtractor;
 pub use vision_llm::VisionLlmExtractor;
 pub use visuals::{LocalVisualCollector, normalize_image};
@@ -115,13 +115,24 @@ pub enum ExtractError {
     /// The container held XML that would not parse.
     #[error("{0}")]
     Xml(String),
+    /// A remote backend the extraction needed was not available: the OCR
+    /// provider could not be reached, or its outage breaker refused every
+    /// page. The file itself may be perfectly fine, so the caller retries the
+    /// job when the backend is back instead of failing it (`#35`, `#36`).
+    #[error("{0}")]
+    Unavailable(String),
 }
 
 impl From<ExtractError> for PortError {
     /// A parser failure is malformed input, not an unavailable backend: the
-    /// engine turns it into a job failure with the parser's own message.
+    /// engine turns it into a job failure with the parser's own message. An
+    /// unavailable backend keeps its own kind, so the job queue can park the
+    /// job and resume it later.
     fn from(err: ExtractError) -> Self {
-        PortError::Malformed(err.to_string())
+        match err {
+            ExtractError::Unavailable(reason) => PortError::Unavailable(reason),
+            other => PortError::Malformed(other.to_string()),
+        }
     }
 }
 

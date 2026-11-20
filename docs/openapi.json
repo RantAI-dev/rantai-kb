@@ -2141,6 +2141,56 @@
           "count_distinct"
         ]
       },
+      "BackendHealth": {
+        "type": "object",
+        "description": "The three backends a client can wait for.",
+        "required": [
+          "embedder",
+          "reranker",
+          "ocr"
+        ],
+        "properties": {
+          "embedder": {
+            "$ref": "#/components/schemas/BackendStatus",
+            "description": "The embedder: without it nothing can be indexed or searched."
+          },
+          "ocr": {
+            "$ref": "#/components/schemas/BackendStatus",
+            "description": "The OCR backend: without it a scanned document cannot be read."
+          },
+          "reranker": {
+            "$ref": "#/components/schemas/BackendStatus",
+            "description": "The reranker: without it search still works, only less well."
+          }
+        }
+      },
+      "BackendState": {
+        "type": "string",
+        "description": "How usable a backend is right now.",
+        "enum": [
+          "ready",
+          "starting",
+          "unavailable"
+        ]
+      },
+      "BackendStatus": {
+        "type": "object",
+        "description": "One backend: its state, and why it is in that state.",
+        "required": [
+          "state",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string",
+            "description": "Why: the HTTP status the backend answered, or the error it gave.\n\nA plain string, not a machine-readable code: this is what an operator\nreads, and the state field is what a client switches on."
+          },
+          "state": {
+            "$ref": "#/components/schemas/BackendState",
+            "description": "`ready`, `starting` or `unavailable`."
+          }
+        }
+      },
       "BoostStatsDto": {
         "type": "object",
         "description": "`stats.boost`: how many returned hits carried a usable field for each\nrequested boost. A hit without the field kept its base relevance and is\nnot counted; this is not an error count.",
@@ -2514,7 +2564,8 @@
           "updatedAt",
           "knowledgeBaseIds",
           "chunkCount",
-          "figures"
+          "figures",
+          "degrades"
         ],
         "properties": {
           "categories": {
@@ -2523,6 +2574,15 @@
               "type": "string"
             },
             "description": "The categories the document is filed under."
+          },
+          "charsExtracted": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How much text the document really produced, in characters (`#29`).",
+            "minimum": 0
           },
           "chunkCount": {
             "type": "integer",
@@ -2533,6 +2593,13 @@
           "createdAt": {
             "type": "string",
             "description": "When the document was created."
+          },
+          "degrades": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What kept the document from being fully searchable, one line each\n(`#29`)."
           },
           "figures": {
             "type": "array",
@@ -2574,6 +2641,15 @@
             ],
             "description": "The file's MIME type."
           },
+          "pages": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many pages the document has (`#29`).",
+            "minimum": 0
+          },
           "sha256": {
             "type": [
               "string",
@@ -2583,7 +2659,7 @@
           },
           "status": {
             "type": "string",
-            "description": "`processing`, `ready` or `failed`."
+            "description": "`processing`, `waiting_for_ocr`, `needs_ocr`, `ready` or `failed`."
           },
           "subcategory": {
             "type": [
@@ -2726,7 +2802,8 @@
           "categories",
           "status",
           "createdAt",
-          "knowledgeBaseIds"
+          "knowledgeBaseIds",
+          "degrades"
         ],
         "properties": {
           "categories": {
@@ -2736,9 +2813,25 @@
             },
             "description": "The categories the document is filed under."
           },
+          "charsExtracted": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How much text the document really produced, in characters (`#29`).",
+            "minimum": 0
+          },
           "createdAt": {
             "type": "string",
             "description": "When the document was created."
+          },
+          "degrades": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What kept the document from being fully searchable, one line each\n(`#29`)."
           },
           "externalRef": {
             "type": [
@@ -2773,6 +2866,15 @@
             },
             "description": "The knowledge bases the document belongs to."
           },
+          "pages": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "How many pages the document has (`#29`).",
+            "minimum": 0
+          },
           "sha256": {
             "type": [
               "string",
@@ -2782,7 +2884,7 @@
           },
           "status": {
             "type": "string",
-            "description": "`processing`, `ready` or `failed`."
+            "description": "`processing`, `waiting_for_ocr`, `needs_ocr`, `ready` or `failed`."
           },
           "subcategory": {
             "type": [
@@ -3060,9 +3162,14 @@
           "ok",
           "checks",
           "version",
-          "egress"
+          "egress",
+          "backends"
         ],
         "properties": {
+          "backends": {
+            "$ref": "#/components/schemas/BackendHealth",
+            "description": "Additive (`#36`): the state of the embedder, the reranker and the OCR\nbackend.\n\n`ready`, `starting` or `unavailable` each. A client that uploads\nscanned documents can hold the upload until the OCR backend says\n`ready` instead of discovering the outage in the job queue."
+          },
           "checks": {
             "$ref": "#/components/schemas/HealthChecks",
             "description": "One boolean per dependency."
@@ -3242,7 +3349,7 @@
           },
           "status": {
             "type": "string",
-            "description": "`pending`, `processing`, `done` or `failed`."
+            "description": "`pending`, `processing`, `waiting_for_ocr`, `success` or `failed`.\n\n`waiting_for_ocr` is the state a job parks in while the backend it\nneeds is not there (`#36`). The worker resumes it by itself."
           },
           "step": {
             "type": [

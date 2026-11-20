@@ -1,0 +1,24 @@
+-- The `waiting_for_ocr` job state (`#36`).
+--
+-- A document whose OCR backend was unavailable used to fail on the first
+-- error: the job went to `failed`, the operator had to press retry, and a
+-- ten-minute provider outage lost every document that arrived during it. The
+-- job now waits, and the worker resumes it on its own when the backend is
+-- back.
+--
+-- `status` is a TEXT column, so the new state needs no migration of its own:
+-- `waiting_for_ocr` is just another value in it. The queue never claims that
+-- value (`CLAIM_NEXT_PENDING` selects `status = 'pending'`), so a waiting job
+-- does not hold a worker slot and does not block the documents behind it.
+--
+-- `resumeAt` says when the job may be tried again. It is what makes the wait
+-- bounded and fair: the worker moves the jobs whose wait is over back to
+-- `pending`, so a job that waited long enough is picked up again — and a job
+-- that has not waited long enough is left alone.
+--
+-- Additive only: one new nullable column, nothing touched. The Bun worker
+-- does not know the state and does not claim it, so a Bun worker and a Rust
+-- worker can share the table during cutover.
+
+-- AlterTable
+ALTER TABLE "IngestJob" ADD COLUMN "resumeAt" TIMESTAMP(3);

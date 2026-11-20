@@ -19,6 +19,7 @@ pub mod page_map;
 pub mod pagination;
 pub mod policy;
 mod progress;
+pub mod quality;
 pub mod query_class;
 pub mod signals;
 pub mod sparse;
@@ -70,6 +71,10 @@ pub use policy::{
 };
 pub use progress::{
     IngestStep, ProgressFlags, StepProgress, compute_eta_seconds, compute_overall_progress,
+};
+pub use quality::{
+    DocumentVerdict, PageDefect, PageVerdict, QualityOptions, assess_document, check_page,
+    check_page_against_median, median_page_chars,
 };
 pub use query_class::{Arm, ArmPlan, QueryClass, QuerySignature, SkippedArm, classify_query};
 pub use signals::{RouterOpts, has_columnar_lines, has_dense_currency, is_unpdf_sufficient};

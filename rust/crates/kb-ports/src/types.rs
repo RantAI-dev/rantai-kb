@@ -651,6 +651,10 @@ pub struct RerankScore {
 #[serde(rename_all = "camelCase")]
 pub struct JobView {
     pub id: String,
+    /// `pending`, `processing`, `waiting_for_ocr`, `success` or `failed`.
+    ///
+    /// `waiting_for_ocr` is the state a job parks in while the backend it
+    /// needs is not there (`#36`); the worker resumes it by itself.
     pub status: String,
     pub step: Option<String>,
     pub progress: u32,

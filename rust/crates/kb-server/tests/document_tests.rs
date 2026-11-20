@@ -45,6 +45,73 @@ async fn list_wraps_documents_in_the_bun_envelope() {
     assert!(first.get("updatedAt").is_none());
 }
 
+/// The extraction quality of a document is on its list row and on its detail
+/// (`#29`).
+///
+/// A document whose text layer was unusable used to come back as an ordinary
+/// `ready` row with nothing to show for it. The numbers and the complaint are
+/// additive, so a client that ignores them still works.
+#[tokio::test]
+async fn the_document_responses_carry_the_extraction_quality() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    let mut doc = doc_meta("doc-1", "Quality");
+    doc.metadata = Some(serde_json::json!({
+        "quality": {
+            "pages": 300,
+            "charsExtracted": 812,
+            "brokenPages": 292,
+            "chunks": 8,
+            "chunksPerPage": 0.0267,
+            "needsOcr": true,
+            "reasons": ["8 chunks over 300 pages is below 0.25 chunks per page"]
+        },
+        "degrades": ["needs_ocr: 8 chunks over 300 pages is below 0.25 chunks per page"]
+    }));
+    h.documents.insert_doc(TenantId(TENANT.to_string()), doc);
+
+    let response = h.send("GET", "/v1/documents", &tenant_key(TENANT)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    let first = &body["documents"].as_array().expect("documents array")[0];
+    assert_eq!(first["pages"], 300);
+    assert_eq!(first["charsExtracted"], 812);
+    assert_eq!(
+        first["degrades"][0],
+        "needs_ocr: 8 chunks over 300 pages is below 0.25 chunks per page"
+    );
+
+    let response = h
+        .send("GET", "/v1/documents/doc-1", &tenant_key(TENANT))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["document"]["pages"], 300);
+    assert_eq!(body["document"]["charsExtracted"], 812);
+    assert_eq!(
+        body["document"]["degrades"][0],
+        "needs_ocr: 8 chunks over 300 pages is below 0.25 chunks per page"
+    );
+}
+
+/// A document indexed before the gate existed has no quality: the fields are
+/// null and empty, not zero, so a client can tell "not measured" from
+/// "measured and empty" (`#29`).
+#[tokio::test]
+async fn a_document_without_a_quality_report_has_no_numbers() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    h.documents
+        .insert_doc(TenantId(TENANT.to_string()), doc_meta("doc-1", "Old"));
+
+    let response = h.send("GET", "/v1/documents", &tenant_key(TENANT)).await;
+    let body = json_body(response).await;
+    let first = &body["documents"].as_array().expect("documents array")[0];
+    assert_eq!(first["pages"], serde_json::Value::Null);
+    assert_eq!(first["charsExtracted"], serde_json::Value::Null);
+    assert_eq!(first["degrades"], serde_json::json!([]));
+}
+
 #[tokio::test]
 async fn list_filters_by_the_camel_case_knowledge_base_parameter() {
     let h = Harness::new();

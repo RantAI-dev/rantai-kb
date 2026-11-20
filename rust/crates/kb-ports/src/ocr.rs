@@ -40,6 +40,14 @@ pub struct OcrReport {
     pub failed_pages: Vec<u32>,
     /// The pages past the page cap (1-based).
     pub skipped_pages: Vec<u32>,
+    /// The pages the quality gate sent to the provider although they carry a
+    /// text layer (1-based, `#29`).
+    ///
+    /// A non-empty list means the text layer of those pages was unusable —
+    /// garbage from a broken font map, or a handful of stray strings — and the
+    /// model read them instead. Empty when the gate is off.
+    #[serde(default)]
+    pub reread_pages: Vec<u32>,
     /// Whether the outage breaker was open while this document ran.
     pub breaker_opened: bool,
     /// How many pages a layout detector answered for.

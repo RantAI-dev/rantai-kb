@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
+use kb_core::quality::{QualityOptions, check_page_against_median, count_chars, median_page_chars};
 use kb_ports::{
     ExtractedFigure, ExtractionOptions, ExtractionResult, OcrPageCache, OcrReport, PageBlock,
     PageBlockKind, PageText,
@@ -53,7 +54,7 @@ use crate::config::{ExtractConfig, OcrMode};
 use crate::mistral::blocks_from_markdown;
 use crate::page_render::{PageRenderSpec, render_image_pages, render_pdf_page_indices_spec};
 use crate::pdfium::{get_pdfium, pdf_page_subset};
-use crate::scanned::{PageFacts, page_is_scan, read_page_facts};
+use crate::scanned::{PageFacts, page_needs_ocr, read_page_facts};
 
 /// One initial attempt plus three retries on a transient provider error.
 const MAX_ATTEMPTS: u32 = 4;
@@ -258,12 +259,29 @@ impl OcrBreaker {
     }
 }
 
+/// The process-wide breaker, built once from the first configuration that
+/// asks for one.
+static BREAKER: OnceLock<Arc<OcrBreaker>> = OnceLock::new();
+
 /// The breaker every router in this process shares, built once from the first
 /// configuration that asks for one.
 #[must_use]
 pub fn process_breaker(threshold: u32, cooldown: Duration) -> Arc<OcrBreaker> {
-    static BREAKER: OnceLock<Arc<OcrBreaker>> = OnceLock::new();
     Arc::clone(BREAKER.get_or_init(|| Arc::new(OcrBreaker::new(threshold, cooldown))))
+}
+
+/// The process-wide breaker, when one was already built.
+///
+/// The health probe uses this to close a breaker that is still open after the
+/// provider came back: without a page read there is nothing else that could
+/// close it, so a job retried in the cooldown window was refused every page
+/// and reported "no text for any page" (`#35`).
+///
+/// `None` when no router has asked for a breaker yet: this never builds one,
+/// because a breaker built here would carry the wrong threshold.
+#[must_use]
+pub fn existing_breaker() -> Option<Arc<OcrBreaker>> {
+    BREAKER.get().cloned()
 }
 
 /// The router's tunables, resolved from [`ExtractConfig`].
@@ -281,6 +299,12 @@ pub struct OcrRouterSettings {
     /// Attempts per provider call (one initial plus retries). Tests set 1 to
     /// exercise the breaker without waiting through backoff.
     pub attempts: u32,
+    /// The extraction quality gate (`KB_EXTRACT_QUALITY_GATE`), when it is on.
+    ///
+    /// With it on, a page whose text layer is unusable — garbage from a broken
+    /// font map, or a handful of stray strings — is read by OCR instead of
+    /// being indexed as it is (`#29`).
+    pub quality: Option<QualityOptions>,
 }
 
 impl OcrRouterSettings {
@@ -298,6 +322,7 @@ impl OcrRouterSettings {
             breaker_cooldown: cfg.ocr_breaker_cooldown,
             dpi: cfg.ocr_dpi,
             attempts: MAX_ATTEMPTS,
+            quality: cfg.quality_options(),
         }
     }
 }
@@ -310,6 +335,9 @@ struct PageOutcome {
     from_cache: bool,
     /// The page was sent, or was meant to be and the breaker refused.
     attempted: bool,
+    /// The breaker refused the page: the provider is in its outage cooldown,
+    /// so the page was never tried.
+    breaker_skipped: bool,
     /// A layout detector answered for this page.
     layout: bool,
     /// The layout detector failed for this page.
@@ -323,6 +351,11 @@ struct RouteOutcome {
     sent: u32,
     cached: u32,
     breaker_open: bool,
+    /// How many pages the breaker refused to send.
+    skipped_by_breaker: u32,
+    /// Whether a provider call failed with a transport error: the provider
+    /// could not be reached, so the pages are worth retrying.
+    transport_error: bool,
     layout_pages: u32,
     layout_failed: u32,
     error: Option<String>,
@@ -334,6 +367,8 @@ impl RouteOutcome {
         self.sent += other.sent;
         self.cached += other.cached;
         self.breaker_open |= other.breaker_open;
+        self.skipped_by_breaker += other.skipped_by_breaker;
+        self.transport_error |= other.transport_error;
         self.layout_pages += other.layout_pages;
         self.layout_failed += other.layout_failed;
         if self.error.is_none() {
@@ -355,6 +390,10 @@ struct PageArtifact {
 struct Candidates {
     send: Vec<u32>,
     skipped: Vec<u32>,
+    /// The pages the quality gate sent although they carry a text layer
+    /// (`#29`). The report names them, so an operator can see which pages of a
+    /// book had to be read again by a model.
+    quality_pages: Vec<u32>,
 }
 
 /// Routes PDF pages and image uploads to OCR under the mode's rules.
@@ -443,7 +482,14 @@ impl OcrRouter {
 
         let candidates = self.candidates(&facts, provider.is_some());
         report.skipped_pages = candidates.skipped.iter().map(|p| p + 1).collect();
+        // The pages the quality gate sent although they carry a text layer:
+        // the operator sees which pages of a book had to be read again by a
+        // model (`#29`).
+        report.reread_pages = candidates.quality_pages.iter().map(|p| p + 1).collect();
         let mut last_error: Option<String> = None;
+        let mut skipped_by_breaker = 0u32;
+        let mut transport_error = false;
+        let mut sent = 0u32;
 
         if let Some(provider) = provider {
             // The pages that need OCR are about to wait on the remote service:
@@ -475,6 +521,9 @@ impl OcrRouter {
             report.breaker_opened = routed.breaker_open;
             report.layout_pages = routed.layout_pages;
             report.layout_failed = routed.layout_failed;
+            sent = routed.sent;
+            skipped_by_breaker = routed.skipped_by_breaker;
+            transport_error = routed.transport_error;
             last_error = routed.error;
             for (page, outcome) in routed.pages {
                 let index = page as usize;
@@ -521,16 +570,37 @@ impl OcrRouter {
         }
 
         if !has_text {
-            let reason = last_error.unwrap_or_else(|| {
-                if candidates.send.is_empty() {
-                    "the PDF has no readable text".to_string()
-                } else {
-                    "the OCR provider returned no text for any page".to_string()
-                }
+            // Three different problems, three different reasons (`#35`):
+            // a breaker that refused every page, a provider that could not be
+            // reached, and a document that really has no readable text. The
+            // first two are worth retrying; the third is not.
+            let (reason, retryable) = if skipped_by_breaker > 0 && sent == 0 {
+                (
+                    "OCR breaker open: the OCR provider is in its outage cooldown; \
+                     retry when it is healthy"
+                        .to_string(),
+                    true,
+                )
+            } else if transport_error {
+                let detail =
+                    last_error.unwrap_or_else(|| "the provider did not answer".to_string());
+                (format!("the OCR provider is unreachable: {detail}"), true)
+            } else if let Some(error) = last_error {
+                (error, false)
+            } else if candidates.send.is_empty() {
+                ("the PDF has no readable text".to_string(), false)
+            } else {
+                (
+                    "the OCR provider returned no text for any page".to_string(),
+                    false,
+                )
+            };
+            let message = format!("OCR failed for \"{filename}\": {reason}");
+            return Err(if retryable {
+                ExtractError::Unavailable(message)
+            } else {
+                ExtractError::Container(message)
             });
-            return Err(ExtractError::Container(format!(
-                "OCR failed for \"{filename}\": {reason}"
-            )));
         }
 
         report.failed_pages.sort_unstable();
@@ -594,6 +664,10 @@ impl OcrRouter {
         let mut report = self.report(pages.len() as u32);
         let mut text = PageTexts::empty(pages.len());
         let mut used_ocr = false;
+        let mut skipped_by_breaker = 0u32;
+        let mut transport_error = false;
+        let mut sent = 0u32;
+        let mut last_error: Option<String> = None;
 
         let provider = match (&self.provider, self.settings.mode) {
             (Some(provider), mode) if mode != OcrMode::Off => Some(Arc::clone(provider)),
@@ -613,6 +687,10 @@ impl OcrRouter {
             report.breaker_opened = routed.breaker_open;
             report.layout_pages = routed.layout_pages;
             report.layout_failed = routed.layout_failed;
+            sent = routed.sent;
+            skipped_by_breaker = routed.skipped_by_breaker;
+            transport_error = routed.transport_error;
+            last_error = routed.error;
             for (page, outcome) in routed.pages {
                 let index = page as usize;
                 if index >= text.len() {
@@ -638,9 +716,31 @@ impl OcrRouter {
                 // or no OCR configured, not a failed job.
                 return Ok(text.into_result("image", report, None, false, Vec::new(), false));
             }
-            return Err(ExtractError::Container(format!(
-                "Image OCR failed for \"{filename}\": no page could be read"
-            )));
+            // The same three cases as a PDF (`#35`): a breaker that refused
+            // every page, a provider that could not be reached, and a picture
+            // the provider could not read.
+            let (reason, retryable) = if skipped_by_breaker > 0 && sent == 0 {
+                (
+                    "OCR breaker open: the OCR provider is in its outage cooldown; \
+                     retry when it is healthy"
+                        .to_string(),
+                    true,
+                )
+            } else if transport_error {
+                let detail =
+                    last_error.unwrap_or_else(|| "the provider did not answer".to_string());
+                (format!("the OCR provider is unreachable: {detail}"), true)
+            } else if let Some(error) = last_error {
+                (error, false)
+            } else {
+                ("no page could be read".to_string(), false)
+            };
+            let message = format!("Image OCR failed for \"{filename}\": {reason}");
+            return Err(if retryable {
+                ExtractError::Unavailable(message)
+            } else {
+                ExtractError::Container(message)
+            });
         }
 
         report.failed_pages.sort_unstable();
@@ -667,26 +767,58 @@ impl OcrRouter {
         if !has_provider || self.settings.mode == OcrMode::Off {
             return out;
         }
+        // The median page of the document, so a page that holds far less text
+        // than the rest is caught (`#29`). It is the median of the pages that
+        // carry text at all: an empty page would drag it down.
+        let median = self.quality_median(facts);
         let mut budget = self.settings.max_pages;
         for fact in facts {
-            let wants = match self.settings.mode {
+            let scan = match self.settings.mode {
                 OcrMode::Full => true,
                 OcrMode::Hybrid => {
-                    page_is_scan(fact, self.settings.scan_area, self.settings.scan_text)
+                    page_needs_ocr(fact, self.settings.scan_area, self.settings.scan_text)
                 }
                 OcrMode::Off | OcrMode::Auto => false,
             };
+            // A text layer that is not text: the page is a scan in everything
+            // but name, and indexing it as it is poisons the document.
+            let broken = !scan && self.quality_broken(fact, median);
+            let wants = scan || broken;
             if !wants {
                 continue;
             }
             if budget > 0 {
                 budget -= 1;
                 out.send.push(fact.page);
+                if broken {
+                    out.quality_pages.push(fact.page);
+                }
             } else {
                 out.skipped.push(fact.page);
             }
         }
         out
+    }
+
+    /// The median number of characters a page of this document carries.
+    fn quality_median(&self, facts: &[PageFacts]) -> usize {
+        if self.settings.quality.is_none() {
+            return 0;
+        }
+        let chars: Vec<usize> = facts
+            .iter()
+            .map(|f| count_chars(&f.text))
+            .filter(|c| *c > 0)
+            .collect();
+        median_page_chars(&chars)
+    }
+
+    /// Whether the page's own text layer is unusable.
+    fn quality_broken(&self, fact: &PageFacts, median: usize) -> bool {
+        let Some(opts) = self.settings.quality else {
+            return false;
+        };
+        check_page_against_median(&fact.text, median, &opts).is_broken()
     }
 
     /// Chat-style providers: render the candidate pages once, then read them
@@ -779,7 +911,12 @@ impl OcrRouter {
             }
 
             if !self.breaker.allows() {
+                // The provider is in its outage cooldown. The page is not
+                // tried and its answer is not cached: a retry must be able to
+                // read it (`#35`).
                 outcome.breaker_open = true;
+                outcome.skipped_by_breaker += 1;
+                page.breaker_skipped = true;
                 outcome.pages.push((item.page, page));
                 continue;
             }
@@ -837,6 +974,13 @@ impl OcrRouter {
                 Err(err) => {
                     if err.transient && self.breaker.record_failure() {
                         outcome.breaker_open = true;
+                    }
+                    if err.transient {
+                        // A transport error (connection refused, timeout, 5xx):
+                        // the provider could not be reached, so the pages are
+                        // worth retrying. Nothing about this page is cached
+                        // (`#35`).
+                        outcome.transport_error = true;
                     }
                     outcome.error.get_or_insert(err.message);
                 }
@@ -966,7 +1110,17 @@ impl OcrRouter {
 
         if !self.breaker.allows() {
             outcome.breaker_open = true;
-            outcome.pages.extend(pages.iter().map(|p| failed_page(*p)));
+            outcome.skipped_by_breaker += pages.len() as u32;
+            outcome.pages.extend(pages.iter().map(|p| {
+                (
+                    *p,
+                    PageOutcome {
+                        attempted: true,
+                        breaker_skipped: true,
+                        ..PageOutcome::default()
+                    },
+                )
+            }));
             return outcome;
         }
 
@@ -1028,6 +1182,9 @@ impl OcrRouter {
             Err(err) => {
                 if err.transient && self.breaker.record_failure() {
                     outcome.breaker_open = true;
+                }
+                if err.transient {
+                    outcome.transport_error = true;
                 }
                 outcome.error = Some(err.message);
                 outcome.pages.extend(pages.iter().map(|p| failed_page(*p)));

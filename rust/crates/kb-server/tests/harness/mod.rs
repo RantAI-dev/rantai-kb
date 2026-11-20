@@ -20,6 +20,7 @@ use kb_engine::fakes::{
 };
 use kb_engine::{EngineSettings, PageArm, PageArmConfig};
 use kb_ports::{DocumentMeta, PageEmbedder, PageImage, PortError};
+use kb_server::backends::{BackendProbe, BackendTargets};
 use kb_server::events::EventBus;
 use kb_server::state::{AppState, StateParts};
 use tower::ServiceExt;
@@ -50,13 +51,25 @@ impl Default for Harness {
 
 impl Harness {
     pub fn new() -> Self {
-        Self::with_upload_dedupe(UploadDedupe::default())
+        Self::build(BackendTargets::default(), UploadDedupe::default())
+    }
+
+    /// A harness whose health route probes the given backends (`#36`).
+    ///
+    /// The router is built from the state, so the probe has to be in place
+    /// before that.
+    pub fn with_backends(targets: BackendTargets) -> Self {
+        Self::build(targets, UploadDedupe::default())
     }
 
     /// A harness whose upload route refuses a file the tenant already has
     /// (`KB_UPLOAD_DEDUPE=reject`, the default) or stores it again
     /// (`KB_UPLOAD_DEDUPE=off`).
     pub fn with_upload_dedupe(upload_dedupe: UploadDedupe) -> Self {
+        Self::build(BackendTargets::default(), upload_dedupe)
+    }
+
+    fn build(targets: BackendTargets, upload_dedupe: UploadDedupe) -> Self {
         let documents = FakeDocumentStore::default();
         let chunks = FakeChunkStore::default();
         let blobs = FakeBlobStore::default();
@@ -66,7 +79,7 @@ impl Harness {
         let events = EventBus::new();
         let tables = FakeTableStore::default();
 
-        let state = AppState::from_parts(
+        let mut state = AppState::from_parts(
             StateParts {
                 documents: Arc::new(documents.clone()),
                 index: Arc::new(chunks.clone()),
@@ -84,6 +97,8 @@ impl Harness {
             Arc::new(FakeReranker::default()),
             engine_settings(),
         );
+        // The backends the health route probes (`#36`).
+        state.backends = BackendProbe::new(targets);
 
         Self {
             app: kb_server::build_router(state),
@@ -284,6 +299,39 @@ fn engine_settings() -> EngineSettings {
 /// The key a tenant fixture authenticates with.
 pub fn tenant_key(tenant: &str) -> String {
     format!("{tenant}-key")
+}
+
+/// A one-line HTTP server that answers every request with `status`.
+///
+/// The health probe only looks at the status, so the server does nothing else.
+pub async fn serve_status(status: u16) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut buf = [0u8; 2048];
+            // Read the request head, so the client is not still writing when
+            // the answer goes out.
+            while let Ok(read) = socket.read(&mut buf).await {
+                if read == 0 || buf.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let reason = match status {
+                200 => "OK",
+                401 => "Unauthorized",
+                503 => "Service Unavailable",
+                _ => "Status",
+            };
+            let answer = format!(
+                "HTTP/1.1 {status} {reason}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+            );
+            let _ = socket.write_all(answer.as_bytes()).await;
+            let _ = socket.flush().await;
+        }
+    });
+    format!("http://{addr}/v1/models")
 }
 
 /// A document row the tests can seed.

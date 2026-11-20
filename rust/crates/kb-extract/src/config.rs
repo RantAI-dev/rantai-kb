@@ -145,6 +145,9 @@ pub const DEFAULT_OCR_MAX_PAGES: u32 = 300;
 pub const DEFAULT_OCR_BREAKER: u32 = 3;
 /// Default for `KB_OCR_BREAKER_COOLDOWN_S`: how long the breaker stays open.
 pub const DEFAULT_OCR_BREAKER_COOLDOWN_S: u64 = 60;
+/// Default for `KB_EXTRACT_QUALITY_MIN_CHUNKS_PER_PAGE`: the chunks per page a
+/// document must reach to count as usable (`#29`).
+pub const DEFAULT_QUALITY_MIN_CHUNKS_PER_PAGE: f32 = 0.25;
 
 /// Configuration for document text extraction, layout parsing, and vision OCR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +232,17 @@ pub struct ExtractConfig {
     pub ocr_breaker: u32,
     /// How long the breaker stays open (60 s).
     pub ocr_breaker_cooldown: Duration,
+    /// Whether the extraction quality gate runs (`KB_EXTRACT_QUALITY_GATE`).
+    ///
+    /// Off by default: the gate sends a page whose text layer is unusable to
+    /// OCR, and on a hosted provider that is a paid request per page. An
+    /// operator turns it on for a corpus whose PDFs carry broken font maps —
+    /// the case where a book is indexed as `ready` with a handful of garbage
+    /// chunks (`#29`).
+    pub quality_gate: bool,
+    /// The chunks per page a document must reach to count as usable
+    /// (`KB_EXTRACT_QUALITY_MIN_CHUNKS_PER_PAGE`, default 0.25).
+    pub quality_min_chunks_per_page: f32,
     /// Path to libpdfium.so dynamic library.
     pub pdfium_dynamic_lib_path: Option<String>,
 }
@@ -252,7 +266,8 @@ impl ExtractConfig {
         format!(
             "epoch={EXTRACT_CACHE_EPOCH}|ver={}|primary={}|fallback={}|smart={}|\
              mineru_url={}|mineru_api={}:{}:{}|mistral={}:{}|order={}|vision={}:{}:{}|ocr={}|\
-             local_ocr={}:{}:{}:{}:{}:{}:{}|mode={}:{}:{}:{}:{}:{}|recipe={}:{}|layout={}",
+             local_ocr={}:{}:{}:{}:{}:{}:{}|mode={}:{}:{}:{}:{}:{}|recipe={}:{}|layout={}|\
+             quality={}:{}",
             env!("CARGO_PKG_VERSION"),
             self.primary,
             self.fallback,
@@ -284,6 +299,11 @@ impl ExtractConfig {
             self.ocr_recipe.as_str(),
             self.ocr_table_format.as_str(),
             self.ocr_layout_url.trim(),
+            // The gate changes what the extraction produces (a page with an
+            // unusable text layer is read by OCR instead), so a cache entry
+            // written with the gate off must not be served with it on.
+            self.quality_gate,
+            self.quality_min_chunks_per_page,
         )
     }
 }
@@ -331,6 +351,8 @@ impl Default for ExtractConfig {
             ocr_max_pages: DEFAULT_OCR_MAX_PAGES,
             ocr_breaker: DEFAULT_OCR_BREAKER,
             ocr_breaker_cooldown: Duration::from_secs(DEFAULT_OCR_BREAKER_COOLDOWN_S),
+            quality_gate: false,
+            quality_min_chunks_per_page: DEFAULT_QUALITY_MIN_CHUNKS_PER_PAGE,
             pdfium_dynamic_lib_path: None,
         }
     }
@@ -501,6 +523,21 @@ impl ExtractConfig {
             ocr_breaker_cooldown: lookup("KB_OCR_BREAKER_COOLDOWN_S")
                 .and_then(|s| s.parse::<u64>().ok())
                 .map_or(default.ocr_breaker_cooldown, Duration::from_secs),
+            // The gate is off unless the operator asks for it: it can send a
+            // page to a paid OCR provider, and a false positive costs a
+            // request (`#29`).
+            quality_gate: lookup("KB_EXTRACT_QUALITY_GATE")
+                .map(|s| {
+                    matches!(
+                        s.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                })
+                .unwrap_or(default.quality_gate),
+            quality_min_chunks_per_page: lookup("KB_EXTRACT_QUALITY_MIN_CHUNKS_PER_PAGE")
+                .and_then(|s| s.parse::<f32>().ok())
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .unwrap_or(default.quality_min_chunks_per_page),
             pdfium_dynamic_lib_path: lookup("PDFIUM_DYNAMIC_LIB_PATH")
                 .or(default.pdfium_dynamic_lib_path),
         }
@@ -539,6 +576,22 @@ impl ExtractConfig {
         } else {
             &self.openrouter_api_key
         }
+    }
+
+    /// The quality gate's thresholds, when the gate is on.
+    ///
+    /// `None` means the gate does not run: the page router then sends a page
+    /// to OCR only when it is a scan, and the ingest worker never refuses to
+    /// mark a document `ready` because of its text (`#29`).
+    #[must_use]
+    pub fn quality_options(&self) -> Option<kb_core::quality::QualityOptions> {
+        if !self.quality_gate {
+            return None;
+        }
+        Some(kb_core::quality::QualityOptions {
+            min_chunks_per_page: self.quality_min_chunks_per_page,
+            ..kb_core::quality::QualityOptions::default()
+        })
     }
 }
 
@@ -631,6 +684,69 @@ mod tests {
         );
         // The extraction fingerprint counts a secret only as set / not set.
         assert!(!cfg.cache_fingerprint().contains("sk-paid"));
+    }
+
+    /// The extraction quality gate is off unless an operator asks for it
+    /// (`#29`).
+    ///
+    /// A false positive costs a paid OCR pass over a good page, so the gate
+    /// does not run on its own; the numbers it produces are recorded either
+    /// way.
+    #[test]
+    fn the_quality_gate_is_off_by_default_and_read_from_its_documented_name() {
+        let default = ExtractConfig::from_lookup(|_| None);
+        assert!(!default.quality_gate);
+        assert!(default.quality_options().is_none());
+        assert_eq!(
+            default.quality_min_chunks_per_page,
+            DEFAULT_QUALITY_MIN_CHUNKS_PER_PAGE
+        );
+
+        let on = ExtractConfig::from_lookup(|name| match name {
+            "KB_EXTRACT_QUALITY_GATE" => Some("true".to_string()),
+            _ => None,
+        });
+        assert!(on.quality_gate);
+        let options = on.quality_options().expect("the gate is on");
+        assert_eq!(
+            options.min_chunks_per_page,
+            DEFAULT_QUALITY_MIN_CHUNKS_PER_PAGE
+        );
+
+        let tuned = ExtractConfig::from_lookup(|name| match name {
+            "KB_EXTRACT_QUALITY_GATE" => Some("1".to_string()),
+            "KB_EXTRACT_QUALITY_MIN_CHUNKS_PER_PAGE" => Some("0.5".to_string()),
+            _ => None,
+        });
+        assert!(tuned.quality_gate);
+        assert_eq!(
+            tuned
+                .quality_options()
+                .expect("the gate is on")
+                .min_chunks_per_page,
+            0.5
+        );
+
+        // A nonsense value is not a crash and not a silent "on".
+        let nonsense = ExtractConfig::from_lookup(|name| match name {
+            "KB_EXTRACT_QUALITY_GATE" => Some("maybe".to_string()),
+            _ => None,
+        });
+        assert!(!nonsense.quality_gate);
+    }
+
+    /// The gate changes what the extraction produces, so a cache entry written
+    /// without it must not be served with it.
+    #[test]
+    fn the_quality_gate_moves_the_extraction_cache_fingerprint() {
+        let base = ExtractConfig::default();
+        let mut gated = base.clone();
+        gated.quality_gate = true;
+        assert_ne!(base.cache_fingerprint(), gated.cache_fingerprint());
+
+        let mut tuned = base.clone();
+        tuned.quality_min_chunks_per_page = 0.5;
+        assert_ne!(base.cache_fingerprint(), tuned.cache_fingerprint());
     }
 
     #[test]

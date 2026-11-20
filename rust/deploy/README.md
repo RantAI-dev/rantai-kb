@@ -412,6 +412,24 @@ postprocessing.
 - The first start downloads each model into the shared `hf-models` volume. That
   is minutes on a slow link, which is why the TEI healthchecks allow a 15-minute
   start period.
+- **The OCR model wants about 8 GiB of the card.** Xiaomi-OCR-0 on vLLM is the
+  largest thing in the stack, and on a shared box it is practical to run it only
+  while ingesting. The OCR container is its own profile (`<tier>-ocr`), so
+  `docker compose stop vllm-ocr-desk` gives the memory back and
+  `docker compose start vllm-ocr-desk` brings it back. Nothing is lost while it
+  is off: a job that needs OCR **waits** instead of failing (see below).
+- **While the OCR backend is off, ingest jobs wait, they do not fail.** A job
+  whose pages need OCR parks in `waiting_for_ocr`, holds no worker slot, and
+  the worker resumes it by itself when the wait is over. The wait doubles every
+  try and is capped (`KB_OCR_WAIT_BACKOFF_S`, `KB_OCR_WAIT_MAX_S`,
+  `KB_OCR_WAIT_MAX_ATTEMPTS`); after the last try the job fails for good, so an
+  operator sees it. `GET /v1/health` says where the backends are: the embedder,
+  the reranker and OCR, each `ready`, `starting` or `unavailable`.
+- **On an NVIDIA GB10 (arm64, sm_121) the OCR model crashed inside a
+  torch.compile/Triton kernel while it started.** `--enforce-eager` fixes it.
+  Put `KB_OCR_VLLM_EXTRA_ARGS=--enforce-eager` in `.env`; the compose file
+  passes the flags to the OCR container, so nothing else has to change. The
+  flag costs throughput, so it is off by default.
 
 ## Troubleshooting
 
@@ -427,6 +445,15 @@ timeout. Check `ps` and `logs`; the usual causes are a store that never became
 healthy (Postgres unreachable, or Qdrant not ready) or a model container that
 cannot download its model. `logs tei-lite` / `logs tei-embed-desk` shows the
 download.
+
+**A job sits in `waiting_for_ocr`.** The OCR backend was not there when the
+job needed it, so the job is waiting for it instead of failing (`#36`). The
+job's `error` says why, and the document's status is `waiting_for_ocr` too.
+`GET /v1/health` says whether the OCR backend is `ready`, still `starting`, or
+`unavailable`; nothing has to be done but wait — the worker resumes the job
+when the wait is over. If the OCR container is stopped on purpose, start it
+(`docker compose start vllm-ocr-desk`) or leave it off: the job keeps waiting
+until the last try, and then it fails for good so an operator sees it.
 
 **I switched tiers and search returns nothing / errors.** The vector index width
 is fixed when the stack is created (384 for lite/lite-en, 1024 for the rest). Wipe

@@ -23,15 +23,32 @@ pub struct PageFacts {
     pub visible_chars: usize,
 }
 
-/// Whether a page is a scan: raster images cover at least `area` of it and it
-/// carries at most `max_text` visible characters.
+/// Whether a page has to go to OCR.
+///
+/// A page needs OCR when it carries at most `max_text` visible characters and
+/// either
+///
+/// * raster images cover at least `area` of it (a scan), or
+/// * it carries **no visible characters at all**.
+///
+/// The second clause is what a vector-outline PDF needs: its glyphs are
+/// drawn as paths, so pdfium extracts zero characters on every page and the
+/// page holds no large raster image either. Under the old rule (raster
+/// coverage only) such a page was never an OCR candidate and the document
+/// failed with "the PDF has no readable text" although a healthy provider was
+/// configured (`#28`).
 ///
 /// The document-level [`is_pdf_scanned`] average stays for the legacy path (a
 /// PDF whose text layer the chain should skip); this is the per-page decision
 /// the OCR router makes (`ING-6`).
 #[must_use]
-pub fn page_is_scan(facts: &PageFacts, area: f32, max_text: u32) -> bool {
-    facts.image_area >= area && facts.visible_chars <= max_text as usize
+pub fn page_needs_ocr(facts: &PageFacts, area: f32, max_text: u32) -> bool {
+    if facts.visible_chars > max_text as usize {
+        return false;
+    }
+    // `visible_chars == 0` also covers a page whose local text layer is empty:
+    // no text object means no visible characters.
+    facts.image_area >= area || facts.visible_chars == 0
 }
 
 /// Read every page's facts: text, raster coverage and visible characters.
@@ -220,7 +237,8 @@ mod tests {
 
     /// One generated page: a text object, or a raster image over the whole
     /// page, or both with the text in an invisible render mode (an existing
-    /// OCR layer).
+    /// OCR layer), or neither (a vector-outline page: no text object and no
+    /// raster image).
     fn generated_page(kind: &str) -> Vec<u8> {
         use pdfium_render::prelude::*;
         let pdfium = get_pdfium().unwrap();
@@ -231,7 +249,7 @@ mod tests {
             .create_page_at_end(PdfPagePaperSize::a4())
             .unwrap();
         let (width, height) = (page.width(), page.height());
-        if kind != "text" {
+        if kind != "text" && kind != "blank" {
             let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
                 32,
                 32,
@@ -247,7 +265,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        if kind != "image" {
+        if kind != "image" && kind != "blank" {
             if kind == "invisible" {
                 // Set the mode *before* the object joins the page: the page's
                 // content must be regenerated for a later change to show up.
@@ -292,12 +310,12 @@ mod tests {
         // One test, three pages generated one at a time: pdfium's document
         // creation is not safe to drive from several test threads at once.
         let text = read_page_facts(pdfium, &generated_page("text")).unwrap();
-        assert!(!page_is_scan(&text[0], 0.90, 50));
+        assert!(!page_needs_ocr(&text[0], 0.90, 50));
         assert!(text[0].image_area < 0.01, "no raster object on a text page");
         assert!(text[0].visible_chars > 50);
 
         let image = read_page_facts(pdfium, &generated_page("image")).unwrap();
-        assert!(page_is_scan(&image[0], 0.90, 50));
+        assert!(page_needs_ocr(&image[0], 0.90, 50));
         assert!(
             (image[0].image_area - 1.0).abs() < 0.01,
             "image covers the page"
@@ -311,10 +329,32 @@ mod tests {
             invisible[0].visible_chars, 0,
             "invisible text must not count"
         );
-        assert!(page_is_scan(&invisible[0], 0.90, 50));
+        assert!(page_needs_ocr(&invisible[0], 0.90, 50));
         assert!(
             invisible[0].text.contains("real text layer"),
             "the local layer is still available as a fallback"
+        );
+    }
+
+    /// A page whose glyphs are drawn as paths: no text object, no raster
+    /// image, so pdfium extracts nothing at all (`#28`).
+    #[test]
+    fn a_page_with_no_text_at_all_needs_ocr_even_without_raster_coverage() {
+        let Ok(pdfium) = get_pdfium() else {
+            eprintln!("Skipping pdfium test: libpdfium not found");
+            return;
+        };
+
+        let blank = read_page_facts(pdfium, &generated_page("blank")).unwrap();
+        assert_eq!(blank[0].visible_chars, 0);
+        assert!(blank[0].text.trim().is_empty(), "no text layer at all");
+        assert!(
+            blank[0].image_area < 0.01,
+            "no raster object on the page either"
+        );
+        assert!(
+            page_needs_ocr(&blank[0], 0.90, 50),
+            "a page with nothing to index must go to OCR"
         );
     }
 

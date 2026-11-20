@@ -4,6 +4,37 @@
 
 ### Added
 
+- **An ingest job waits for a backend that is not there instead of failing (`#36`).** A job whose
+  pages need OCR while the OCR backend is stopped, still starting, or gone mid-job now parks in
+  `waiting_for_ocr` with the reason in the job's `error`, holds no worker slot, and is resumed by
+  the worker itself when the wait is over — nobody presses retry, and the pages that were already
+  read are not paid for twice. The wait doubles every try and is capped (`KB_OCR_WAIT_BACKOFF_S`,
+  default 30 s; `KB_OCR_WAIT_MAX_S`, default 600 s; `KB_OCR_WAIT_MAX_ATTEMPTS`, default 10); after
+  the last try the job fails for good, so a document does not wait forever. The document's status
+  says `waiting_for_ocr` too, and `POST /v1/jobs/:id/retry` still refuses it (only a failed job can
+  be retried). Additive: `IngestJob.status` and `Document.status` are TEXT columns, and one
+  nullable column was added (`prisma/migrations/20261120130000_job_waiting_for_ocr`).
+- **`GET /health` and `GET /v1/health` report the model backends (`#36`).** The body carries a
+  `backends` object: the embedder, the reranker and the OCR backend, each `ready`, `starting` or
+  `unavailable`, with the reason as a plain string. A client that uploads a scanned document can
+  hold the upload until the OCR backend says `ready`. The status code of the health route is
+  unchanged — a missing OCR model does not make the service dead. The probe is a `GET` on the
+  endpoint the configuration names; it never reads the body, never runs a model, and its answer is
+  reused for ten seconds. A probe that sees the OCR backend answer also closes the outage breaker,
+  which is otherwise only closed by a page read, so a job that arrived inside the cooldown window
+  was refused every page (`#35`).
+
+- **An extraction quality gate, off by default (`KB_EXTRACT_QUALITY_GATE`, `#29`).** A page whose
+  text layer is unusable (too few characters, not mostly letters or words, broken-encoding
+  characters, far below the document's median page) is sent to OCR, and a document that still
+  produces almost no text ends as `needs_ocr` with the job failed and the reason on the document,
+  instead of a silent `ready`. Off by default because a false positive costs an OCR pass over a
+  good page (paid, with a hosted provider). The numbers are recorded either way in
+  `metadata.quality`. `GET /v1/documents` and `GET /v1/documents/{id}` gain `pages`,
+  `charsExtracted` and `degrades` (additive; null or empty for documents indexed before this).
+- **`Document.status` and `IngestJob.status` can hold two new values:** `waiting_for_ocr` (`#36`)
+  and `needs_ocr` (`#29`, only with the gate on). A calling app that switches on the status should
+  treat `waiting_for_ocr` as still in progress and `needs_ocr` as failed.
 - **The embedder runs in NVFP4 on Blackwell cards.** `Nemotron-3.5-Embed-1B` ships in two builds of the
   same checkpoint: BF16 (16-bit, every CUDA GPU) and NVFP4 (4-bit, Blackwell cards with native FP4 —
   sm_100, sm_120, sm_121). `kb-server setup` reads the card's CUDA compute capability
@@ -52,6 +83,12 @@
 
 ### Changed
 
+- The OCR vLLM containers (`vllm-ocr-desk`, `vllm-ocr-studio`, `vllm-ocr-station`) take extra
+  command-line flags from `KB_OCR_VLLM_EXTRA_ARGS`. On an NVIDIA GB10 (arm64, sm_121) the OCR
+  model crashed inside a torch.compile/Triton kernel while it started, and `--enforce-eager` fixed
+  it; the flag costs throughput, so it is off by default. The OCR model wants about 8 GiB of the
+  card, and a job that needs OCR while the container is off now waits instead of failing
+  (`rust/deploy/README.md`, GPU notes).
 - `docs/kb-tiers.md` describes the stack the preset actually fills (one embedder for text and page
   images, `KB_EMBEDDERS=one` by default) instead of the 0.3–0.5 Qwen3-VL stack, and gives the VRAM
   budget per tier **per build**.
@@ -69,6 +106,22 @@
 - The engine orders the head by the rerank score itself instead of trusting the provider's
   order (a stable sort, so equal scores keep the provider's order), and the candidates past the
   head keep the fused order.
+
+### Fixed
+
+- **A PDF whose text is drawn as outlines goes to OCR (`#28`).** Such a page has no text and no
+  large raster image, so under the old raster-coverage rule no page qualified for OCR and the
+  document failed with "the PDF has no readable text" even with a healthy OCR provider. A page with
+  no visible characters is now an OCR candidate whatever its raster coverage.
+- **A retry right after an OCR outage no longer fails with "no text for any page" (`#35`).** The
+  outage breaker is process-wide, so a breaker opened by one document refused every page of the
+  next one, and the skipped pages were reported as "no text". A breaker-skipped page and a
+  transport error are now a distinct retryable error that names the cause, the job waits
+  (`#36`) instead of failing, and pages touched by a transport error are never cached.
+- The quality gate's own test counted 36 characters in a 34-character sentence, so the gate's test
+  failed while the gate was right.
+- The migration check accepted only a migration that creates a table; a migration that adds a
+  column (`IngestJob.resumeAt`) was refused.
 
 ### Upgrading
 

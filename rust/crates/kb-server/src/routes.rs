@@ -390,6 +390,13 @@ pub struct HealthResponse {
     pub tier: Option<String>,
     /// Additive (R3): non-local model-endpoint hosts, sorted and de-duplicated.
     pub egress: Vec<String>,
+    /// Additive (`#36`): the state of the embedder, the reranker and the OCR
+    /// backend.
+    ///
+    /// `ready`, `starting` or `unavailable` each. A client that uploads
+    /// scanned documents can hold the upload until the OCR backend says
+    /// `ready` instead of discovering the outage in the job queue.
+    pub backends: crate::backends::BackendHealth,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -422,12 +429,17 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Response {
     let postgres = state.documents.health_check().await.is_ok();
     let vectors = state.index.health_check().await.is_ok();
     let ok = postgres && vectors;
+    // The model backends are reported separately (`#36`): they do not decide
+    // whether the service is alive, but a client has to know whether the OCR
+    // backend can serve a scanned document before it uploads one.
+    let backends = state.backends.health().await;
     let body = HealthResponse {
         ok,
         checks: HealthChecks { postgres, vectors },
         version: state.version.clone(),
         tier: state.tier.clone(),
         egress: state.egress.clone(),
+        backends,
     };
     let status = if ok {
         StatusCode::OK
@@ -1239,7 +1251,7 @@ pub struct DocumentSummary {
     /// The file's size in bytes.
     #[serde(rename = "fileSize")]
     pub file_size: Option<i32>,
-    /// `processing`, `ready` or `failed`.
+    /// `processing`, `waiting_for_ocr`, `needs_ocr`, `ready` or `failed`.
     pub status: String,
     /// Additive: the caller's opaque document reference, or null.
     #[serde(rename = "externalRef")]
@@ -1250,6 +1262,16 @@ pub struct DocumentSummary {
     /// The knowledge bases the document belongs to.
     #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Vec<String>,
+    /// How many pages the document has (`#29`).
+    #[serde(rename = "pages")]
+    pub pages: Option<u32>,
+    /// How much text the document really produced, in characters (`#29`).
+    #[serde(rename = "charsExtracted")]
+    pub chars_extracted: Option<u64>,
+    /// What kept the document from being fully searchable, one line each
+    /// (`#29`).
+    #[serde(rename = "degrades")]
+    pub degrades: Vec<String>,
     /// The SHA-256 of the uploaded bytes, when the document was stored with
     /// one. Null for a document uploaded before the hash was recorded.
     #[serde(rename = "sha256")]
@@ -1342,18 +1364,24 @@ pub async fn list_documents(
     let documents = page
         .documents
         .into_iter()
-        .map(|d| DocumentSummary {
-            id: d.id.0,
-            title: d.title,
-            categories: d.categories,
-            subcategory: d.subcategory,
-            file_type: d.file_type,
-            file_size: d.file_size,
-            status: d.status,
-            external_ref: d.external_ref,
-            created_at: d.created_at,
-            knowledge_base_ids: d.knowledge_base_ids,
-            sha256: d.sha256,
+        .map(|d| {
+            let quality = read_document_quality(d.metadata.as_ref());
+            DocumentSummary {
+                id: d.id.0,
+                title: d.title,
+                categories: d.categories,
+                subcategory: d.subcategory,
+                file_type: d.file_type,
+                file_size: d.file_size,
+                status: d.status,
+                external_ref: d.external_ref,
+                created_at: d.created_at,
+                knowledge_base_ids: d.knowledge_base_ids,
+                pages: quality.pages,
+                chars_extracted: quality.chars_extracted,
+                degrades: quality.degrades,
+                sha256: d.sha256,
+            }
         })
         .collect();
     Ok(Json(DocumentListResponse {
@@ -1420,6 +1448,57 @@ pub fn read_document_figures(metadata: Option<&serde_json::Value>) -> Vec<Figure
         .collect()
 }
 
+/// The extraction quality of a document, as the ingest worker recorded it
+/// (`#29`).
+///
+/// Additive: a document ingested before the gate existed has no numbers, and
+/// the fields are then null / empty rather than zero, so a caller can tell
+/// "not measured" from "measured and empty".
+#[derive(Debug, Clone, Default)]
+pub struct DocumentQuality {
+    /// How many pages the document has.
+    pub pages: Option<u32>,
+    /// How much text the document produced, in characters.
+    pub chars_extracted: Option<u64>,
+    /// What kept the document from being fully searchable, one line each.
+    ///
+    /// Empty when nothing was wrong — or when the gate is off and no
+    /// complaint was recorded.
+    pub degrades: Vec<String>,
+}
+
+/// The quality numbers and the complaints from `Document.metadata`.
+///
+/// The ingest worker writes `metadata.quality` (the numbers) and
+/// `metadata.degrades` (the complaints) when it indexes a document; a
+/// document indexed before that has neither.
+#[must_use]
+pub fn read_document_quality(metadata: Option<&serde_json::Value>) -> DocumentQuality {
+    let quality = metadata.and_then(|m| m.get("quality"));
+    let pages = quality
+        .and_then(|q| q.get("pages"))
+        .and_then(serde_json::Value::as_u64)
+        .map(|v| v as u32);
+    let chars_extracted = quality
+        .and_then(|q| q.get("charsExtracted"))
+        .and_then(serde_json::Value::as_u64);
+    let degrades = metadata
+        .and_then(|m| m.get("degrades"))
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    DocumentQuality {
+        pages,
+        chars_extracted,
+        degrades,
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentDetailResponse {
     /// The document's row.
@@ -1447,7 +1526,7 @@ pub struct DocumentDetail {
     /// The file's MIME type.
     #[serde(rename = "mimeType")]
     pub mime_type: Option<String>,
-    /// `processing`, `ready` or `failed`.
+    /// `processing`, `waiting_for_ocr`, `needs_ocr`, `ready` or `failed`.
     pub status: String,
     /// When the document was created.
     #[serde(rename = "createdAt")]
@@ -1463,6 +1542,16 @@ pub struct DocumentDetail {
     pub chunk_count: u32,
     /// The document's figures.
     pub figures: Vec<FigureView>,
+    /// How many pages the document has (`#29`).
+    #[serde(rename = "pages")]
+    pub pages: Option<u32>,
+    /// How much text the document really produced, in characters (`#29`).
+    #[serde(rename = "charsExtracted")]
+    pub chars_extracted: Option<u64>,
+    /// What kept the document from being fully searchable, one line each
+    /// (`#29`).
+    #[serde(rename = "degrades")]
+    pub degrades: Vec<String>,
     /// The SHA-256 of the uploaded bytes, when the document was stored with
     /// one. Null for a document uploaded before the hash was recorded.
     #[serde(rename = "sha256")]
@@ -1515,6 +1604,7 @@ pub async fn get_document(
         return Err(ApiError::missing_scope("kb:read"));
     }
     let meta = find_visible_document(&state, &auth, &id).await?;
+    let quality = read_document_quality(meta.metadata.as_ref());
     let chunks = state
         .index
         .ordered_chunks(&auth.tenant_id, &meta.id)
@@ -1553,6 +1643,9 @@ pub async fn get_document(
             knowledge_base_ids: meta.knowledge_base_ids,
             chunk_count,
             figures: read_document_figures(meta.metadata.as_ref()),
+            pages: quality.pages,
+            chars_extracted: quality.chars_extracted,
+            degrades: quality.degrades,
             sha256: meta.sha256,
         },
         chunks: chunk_views,
