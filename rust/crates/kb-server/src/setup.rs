@@ -812,7 +812,14 @@ pub fn choose_embedder(
                 };
             }
         }
-        for key in ["KB_EMBEDDING_MODEL", "KB_PAGE_EMBEDDING_MODEL"] {
+        // `KB_EMBED_MODEL` is what the model server serves, the other two are
+        // what the server asks for: any of them naming a build keeps it, so
+        // the two sides cannot end up on different builds.
+        for key in [
+            "KB_EMBED_MODEL",
+            "KB_EMBEDDING_MODEL",
+            "KB_PAGE_EMBEDDING_MODEL",
+        ] {
             let Some(model) = file
                 .get(key)
                 .map(|value| value.trim())
@@ -4194,6 +4201,19 @@ mod tests {
         existing.insert("KB_EMBED_PRECISION".to_string(), "nvfp4".to_string());
         let choice = choose_embedder(&args, Tier::Desk, &blackwell, Some(&existing));
         assert_eq!(choice.precision, Some(EmbedPrecision::Nvfp4));
+
+        // An env file that names only the checkpoint the model server serves
+        // keeps it too: otherwise the server and the model server would end
+        // up on different builds of the same checkpoint.
+        let mut existing = BTreeMap::new();
+        existing.insert("KB_TIER".to_string(), "desk".to_string());
+        existing.insert(
+            "KB_EMBED_MODEL".to_string(),
+            "nvidia/Nemotron-3.5-Embed-1B-NVFP4".to_string(),
+        );
+        let choice = choose_embedder(&args, Tier::Desk, &blackwell, Some(&existing));
+        assert_eq!(choice.precision, Some(EmbedPrecision::Nvfp4));
+        assert_eq!(choice.model, "nvidia/Nemotron-3.5-Embed-1B-NVFP4");
     }
 
     /// The vLLM flags are sized from the card: the memory fraction is of the
