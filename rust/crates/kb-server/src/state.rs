@@ -56,6 +56,10 @@ pub struct AppState {
     /// whether the embedder, the reranker and the OCR backend can serve
     /// (`#36`).
     pub backends: crate::backends::BackendProbe,
+    /// What the upload route does with a file the tenant already has
+    /// (`KB_UPLOAD_DEDUPE`). `reject` by default: the same bytes twice cost a
+    /// whole ingest and produce a second copy of the same answer.
+    pub upload_dedupe: kb_core::policy::UploadDedupe,
 }
 
 /// Adapters a caller supplies. Grouped so tests can build a state from fakes
@@ -74,6 +78,9 @@ pub struct StateParts {
     /// does not exercise tables.
     pub tables: Option<Arc<dyn TableStore>>,
     pub version: String,
+    /// What the upload route does with a file the tenant already has
+    /// (`KB_UPLOAD_DEDUPE`).
+    pub upload_dedupe: kb_core::policy::UploadDedupe,
 }
 
 impl AppState {
@@ -269,6 +276,7 @@ impl AppState {
             egress,
             // The backends the health route probes (`#36`).
             backends: crate::backends::BackendProbe::new(backends),
+            upload_dedupe: config.upload_dedupe,
         })
     }
 
@@ -315,6 +323,7 @@ impl AppState {
             // No configured backends: a hand-built state has no model
             // endpoints to probe.
             backends: crate::backends::BackendProbe::default(),
+            upload_dedupe: parts.upload_dedupe,
         }
     }
 

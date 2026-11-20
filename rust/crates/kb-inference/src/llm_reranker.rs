@@ -230,6 +230,17 @@ impl Reranker for LlmReranker {
         let picked = Self::parse_indices(&raw);
         Ok(Self::select(&candidates, &picked, final_k))
     }
+
+    /// The LLM reranker does **not** score every candidate it is handed.
+    ///
+    /// It asks a chat model to name the top `final_k` passages and hands back
+    /// ranks, not relevance scores (`select` gives every result `final_k -
+    /// rank`). A wider ask would ask the model for a longer list and put a
+    /// rank where a relevance score belongs, so the engine keeps this
+    /// reranker's head at `KB_RERANK_FINAL_K`.
+    fn scores_every_candidate(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

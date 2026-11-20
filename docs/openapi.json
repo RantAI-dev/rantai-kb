@@ -359,13 +359,13 @@
           "documents"
         ],
         "summary": "List the caller's documents.",
-        "description": "`GET /v1/documents` — the caller's documents. Needs the `kb:read` scope. A\nkey bound to some knowledge bases sees only the documents in them.",
+        "description": "`GET /v1/documents` — the caller's documents. Needs the `kb:read` scope. A\nkey bound to some knowledge bases sees only the documents in them.\n\nThe list is paged: the response carries `nextCursor` and `total`, and the\ncaller sends the cursor back to continue. A `limit` above the cap is\nclamped, never refused — and the response says so (`limitClamped`), because\na caller that asked for 500 and got 200 has to know which it got.",
         "operationId": "list_documents",
         "parameters": [
           {
             "name": "limit",
             "in": "query",
-            "description": "How many documents to return. 1–500; anything else is the default (100).",
+            "description": "How many documents to return. 1–200; anything else is the default (100).",
             "required": false,
             "schema": {
               "type": "string"
@@ -388,6 +388,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "The cursor of the previous page, as `nextCursor` returned it. Send it\nback unchanged to get the next page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -397,6 +406,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DocumentListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The cursor is not one this server issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -495,6 +514,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The tenant already has a document with these bytes (KB_UPLOAD_DEDUPE=reject)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DuplicateDocumentBody"
                 }
               }
             }
@@ -2621,6 +2650,13 @@
             "description": "How many pages the document has (`#29`).",
             "minimum": 0
           },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SHA-256 of the uploaded bytes, when the document was stored with\none. Null for a document uploaded before the hash was recorded."
+          },
           "status": {
             "type": "string",
             "description": "`processing`, `waiting_for_ocr`, `needs_ocr`, `ready` or `failed`."
@@ -2665,7 +2701,10 @@
       "DocumentListResponse": {
         "type": "object",
         "required": [
-          "documents"
+          "documents",
+          "total",
+          "limit",
+          "limitClamped"
         ],
         "properties": {
           "documents": {
@@ -2674,6 +2713,29 @@
               "$ref": "#/components/schemas/DocumentSummary"
             },
             "description": "The documents, newest first."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The page size that was applied.",
+            "minimum": 0
+          },
+          "limitClamped": {
+            "type": "boolean",
+            "description": "True when the requested limit was above the cap and was clamped to it."
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cursor for the next page; null on the last page."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many documents match the filter, over every page.",
+            "minimum": 0
           }
         }
       },
@@ -2813,6 +2875,13 @@
             "description": "How many pages the document has (`#29`).",
             "minimum": 0
           },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SHA-256 of the uploaded bytes, when the document was stored with\none. Null for a document uploaded before the hash was recorded."
+          },
           "status": {
             "type": "string",
             "description": "`processing`, `waiting_for_ocr`, `needs_ocr`, `ready` or `failed`."
@@ -2827,6 +2896,24 @@
           "title": {
             "type": "string",
             "description": "The document's title."
+          }
+        }
+      },
+      "DuplicateDocumentBody": {
+        "type": "object",
+        "description": "The body a duplicate-upload `409` answers with.\n\nThe usual `error` message plus the id of the document that already holds\nthese bytes, so a caller can point at it instead of uploading the file\nagain to find out.",
+        "required": [
+          "error",
+          "existingDocumentId"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "What went wrong, in the words the service has always used."
+          },
+          "existingDocumentId": {
+            "type": "string",
+            "description": "The id of the document that already holds these bytes."
           }
         }
       },
@@ -4187,6 +4274,14 @@
               "null"
             ],
             "description": "The question's class (`\"exact\"`, `\"factual\"`, `\"structural\"`,\n`\"relational\"`, `\"aggregative\"`, `\"topical\"`). ADDITIVE RET-5; present\nonly when adaptive arm choice ran. Absent on a default search so an old\nclient sees exactly the earlier shape."
+          },
+          "rerankedCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Additive (issue #31): how many of the returned chunks carry a\n`rerankScore` — that is, how many of them the reranker scored.\n\nWithout a relevance floor that is the reranked head: the chunks ordered\nby the rerank score, followed by the rest in the fused order without\none. With a relevance floor (`minScore`) the whole pool was scored (the\nfloor compares every hit against its score), so it can be the whole\nanswer.\n\nAbsent when no reranker ran, so a search without a reranker keeps\nexactly the earlier shape.",
+            "minimum": 0
           },
           "skippedArms": {
             "type": [

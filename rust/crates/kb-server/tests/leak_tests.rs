@@ -61,6 +61,7 @@ fn engine_settings() -> EngineSettings {
         rerank_char_budget: 350,
         rerank_timeout_ms: 3000,
         rerank_final_k: 10,
+        rerank_max_k: 10,
         max_chunks: 10,
         min_similarity: 0.30,
         min_score: None,
@@ -78,6 +79,7 @@ fn engine_settings() -> EngineSettings {
 /// A document row the matrix can scope by knowledge base and category.
 fn doc(id: &str, title: &str, kb: &str, category: &str) -> DocumentMeta {
     DocumentMeta {
+        sha256: None,
         id: DocumentId(id.to_string()),
         title: title.to_string(),
         categories: vec![category.to_string()],
@@ -546,6 +548,7 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
             events: Arc::clone(&events),
             tables: Some(Arc::new(tables)),
             version: "leak-test".to_string(),
+            upload_dedupe: kb_core::policy::UploadDedupe::default(),
         },
         Arc::new(FakeReranker::default()),
         engine_settings(),

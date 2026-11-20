@@ -25,6 +25,57 @@ impl FigureMode {
     }
 }
 
+/// What the upload route does with a file the tenant already has
+/// (`KB_UPLOAD_DEDUPE`).
+///
+/// The default is [`UploadDedupe::Reject`]: uploading the same bytes twice
+/// costs a full ingest — extraction, embedding, indexing — and produces a
+/// second copy of the same answer. The operator can turn the check off with
+/// `KB_UPLOAD_DEDUPE=off` when a duplicate upload is the point (a re-ingest
+/// after the extraction pipeline changed, two copies that must stay apart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UploadDedupe {
+    /// Refuse the upload with a 409 that names the document that already holds
+    /// these bytes.
+    #[default]
+    Reject,
+    /// Store the file again, as if the dedupe did not exist.
+    Off,
+}
+
+impl UploadDedupe {
+    /// The environment variable that sets it.
+    pub const ENV_VAR: &'static str = "KB_UPLOAD_DEDUPE";
+
+    /// Parse the environment value. `None` for a value that is neither
+    /// `reject` nor `off`: the caller turns that into a boot error rather
+    /// than silently picking a mode, because a typo in a toggle that decides
+    /// whether an upload is refused must not read as "off".
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" | "reject" => Some(Self::Reject),
+            "off" | "false" | "0" | "no" | "disabled" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// The value the environment variable uses.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Reject => "reject",
+            Self::Off => "off",
+        }
+    }
+
+    /// Whether an upload of bytes the tenant already has is refused.
+    #[must_use]
+    pub fn rejects(&self) -> bool {
+        matches!(self, Self::Reject)
+    }
+}
+
 /// Per-file-type policy. The single decision table for what the pipeline does
 /// to a document. Replaces the old UI "enhanced" toggle.
 #[derive(Debug, Clone, Copy)]
@@ -50,6 +101,8 @@ impl MimeRegistry {
     }
 
     /// KB upload limit in bytes.
+    ///
+    /// The default is 256 MiB; `KB_MAX_FILE_BYTES` overrides it at runtime.
     #[must_use]
     pub fn kb_max_file_bytes() -> u64 {
         KB_MAX_FILE_BYTES
@@ -123,7 +176,15 @@ pub fn parse_figure_mode(value: Option<&str>, legacy_force_ocr: Option<bool>) ->
     FigureMode::Auto
 }
 
-const KB_MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
+/// The default upload limit: 256 MiB.
+///
+/// The Bun service it replaced accepted 50 MB, which was its own inherited
+/// default rather than a considered limit — a 50.9 MB computer-science textbook
+/// (ViDoRe's) already did not fit. 256 MiB is big enough for the manuals,
+/// textbooks and scanned archives that actually get uploaded, and small enough
+/// that one request cannot exhaust a worker's memory. `KB_MAX_FILE_BYTES`
+/// overrides it.
+const KB_MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 const EXT_TO_MIME: &[(&str, &str)] = &[
     (".pdf", "application/pdf"),
@@ -351,5 +412,28 @@ mod tests {
     #[test]
     fn mime_registry_knows_pdf() {
         assert_eq!(MimeRegistry::ext_to_mime(".pdf"), Some("application/pdf"));
+    }
+
+    #[test]
+    fn upload_dedupe_defaults_to_rejecting() {
+        assert_eq!(UploadDedupe::default(), UploadDedupe::Reject);
+        assert!(UploadDedupe::default().rejects());
+    }
+
+    #[test]
+    fn upload_dedupe_parses_both_modes() {
+        assert_eq!(UploadDedupe::parse("reject"), Some(UploadDedupe::Reject));
+        assert_eq!(UploadDedupe::parse("off"), Some(UploadDedupe::Off));
+        assert_eq!(UploadDedupe::parse(" OFF "), Some(UploadDedupe::Off));
+        // An unset variable is the default, not an error.
+        assert_eq!(UploadDedupe::parse(""), Some(UploadDedupe::Reject));
+    }
+
+    #[test]
+    fn upload_dedupe_refuses_a_value_it_does_not_know() {
+        // A typo must not read as "off": the toggle decides whether an
+        // upload is refused, so an unknown value has to stop the boot.
+        assert_eq!(UploadDedupe::parse("maybe"), None);
+        assert_eq!(UploadDedupe::parse("dedupe"), None);
     }
 }

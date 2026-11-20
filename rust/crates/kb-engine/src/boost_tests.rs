@@ -41,6 +41,7 @@ fn doc(id: &str, effective_date: Option<&str>, authority: Option<f64>) -> Docume
         metadata.insert("authority".into(), serde_json::json!(value));
     }
     DocumentMeta {
+        sha256: None,
         id: DocumentId(id.into()),
         title: format!("Title {id}"),
         categories: vec![],

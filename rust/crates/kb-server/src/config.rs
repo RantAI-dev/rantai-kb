@@ -139,6 +139,9 @@ pub struct Config {
     /// The deployment tier preset that shaped this config (`KB_TIER`), with
     /// the variables it filled. `None` when no tier is set.
     pub tier: Option<crate::tier::TierPlan>,
+    /// What the upload route does with a file the tenant already has
+    /// (`KB_UPLOAD_DEDUPE`). `reject` by default.
+    pub upload_dedupe: kb_core::policy::UploadDedupe,
 }
 
 /// The table store (`TBL-1`). On by default: a document with no tables is
@@ -748,6 +751,15 @@ impl Config {
         // fusion (k=2 won offline with e5-large on MIRACL-id) sets it here.
         let rrf_k: u32 = int_var(&lookup, "KB_RRF_K", 60u32)?.max(1);
         let rerank_final_k = int_var(&lookup, "KB_RERANK_FINAL_K", 5)?;
+        // The cap on the reranked head (issue #31). The head is
+        // `max(KB_RERANK_FINAL_K, KB_RERANK_MAX_K)` wide: the candidates that
+        // come back with a `rerankScore` and are ordered by it. The default (10)
+        // covers the default answer (8 chunks) and stops where the
+        // measurement says the reranker's ordering stops beating the fused
+        // order (`docs/eval-ab/rerank-max-k/README.md`). `0` means no cap: the
+        // head is the whole pool. It costs no extra rerank compute, because
+        // those candidates were already sent and already scored.
+        let rerank_max_k = int_var(&lookup, "KB_RERANK_MAX_K", 10u32)?.min(100);
         let figure_limit = int_var(&lookup, "KB_FIGURE_MAX_PER_ANSWER", 3)?;
         let query_expansion_enabled = bool_flag(&lookup, "KB_QUERY_EXPANSION_ENABLED", false);
         let query_expansion_model = lookup("KB_QUERY_EXPANSION_MODEL")
@@ -810,6 +822,7 @@ impl Config {
             rerank_char_budget,
             rerank_timeout_ms,
             rerank_final_k,
+            rerank_max_k,
             max_chunks: default_max_chunks,
             min_similarity,
             min_score,
@@ -1194,6 +1207,18 @@ impl Config {
                 kb_core::tables::QUERY_TIMEOUT_MS,
             )?,
         };
+        // The upload dedupe decides whether an upload of bytes the tenant
+        // already has is refused. An unknown value stops the boot: a typo in
+        // this toggle must not read as "off".
+        let upload_dedupe = match lookup(kb_core::policy::UploadDedupe::ENV_VAR) {
+            None => kb_core::policy::UploadDedupe::default(),
+            Some(value) => kb_core::policy::UploadDedupe::parse(&value).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} must be \"reject\" or \"off\", got {value:?}",
+                    kb_core::policy::UploadDedupe::ENV_VAR
+                )
+            })?,
+        };
         Ok(Config {
             pages,
             visuals,
@@ -1219,6 +1244,7 @@ impl Config {
             version,
             request_timeout: Duration::from_secs(30),
             tier: tier_plan,
+            upload_dedupe,
         })
     }
 
@@ -1498,6 +1524,34 @@ mod tests {
     }
 
     #[test]
+    fn test_the_rerank_head_cap_defaults_to_ten_and_zero_means_no_cap() {
+        let load = |value: Option<&'static str>| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            if let Some(v) = value {
+                map.insert("KB_RERANK_MAX_K", v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .engine
+                .rerank_max_k
+        };
+        assert_eq!(
+            load(None),
+            10,
+            "the default head covers the default answer (8 chunks)"
+        );
+        assert_eq!(load(Some("0")), 0, "0 means no cap: the whole pool");
+        assert_eq!(load(Some("25")), 25);
+        assert_eq!(
+            load(Some("9999")),
+            100,
+            "the cap is clamped, so a typo cannot ask for a thousand reranked hits"
+        );
+    }
+
+    #[test]
     fn test_tree_arm_is_off_by_default_and_settable() {
         let load = |vars: &[(&'static str, &'static str)]| {
             let mut map = HashMap::new();
@@ -1600,6 +1654,7 @@ mod tests {
         map.insert("KB_NEIGHBOR_WINDOW", "3");
         map.insert("KB_RERANK_INITIAL_K", "30");
         map.insert("KB_RERANK_FINAL_K", "7");
+        map.insert("KB_RERANK_MAX_K", "16");
         map.insert("KB_FIGURE_MAX_PER_ANSWER", "6");
         map.insert("KB_HYBRID_BM25_ENABLED", "false");
         map.insert("KB_QUERY_EXPANSION_ENABLED", "true");
@@ -1662,6 +1717,7 @@ mod tests {
         assert_eq!(cfg.engine.neighbour_window, 3);
         assert_eq!(cfg.engine.candidate_pool_size, 30);
         assert_eq!(cfg.engine.rerank_final_k, 7);
+        assert_eq!(cfg.engine.rerank_max_k, 16);
         assert!((cfg.engine.min_similarity - 0.30).abs() < 1e-4);
         assert_eq!(cfg.engine.figure_limit, 6);
         assert!(!cfg.engine.hybrid_bm25_enabled);
@@ -1738,6 +1794,7 @@ mod tests {
         assert_eq!(cfg.engine.neighbour_window, 1);
         assert_eq!(cfg.engine.candidate_pool_size, 20);
         assert_eq!(cfg.engine.rerank_final_k, 5);
+        assert_eq!(cfg.engine.rerank_max_k, 10);
         assert_eq!(cfg.engine.figure_limit, 3);
         assert!(cfg.engine.hybrid_bm25_enabled);
         assert!(!cfg.engine.expansion_enabled);

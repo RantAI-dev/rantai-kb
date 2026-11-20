@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use kb_core::policy::UploadDedupe;
 use kb_engine::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityStore, FakeJobStore,
     FakeReranker, FakeTableStore,
@@ -50,7 +51,7 @@ impl Default for Harness {
 
 impl Harness {
     pub fn new() -> Self {
-        Self::build(BackendTargets::default())
+        Self::build(BackendTargets::default(), UploadDedupe::default())
     }
 
     /// A harness whose health route probes the given backends (`#36`).
@@ -58,10 +59,17 @@ impl Harness {
     /// The router is built from the state, so the probe has to be in place
     /// before that.
     pub fn with_backends(targets: BackendTargets) -> Self {
-        Self::build(targets)
+        Self::build(targets, UploadDedupe::default())
     }
 
-    fn build(targets: BackendTargets) -> Self {
+    /// A harness whose upload route refuses a file the tenant already has
+    /// (`KB_UPLOAD_DEDUPE=reject`, the default) or stores it again
+    /// (`KB_UPLOAD_DEDUPE=off`).
+    pub fn with_upload_dedupe(upload_dedupe: UploadDedupe) -> Self {
+        Self::build(BackendTargets::default(), upload_dedupe)
+    }
+
+    fn build(targets: BackendTargets, upload_dedupe: UploadDedupe) -> Self {
         let documents = FakeDocumentStore::default();
         let chunks = FakeChunkStore::default();
         let blobs = FakeBlobStore::default();
@@ -84,6 +92,7 @@ impl Harness {
                 events: Arc::clone(&events),
                 tables: Some(Arc::new(tables.clone())),
                 version: "test".to_string(),
+                upload_dedupe,
             },
             Arc::new(FakeReranker::default()),
             engine_settings(),
@@ -132,6 +141,7 @@ impl Harness {
                 events: Arc::clone(&events),
                 tables: Some(Arc::new(tables.clone())),
                 version: "test".to_string(),
+                upload_dedupe: UploadDedupe::default(),
             },
             Arc::new(FakeReranker::default()),
             engine_settings(),
@@ -272,6 +282,7 @@ fn engine_settings() -> EngineSettings {
         rerank_char_budget: 350,
         rerank_timeout_ms: 3000,
         rerank_final_k: 10,
+        rerank_max_k: 10,
         max_chunks: 10,
         min_similarity: 0.30,
         min_score: None,
@@ -326,6 +337,7 @@ pub async fn serve_status(status: u16) -> String {
 /// A document row the tests can seed.
 pub fn doc_meta(id: &str, title: &str) -> DocumentMeta {
     DocumentMeta {
+        sha256: None,
         id: kb_ports::DocumentId(id.to_string()),
         title: title.to_string(),
         categories: vec![],

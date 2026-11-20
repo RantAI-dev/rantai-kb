@@ -395,6 +395,10 @@ postprocessing.
   app's chat LLM shares the card. If a model cannot load, lower
   `KB_RERANK_CANDIDATE_LIMIT` (the tier presets are 10/20/30) or use an external
   reranker.
+- `KB_RERANK_MAX_K` is the width of the reranked head (the candidates that come
+  back with a `rerankScore` and are ordered by it); it does not change what is
+  sent to the reranker, so it costs no VRAM, no latency and no spend. Leave it at
+  the default (10).
 - The first start downloads each model into the shared `hf-models` volume. That
   is minutes on a slow link, which is why the TEI healthchecks allow a 15-minute
   start period.

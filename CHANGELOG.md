@@ -35,6 +35,39 @@
 - **`Document.status` and `IngestJob.status` can hold two new values:** `waiting_for_ocr` (`#36`)
   and `needs_ocr` (`#29`, only with the gate on). A calling app that switches on the status should
   treat `waiting_for_ocr` as still in progress and `needs_ocr` as failed.
+- **`GET /v1/documents` is paged.** The response now carries `nextCursor` (an opaque token, `null` on
+  the last page), `total` (how many documents match the filter, over every page), `limit` (the page
+  size that was applied) and `limitClamped` (`true` when the requested limit was above the cap of 200
+  and had to be clamped). Send the cursor back as `?cursor=` to continue the walk. The list is ordered
+  by `(createdAt, id)`, so a document is never listed twice or skipped. The existing query parameters
+  and the `documents` array are unchanged; the new fields are additive. A cursor this server did not
+  issue is a `400`, not an empty page — an empty page is a valid answer that looks like the end of the
+  list.
+- **An upload of a file the tenant already has is refused (`KB_UPLOAD_DEDUPE`).** The upload's bytes
+  are hashed (SHA-256) and compared with the tenant's live documents: the same bytes, in the same
+  tenant, filed under the same knowledge bases, that is neither deleted nor failed, answer `409` with
+  the usual `error` message plus `existingDocumentId`, the id of the document that already holds the
+  file. The message names the toggle. `KB_UPLOAD_DEDUPE=off` stores the file again, as before. The
+  hash is kept on the document row and is returned as `sha256` by the document list and detail
+  routes. Another tenant's identical file neither refuses the upload nor has its id reported.
+- **`KB_RERANK_MAX_K` sets how wide the reranked head is (issue #31).** The head is the set of
+  candidates that come back with a `rerankScore` and are ordered by it; the candidates past it
+  follow in the fused order, unscored. Before this, the head was always
+  `KB_RERANK_FINAL_K` (5), so with the default answer of 8 chunks only 5 of them carried a score.
+  The head is now `max(KB_RERANK_FINAL_K, KB_RERANK_MAX_K)` wide: `KB_RERANK_FINAL_K` keeps its
+  old meaning ("the head is at least this wide"), so an operator who raised it keeps the head
+  they had. `KB_RERANK_MAX_K=0` means no cap — the head is the whole pool. The default is **10**,
+  which covers the default answer and stops where the measurement says the reranker's ordering
+  stops beating the fused order (`docs/eval-ab/rerank-max-k/README.md`: nDCG@10 +0.0101
+  [+0.0030, +0.0182] and Recall@10 +0.0246 [+0.0078, +0.0449] on the 20-candidate pool with
+  `nvidia/nemotron-3.5-rerank-8b:free`; nothing gains past 10). A cross-encoder scores every
+  document it is sent, so widening the head costs **no extra compute and no extra spend** — it
+  only decides how many of the scores already produced are kept. The LLM reranker asks a chat
+  model for a top-N list and returns ranks rather than relevance scores, so its head stays at
+  `KB_RERANK_FINAL_K`.
+- **`stats.rerankedCount` on the search response.** How many of the returned chunks carry a
+  `rerankScore` — that is, how much of the answer the reranker scored. Additive: it is absent
+  when no reranker ran, so a search without a reranker keeps exactly the earlier shape.
 
 ### Changed
 
@@ -44,6 +77,18 @@
   it; the flag costs throughput, so it is off by default. The OCR model wants about 8 GiB of the
   card, and a job that needs OCR while the container is off now waits instead of failing
   (`rust/deploy/README.md`, GPU notes).
+- **The upload limit is 256 MiB, and a `413` says how to move it.** `KB_MAX_FILE_BYTES` still wins when
+  it is set, but the default is now `268435456` bytes (256 MiB) instead of the Bun service's inherited
+  50 MB (`src/lib/files/mime-types.ts`) — a limit that a 50.9 MB textbook (ViDoRe's) already did not
+  fit. The `413` body names the limit in bytes, the limit in MiB and the variable that moves it, so a
+  caller can act instead of guessing. The status code and the JSON shape are unchanged.
+- **The documents list caps a page at 200.** A caller that asked for 500 used to receive 200 rows
+  without being told; it is now told (`limitClamped: true`) and the page size that was applied is
+  returned as `limit`. A limit above the cap is still clamped rather than refused, so existing callers
+  keep working.
+- The engine orders the head by the rerank score itself instead of trusting the provider's
+  order (a stable sort, so equal scores keep the provider's order), and the candidates past the
+  head keep the fused order.
 
 ### Fixed
 
@@ -60,6 +105,12 @@
   failed while the gate was right.
 - The migration check accepted only a migration that creates a table; a migration that adds a
   column (`IngestJob.resumeAt`) was refused.
+
+### Upgrading
+
+- No re-index and no re-embed. The on-disk rerank cache keys on the ask width, so the first
+  query after the upgrade re-runs the reranker for the wider ask and re-populates the cache; the
+  provider spend is the same, it is paid once.
 
 ## 0.6.0 — 2026-11-18
 

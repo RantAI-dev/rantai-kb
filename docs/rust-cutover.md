@@ -746,7 +746,35 @@ Operational notes: `KB_TABLES=false` disables the store and the routes (404);
 are cached under `KB_CACHE_DIR/tables/` (or the system temporary directory), one
 file per grid version; a hard delete removes the document's table rows and Parquet.
 
-### 23. Additive: the `waiting_for_ocr` job state and the per-backend health (`#36`, 2026-11-20)
+### 23. Additive: the reranked head and `stats.rerankedCount` (2026-11-20, issue #31)
+- **Bun**: the reranker's `top_k` (`KB_RERANK_FINAL_K`) decided both how many
+  candidates were sent and how many came back with a `rerankScore`; the rest of
+  the pool was returned in the fused order, unscored.
+- **Rust (now)**: two settings. `KB_RERANK_CANDIDATE_LIMIT` still decides how
+  many candidates are **sent**; `KB_RERANK_MAX_K` decides how many of the
+  scores that came back are **kept** and used for the order. The head is
+  `max(KB_RERANK_FINAL_K, KB_RERANK_MAX_K)` wide, so `KB_RERANK_FINAL_K` keeps
+  its old meaning ("the head is at least this wide") and an operator who raised
+  it keeps the head they had. `KB_RERANK_MAX_K=0` means no cap. The default is
+  10, which covers the default answer of 8 chunks — before, only 5 of the 8
+  carried a score.
+- **What it changes in the API**: additive. `stats.rerankedCount` says how many
+  of the returned chunks carry a `rerankScore`; it is absent when no reranker
+  ran, so a search without a reranker keeps exactly the earlier shape. Chunks
+  that carry a score are ordered by it; the ones past them keep the fused
+  order.
+- **Cost**: none per query. A cross-encoder scores every document it is sent, so
+  the head width changes no compute and no spend — it only decides how many of
+  the scores already produced are kept. The on-disk rerank cache keys on the ask
+  width, so the first query after the upgrade re-runs the reranker once and
+  re-populates the cache; the provider spend is the same, it is paid once.
+- **The LLM reranker is excluded**: `KB_RERANK_PROVIDER=llm` asks a chat model
+  for a top-N list and returns ranks, not relevance scores, so its head stays
+  at `KB_RERANK_FINAL_K`.
+- **Evidence**: `docs/eval-ab/rerank-max-k/README.md` (200 MIRACL-id queries,
+  paired bootstrap over cached rerank scores, 10,000 resamples).
+
+### 28. Additive: the `waiting_for_ocr` job state and the per-backend health (`#36`, 2026-11-20)
 
 A document whose OCR backend was not there used to fail on the first error: the job went to
 `failed`, the operator had to press retry, and a ten-minute provider outage lost every document
@@ -901,3 +929,91 @@ created. Wipe and rebuild from the S3 originals:
 
 The measured numbers behind the option are in `docs/eval-ab/one-embedder/` and
 `docs/eval-ab/rerank-2026-11-17/`; the spec is `docs/core/specs/dep-6.md`.
+
+### 24. The upload limit is 256 MiB, and a `413` says how to move it
+
+`KB_MAX_FILE_BYTES` defaults to `268435456` bytes (256 MiB). The Bun service it replaced defaulted to
+50 MB (`src/lib/files/mime-types.ts`) — an inherited default rather than a considered limit: a 50.9 MB
+computer-science textbook (ViDoRe's) already did not fit. A deployment that sets the variable keeps
+its own limit; an unset one is now 256 MiB. Nothing else changes: the same files are accepted, the
+same ones are refused.
+
+The `413` body changed shape. It used to read `"<file>" is 300.0MB — the limit is 50MB.`; it now
+reads:
+
+    "<file>" is 300.0 MiB — the limit is 256 MiB (268435456 bytes). Raise KB_MAX_FILE_BYTES to accept a larger file.
+
+The bytes are exact, the MiB is the limit rounded up, and the variable is named so an operator can
+find the knob. The status code, the JSON shape (`{"error": "…"}`) and every other field are
+unchanged, so no client has to change to read the new message.
+
+### 25. `GET /v1/documents` is paged
+
+The response grew four fields and the request grew one parameter. Everything that existed before
+still works: the `documents` array, the `limit`, `knowledgeBaseIds` and `externalRef` parameters, and
+the `{"documents": [...]}` shape.
+
+    GET /v1/documents?limit=50
+    {
+      "documents": [ ... ],
+      "nextCursor": "MjAyNi0xMS0yMFQwNToyODowMC4wMDB8ZG9jLTE",
+      "total": 340,
+      "limit": 50,
+      "limitClamped": false
+    }
+
+- `nextCursor` is an opaque token (`null` on the last page). Send it back as `?cursor=` to get the
+  next page. It is base64url over a private encoding: a caller cannot read the order out of it, and it
+  is not a document id, so it cannot be edited into a position in another tenant's list.
+- `total` is how many documents match the **filter**, over every page — the same number on every
+  page, so a client can show "17 of 340" without counting rows itself.
+- `limit` is the page size that was applied, and `limitClamped` says whether it was the one that was
+  asked for. A `limit` above the cap of 200 is clamped, never refused: a caller that asks for 500
+  keeps working, and now knows it got 200.
+- The list is ordered by `(createdAt, id)`, newest first. The id breaks the tie, so a walk over many
+  documents created in the same millisecond lists each of them exactly once.
+
+A cursor this server did not issue is a `400` (`Invalid 'cursor': not a cursor this server issued.`),
+not an empty page: an empty page is a valid answer that would look like the end of the list.
+
+The cursor never widens what a caller can see. The tenant, the knowledge-base and the soft-delete
+filters are applied by the same query that reads the cursor, so a cursor is a position and never a
+grant.
+
+### 26. An upload of a file the tenant already has is refused (`KB_UPLOAD_DEDUPE`)
+
+The upload's bytes are hashed (SHA-256) and stored on the document row (`Document.sha256`, a new
+nullable column). Before anything is written, the upload route looks for a document in the same
+tenant with the same hash, filed under one of the same knowledge bases, that is neither deleted nor
+failed. A hit is a `409`:
+
+    HTTP/1.1 409 Conflict
+    {
+      "error": "This file has already been uploaded as document 6f1c…. Set KB_UPLOAD_DEDUPE=off to upload the same file again.",
+      "existingDocumentId": "6f1c…"
+    }
+
+The usual `error` field is there, so a client that only reads it keeps working; `existingDocumentId`
+is additive and names the document that already holds the file.
+
+- `KB_UPLOAD_DEDUPE=off` stores the file again, exactly as before. Unset means `reject`.
+- An unknown value stops the boot: a typo in a toggle that decides whether an upload is refused must
+  not read as "off".
+- A deleted document does not block an upload, and neither does a failed one: a document that failed
+  to ingest is exactly the one a caller wants to try again.
+- The scope is the tenant's. Another tenant's identical file neither refuses the upload nor has its
+  id reported — the query that finds the duplicate filters on the tenant, so a cross-tenant probe
+  learns nothing.
+- The hash is returned as `sha256` by `GET /v1/documents` and `GET /v1/documents/{id}`. A document
+  uploaded before this column existed has none.
+
+**The migration.** `Document.sha256` is a nullable `TEXT` column with an index on
+`("tenantId", "sha256")`. It is additive: nothing existing changes, and a deployment that has not
+run `kb-server migrate` yet keeps working — the upload route then fails to write the column, so
+run the migration before the upgrade:
+
+    kb-server migrate
+
+Existing documents have no hash, so the first upload of a file that was uploaded before the upgrade
+is not a duplicate of it.
+

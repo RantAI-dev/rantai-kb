@@ -26,6 +26,7 @@ fn tenant() -> TenantId {
 
 fn doc_meta(id: &str, title: &str) -> DocumentMeta {
     DocumentMeta {
+        sha256: None,
         id: DocumentId(id.into()),
         title: title.into(),
         categories: vec![],

@@ -1,3 +1,5 @@
+| `KB_MAX_FILE_BYTES` | Largest accepted upload, in bytes. A `413` names this variable, the limit in bytes and the limit in MiB | `268435456` (256 MiB) |
+| `KB_UPLOAD_DEDUPE` | What an upload of a file the tenant already has does: `reject` answers `409` with the id of the document that already holds the bytes, `off` stores the file again. The scope is the tenant's, so another tenant's identical file is never a duplicate | `reject` |
 | `KB_FIGURE_VLM_TOPN` | Top candidate figures evaluated by figure gate | `5` |
 | `KB_FIGURE_VLM_MAX` | Maximum number of candidate figures accepted | `2` |
 | `KB_FIGURE_VLM_TIMEOUT_MS` | Figure gate evaluation timeout in ms | `15000` |

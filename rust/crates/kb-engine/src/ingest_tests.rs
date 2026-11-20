@@ -75,6 +75,7 @@ fn job() -> JobRecord {
 
 fn document() -> DocumentMeta {
     DocumentMeta {
+        sha256: None,
         id: DocumentId::new_unchecked(DOC),
         title: "Quarterly report".to_string(),
         categories: vec!["finance".to_string()],
@@ -2701,6 +2702,7 @@ fn named_job(id: &str, doc: &str, filename: &str, created_at: i64) -> JobRecord 
 
 fn named_document(doc: &str) -> DocumentMeta {
     DocumentMeta {
+        sha256: None,
         id: DocumentId::new_unchecked(doc),
         ..document()
     }

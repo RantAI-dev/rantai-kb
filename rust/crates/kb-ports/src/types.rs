@@ -573,6 +573,27 @@ pub struct DocumentMeta {
     pub updated_at: String,
     pub knowledge_base_ids: Vec<String>,
     pub metadata: Option<serde_json::Value>,
+    /// The SHA-256 of the uploaded bytes, when the document was stored with
+    /// one. `None` for a document uploaded before the hash was recorded, and
+    /// for one uploaded while the dedupe was off.
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+/// One page of the documents list: the rows, the size of the whole result
+/// set, and the cursor that continues the walk.
+///
+/// `total` counts the documents that match the **filter**, not the page: it is
+/// the same on every page, so a caller can show "17 of 340" without counting
+/// rows itself. `next_cursor` is `None` on the last page.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentPage {
+    /// The page's documents, newest first.
+    pub documents: Vec<DocumentMeta>,
+    /// How many documents match the filter, over every page.
+    pub total: u64,
+    /// The cursor that continues the walk; `None` when this is the last page.
+    pub next_cursor: Option<String>,
 }
 
 /// Summary of a knowledge base, as returned by the document store list path.
@@ -678,6 +699,11 @@ pub struct NewDocument {
     /// `{"effectiveDate": "2025-03-01", "authority": 0.9}`.
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    /// The SHA-256 of the uploaded bytes. `None` when the document is stored
+    /// without one — the dedupe was off, or the document was created by
+    /// something other than an upload.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// Metadata update patch for a document.

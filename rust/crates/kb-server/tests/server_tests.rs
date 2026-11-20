@@ -35,6 +35,13 @@ pub struct Harness {
 
 impl Harness {
     pub fn new() -> Self {
+        Self::with_rerank(false)
+    }
+
+    /// A harness whose engine reranks (issue #31). The fake reranker scores
+    /// every candidate it is handed, like a cross-encoder, so the response
+    /// carries `stats.rerankedCount`.
+    pub fn with_rerank(rerank_enabled: bool) -> Self {
         let documents = FakeDocumentStore::default();
         let chunks = FakeChunkStore::default();
         let blobs = FakeBlobStore::default();
@@ -50,6 +57,7 @@ impl Harness {
             rerank_char_budget: 350,
             rerank_timeout_ms: 3000,
             rerank_final_k: 10,
+            rerank_max_k: 10,
             max_chunks: 10,
             min_similarity: 0.30,
             min_score: None,
@@ -58,7 +66,7 @@ impl Harness {
             expansion_enabled: false,
             expansion_paraphrases: 3,
             hybrid_bm25_enabled: true,
-            rerank_enabled: false,
+            rerank_enabled,
             adaptive_arms: false,
         };
 
@@ -75,6 +83,7 @@ impl Harness {
                 events: Arc::clone(&events),
                 tables: None,
                 version: "test".to_string(),
+                upload_dedupe: kb_core::policy::UploadDedupe::default(),
             },
             Arc::new(FakeReranker::default()),
             settings,
@@ -161,6 +170,7 @@ async fn test_search_happy_path_fields() {
     harness.documents.insert_doc(
         tenant,
         DocumentMeta {
+            sha256: None,
             id: DocumentId(doc_id.into()),
             title: "Happy Path Document".into(),
             categories: vec!["guide".into()],
@@ -223,6 +233,84 @@ async fn test_search_happy_path_fields() {
 }
 
 #[tokio::test]
+async fn the_search_response_says_how_much_of_the_answer_was_reranked() {
+    // Issue #31: `stats.rerankedCount` is additive. With a reranker it says
+    // how many of the returned chunks carry a `rerankScore`; without one the
+    // field is absent, so a search without a reranker keeps exactly the
+    // earlier shape.
+    let harness = Harness::with_rerank(true);
+    let tenant = TenantId("tenant-1".into());
+    harness
+        .documents
+        .insert_api_key("valid-key", tenant.clone());
+    harness.documents.insert_doc(
+        tenant,
+        DocumentMeta {
+            sha256: None,
+            id: DocumentId("doc-1".into()),
+            title: "Reranked Document".into(),
+            categories: vec![],
+            subcategory: None,
+            status: "ready".into(),
+            external_ref: None,
+            chunk_count: 3,
+            file_type: None,
+            file_size: None,
+            mime_type: None,
+            s3_key: None,
+            created_at: "2026-01-01T00:00:00.000Z".into(),
+            updated_at: "2026-01-01T00:00:00.000Z".into(),
+            knowledge_base_ids: vec![],
+            metadata: None,
+        },
+    );
+    for i in 1..=3u32 {
+        harness
+            .chunks
+            .vector_hits
+            .write()
+            .unwrap()
+            .push(make_fake_hit(
+                &format!("c_{i}"),
+                "doc-1",
+                "Reranked Document",
+                &format!("Passage {i}"),
+                i,
+                0.9,
+            ));
+    }
+
+    let body = search_body(&harness, "passage").await;
+    let scored = body["chunks"]
+        .as_array()
+        .expect("chunks present")
+        .iter()
+        .filter(|c| {
+            c.get("retrieval")
+                .and_then(|r| r.get("rerankScore"))
+                .is_some_and(|s| !s.is_null())
+        })
+        .count();
+    assert_eq!(scored, 3, "every returned chunk carries a rerank score");
+    assert_eq!(
+        body["stats"]["rerankedCount"], 3,
+        "the count says how much of the answer the reranker scored"
+    );
+
+    // Without a reranker the field is absent, not zero: an old client sees
+    // exactly the earlier shape.
+    let plain = Harness::with_rerank(false);
+    plain
+        .documents
+        .insert_api_key("valid-key", TenantId("tenant-1".into()));
+    let body = search_body(&plain, "passage").await;
+    assert!(
+        body["stats"].get("rerankedCount").is_none(),
+        "no reranker ran, so there is no count: {body}"
+    );
+}
+
+#[tokio::test]
 async fn test_search_min_score_floor_empties_with_a_note_and_reports_stats() {
     let harness = Harness::new();
     let tenant = TenantId("tenant-1".into());
@@ -232,6 +320,7 @@ async fn test_search_min_score_floor_empties_with_a_note_and_reports_stats() {
     harness.documents.insert_doc(
         tenant,
         DocumentMeta {
+            sha256: None,
             id: DocumentId("doc-1".into()),
             title: "Floor Document".into(),
             categories: vec![],
@@ -318,6 +407,7 @@ async fn test_search_chunks_carry_the_documents_external_ref() {
     harness.documents.insert_doc(
         tenant,
         DocumentMeta {
+            sha256: None,
             id: DocumentId("doc-1".into()),
             title: "KU Document".into(),
             categories: vec![],
@@ -385,6 +475,7 @@ fn timing_harness() -> Harness {
     harness.documents.insert_doc(
         tenant,
         DocumentMeta {
+            sha256: None,
             id: DocumentId("doc-1".into()),
             title: "Timing Document".into(),
             categories: vec![],
@@ -705,6 +796,7 @@ async fn test_tenant_b_key_searching_fakes_with_tenant_a_docs_gets_zero_results(
     harness.documents.insert_doc(
         tenant_a.clone(),
         DocumentMeta {
+            sha256: None,
             id: DocumentId(doc_a_id.into()),
             title: "Tenant A Confidential Doc".into(),
             categories: vec![],
@@ -781,6 +873,7 @@ async fn test_tenant_b_key_searching_fakes_with_tenant_a_docs_gets_zero_results(
 
 fn delete_test_doc(id: &str) -> DocumentMeta {
     DocumentMeta {
+        sha256: None,
         id: DocumentId(id.into()),
         title: "Delete Me".into(),
         categories: vec![],
