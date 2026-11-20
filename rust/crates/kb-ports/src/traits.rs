@@ -143,6 +143,24 @@ pub trait DocumentStore: Send + Sync {
         scope: &DocumentScope,
     ) -> Result<Vec<(DocumentId, kb_core::tree::Outline)>, PortError>;
 
+    /// Find a live document in the tenant that already holds these bytes.
+    ///
+    /// The upload dedupe (`KB_UPLOAD_DEDUPE`) asks this before it stores
+    /// anything: a document with the same content hash, in the same tenant,
+    /// filed under one of the same knowledge bases, that is neither deleted
+    /// nor failed, blocks the upload.
+    ///
+    /// The scope is the store's, never the caller's: the tenant filter is
+    /// part of the statement, so another tenant's document with the same bytes
+    /// can neither block the upload nor have its id reported. A knowledge-base
+    /// list that is empty means the whole tenant.
+    async fn find_duplicate_by_sha256(
+        &self,
+        tenant: &TenantId,
+        sha256: &str,
+        knowledge_base_ids: &[KnowledgeBaseId],
+    ) -> Result<Option<DocumentId>, PortError>;
+
     /// List one page of documents visible to the tenant (optionally filtered).
     /// Used by `GET /v1/documents`.
     ///

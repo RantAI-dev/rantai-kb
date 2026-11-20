@@ -81,6 +81,7 @@ fn doc_store() -> Arc<FakeDocumentStore> {
         store.insert_doc(
             TenantId::new_unchecked("t1"),
             DocumentMeta {
+                sha256: None,
                 id: DocumentId::new_unchecked(id),
                 title: title.to_string(),
                 categories: vec![],

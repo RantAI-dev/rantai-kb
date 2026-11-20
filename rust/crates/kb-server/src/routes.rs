@@ -1245,6 +1245,10 @@ pub struct DocumentSummary {
     /// The knowledge bases the document belongs to.
     #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Vec<String>,
+    /// The SHA-256 of the uploaded bytes, when the document was stored with
+    /// one. Null for a document uploaded before the hash was recorded.
+    #[serde(rename = "sha256")]
+    pub sha256: Option<String>,
 }
 
 /// List the caller's documents.
@@ -1344,6 +1348,7 @@ pub async fn list_documents(
             external_ref: d.external_ref,
             created_at: d.created_at,
             knowledge_base_ids: d.knowledge_base_ids,
+            sha256: d.sha256,
         })
         .collect();
     Ok(Json(DocumentListResponse {
@@ -1453,6 +1458,10 @@ pub struct DocumentDetail {
     pub chunk_count: u32,
     /// The document's figures.
     pub figures: Vec<FigureView>,
+    /// The SHA-256 of the uploaded bytes, when the document was stored with
+    /// one. Null for a document uploaded before the hash was recorded.
+    #[serde(rename = "sha256")]
+    pub sha256: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1539,6 +1548,7 @@ pub async fn get_document(
             knowledge_base_ids: meta.knowledge_base_ids,
             chunk_count,
             figures: read_document_figures(meta.metadata.as_ref()),
+            sha256: meta.sha256,
         },
         chunks: chunk_views,
     }))

@@ -15,11 +15,12 @@ use kb_core::policy::{FigureMode, MimeRegistry};
 use kb_ports::{CreateJobInput, DocumentId, KnowledgeBaseId, NewDocument, document_path};
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::auth::Authed;
-use crate::error::{ApiError, ErrorBody};
+use crate::error::{ApiError, DuplicateDocumentBody, ErrorBody};
 use crate::state::AppState;
 
 struct Upload {
@@ -151,6 +152,7 @@ pub struct UploadForm {
         (status = 400, description = "No file, an unsupported extension, or an unknown knowledge base", body = ErrorBody),
         (status = 401, description = "No key, or a key that does not resolve", body = ErrorBody),
         (status = 403, description = "The key lacks the kb:write scope", body = ErrorBody),
+        (status = 409, description = "The tenant already has a document with these bytes (KB_UPLOAD_DEDUPE=reject)", body = DuplicateDocumentBody),
         (status = 413, description = "The upload is larger than the accepted limit", body = ErrorBody),
         (status = 415, description = "The file extension is not on the accepted list", body = ErrorBody),
         (status = 500, description = "The store could not be written", body = ErrorBody),
@@ -256,6 +258,27 @@ pub async fn ingest_document(
         .filter(|v| !v.is_empty())
         .unwrap_or("application/octet-stream");
 
+    // The content hash. Two uploads of the same bytes are the same document,
+    // whatever they are called and whoever sends them.
+    let sha256 = hex::encode(Sha256::digest(&upload.bytes));
+
+    // The dedupe (`KB_UPLOAD_DEDUPE`). Checked before anything is written, so
+    // a refused upload leaves no blob and no document row behind.
+    //
+    // The scope is the store's: the tenant, the hash and the knowledge bases
+    // the upload is filed under. Another tenant's identical file can neither
+    // refuse this upload nor have its id reported.
+    if state.upload_dedupe.rejects() {
+        let existing = state
+            .documents
+            .find_duplicate_by_sha256(&auth.tenant_id, &sha256, &knowledge_base_ids)
+            .await
+            .map_err(ApiError::from)?;
+        if let Some(existing) = existing {
+            return Err(ApiError::duplicate_document(existing.0));
+        }
+    }
+
     if let Err(err) = state
         .blob
         .upload(&s3_key, upload.bytes.clone(), content_type)
@@ -283,6 +306,9 @@ pub async fn ingest_document(
                 status: "processing".to_string(),
                 external_ref: external_ref.clone(),
                 metadata: metadata.clone(),
+                // The hash is stored even when the dedupe is off: it is what a
+                // later dedupe check compares against.
+                sha256: Some(sha256.clone()),
             },
             &knowledge_base_ids,
         )

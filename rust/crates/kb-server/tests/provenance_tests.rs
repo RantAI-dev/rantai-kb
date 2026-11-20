@@ -364,6 +364,7 @@ async fn a_hit_from_an_adapter_that_reports_no_arm_omits_the_field() {
             events: EventBus::new(),
             tables: None,
             version: "test".to_string(),
+            upload_dedupe: kb_core::policy::UploadDedupe::default(),
         },
         Arc::new(FakeReranker::default()),
         engine_settings(),

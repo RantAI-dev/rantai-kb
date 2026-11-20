@@ -383,6 +383,35 @@ impl DocumentStore for FakeDocumentStore {
             .collect())
     }
 
+    async fn find_duplicate_by_sha256(
+        &self,
+        tenant: &TenantId,
+        sha256: &str,
+        knowledge_base_ids: &[KnowledgeBaseId],
+    ) -> Result<Option<DocumentId>, PortError> {
+        let map = self.docs.read().unwrap();
+        let list = map.get(tenant).cloned().unwrap_or_default();
+        // The same scope the Postgres statement applies: the tenant (the map
+        // is keyed by it), the hash, the knowledge bases, and neither a
+        // deleted nor a failed document.
+        let duplicate = list
+            .into_iter()
+            .filter(|d| d.sha256.as_deref() == Some(sha256))
+            .filter(|d| d.status != "failed")
+            .filter(|d| {
+                knowledge_base_ids.is_empty()
+                    || d.knowledge_base_ids
+                        .iter()
+                        .any(|id| knowledge_base_ids.iter().any(|k| k.0 == *id))
+            })
+            .max_by(|a, b| {
+                a.created_at
+                    .cmp(&b.created_at)
+                    .then_with(|| a.id.0.cmp(&b.id.0))
+            });
+        Ok(duplicate.map(|d| d.id))
+    }
+
     async fn list_page(
         &self,
         tenant: &TenantId,
@@ -544,6 +573,7 @@ impl DocumentStore for FakeDocumentStore {
             updated_at: FAKE_TIMESTAMP.to_string(),
             knowledge_base_ids: group_kb_ids.iter().map(|k| k.0.clone()).collect(),
             metadata: doc.metadata.clone(),
+            sha256: doc.sha256.clone(),
         };
         self.insert_doc(doc.tenant_id.clone(), meta);
         self.download_metas.write().unwrap().insert(

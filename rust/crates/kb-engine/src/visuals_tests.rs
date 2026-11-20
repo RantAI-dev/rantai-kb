@@ -114,6 +114,7 @@ async fn ingest(
     documents.insert_doc(
         tenant(),
         DocumentMeta {
+            sha256: None,
             id: DocumentId::new_unchecked(DOC),
             title: "t".into(),
             categories: vec!["c".into()],

@@ -11,6 +11,7 @@ pub const SELECT_BY_ID: &str = r#"
            d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
+           d."sha256" AS sha256,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
@@ -28,6 +29,7 @@ pub const SELECT_BY_ID_WITH_DELETED: &str = r#"
            d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
+           d."sha256" AS sha256,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
@@ -43,6 +45,7 @@ pub const SELECT_ALIVE_BY_IDS: &str = r#"
            d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
+           d."sha256" AS sha256,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
@@ -88,6 +91,7 @@ pub const SELECT_DOCS_TENANT_ONLY: &str = r#"
            d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
+           d."sha256" AS sha256,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            d."createdAt" AS created_at_ts,
@@ -111,6 +115,7 @@ pub const SELECT_DOCS_WITH_KB: &str = r#"
            d."externalRef" AS external_ref,
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
+           d."sha256" AS sha256,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            d."createdAt" AS created_at_ts,
@@ -148,6 +153,35 @@ pub const COUNT_DOCS_WITH_KB: &str = r#"
        AND ($3::text IS NULL OR d."externalRef" = $3)
        AND EXISTS (SELECT 1 FROM "DocumentGroup" gf
                     WHERE gf."documentId" = d.id AND gf."knowledgeBaseId" = ANY($2::text[]))
+"#;
+
+/// The document that already holds these bytes, if any.
+///
+/// The upload dedupe (`KB_UPLOAD_DEDUPE`) runs this before it stores
+/// anything. Every clause is a scope clause: the tenant, the hash, and the
+/// knowledge bases. A soft-deleted document and a failed one do not block an
+/// upload — a document that failed to ingest is exactly the one a caller
+/// wants to try again.
+///
+/// `$3` is the list of knowledge bases the upload is filed under. An empty
+/// list means the whole tenant: the same bytes anywhere in the tenant block
+/// the upload. A non-empty list means the existing document has to be filed
+/// under one of them.
+pub const SELECT_DUPLICATE_BY_SHA256: &str = r#"
+    SELECT d.id
+      FROM "Document" d
+     WHERE d."tenantId" = $1
+       AND d."sha256" = $2
+       AND d."deletedAt" IS NULL
+       AND d.status <> 'failed'
+       AND (
+           cardinality($3::text[]) = 0
+           OR EXISTS (SELECT 1 FROM "DocumentGroup" g
+                       WHERE g."documentId" = d.id
+                         AND g."knowledgeBaseId" = ANY($3::text[]))
+       )
+     ORDER BY d."createdAt" DESC, d.id DESC
+     LIMIT 1
 "#;
 
 pub const SELECT_KNOWLEDGE_BASES: &str = r#"
@@ -332,9 +366,9 @@ pub const INSERT_DOCUMENT: &str = r#"
     INSERT INTO "Document" (
         id, "tenantId", title, content, categories, "subcategory",
         "s3Key", "fileSize", "mimeType", status, "externalRef", metadata,
-        "createdAt", "updatedAt"
+        sha256, "createdAt", "updatedAt"
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), now()
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now()
     )
 "#;
 

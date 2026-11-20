@@ -19,10 +19,10 @@ use crate::queries::{
     DELETE_KB_GROUPS, DELETE_KNOWLEDGE_BASE, INSERT_CATEGORY, INSERT_DOCUMENT,
     INSERT_DOCUMENT_GROUP, INSERT_KNOWLEDGE_BASE, MAX_LIMIT, SELECT_ALIVE_BY_IDS, SELECT_BY_ID,
     SELECT_BY_ID_WITH_DELETED, SELECT_CATEGORIES, SELECT_CATEGORY_BY_ID_TENANT,
-    SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB, SELECT_EXISTS_FOR_PATCH, SELECT_FOR_DOWNLOAD,
-    SELECT_KB_BY_ID_TENANT, SELECT_KNOWLEDGE_BASES, SELECT_OUTLINES, SELECT_OWNED_KB_IDS,
-    SET_DOCUMENT_STATUS, UPDATE_CATEGORY, UPDATE_DOCUMENT_PATCH, UPDATE_EXTRACTED_CONTENT,
-    UPDATE_KNOWLEDGE_BASE, UPDATE_METADATA,
+    SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB, SELECT_DUPLICATE_BY_SHA256,
+    SELECT_EXISTS_FOR_PATCH, SELECT_FOR_DOWNLOAD, SELECT_KB_BY_ID_TENANT, SELECT_KNOWLEDGE_BASES,
+    SELECT_OUTLINES, SELECT_OWNED_KB_IDS, SET_DOCUMENT_STATUS, UPDATE_CATEGORY,
+    UPDATE_DOCUMENT_PATCH, UPDATE_EXTRACTED_CONTENT, UPDATE_KNOWLEDGE_BASE, UPDATE_METADATA,
 };
 
 /// Open a connection pool from settings. A free function rather than a
@@ -396,6 +396,26 @@ impl DocumentStore for PgDocumentStore {
         Ok(out)
     }
 
+    async fn find_duplicate_by_sha256(
+        &self,
+        tenant: &TenantId,
+        sha256: &str,
+        knowledge_base_ids: &[KnowledgeBaseId],
+    ) -> Result<Option<DocumentId>, PortError> {
+        let ids: Vec<&str> = knowledge_base_ids.iter().map(|k| k.0.as_str()).collect();
+        let row = sqlx::query(SELECT_DUPLICATE_BY_SHA256)
+            .bind(tenant.0.as_str())
+            .bind(sha256)
+            .bind(&ids)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg duplicate: {e}")))?;
+        match row {
+            Some(row) => Ok(Some(DocumentId(text(&row, "id")?))),
+            None => Ok(None),
+        }
+    }
+
     async fn list_page(
         &self,
         tenant: &TenantId,
@@ -615,6 +635,7 @@ impl DocumentStore for PgDocumentStore {
             .bind(&doc.status)
             .bind(doc.external_ref.as_deref())
             .bind(doc.metadata.as_ref())
+            .bind(doc.sha256.as_deref())
             .execute(&mut *tx)
             .await
             .map_err(|e| PortError::Unavailable(format!("pg insert document: {e}")))?;

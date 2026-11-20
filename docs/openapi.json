@@ -518,6 +518,16 @@
               }
             }
           },
+          "409": {
+            "description": "The tenant already has a document with these bytes (KB_UPLOAD_DEDUPE=reject)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DuplicateDocumentBody"
+                }
+              }
+            }
+          },
           "413": {
             "description": "The upload is larger than the accepted limit",
             "content": {
@@ -2564,6 +2574,13 @@
             ],
             "description": "The file's MIME type."
           },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SHA-256 of the uploaded bytes, when the document was stored with\none. Null for a document uploaded before the hash was recorded."
+          },
           "status": {
             "type": "string",
             "description": "`processing`, `ready` or `failed`."
@@ -2756,6 +2773,13 @@
             },
             "description": "The knowledge bases the document belongs to."
           },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The SHA-256 of the uploaded bytes, when the document was stored with\none. Null for a document uploaded before the hash was recorded."
+          },
           "status": {
             "type": "string",
             "description": "`processing`, `ready` or `failed`."
@@ -2770,6 +2794,24 @@
           "title": {
             "type": "string",
             "description": "The document's title."
+          }
+        }
+      },
+      "DuplicateDocumentBody": {
+        "type": "object",
+        "description": "The body a duplicate-upload `409` answers with.\n\nThe usual `error` message plus the id of the document that already holds\nthese bytes, so a caller can point at it instead of uploading the file\nagain to find out.",
+        "required": [
+          "error",
+          "existingDocumentId"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "What went wrong, in the words the service has always used."
+          },
+          "existingDocumentId": {
+            "type": "string",
+            "description": "The id of the document that already holds these bytes."
           }
         }
       },

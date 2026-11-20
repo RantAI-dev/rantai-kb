@@ -573,6 +573,11 @@ pub struct DocumentMeta {
     pub updated_at: String,
     pub knowledge_base_ids: Vec<String>,
     pub metadata: Option<serde_json::Value>,
+    /// The SHA-256 of the uploaded bytes, when the document was stored with
+    /// one. `None` for a document uploaded before the hash was recorded, and
+    /// for one uploaded while the dedupe was off.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// One page of the documents list: the rows, the size of the whole result
@@ -690,6 +695,11 @@ pub struct NewDocument {
     /// `{"effectiveDate": "2025-03-01", "authority": 0.9}`.
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+    /// The SHA-256 of the uploaded bytes. `None` when the document is stored
+    /// without one — the dedupe was off, or the document was created by
+    /// something other than an upload.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 /// Metadata update patch for a document.

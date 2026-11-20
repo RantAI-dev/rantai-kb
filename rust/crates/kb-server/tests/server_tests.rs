@@ -75,6 +75,7 @@ impl Harness {
                 events: Arc::clone(&events),
                 tables: None,
                 version: "test".to_string(),
+                upload_dedupe: kb_core::policy::UploadDedupe::default(),
             },
             Arc::new(FakeReranker::default()),
             settings,
@@ -161,6 +162,7 @@ async fn test_search_happy_path_fields() {
     harness.documents.insert_doc(
         tenant,
         DocumentMeta {
+            sha256: None,
             id: DocumentId(doc_id.into()),
             title: "Happy Path Document".into(),
             categories: vec!["guide".into()],
@@ -232,6 +234,7 @@ async fn test_search_min_score_floor_empties_with_a_note_and_reports_stats() {
     harness.documents.insert_doc(
         tenant,
         DocumentMeta {
+            sha256: None,
             id: DocumentId("doc-1".into()),
             title: "Floor Document".into(),
             categories: vec![],
@@ -318,6 +321,7 @@ async fn test_search_chunks_carry_the_documents_external_ref() {
     harness.documents.insert_doc(
         tenant,
         DocumentMeta {
+            sha256: None,
             id: DocumentId("doc-1".into()),
             title: "KU Document".into(),
             categories: vec![],
@@ -385,6 +389,7 @@ fn timing_harness() -> Harness {
     harness.documents.insert_doc(
         tenant,
         DocumentMeta {
+            sha256: None,
             id: DocumentId("doc-1".into()),
             title: "Timing Document".into(),
             categories: vec![],
@@ -705,6 +710,7 @@ async fn test_tenant_b_key_searching_fakes_with_tenant_a_docs_gets_zero_results(
     harness.documents.insert_doc(
         tenant_a.clone(),
         DocumentMeta {
+            sha256: None,
             id: DocumentId(doc_a_id.into()),
             title: "Tenant A Confidential Doc".into(),
             categories: vec![],
@@ -781,6 +787,7 @@ async fn test_tenant_b_key_searching_fakes_with_tenant_a_docs_gets_zero_results(
 
 fn delete_test_doc(id: &str) -> DocumentMeta {
     DocumentMeta {
+        sha256: None,
         id: DocumentId(id.into()),
         title: "Delete Me".into(),
         categories: vec![],

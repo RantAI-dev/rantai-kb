@@ -33,6 +33,7 @@ mod pipeline_tests {
         doc_store.insert_doc(
             TenantId("t1".into()),
             DocumentMeta {
+                sha256: None,
                 id: DocumentId("d1".into()),
                 title: "Title 1".into(),
                 categories: vec![],
@@ -763,6 +764,7 @@ mod pipeline_tests {
         doc_store.insert_doc(
             tenant.clone(),
             DocumentMeta {
+                sha256: None,
                 id: DocumentId("doc_a".into()),
                 title: "Doc in KB A".into(),
                 categories: vec!["cat_a".into()],
@@ -783,6 +785,7 @@ mod pipeline_tests {
         doc_store.insert_doc(
             tenant.clone(),
             DocumentMeta {
+                sha256: None,
                 id: DocumentId("doc_b".into()),
                 title: "Doc in KB B".into(),
                 categories: vec!["cat_b".into()],
@@ -2114,6 +2117,7 @@ mod pipeline_tests {
         doc_store.insert_doc(
             TenantId("t1".into()),
             DocumentMeta {
+                sha256: None,
                 id: DocumentId("d2".into()),
                 title: "Hidden".into(),
                 categories: vec![],

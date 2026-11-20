@@ -62,6 +62,7 @@ async fn seed(h: &Harness) {
     h.documents.insert_doc(
         TenantId(TENANT.to_string()),
         DocumentMeta {
+            sha256: None,
             metadata: Some(serde_json::json!({"figures": [
                 {
                     "assetKey": "documents/tenant-a/doc-1/assets/fig-p1-1.png",
