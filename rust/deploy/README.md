@@ -221,6 +221,16 @@ first start takes as long as their download (2.4 GB for the embedder).
 re-index (`docs/rust-cutover.md` §17). The numbers and the compose
 services it needs are in [`docs/core/specs/dep-6.md`](../../docs/core/specs/dep-6.md).
 
+**Which build of the embedder (`KB_EMBED_PRECISION`).** The checkpoint ships in two builds: BF16
+(16-bit, every CUDA GPU) and NVFP4 (the same weights in 4-bit, Blackwell cards with native FP4 —
+compute capability 10.x or 12.x). `kb-server setup` reads the card's compute capability and picks
+the build: NVFP4 on `desk` and `studio`, BF16 on `station` (the product owner's decision of
+2026-11-20) and BF16 anywhere the card cannot do FP4 (RTX 30/40, Ampere, Ada, Hopper). It writes
+`KB_EMBED_PRECISION`, `KB_EMBED_MODEL` and the three sized vLLM flags into the env file; the tier
+preset turns `KB_EMBED_PRECISION` into the model name the server asks for. An install that is
+already there keeps the build its index was made with — the two builds make different vectors, so
+switching is a re-index (`kb-server reindex`), never an upgrade.
+
 The measured rows come from
 [`docs/eval-ab/lite-2core`](../../docs/eval-ab/lite-2core/) (2 pinned cores; the
 MIRACL run capped the embedder at one thread, the HR runs did not).

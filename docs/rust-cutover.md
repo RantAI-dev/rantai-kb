@@ -962,3 +962,49 @@ run the migration before the upgrade:
 Existing documents have no hash, so the first upload of a file that was uploaded before the upgrade
 is not a duplicate of it.
 
+### 27. The embedder's build: NVFP4 or BF16 (added 2026-11-20)
+
+`Nemotron-3.5-Embed-1B` ships in two builds of the same checkpoint:
+
+| Build | Checkpoint | Weights | Runs on |
+|---|---|---:|---|
+| BF16 | `nvidia/Nemotron-3.5-Embed-1B-BF16` | 2.90 GiB | every CUDA GPU |
+| NVFP4 | `nvidia/Nemotron-3.5-Embed-1B-NVFP4` | 1.18 GiB | Blackwell cards with native FP4 (sm_100, sm_120, sm_121) |
+
+**Nothing changes for a deployment that does not touch the setting.** The tier preset keeps naming
+the BF16 build, so an operator who never runs `setup` on a Blackwell card keeps exactly the model,
+the index and the vectors of before. The two builds are **different checkpoints with different
+vectors** (NVIDIA reports separate ViDoRe V3 scores and says only that the two "share the embedding
+space"), and Qdrant's collection name carries the model's slug
+(`chunks__<model-slug>__<dim>`), so a BF16 index and an NVFP4 index are different collections.
+
+**Switching build is a re-index, like switching stack.** `kb-server setup` picks the build for the
+card — NVFP4 on `desk` and `studio` when the card has native FP4, BF16 on `station` and on every card
+without it — but **never switches an install that is already there**: an env file that names neither
+`KB_EMBED_PRECISION` nor a model keeps the BF16 build its index was made with, and setup says so.
+To move an existing install to the 4-bit build:
+
+    rantai-kb setup <tier> --embed-precision nvfp4
+    kb-server down -v
+    kb-server up <tier>
+    kb-server reindex
+
+The old collection is left alone; remove it when the new one is good.
+
+**The flags the model server runs with are now sized per card.** `setup` writes
+`KB_EMBED_MAX_MODEL_LEN`, `KB_EMBED_MAX_NUM_SEQS` and `KB_EMBED_GPU_FRACTION` into the env file and
+the compose file reads them. Before, the container ran `--max-model-len 32768` with a fixed memory
+fraction, which took ~13.8 GiB on a GB10; with the sized flags it is ~3.7 GiB (issue
+#37). The NVFP4 footprint is an estimate and is not measured yet.
+
+**Upgrading an existing GPU-tier deployment.** Re-run `kb-server setup <tier>` once. It writes the
+sized flags into the env file and leaves the build alone, so nothing about the index changes. Until
+it runs, the container keeps the old fixed flags (`--max-model-len 32768`, memory fraction 0.15;
+the compose fallbacks are those values, so an upgrade never grows the embedder's share of the
+card), which are too small for the embedder's weights on
+an 8 GB card and too large on a 48 GB one. `setup` never changes the build of an install that is
+already there — that is the opt-in below.
+
+`KB_EMBED_PRECISION` is a new variable: unset or `bf16` is the old behaviour, `nvfp4` asks for the
+4-bit build. An unknown value is a startup error, not a fallback. `docs/kb-tiers.md` has the
+per-tier VRAM budgets per build.

@@ -22,6 +22,7 @@ change; MinerU's did.
 | Model | Size | Licence | Verdict |
 |---|---|---|---|
 | nvidia/Nemotron-3.5-Embed-1B-BF16 | 1B | OpenMDW-1.1 (Linux Foundation; checked 2026-11-18) | 🟢 — "deal in the Model Materials without restriction"; keep the licence and notices when redistributing; rights end for whoever sues over the weights; no restriction on outputs. The GPU tiers' text and page embedder since 0.6.0 |
+| nvidia/Nemotron-3.5-Embed-1B-NVFP4 | 1B | OpenMDW-1.1 (Linux Foundation; checked 2026-11-20, [card](https://huggingface.co/nvidia/Nemotron-3.5-Embed-1B-NVFP4)) | 🟢 — the same licence as the BF16 build ([terms](https://openmdw.ai/license/1-1/)); the card says "This model is ready for commercial or non-commercial use". The **4-bit build** of the same checkpoint (`base_model: nvidia/Nemotron-3.5-Embed-1B-BF16`), quantized with NVIDIA Model Optimizer. It needs a Blackwell GPU: the card's "Supported Hardware Microarchitecture Compatibility" is NVIDIA Blackwell only |
 | Qwen/Qwen3-Embedding-0.6B / 4B / 8B | 0.6–8B | Apache-2.0 | 🟢 |
 | intfloat/multilingual-e5-small / base / large-instruct | 118M–560M | MIT | 🟢 |
 | sentence-transformers/all-MiniLM-L6-v2 | 22M | Apache-2.0 | 🟢 (English only; Lite-en) |
