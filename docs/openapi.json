@@ -4168,6 +4168,14 @@
             ],
             "description": "The question's class (`\"exact\"`, `\"factual\"`, `\"structural\"`,\n`\"relational\"`, `\"aggregative\"`, `\"topical\"`). ADDITIVE RET-5; present\nonly when adaptive arm choice ran. Absent on a default search so an old\nclient sees exactly the earlier shape."
           },
+          "rerankedCount": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Additive (issue #31): how many of the returned chunks carry a\n`rerankScore` — that is, how many of them the reranker scored.\n\nWithout a relevance floor that is the reranked head: the chunks ordered\nby the rerank score, followed by the rest in the fused order without\none. With a relevance floor (`minScore`) the whole pool was scored (the\nfloor compares every hit against its score), so it can be the whole\nanswer.\n\nAbsent when no reranker ran, so a search without a reranker keeps\nexactly the earlier shape.",
+            "minimum": 0
+          },
           "skippedArms": {
             "type": [
               "array",

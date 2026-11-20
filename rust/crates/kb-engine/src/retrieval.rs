@@ -45,7 +45,25 @@ pub struct RetrievalOptions {
     pub rerank_candidate_limit: u32,
     pub rerank_char_budget: usize,
     pub rerank_timeout_ms: u64,
+    /// The **floor** on the reranked head (`KB_RERANK_FINAL_K`).
+    ///
+    /// The head — the candidates the reranker scored and ordered — is
+    /// `max(rerank_final_k, rerank_max_k)` wide. `rerank_final_k` keeps its old
+    /// meaning ("the head is at least this wide"), so an operator who set it
+    /// higher than the new cap keeps the head they had.
     pub rerank_final_k: u32,
+    /// The **cap** on the reranked head (`KB_RERANK_MAX_K`).
+    ///
+    /// How many of the top fused candidates come back with a `rerankScore` and
+    /// are ordered by it. The candidates beyond the cap follow in the fused
+    /// order, without a score. `0` means no cap: the head is the whole pool.
+    ///
+    /// The width is free for a cross-encoder reranker (it scored every
+    /// candidate it was sent either way; this only decides how many of those
+    /// scores the response keeps). A reranker that picks its own top N — the
+    /// LLM one — keeps its head at `rerank_final_k`, because it returns ranks
+    /// rather than relevance scores.
+    pub rerank_max_k: u32,
     pub neighbour_window: u32,
     pub figure_limit: u32,
     /// Whether to ask the expander for paraphrases.
@@ -96,6 +114,7 @@ impl fmt::Debug for RetrievalOptions {
             .field("rerank_char_budget", &self.rerank_char_budget)
             .field("rerank_timeout_ms", &self.rerank_timeout_ms)
             .field("rerank_final_k", &self.rerank_final_k)
+            .field("rerank_max_k", &self.rerank_max_k)
             .field("neighbour_window", &self.neighbour_window)
             .field("figure_limit", &self.figure_limit)
             .field("expansion_enabled", &self.expansion_enabled)
@@ -127,6 +146,7 @@ impl Default for RetrievalOptions {
             rerank_char_budget: 0,
             rerank_timeout_ms: 20_000,
             rerank_final_k: 5,
+            rerank_max_k: 10,
             neighbour_window: 0,
             figure_limit: 0,
             expansion_enabled: false,
@@ -245,6 +265,19 @@ pub struct RetrievalOutcome {
     /// aggregative query). `None` on every other search, so a server with the
     /// flag off answers exactly as it did before `DEC-5`.
     pub global_arm: Option<GlobalArmStats>,
+    /// How many of the returned hits carry a rerank score (`stats.rerankedCount`).
+    ///
+    /// `Some` only when the rerank stage ran; `None` when no reranker was
+    /// asked, so a search without a reranker keeps exactly the earlier shape.
+    /// The count is over the **returned** hits: it says how much of the answer
+    /// the reranker actually scored.
+    ///
+    /// Without a relevance floor that is the reranked head — the hits ordered
+    /// by the rerank score — because the hits past it come back in the fused
+    /// order without a score. With a relevance floor (`minScore`) the whole
+    /// pool was scored (the floor compares every hit against its score), so
+    /// the count is the scored pool, not the head.
+    pub reranked_count: Option<usize>,
     /// What each stage cost. Always present: a request nobody times is a
     /// request nobody can make faster, and the numbers are the only evidence
     /// a retrieval change can be judged by.
@@ -1343,7 +1376,21 @@ async fn execute_pipeline_with_plan(
     let rerank_sw = Stopwatch::start(clock);
     let rerank_future = async {
         if plan.rerank && opts.rerank_enabled && hits.len() > 1 {
+            // The width of the reranked head — the candidates that come back
+            // with a `rerankScore` and are ordered by it.
+            //
+            // `KB_RERANK_FINAL_K` is the floor (it used to be the only width
+            // there was) and `KB_RERANK_MAX_K` is the cap, so the head is
+            // `max(final_k, max_k)` wide. An operator who set `final_k` above
+            // the cap keeps the head they had; an operator who left it at the
+            // default 5 gets the cap. `KB_RERANK_MAX_K=0` means no cap: the
+            // head is the whole pool.
             let final_k = opts.rerank_final_k.clamp(1, 100);
+            let head_width = if opts.rerank_max_k == 0 {
+                usize::MAX
+            } else {
+                final_k.max(opts.rerank_max_k.clamp(1, 100)) as usize
+            };
             // 0 means no limit: every candidate goes to the reranker, as before L.4.
             let candidate_limit = match opts.rerank_candidate_limit {
                 0 => hits.len(),
@@ -1383,16 +1430,30 @@ async fn execute_pipeline_with_plan(
                 })
                 .collect();
 
-            // With a relevance floor (RET-2) every candidate needs a score, or the
-            // floor would drop every hit below `final_k` for having none and cut
-            // the answer to `final_k` hits. So the reranker scores them all (a
-            // rerank API bills per document sent, not per result returned), while
-            // the order below stays exactly the floorless one: the first
-            // `final_k` by rerank score, the rest in fused order.
+            // How many of the candidates the reranker sees come back scored.
+            // The head is never wider than the pool that was sent: a candidate
+            // that was not sent cannot be scored.
+            let sent = candidates.len();
+            let head = head_width.min(sent);
+            // How many results to ask the reranker for.
+            //
+            // With a relevance floor (RET-2) every candidate needs a score, or
+            // the floor would drop every hit below the head for having none
+            // and cut the answer to the head. So the reranker scores them all
+            // (a rerank API bills per document sent, not per result returned),
+            // while the order below stays exactly the floorless one: the head
+            // by rerank score, the rest in fused order.
+            //
+            // Without a floor the ask depends on what the reranker is: one that
+            // scores every candidate it sees (a cross-encoder) can fill the
+            // whole head for free — the documents were sent and scored either
+            // way, and `final_k` only decided how many scores the response
+            // kept. One that picks its own top N (the LLM reranker) gives
+            // ranks, not relevance scores, so its head stays `final_k` wide.
             let request_k = if opts.min_score.is_some() {
-                u32::try_from(candidates.len())
-                    .unwrap_or(u32::MAX)
-                    .max(final_k)
+                u32::try_from(sent).unwrap_or(u32::MAX).max(final_k)
+            } else if reranker.scores_every_candidate() {
+                u32::try_from(head).unwrap_or(u32::MAX)
             } else {
                 final_k
             };
@@ -1403,7 +1464,7 @@ async fn execute_pipeline_with_plan(
             )
             .await
             {
-                Ok(Ok(ordered)) => {
+                Ok(Ok(mut ordered)) => {
                     // Remember the fused order so hits the reranker did not return are
                     // appended deterministically, not in HashMap iteration order.
                     let fused_order: Vec<String> =
@@ -1412,11 +1473,19 @@ async fn execute_pipeline_with_plan(
                     for h in to_rerank {
                         hit_map.entry(h.chunk.id.0.clone()).or_default().push(h);
                     }
+                    // The head is ordered by the rerank score, and the engine
+                    // sorts it itself rather than trusting the provider's order:
+                    // "ordered by rerank score" is the engine's promise, not the
+                    // provider's habit. A stable sort keeps the provider's order
+                    // for equal scores.
+                    ordered.sort_by(|a, b| b.score.total_cmp(&a.score));
                     let mut reordered: Vec<SearchHit> = Vec::new();
-                    // Scores of candidates past `final_k`, attached in fused order.
+                    // Scores of candidates past the head, attached in fused order.
+                    // Only the floor path has them: it needs a score for every
+                    // hit it compares, so the reranker scored the whole pool.
                     let mut tail_scores: HashMap<String, f32> = HashMap::new();
                     for (rank, item) in ordered.into_iter().enumerate() {
-                        if rank >= final_k as usize {
+                        if rank >= head {
                             tail_scores.entry(item.id.0.clone()).or_insert(item.score);
                             continue;
                         }
@@ -1446,14 +1515,14 @@ async fn execute_pipeline_with_plan(
                         hit.rank = reordered.len() as u32;
                         reordered.push(hit);
                     }
-                    reordered
+                    (reordered, true)
                 }
                 Ok(Err(e)) => {
                     tracing::warn!(error = %e, "rerank error; falling back to fused order");
                     degrades.push(RetrievalDegrade::RerankUnavailable);
                     let mut hits = to_rerank;
                     hits.extend(tail);
-                    hits
+                    (hits, true)
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -1463,15 +1532,15 @@ async fn execute_pipeline_with_plan(
                     degrades.push(RetrievalDegrade::RerankUnavailable);
                     let mut hits = to_rerank;
                     hits.extend(tail);
-                    hits
+                    (hits, true)
                 }
             }
         } else {
-            hits
+            (hits, false)
         }
     };
 
-    let mut reranked_hits: Vec<SearchHit> = rerank_future
+    let (mut reranked_hits, rerank_ran): (Vec<SearchHit>, bool) = rerank_future
         .instrument(stage_span("rerank", "RERANKER"))
         .await;
     timings.rerank_ms = rerank_sw.elapsed_ms();
@@ -1542,6 +1611,9 @@ async fn execute_pipeline_with_plan(
                     // The global arm runs after the floor, so a floored-to-empty
                     // answer has not reached it: absent is the honest value.
                     global_arm: None,
+                    // The rerank ran, and the floor kept nothing: no returned
+                    // hit carries a score, because there is no returned hit.
+                    reranked_count: rerank_ran.then_some(0),
                     timings,
                 });
             }
@@ -1829,6 +1901,12 @@ async fn execute_pipeline_with_plan(
     timings.total_ms = total_sw.elapsed_ms();
     timings.engine_total_ms = timings.total_ms;
 
+    // How many of the returned hits carry a rerank score. This is how much of
+    // the answer the reranker actually scored: without a relevance floor it is
+    // the reranked head (the hits ordered by the rerank score), with one it is
+    // the whole scored pool.
+    let reranked_count = rerank_ran.then(|| count_reranked(&reranked_hits));
+
     Ok(RetrievalOutcome {
         chunks: ranked_first(reranked_hits, &ranked_ids),
         sources,
@@ -1840,8 +1918,14 @@ async fn execute_pipeline_with_plan(
         adaptive: None,
         tree: tree_stats,
         global_arm: global_stats,
+        reranked_count,
         timings,
     })
+}
+
+/// How many of the hits carry a rerank score.
+fn count_reranked(hits: &[SearchHit]) -> usize {
+    hits.iter().filter(|h| h.rerank_score.is_some()).count()
 }
 
 /// The ranked hits first, in rank order; then everything added for context

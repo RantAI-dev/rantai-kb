@@ -608,4 +608,22 @@ pub trait Reranker: Send + Sync {
         candidates: Vec<RerankCandidate>,
         final_k: u32,
     ) -> Result<Vec<RerankResult>, PortError>;
+
+    /// Whether this reranker gives **every** candidate it is handed a score of
+    /// its own.
+    ///
+    /// A cross-encoder (TEI, vLLM, Cohere) scores every document it is sent;
+    /// `final_k` only decides how many of those scores the response keeps, so
+    /// asking for more of them costs no extra compute and no extra spend. The
+    /// LLM reranker is not that: it asks a chat model to pick the top N and
+    /// hands back ranks (`final_k - rank`), not relevance scores, so asking it
+    /// for more means asking the model for a longer list and putting a rank
+    /// where a relevance score belongs.
+    ///
+    /// The engine uses this to decide how wide the reranked head may be
+    /// (`KB_RERANK_MAX_K`): a reranker that scores everything can fill a wide
+    /// head for free, one that cannot keeps the head it had.
+    fn scores_every_candidate(&self) -> bool {
+        false
+    }
 }

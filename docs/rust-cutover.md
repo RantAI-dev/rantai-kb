@@ -746,6 +746,34 @@ Operational notes: `KB_TABLES=false` disables the store and the routes (404);
 are cached under `KB_CACHE_DIR/tables/` (or the system temporary directory), one
 file per grid version; a hard delete removes the document's table rows and Parquet.
 
+### 23. Additive: the reranked head and `stats.rerankedCount` (2026-11-20, issue #31)
+- **Bun**: the reranker's `top_k` (`KB_RERANK_FINAL_K`) decided both how many
+  candidates were sent and how many came back with a `rerankScore`; the rest of
+  the pool was returned in the fused order, unscored.
+- **Rust (now)**: two settings. `KB_RERANK_CANDIDATE_LIMIT` still decides how
+  many candidates are **sent**; `KB_RERANK_MAX_K` decides how many of the
+  scores that came back are **kept** and used for the order. The head is
+  `max(KB_RERANK_FINAL_K, KB_RERANK_MAX_K)` wide, so `KB_RERANK_FINAL_K` keeps
+  its old meaning ("the head is at least this wide") and an operator who raised
+  it keeps the head they had. `KB_RERANK_MAX_K=0` means no cap. The default is
+  10, which covers the default answer of 8 chunks — before, only 5 of the 8
+  carried a score.
+- **What it changes in the API**: additive. `stats.rerankedCount` says how many
+  of the returned chunks carry a `rerankScore`; it is absent when no reranker
+  ran, so a search without a reranker keeps exactly the earlier shape. Chunks
+  that carry a score are ordered by it; the ones past them keep the fused
+  order.
+- **Cost**: none per query. A cross-encoder scores every document it is sent, so
+  the head width changes no compute and no spend — it only decides how many of
+  the scores already produced are kept. The on-disk rerank cache keys on the ask
+  width, so the first query after the upgrade re-runs the reranker once and
+  re-populates the cache; the provider spend is the same, it is paid once.
+- **The LLM reranker is excluded**: `KB_RERANK_PROVIDER=llm` asks a chat model
+  for a top-N list and returns ranks, not relevance scores, so its head stays
+  at `KB_RERANK_FINAL_K`.
+- **Evidence**: `docs/eval-ab/rerank-max-k/README.md` (200 MIRACL-id queries,
+  paired bootstrap over cached rerank scores, 10,000 resamples).
+
 ---
 
 ## 6. Shared Known Issues
@@ -847,7 +875,7 @@ created. Wipe and rebuild from the S3 originals:
 The measured numbers behind the option are in `docs/eval-ab/one-embedder/` and
 `docs/eval-ab/rerank-2026-11-17/`; the spec is `docs/core/specs/dep-6.md`.
 
-### 23. The upload limit is 256 MiB, and a `413` says how to move it
+### 24. The upload limit is 256 MiB, and a `413` says how to move it
 
 `KB_MAX_FILE_BYTES` defaults to `268435456` bytes (256 MiB). The Bun service it replaced defaulted to
 50 MB (`src/lib/files/mime-types.ts`) — an inherited default rather than a considered limit: a 50.9 MB
@@ -864,7 +892,7 @@ The bytes are exact, the MiB is the limit rounded up, and the variable is named 
 find the knob. The status code, the JSON shape (`{"error": "…"}`) and every other field are
 unchanged, so no client has to change to read the new message.
 
-### 24. `GET /v1/documents` is paged
+### 25. `GET /v1/documents` is paged
 
 The response grew four fields and the request grew one parameter. Everything that existed before
 still works: the `documents` array, the `limit`, `knowledgeBaseIds` and `externalRef` parameters, and
@@ -897,7 +925,7 @@ The cursor never widens what a caller can see. The tenant, the knowledge-base an
 filters are applied by the same query that reads the cursor, so a cursor is a position and never a
 grant.
 
-### 25. An upload of a file the tenant already has is refused (`KB_UPLOAD_DEDUPE`)
+### 26. An upload of a file the tenant already has is refused (`KB_UPLOAD_DEDUPE`)
 
 The upload's bytes are hashed (SHA-256) and stored on the document row (`Document.sha256`, a new
 nullable column). Before anything is written, the upload route looks for a document in the same

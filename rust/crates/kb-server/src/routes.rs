@@ -838,6 +838,9 @@ fn search_stats(
         arm_plan_fallback: None,
         tree_arm: None,
         global_arm: None,
+        // Only the standard branch runs a reranker, and it builds its stats
+        // from the engine's outcome, which carries the count.
+        reranked_count: None,
     }
 }
 
@@ -895,6 +898,7 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
         arm_plan_fallback,
         tree_arm,
         global_arm,
+        reranked_count,
         ..
     } = stats;
     let stats = SearchStatsDto {
@@ -903,6 +907,7 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
         arm_plan_fallback,
         tree_arm,
         global_arm,
+        reranked_count,
         ..search_stats(
             stages,
             vector_results,

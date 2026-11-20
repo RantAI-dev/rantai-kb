@@ -19,8 +19,9 @@ mod pipeline_tests {
     use kb_ports::{
         ChunkId, ChunkToStore, ChunkType, DocumentFilter, DocumentId, DocumentMeta, DocumentScope,
         DocumentStore, Embedder, EngineError, EntityUpsert, GraphStore, IndexUnit, KnowledgeBaseId,
-        PageEmbedder, PageImage, PortError, ProvenanceArm, RelationUpsert, RetrievalDegrade,
-        RetrievalIndex, ScopeRequest, TenantGraph, TenantId,
+        PageEmbedder, PageImage, PortError, ProvenanceArm, RelationUpsert, RerankCandidate,
+        RerankResult, Reranker, RetrievalDegrade, RetrievalIndex, ScopeRequest, TenantGraph,
+        TenantId,
     };
 
     fn setup() -> (
@@ -1245,6 +1246,48 @@ mod pipeline_tests {
         }
     }
 
+    /// `n` hits named `c1..c{n}`, in the fused order the arms returned them.
+    /// The similarities stay above the engine's `min_similarity` floor (0.30),
+    /// so the whole set reaches the reranker.
+    fn many_hits(chunk_store: &FakeChunkStore, n: u32) {
+        for i in 1..=n {
+            chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+                &format!("c{i}"),
+                "d1",
+                "Title 1",
+                &"x".repeat(1_000),
+                i,
+                1.0 - i as f32 * 0.01,
+            ));
+        }
+    }
+
+    /// A reranker that picks its own top N and hands back ranks, like the LLM
+    /// one: it does not score every candidate it saw, so the engine must not
+    /// widen its head for it.
+    struct RankPickingReranker;
+
+    #[async_trait]
+    impl Reranker for RankPickingReranker {
+        async fn rerank(
+            &self,
+            _query: &str,
+            candidates: Vec<RerankCandidate>,
+            top_k: u32,
+        ) -> Result<Vec<RerankResult>, PortError> {
+            Ok(candidates
+                .into_iter()
+                .take(top_k as usize)
+                .enumerate()
+                .map(|(i, c)| RerankResult {
+                    id: c.id,
+                    final_rank: i as u32,
+                    score: top_k as f32 - i as f32,
+                })
+                .collect())
+        }
+    }
+
     #[tokio::test]
     async fn by_default_the_reranker_sees_every_candidate_in_full() {
         let (doc_store, chunk_store, embedder, reranker) = setup();
@@ -1392,6 +1435,203 @@ mod pipeline_tests {
                 .collect();
             assert_eq!(ids, ["c5", "c1", "c2", "c3"]);
         }
+    }
+
+    /// The reranked head is as wide as `KB_RERANK_MAX_K` (issue #31). Before,
+    /// only the top `KB_RERANK_FINAL_K` (5) came back with a score and were
+    /// ordered by it; the rest came back in the fused order without one, so a
+    /// caller that grounds on `rerankScore` had to treat them as irrelevant.
+    #[tokio::test]
+    async fn the_reranked_head_is_as_wide_as_the_cap() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        many_hits(&chunk_store, 12);
+        let opts = RetrievalOptions {
+            max_chunks: 12,
+            rerank_enabled: true,
+            rerank_final_k: 5,
+            rerank_max_k: 10,
+            ..RetrievalOptions::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        let scored: Vec<&str> = outcome
+            .chunks
+            .iter()
+            .filter(|c| c.rerank_score.is_some())
+            .map(|c| c.chunk.id.0.as_str())
+            .collect();
+        assert_eq!(
+            scored.len(),
+            10,
+            "the head is as wide as the cap, not as wide as final_k"
+        );
+        assert_eq!(outcome.reranked_count, Some(10));
+        let ids: Vec<&str> = outcome
+            .chunks
+            .iter()
+            .map(|c| c.chunk.id.0.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "c10", "c11", "c12"
+            ],
+            "the tail past the head keeps the fused order"
+        );
+        assert!(
+            outcome.chunks[10].rerank_score.is_none(),
+            "a hit past the head has no score"
+        );
+    }
+
+    /// `KB_RERANK_FINAL_K` still works: an operator who set it above the cap
+    /// keeps the head they had.
+    #[tokio::test]
+    async fn a_wider_final_k_is_not_shrunk_by_the_cap() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        many_hits(&chunk_store, 12);
+        let opts = RetrievalOptions {
+            max_chunks: 12,
+            rerank_enabled: true,
+            rerank_final_k: 12,
+            rerank_max_k: 10,
+            ..RetrievalOptions::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.reranked_count, Some(12));
+    }
+
+    /// A reranker that picks its own top N (the LLM one) hands back ranks, not
+    /// scores for every candidate: widening its head would put a rank where a
+    /// relevance score belongs, so it keeps the head it had.
+    #[tokio::test]
+    async fn a_reranker_that_picks_its_own_top_n_keeps_the_old_head() {
+        let (doc_store, chunk_store, embedder, _reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        many_hits(&chunk_store, 12);
+        let opts = RetrievalOptions {
+            max_chunks: 12,
+            rerank_enabled: true,
+            rerank_final_k: 5,
+            rerank_max_k: 10,
+            ..RetrievalOptions::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(Arc::new(RankPickingReranker) as Arc<dyn Reranker>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.reranked_count,
+            Some(5),
+            "the head stays at final_k for a reranker that picks its own top N"
+        );
+    }
+
+    /// The count is absent when no reranker ran, so a search without a
+    /// reranker keeps exactly the earlier shape.
+    #[tokio::test]
+    async fn the_count_is_absent_when_no_reranker_ran() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        five_hits(&chunk_store);
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &RetrievalOptions::default(),
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.reranked_count, None);
+        assert!(
+            outcome.chunks.iter().all(|c| c.rerank_score.is_none()),
+            "no reranker, no score"
+        );
+    }
+
+    /// With a relevance floor the whole pool was scored — the floor compares
+    /// every hit against its score — so the count is the scored pool, not the
+    /// head. A caller that reads the count as "how much of the answer was
+    /// reranked" gets the truth either way.
+    #[tokio::test]
+    async fn a_floor_scores_the_whole_pool_and_the_count_says_so() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        many_hits(&chunk_store, 12);
+        let opts = RetrievalOptions {
+            max_chunks: 12,
+            rerank_enabled: true,
+            rerank_final_k: 5,
+            rerank_max_k: 10,
+            min_score: Some(0.4),
+            ..RetrievalOptions::default()
+        };
+        let outcome = execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            outcome.reranked_count,
+            Some(12),
+            "a floor scores every candidate, so every returned hit carries a score"
+        );
+        assert!(
+            outcome.chunks.iter().all(|c| c.rerank_score.is_some()),
+            "a floored answer has no unscored hit"
+        );
     }
 
     fn hit_id(hit: &kb_ports::SearchHit) -> &str {
