@@ -90,7 +90,7 @@ pub use pdfium::{
     MINIMAL_BLANK_PDF, MINIMAL_PDF_HELLO_WORLD, extract_pdf_text_layer, get_pdf_page_count,
     get_pdfium, init_pdfium, render_pdf_page_to_png, split_pdf_by_page_count,
 };
-pub use scanned::{is_pdf_scanned, page_is_scan, read_page_facts};
+pub use scanned::{is_pdf_scanned, page_needs_ocr, read_page_facts};
 pub use smart_router::SmartRouterExtractor;
 pub use vision_llm::VisionLlmExtractor;
 pub use visuals::{LocalVisualCollector, normalize_image};

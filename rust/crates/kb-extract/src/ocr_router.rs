@@ -53,7 +53,7 @@ use crate::config::{ExtractConfig, OcrMode};
 use crate::mistral::blocks_from_markdown;
 use crate::page_render::{PageRenderSpec, render_image_pages, render_pdf_page_indices_spec};
 use crate::pdfium::{get_pdfium, pdf_page_subset};
-use crate::scanned::{PageFacts, page_is_scan, read_page_facts};
+use crate::scanned::{PageFacts, page_needs_ocr, read_page_facts};
 
 /// One initial attempt plus three retries on a transient provider error.
 const MAX_ATTEMPTS: u32 = 4;
@@ -672,7 +672,7 @@ impl OcrRouter {
             let wants = match self.settings.mode {
                 OcrMode::Full => true,
                 OcrMode::Hybrid => {
-                    page_is_scan(fact, self.settings.scan_area, self.settings.scan_text)
+                    page_needs_ocr(fact, self.settings.scan_area, self.settings.scan_text)
                 }
                 OcrMode::Off | OcrMode::Auto => false,
             };

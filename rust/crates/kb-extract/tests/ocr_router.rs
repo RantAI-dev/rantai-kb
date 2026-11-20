@@ -47,6 +47,15 @@ fn image_page() -> Page {
     }
 }
 
+/// A page whose glyphs are drawn as paths: no text object, no raster image.
+fn vector_page() -> Page {
+    Page {
+        text: None,
+        image: false,
+        invisible_text: None,
+    }
+}
+
 /// libpdfium is not safe to drive from several threads at once in this
 /// environment even with pdfium-render's `thread_safe` marshalling: parallel
 /// tests see empty documents and occasional format errors. These tests take
@@ -366,6 +375,29 @@ async fn case_hybrid_sends_exactly_the_scanned_pages() {
     assert!(map[22].text.starts_with("IMG-page-"));
 }
 
+/// A page with no extractable text and no raster image — the vector-outline
+/// PDF of `#28`. It must still go to OCR: there is nothing else to index.
+async fn case_hybrid_sends_a_page_with_no_text_at_all() {
+    let pdf = build_pdf(&[vector_page(), vector_page(), vector_page()]);
+    let provider = FakeProvider::chat();
+    let out = extract(
+        &router(OcrMode::Hybrid, Some(Arc::clone(&provider)), None),
+        &pdf,
+    )
+    .await;
+
+    assert_eq!(
+        provider.images(),
+        3,
+        "every text-less page is an OCR candidate, raster coverage or not"
+    );
+    let report = out.ocr.expect("the report is stored in metadata.ocr");
+    assert_eq!(report.ocr_pages, 3);
+    assert_eq!(report.pages, 3);
+    assert!(out.used_ocr, "the pages were read by OCR");
+    assert!(out.content.contains("IMG-page-"), "{}", out.content);
+}
+
 async fn case_full_sends_every_page() {
     let pdf = mixed_pdf(20, 3);
     let provider = FakeProvider::chat();
@@ -593,6 +625,7 @@ async fn case_a_page_subset_holds_exactly_the_pages_it_was_given() {
 #[tokio::test]
 async fn the_page_router_meets_its_contract() {
     case_hybrid_sends_exactly_the_scanned_pages().await;
+    case_hybrid_sends_a_page_with_no_text_at_all().await;
     case_full_sends_every_page().await;
     case_off_never_sends_a_page_and_still_reports().await;
     case_a_document_provider_sends_three_batches_of_eight().await;
