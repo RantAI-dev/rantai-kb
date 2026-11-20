@@ -24,6 +24,18 @@
   which is otherwise only closed by a page read, so a job that arrived inside the cooldown window
   was refused every page (`#35`).
 
+- **An extraction quality gate, off by default (`KB_EXTRACT_QUALITY_GATE`, `#29`).** A page whose
+  text layer is unusable (too few characters, not mostly letters or words, broken-encoding
+  characters, far below the document's median page) is sent to OCR, and a document that still
+  produces almost no text ends as `needs_ocr` with the job failed and the reason on the document,
+  instead of a silent `ready`. Off by default because a false positive costs an OCR pass over a
+  good page (paid, with a hosted provider). The numbers are recorded either way in
+  `metadata.quality`. `GET /v1/documents` and `GET /v1/documents/{id}` gain `pages`,
+  `charsExtracted` and `degrades` (additive; null or empty for documents indexed before this).
+- **`Document.status` and `IngestJob.status` can hold two new values:** `waiting_for_ocr` (`#36`)
+  and `needs_ocr` (`#29`, only with the gate on). A calling app that switches on the status should
+  treat `waiting_for_ocr` as still in progress and `needs_ocr` as failed.
+
 ### Changed
 
 - The OCR vLLM containers (`vllm-ocr-desk`, `vllm-ocr-studio`, `vllm-ocr-station`) take extra
@@ -35,6 +47,15 @@
 
 ### Fixed
 
+- **A PDF whose text is drawn as outlines goes to OCR (`#28`).** Such a page has no text and no
+  large raster image, so under the old raster-coverage rule no page qualified for OCR and the
+  document failed with "the PDF has no readable text" even with a healthy OCR provider. A page with
+  no visible characters is now an OCR candidate whatever its raster coverage.
+- **A retry right after an OCR outage no longer fails with "no text for any page" (`#35`).** The
+  outage breaker is process-wide, so a breaker opened by one document refused every page of the
+  next one, and the skipped pages were reported as "no text". A breaker-skipped page and a
+  transport error are now a distinct retryable error that names the cause, the job waits
+  (`#36`) instead of failing, and pages touched by a transport error are never cached.
 - The quality gate's own test counted 36 characters in a 34-character sentence, so the gate's test
   failed while the gate was right.
 - The migration check accepted only a migration that creates a table; a migration that adds a
