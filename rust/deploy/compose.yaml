@@ -527,6 +527,17 @@ services:
   vllm-embed:
     <<: *vllm
     profiles: ["desk-one", "studio-one", "station-one"]
+    # The 4-bit build tunes FP4 GEMMs and captures CUDA graphs on the first
+    # start, which takes minutes; the model card's VLLM_CACHE_ROOT keeps
+    # those artifacts across restarts. The anchor's own keys are repeated
+    # because a merge key does not merge maps.
+    environment:
+      HF_TOKEN: ${HF_TOKEN:-}
+      VLLM_CACHE_ROOT: /root/.cache/vllm
+    volumes:
+      - hf-models:/root/.cache/huggingface
+      - ./vllm:/templates:ro
+      - vllm-cache:/root/.cache/vllm
     command:
       - ${KB_EMBED_MODEL:-nvidia/Nemotron-3.5-Embed-1B-BF16}
       - --served-model-name
@@ -860,4 +871,6 @@ volumes:
   llama-models:
   # Content-addressed embeddings/extraction (KB_CACHE_DIR), survives `down`.
   kb-cache:
+  # vLLM's compilation and FP4 GEMM autotuning artifacts (VLLM_CACHE_ROOT).
+  vllm-cache:
 
