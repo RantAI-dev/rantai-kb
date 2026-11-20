@@ -463,6 +463,55 @@ async fn a_repeated_rerank_is_served_from_disk_with_the_callers_ids() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// The cache is transparent about the reranker's width (issue #31): a cached
+/// cross-encoder may fill a wide head for free, and a cached one that picks
+/// its own top N may not. If the decorator stopped forwarding this, the head
+/// would silently narrow for every cached deployment.
+#[tokio::test]
+async fn the_cached_reranker_forwards_the_width_of_the_one_it_wraps() {
+    use kb_ports::Reranker;
+    let root = temp_root();
+    let wide = crate::CachedReranker::new(Arc::new(WideReranker), DiskCache::new(&root), "tei|bge");
+    let narrow = crate::CachedReranker::new(
+        Arc::new(LengthReranker::default()),
+        DiskCache::new(&root),
+        "llm|gpt",
+    );
+    assert!(wide.scores_every_candidate());
+    assert!(
+        !narrow.scores_every_candidate(),
+        "the length reranker picks its own top N, so it does not score every candidate"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A cross-encoder: every candidate it is handed gets a score of its own.
+struct WideReranker;
+
+#[async_trait]
+impl kb_ports::Reranker for WideReranker {
+    async fn rerank(
+        &self,
+        _q: &str,
+        c: Vec<kb_ports::RerankCandidate>,
+        final_k: u32,
+    ) -> Result<Vec<kb_ports::RerankResult>, PortError> {
+        Ok(c.into_iter()
+            .take(final_k as usize)
+            .enumerate()
+            .map(|(i, x)| kb_ports::RerankResult {
+                id: x.id,
+                final_rank: i as u32,
+                score: 1.0 - i as f32 * 0.1,
+            })
+            .collect())
+    }
+
+    fn scores_every_candidate(&self) -> bool {
+        true
+    }
+}
+
 /// Answers with a fixed description (or `None`) and counts calls.
 struct AnswerDescriber {
     calls: AtomicUsize,

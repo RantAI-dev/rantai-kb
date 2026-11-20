@@ -110,7 +110,19 @@ pub struct EngineSettings {
     /// Per-request reranker timeout in ms (`KB_RERANK_TIMEOUT_MS`).
     pub rerank_timeout_ms: u64,
     /// Chunks kept by the reranker (`KB_RERANK_FINAL_K`).
+    ///
+    /// The floor on the reranked head: the head is `max(rerank_final_k,
+    /// rerank_max_k)` wide, so this keeps its old meaning ("the head is at
+    /// least this wide") for an operator who set it above the new cap.
     pub rerank_final_k: u32,
+    /// The cap on the reranked head (`KB_RERANK_MAX_K`).
+    ///
+    /// How many of the top fused candidates come back with a `rerankScore` and
+    /// are ordered by it. The default (10) covers the default answer (8
+    /// chunks) and stops where the measurement says the reranker's ordering
+    /// stops beating the fused order
+    /// (`docs/eval-ab/rerank-max-k/README.md`).
+    pub rerank_max_k: u32,
     /// Default chunk cap when the request has none (`KB_DEFAULT_MAX_CHUNKS`).
     pub max_chunks: u32,
     /// Minimum similarity score for vector-only hits (`KB_MIN_SIMILARITY`).
@@ -151,6 +163,7 @@ impl Default for EngineSettings {
             rerank_char_budget: 0,
             rerank_timeout_ms: 20_000,
             rerank_final_k: 5,
+            rerank_max_k: 10,
             max_chunks: 8,
             min_similarity: 0.30,
             min_score: None,
@@ -374,6 +387,8 @@ impl Engine {
                 adaptive: None,
                 tree: None,
                 global_arm: None,
+                // An empty query never reaches the reranker.
+                reranked_count: None,
                 timings: StageTimings::default(),
             });
         }
@@ -392,6 +407,7 @@ impl Engine {
             rerank_char_budget: self.settings.rerank_char_budget,
             rerank_timeout_ms: self.settings.rerank_timeout_ms,
             rerank_final_k: self.settings.rerank_final_k,
+            rerank_max_k: self.settings.rerank_max_k,
             neighbour_window: self.settings.neighbour_window,
             figure_limit: self.settings.figure_limit,
             expansion_enabled: self.settings.expansion_enabled,

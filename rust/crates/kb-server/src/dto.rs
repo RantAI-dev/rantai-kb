@@ -251,6 +251,23 @@ pub struct SearchStatsDto {
     /// that is not a degrade.
     #[serde(rename = "globalArm", skip_serializing_if = "Option::is_none", default)]
     pub global_arm: Option<GlobalArmStatsDto>,
+    /// Additive (issue #31): how many of the returned chunks carry a
+    /// `rerankScore` — that is, how many of them the reranker scored.
+    ///
+    /// Without a relevance floor that is the reranked head: the chunks ordered
+    /// by the rerank score, followed by the rest in the fused order without
+    /// one. With a relevance floor (`minScore`) the whole pool was scored (the
+    /// floor compares every hit against its score), so it can be the whole
+    /// answer.
+    ///
+    /// Absent when no reranker ran, so a search without a reranker keeps
+    /// exactly the earlier shape.
+    #[serde(
+        rename = "rerankedCount",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub reranked_count: Option<usize>,
 }
 
 /// `stats.treeArm`: outline nodes the query scored and the distinct pages the
@@ -583,6 +600,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             adaptive: outcome_adaptive,
             tree: outcome_tree,
             global_arm: outcome_global_arm,
+            reranked_count: outcome_reranked_count,
             timings: outcome_timings,
         } = outcome;
         let vector_results = outcome_chunks.iter().filter(|h| !h.is_bm25).count();
@@ -656,6 +674,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
                 communities: stats.communities,
                 chunks: stats.chunks,
             }),
+            reranked_count: outcome_reranked_count,
         };
         SearchResponseDto {
             chunks: Some(chunks),
@@ -1127,6 +1146,7 @@ mod tests {
             arm_plan_fallback: None,
             tree_arm: None,
             global_arm: None,
+            reranked_count: None,
         };
         let value = serde_json::to_value(&stats).unwrap();
         for key in [
@@ -1173,6 +1193,7 @@ mod tests {
             boost: None,
             tree_arm: None,
             global_arm: None,
+            reranked_count: None,
         };
         let off = serde_json::to_value(&stats).unwrap();
         assert!(off.get("queryClass").is_none());
@@ -1214,6 +1235,7 @@ mod tests {
             arm_plan_fallback: None,
             global_arm: None,
             tree_arm: None,
+            reranked_count: None,
         };
         let off = serde_json::to_value(&stats).unwrap();
         assert!(
@@ -1228,6 +1250,44 @@ mod tests {
         let on = serde_json::to_value(&stats).unwrap();
         assert_eq!(on["globalArm"]["communities"], 2);
         assert_eq!(on["globalArm"]["chunks"], 5);
+    }
+
+    /// `stats.rerankedCount` (issue #31) is additive: a search without a
+    /// reranker keeps exactly the earlier shape, and a search with one says
+    /// how much of the answer the reranker scored.
+    #[test]
+    fn the_reranked_count_is_additive_and_absent_when_no_reranker_ran() {
+        let mut stats = SearchStatsDto {
+            total_time_ms: 5.0,
+            embedding_time_ms: 1.0,
+            vector_search_time_ms: 2.0,
+            entity_search_time_ms: 0.0,
+            graph_search_time_ms: 0.0,
+            fusion_time_ms: 0.5,
+            vector_results: 2,
+            entity_results: 0,
+            graph_results: 0,
+            total_results: 3,
+            stage_timings_ms: StageTimingsDto::empty(),
+            floor_score_kind: None,
+            floor_dropped: None,
+            boost: None,
+            query_class: None,
+            skipped_arms: None,
+            arm_plan_fallback: None,
+            global_arm: None,
+            tree_arm: None,
+            reranked_count: None,
+        };
+        let off = serde_json::to_value(&stats).unwrap();
+        assert!(
+            off.get("rerankedCount").is_none(),
+            "no reranker ran: an old client sees exactly the earlier shape"
+        );
+
+        stats.reranked_count = Some(10);
+        let on = serde_json::to_value(&stats).unwrap();
+        assert_eq!(on["rerankedCount"], 10);
     }
 
     #[test]

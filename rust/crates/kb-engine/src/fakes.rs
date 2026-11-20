@@ -1420,6 +1420,12 @@ impl Reranker for FakeReranker {
         }
         Ok(results)
     }
+
+    /// The fake scores every candidate it is handed (by position), like a
+    /// cross-encoder: asking it for more results is free.
+    fn scores_every_candidate(&self) -> bool {
+        true
+    }
 }
 
 /// In-memory object store. Keys are exact; a missing key is an error, the

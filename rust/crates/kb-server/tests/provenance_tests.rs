@@ -45,6 +45,7 @@ fn engine_settings() -> EngineSettings {
         rerank_char_budget: 350,
         rerank_timeout_ms: 3000,
         rerank_final_k: 10,
+        rerank_max_k: 10,
         max_chunks: 10,
         min_similarity: 0.30,
         min_score: None,
