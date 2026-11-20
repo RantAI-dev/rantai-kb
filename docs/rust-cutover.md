@@ -884,7 +884,9 @@ fraction, which took ~13.8 GiB on a GB10; with the sized flags it is ~3.7 GiB (i
 
 **Upgrading an existing GPU-tier deployment.** Re-run `kb-server setup <tier>` once. It writes the
 sized flags into the env file and leaves the build alone, so nothing about the index changes. Until
-it runs, the container keeps the old fixed flags, which are too small for the embedder's weights on
+it runs, the container keeps the old fixed flags (`--max-model-len 32768`, memory fraction 0.15;
+the compose fallbacks are those values, so an upgrade never grows the embedder's share of the
+card), which are too small for the embedder's weights on
 an 8 GB card and too large on a 48 GB one. `setup` never changes the build of an install that is
 already there — that is the opt-in below.
 

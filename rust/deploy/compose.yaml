@@ -522,10 +522,12 @@ services:
   # KB_EMBED_MAX_NUM_SEQS, KB_EMBED_GPU_FRACTION). With the old fixed flags the
   # embedder took ~13.8 GB on a GB10; with the sized flags ~3.7 GB (issue #37).
   #
-  # The fallbacks here suit the *smallest* card we support (8 GB → 4 GB, enough
-  # for the 16-bit build). On a bigger card they reserve too much of it next
-  # to the chat model: run `kb-server setup <tier>` — which every install needs
-  # anyway to write the tier file — or set the three variables yourself.
+  # The fallbacks are the flags this service ran with before setup sized
+  # them (`--max-model-len 32768`, fraction 0.15), so an upgraded install
+  # whose env file predates the sizing keeps exactly the memory share it had;
+  # `--max-num-seqs` falls back high enough not to throttle it. They are not a
+  # good fit for any card: run `kb-server setup <tier>` once to size them, or
+  # set the three variables yourself.
   vllm-embed:
     <<: *vllm
     profiles: ["desk-one", "studio-one", "station-one"]
@@ -545,15 +547,15 @@ services:
       - --served-model-name
       - ${KB_EMBED_MODEL:-nvidia/Nemotron-3.5-Embed-1B-BF16}
       - --max-model-len
-      - ${KB_EMBED_MAX_MODEL_LEN:-8192}
+      - ${KB_EMBED_MAX_MODEL_LEN:-32768}
       - --max-num-seqs
-      - ${KB_EMBED_MAX_NUM_SEQS:-8}
+      - ${KB_EMBED_MAX_NUM_SEQS:-256}
       - --chat-template-content-format
       - openai
       - --compilation-config
       - '{"compile_mm_encoder":true}'
       - --gpu-memory-utilization
-      - ${KB_EMBED_GPU_FRACTION:-0.5}
+      - ${KB_EMBED_GPU_FRACTION:-0.15}
       - --port
       - "8000"
 
