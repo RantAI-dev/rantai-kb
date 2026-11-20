@@ -2022,9 +2022,8 @@ impl IngestWorker {
     async fn park_for_backend(&self, job: &JobRecord, reason: &str) -> JobOutcome {
         let attempt = job.attempt.max(1) as u32;
         if attempt >= self.settings.ocr_wait_max_attempts {
-            let reason = format!(
-                "{reason} (the backend was still unavailable after {attempt} tries)"
-            );
+            let reason =
+                format!("{reason} (the backend was still unavailable after {attempt} tries)");
             tracing::error!(job_id = %job.id, attempt, "giving up on an unavailable backend");
             self.mark_failed(job, &reason, &crate::seats::SeatPriority::of_job(job))
                 .await;
@@ -2040,11 +2039,7 @@ impl IngestWorker {
             reason,
             "a backend was unavailable: the job waits and is retried by itself"
         );
-        if let Err(err) = self
-            .jobs
-            .park(job.id.as_str(), reason, resume_at)
-            .await
-        {
+        if let Err(err) = self.jobs.park(job.id.as_str(), reason, resume_at).await {
             // The job could not be parked, so it is still `processing`: the
             // stale reclaim will pick it up again. Say so, because the reason
             // the job is stuck is then the reclaim's business.

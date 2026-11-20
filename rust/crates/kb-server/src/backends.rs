@@ -373,7 +373,10 @@ mod tests {
 
     /// A client for the probes.
     fn client() -> reqwest::Client {
-        reqwest::Client::builder().timeout(PROBE_TIMEOUT).build().unwrap()
+        reqwest::Client::builder()
+            .timeout(PROBE_TIMEOUT)
+            .build()
+            .unwrap()
     }
 
     #[tokio::test]

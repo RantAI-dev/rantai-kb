@@ -63,7 +63,10 @@ async fn a_waiting_document_says_so_in_the_list_and_the_detail() {
     waiting_job(&h, "job-1", &tenant, Some("doc-1"));
     // The engine marks the document as waiting while its job waits.
     h.documents
-        .set_status(&kb_ports::DocumentId::new_unchecked("doc-1"), "waiting_for_ocr")
+        .set_status(
+            &kb_ports::DocumentId::new_unchecked("doc-1"),
+            "waiting_for_ocr",
+        )
         .await
         .unwrap();
 

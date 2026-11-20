@@ -172,12 +172,7 @@ impl JobStore for PgJobStore {
         Ok(())
     }
 
-    async fn park(
-        &self,
-        job_id: &str,
-        reason: &str,
-        resume_at_ms: i64,
-    ) -> Result<(), PortError> {
+    async fn park(&self, job_id: &str, reason: &str, resume_at_ms: i64) -> Result<(), PortError> {
         let mut message: String = reason.chars().take(MAX_ERROR_LEN).collect();
         if message.is_empty() {
             message = "the backend was unavailable".to_string();

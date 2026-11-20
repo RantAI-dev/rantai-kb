@@ -71,7 +71,9 @@ async fn health_says_when_a_backend_is_not_there() {
     let body = json_body(response).await;
     assert_eq!(body["backends"]["ocr"]["state"], "unavailable");
     assert!(
-        body["backends"]["ocr"]["detail"].as_str().is_some_and(|d| !d.is_empty()),
+        body["backends"]["ocr"]["detail"]
+            .as_str()
+            .is_some_and(|d| !d.is_empty()),
         "the reason is told: {body}"
     );
 }

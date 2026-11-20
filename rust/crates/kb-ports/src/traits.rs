@@ -452,8 +452,7 @@ pub trait JobStore: Send + Sync {
     /// The attempt counter goes up, so a job that keeps meeting an
     /// unavailable backend eventually fails for good instead of waiting
     /// forever.
-    async fn park(&self, job_id: &str, reason: &str, resume_at_ms: i64)
-        -> Result<(), PortError>;
+    async fn park(&self, job_id: &str, reason: &str, resume_at_ms: i64) -> Result<(), PortError>;
 
     /// Move the parked jobs whose wait is over back to `pending`.
     ///

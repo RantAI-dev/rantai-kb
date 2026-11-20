@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use kb_ports::{
     BlobStore, ChunkToStore, DocumentId, DocumentMeta, Embedder, Entity, ExtractedFigure,
-    ExtractionResult, Extractor, JobRecord, JobStore, OcrReport, PageBlock, PageBlockKind, PageText,
-    PortError, Relation, TenantId, document_path,
+    ExtractionResult, Extractor, JobRecord, JobStore, OcrReport, PageBlock, PageBlockKind,
+    PageText, PortError, Relation, TenantId, document_path,
 };
 
 use super::*;
@@ -494,7 +494,10 @@ async fn a_job_whose_backend_is_unavailable_waits_instead_of_failing() {
     // The job is not finished: it is waiting, with the reason it is waiting
     // for, and a time it may be tried again.
     let finished = jobs.finished.read().unwrap();
-    assert!(finished.is_empty(), "the job must not be failed: {finished:?}");
+    assert!(
+        finished.is_empty(),
+        "the job must not be failed: {finished:?}"
+    );
     drop(finished);
     let parked = jobs.parked();
     assert_eq!(parked.len(), 1);
@@ -2477,9 +2480,7 @@ async fn page_descriptions_are_indexed_as_figure_chunks_after_the_text_chunks() 
     );
     let written = match outcome {
         JobOutcome::Ready { chunks } => chunks,
-        JobOutcome::Failed { .. }
-        | JobOutcome::NeedsOcr { .. }
-        | JobOutcome::Waiting { .. } => 0,
+        JobOutcome::Failed { .. } | JobOutcome::NeedsOcr { .. } | JobOutcome::Waiting { .. } => 0,
     };
     assert!(written > 0);
 
@@ -2558,9 +2559,7 @@ async fn a_failed_description_embedding_does_not_fail_the_document() {
     );
     let written = match outcome {
         JobOutcome::Ready { chunks } => chunks,
-        JobOutcome::Failed { .. }
-        | JobOutcome::NeedsOcr { .. }
-        | JobOutcome::Waiting { .. } => 0,
+        JobOutcome::Failed { .. } | JobOutcome::NeedsOcr { .. } | JobOutcome::Waiting { .. } => 0,
     };
     let stored = index
         .ordered_chunks(&tenant(), &DocumentId::new_unchecked(DOC))

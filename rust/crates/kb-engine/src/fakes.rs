@@ -1780,12 +1780,7 @@ impl JobStore for FakeJobStore {
         Ok(())
     }
 
-    async fn park(
-        &self,
-        job_id: &str,
-        reason: &str,
-        resume_at_ms: i64,
-    ) -> Result<(), PortError> {
+    async fn park(&self, job_id: &str, reason: &str, resume_at_ms: i64) -> Result<(), PortError> {
         self.parked.write().unwrap().push(ParkedJob {
             job_id: job_id.to_string(),
             reason: reason.to_string(),
