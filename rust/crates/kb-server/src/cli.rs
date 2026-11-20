@@ -406,6 +406,15 @@ fn print_reindex_plan(
 async fn apply_schema() -> Result<(), CliError> {
     let tier =
         crate::tier::Tier::from_lookup(&env_lookup).map_err(|e| CliError::Failed(e.to_string()))?;
+    if tier.is_some() {
+        // The collection's name carries the model's slug, so an invalid
+        // embedding stack or build would create the collection for the other
+        // embedder. Fail like the server does instead of guessing.
+        crate::tier::Embedders::from_lookup(&env_lookup)
+            .map_err(|e| CliError::Failed(e.to_string()))?;
+        crate::tier::EmbedPrecision::from_lookup(&env_lookup)
+            .map_err(|e| CliError::Failed(e.to_string()))?;
+    }
     let lookup = crate::tier::with_preset(tier, &env_lookup);
     let model = lookup("KB_EMBEDDING_MODEL")
         .filter(|v| !v.trim().is_empty())

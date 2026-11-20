@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::cli::CliError;
-use crate::tier::{TIER_NAMES, Tier};
+use crate::tier::{EmbedPrecision, TIER_NAMES, Tier};
 
 // ---------------------------------------------------------------------------
 // Hardware detection
@@ -86,6 +86,72 @@ pub struct Gpu {
     pub name: String,
     /// Per-GPU memory in GiB (unified memory for Apple).
     pub memory_gb: f64,
+    /// The CUDA compute capability, when the driver reported it. It decides
+    /// whether the NVFP4 build of the embedder can run on this card.
+    pub compute_cap: Option<ComputeCapability>,
+}
+
+/// A CUDA compute capability: `10.1` is the GB10 (sm_121), `12.0` the RTX
+/// 50-series (sm_120), `8.9` an RTX 4090 (sm_89).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ComputeCapability {
+    pub major: u32,
+    pub minor: u32,
+}
+
+impl ComputeCapability {
+    /// Whether the card has **native FP4** tensor cores, which the NVFP4
+    /// build of the embedder needs.
+    ///
+    /// Blackwell only: sm_100 (B200, GB200), sm_120 (RTX 50-series, RTX PRO)
+    /// and sm_121 (GB10, DGX Spark). Nothing before it does — Ada is 8.9,
+    /// Hopper 9.0, Ampere 8.x — so an RTX 4090 or an H100 falls back to BF16.
+    #[must_use]
+    pub fn supports_fp4(self) -> bool {
+        matches!(self.major, 10 | 12)
+    }
+}
+
+impl std::fmt::Display for ComputeCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.major, self.minor)
+    }
+}
+
+impl Gpu {
+    /// Whether this card can run the NVFP4 build of the embedder.
+    ///
+    /// The compute capability is the answer. When the driver does not report
+    /// it, the card's name is the fallback, and only for names that cannot
+    /// mean anything else: the DGX Spark's GB10, the B200/GB200 data-centre
+    /// parts and the cards that say "Blackwell" on them.
+    #[must_use]
+    pub fn supports_fp4(&self) -> bool {
+        if self.vendor != GpuVendor::Nvidia {
+            return false;
+        }
+        if let Some(capability) = self.compute_cap {
+            return capability.supports_fp4();
+        }
+        let name = self.name.to_ascii_uppercase();
+        // "RTX 5050".."RTX 5090" are Blackwell; "RTX 5000 Ada" is not, so the
+        // consumer numbers are listed one by one instead of "RTX 50".
+        [
+            "GB10",
+            "GB200",
+            "GB300",
+            "B200",
+            "B300",
+            "BLACKWELL",
+            "RTX 5050",
+            "RTX 5060",
+            "RTX 5070",
+            "RTX 5080",
+            "RTX 5090",
+        ]
+        .iter()
+        .any(|needle| name.contains(needle))
+    }
 }
 
 /// What the machine has, after detection.
@@ -134,6 +200,31 @@ impl Hardware {
                 Some(best.map_or(gb, |b| b.max(gb)))
             })
     }
+
+    /// Whether any NVIDIA card here has native FP4, so the NVFP4 build of the
+    /// embedder can run.
+    #[must_use]
+    pub fn has_fp4(&self) -> bool {
+        self.gpus.iter().any(Gpu::supports_fp4)
+    }
+
+    /// The card the embedder would run on: the largest NVIDIA card, like
+    /// [`Hardware::usable_vram_gb`].
+    #[must_use]
+    pub fn largest_nvidia(&self) -> Option<&Gpu> {
+        self.gpus
+            .iter()
+            .filter(|gpu| gpu.vendor == GpuVendor::Nvidia)
+            .max_by(|a, b| a.memory_gb.total_cmp(&b.memory_gb))
+    }
+
+    /// An NVIDIA card with native FP4, if there is one.
+    #[must_use]
+    pub fn fp4_gpu(&self) -> Option<&Gpu> {
+        self.gpus
+            .iter()
+            .find(|gpu| gpu.vendor == GpuVendor::Nvidia && gpu.supports_fp4())
+    }
 }
 
 /// `nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits`.
@@ -166,12 +257,34 @@ pub fn parse_nvidia_smi(output: &str) -> Result<Vec<Gpu>, String> {
             vendor: GpuVendor::Nvidia,
             name: name.to_string(),
             memory_gb: mib / 1024.0,
+            compute_cap: None,
         });
     }
     if gpus.is_empty() {
         return Err("nvidia-smi returned no GPUs".to_string());
     }
     Ok(gpus)
+}
+
+/// `nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits`: one
+/// line per GPU, the CUDA compute capability (`10.1`).
+///
+/// A driver that does not know the field answers `[N/A]`, and a driver too old
+/// to have it fails outright; both mean "unknown", never a wrong capability.
+/// The lines are in the same device order as the name/VRAM query.
+#[must_use]
+pub fn parse_compute_caps(output: &str) -> Vec<Option<ComputeCapability>> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let (major, minor) = line.split_once('.')?;
+            let major = major.trim().parse::<u32>().ok()?;
+            let minor = minor.trim().parse::<u32>().ok()?;
+            Some(ComputeCapability { major, minor })
+        })
+        .collect()
 }
 
 /// Parse `sysctl -n hw.memsize` (bytes) into GiB.
@@ -246,6 +359,37 @@ pub fn detect(runner: &dyn CommandRunner) -> Hardware {
         },
     }
 
+    // The compute capability is a second query on purpose: a driver that does
+    // not know the field would otherwise cost us the VRAM reading too. It
+    // decides whether the NVFP4 build of the embedder can run here.
+    let caps = runner
+        .stdout(
+            "nvidia-smi",
+            &["--query-gpu=compute_cap", "--format=csv,noheader,nounits"],
+        )
+        .map(|output| parse_compute_caps(&output));
+    if let Some(caps) = caps {
+        let nvidia = gpus
+            .iter_mut()
+            .filter(|gpu| gpu.vendor == GpuVendor::Nvidia)
+            .count();
+        if caps.len() == nvidia {
+            let mut caps = caps.into_iter();
+            for gpu in gpus
+                .iter_mut()
+                .filter(|gpu| gpu.vendor == GpuVendor::Nvidia)
+            {
+                gpu.compute_cap = caps.next().flatten();
+            }
+        } else {
+            notes.push(format!(
+                "nvidia-smi reported {} compute capabilities for {nvidia} GPUs; \
+                 the FP4 capability is unknown",
+                caps.len()
+            ));
+        }
+    }
+
     let mut ram_gb = 0.0;
     let mut cpu = None;
     if os == "Darwin" {
@@ -261,6 +405,7 @@ pub fn detect(runner: &dyn CommandRunner) -> Hardware {
                     vendor: GpuVendor::Apple,
                     name,
                     memory_gb: gb,
+                    compute_cap: None,
                 });
             } else {
                 notes.push(format!(
@@ -301,6 +446,7 @@ pub fn detect(runner: &dyn CommandRunner) -> Hardware {
                     vendor: GpuVendor::Other,
                     name,
                     memory_gb: 0.0,
+                    compute_cap: None,
                 });
             }
         }
@@ -432,6 +578,406 @@ fn nvidia_threshold(tier: Tier) -> &'static str {
         Tier::Studio => "≥24 GB VRAM",
         Tier::Desk => "≥8 GB VRAM",
         _ => "no GPU",
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The embedder build: NVFP4 where the hardware has native FP4, BF16 elsewhere
+// ---------------------------------------------------------------------------
+
+/// The weights a build holds, in GiB.
+///
+/// Read from the checkpoints' `model.safetensors.index.json` (`total_size`):
+/// the BF16 checkpoint is 3,109,421,056 bytes (2.90 GiB) and the NVFP4 one
+/// 1,267,468,496 bytes (1.18 GiB). The 4-bit build is 2.5× smaller, which is
+/// the whole point of running it on a card shared with a chat model.
+const NEMOTRON_BF16_WEIGHTS_GIB: f64 = 2.90;
+const NEMOTRON_NVFP4_WEIGHTS_GIB: f64 = 1.18;
+
+/// What vLLM needs besides the weights: the CUDA context, the activations and
+/// the pooler. **An estimate**, not a measurement.
+const VLLM_RUNTIME_GIB: f64 = 0.4;
+
+/// The KV cache one token of this model costs: 16 layers × 8 KV heads × 128
+/// head_dim × 2 (K and V) × 2 bytes (bf16) = 65,536 bytes, from the
+/// checkpoint's `config.json` (`text_config`).
+const KV_BYTES_PER_TOKEN: f64 = 65_536.0;
+
+/// One GiB in bytes.
+const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// The context the embedder serves: 8,192 tokens.
+///
+/// The checkpoint supports 32,768 (the model card's serve example uses it),
+/// but a chunk or a page is far shorter, and the KV cache is what the
+/// embedder's footprint is made of. 8,192 is the setting the footprint was
+/// measured in (issue #37: ~13.8 GiB with vLLM's defaults, ~3.7 GiB with
+/// `--max-model-len 8192` and a sized memory fraction on a GB10).
+const EMBED_MAX_MODEL_LEN: u32 = 8192;
+
+/// The tokens one page image costs: the default 1,120 px longest edge with a
+/// 14 px patch and a 2×2 merge is 1,600 tokens, and a page image is the
+/// biggest request the tier sends. A text chunk is a few hundred.
+const EMBED_PAGE_TOKENS: f64 = 1600.0;
+
+/// The embedder checkpoint a setup run configures, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmbedderChoice {
+    /// The checkpoint the embedder will run.
+    pub model: String,
+    /// The build, when the checkpoint is one of ours.
+    pub precision: Option<EmbedPrecision>,
+    /// Why this one, in a sentence, printed by setup.
+    pub reason: String,
+    /// True when the checkpoint is not the tier preset's (BF16): the vectors
+    /// of an existing index were made by another model, so this is a re-index.
+    pub differs_from_preset: bool,
+}
+
+/// What the embedder role gets in the env file: the checkpoint, the build and
+/// the vLLM flags sized for the card.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EmbedderPlan {
+    /// The checkpoint and why it was chosen.
+    pub choice: EmbedderChoice,
+    /// The vLLM flags, when the embedder runs under vLLM (the one-embedder
+    /// stack on a GPU tier).
+    pub sizing: Option<EmbedderSizing>,
+}
+
+/// The embedder's vLLM flags, sized for this machine.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EmbedderSizing {
+    /// `--max-model-len`.
+    pub max_model_len: u32,
+    /// `--max-num-seqs`: how many requests the KV pool serves at once.
+    pub max_num_seqs: u32,
+    /// `--gpu-memory-utilization`: the share of the whole card the embedder
+    /// may hold. `None` when there is no accelerator to size it for.
+    pub gpu_fraction: Option<f64>,
+    /// The footprint the flags aim for, in GiB.
+    pub target_gb: f64,
+    /// The checkpoint's weights, in GiB.
+    pub weights_gb: f64,
+    /// The KV cache the flags leave for, in GiB.
+    pub kv_gb: f64,
+}
+
+/// The VRAM the embedder may hold, per tier, in GiB.
+///
+/// Desk's is its share of the 4.5 GB KB budget (`docs/kb-tiers.md`; the
+/// reranker takes 1.2 of it), Studio's the same share of its 10 GB (the OCR
+/// model takes 4.4 of it), and Station's 8 GB of its 20 GB: the card has
+/// room, but the chat LLM comes first.
+///
+/// This is a **cap**, not a target: the flags are sized for what the model
+/// needs, and a build that does not fit under the cap is reported.
+///
+/// **Every number is an estimate from model sizes, not a measurement.**
+fn embed_vram_cap_gb(tier: Tier) -> f64 {
+    match tier {
+        Tier::Desk => 3.2,
+        Tier::Studio => 4.0,
+        Tier::Station => 8.0,
+        _ => 4.0,
+    }
+}
+
+/// The weights a build holds, in GiB.
+fn embed_weights_gib(precision: EmbedPrecision) -> f64 {
+    match precision {
+        EmbedPrecision::Nvfp4 => NEMOTRON_NVFP4_WEIGHTS_GIB,
+        EmbedPrecision::Bf16 => NEMOTRON_BF16_WEIGHTS_GIB,
+    }
+}
+
+/// How many embedding requests the tier has in flight, which is how many the
+/// model server should serve at once.
+///
+/// These are the tier preset's `KB_EMBED_CONCURRENCY` values (Desk 2, Studio
+/// 4, Station 8): kb-server never has more text-chunk requests in flight than
+/// that. The page arm has its own knob (`KB_PAGE_EMBEDDING_CONCURRENCY`,
+/// 8 by default); requests over `--max-num-seqs` queue in the model server
+/// instead of failing.
+#[must_use]
+pub fn embed_max_num_seqs(tier: Tier) -> u32 {
+    match tier {
+        Tier::Desk => 2,
+        Tier::Studio => 4,
+        Tier::Station => 8,
+        _ => 4,
+    }
+}
+
+/// The KV cache the flags leave for, in GiB.
+///
+/// It has to hold **one full-length sequence** (`max_model_len` tokens), or
+/// vLLM refuses to start, and the requests the tier has in flight on top of
+/// that.
+fn embed_kv_gib(tier: Tier) -> f64 {
+    let seq_kv_gib = EMBED_MAX_MODEL_LEN as f64 * KV_BYTES_PER_TOKEN / GIB;
+    let page_kv_gib = EMBED_PAGE_TOKENS * KV_BYTES_PER_TOKEN / GIB;
+    seq_kv_gib.max(page_kv_gib * embed_max_num_seqs(tier) as f64)
+}
+
+/// Size the embedder's vLLM flags for this tier, build and card.
+///
+/// The arithmetic, and where every number comes from:
+///
+/// * the **weights** are the checkpoint's own size (2.90 GiB BF16, 1.18 GiB
+///   NVFP4), read from the Hub's safetensors index;
+/// * the **runtime** is an estimate (0.4 GiB: the CUDA context, the
+///   activations, the pooler);
+/// * the **KV cache** is what is left: one full-length sequence (8,192
+///   tokens at 64 KiB each = 0.5 GiB) or the tier's in-flight requests,
+///   whichever is bigger;
+/// * `--max-num-seqs` is the tier's in-flight count (2, 4, 8);
+/// * `--gpu-memory-utilization` is that footprint over the card's memory:
+///   vLLM's fraction is of the **whole** card, so one number means a
+///   different budget on an 8 GB card than on a 128 GB one.
+///
+/// The BF16 footprint this gives on a GB10 is ~3.8 GB, next to the ~3.7 GB
+/// measured there with the sized flags (issue #37). **The NVFP4 footprint is
+/// an estimate: it has not been measured.**
+#[must_use]
+pub fn embedder_sizing(
+    tier: Tier,
+    precision: EmbedPrecision,
+    hardware: &Hardware,
+) -> EmbedderSizing {
+    let weights = embed_weights_gib(precision);
+    let kv_gb = embed_kv_gib(tier);
+    let target_gb = weights + VLLM_RUNTIME_GIB + kv_gb;
+    let gpu_fraction = hardware
+        .usable_vram_gb()
+        .map(|vram| (target_gb / vram).clamp(0.02, 0.6));
+    EmbedderSizing {
+        max_model_len: EMBED_MAX_MODEL_LEN,
+        max_num_seqs: embed_max_num_seqs(tier),
+        gpu_fraction,
+        target_gb,
+        weights_gb: weights,
+        kv_gb,
+    }
+}
+
+/// Choose the embedder checkpoint for a tier on this machine.
+///
+/// The rules, in order:
+///
+/// 1. `--embed-precision` wins: the operator asked for that build.
+/// 2. An env file that already names a build (`KB_EMBED_PRECISION`) or a
+///    model keeps it: an explicit setting always wins.
+/// 3. An env file for **this** tier that names neither keeps the preset's
+///    BF16 build. The index behind it was made by BF16, and changing the
+///    embedder is a re-index and not an upgrade, so an existing install is
+///    never switched silently.
+/// 4. Otherwise the tier's own preference (NVFP4 on Desk and Studio, the
+///    product owner's decision of 2026-11-20) when the card has native FP4,
+///    and BF16 everywhere else.
+#[must_use]
+pub fn choose_embedder(
+    args: &SetupArgs,
+    tier: Tier,
+    hardware: &Hardware,
+    existing: Option<&BTreeMap<String, String>>,
+) -> EmbedderChoice {
+    if let Some(precision) = args.embed_precision {
+        return EmbedderChoice {
+            model: precision.model_id().to_string(),
+            precision: Some(precision),
+            reason: format!(
+                "you asked for the {} build with --embed-precision",
+                precision.as_str()
+            ),
+            differs_from_preset: precision != EmbedPrecision::Bf16,
+        };
+    }
+
+    if let Some(file) = existing {
+        if let Some(named) = file
+            .get("KB_EMBED_PRECISION")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            if let Some(precision) = EmbedPrecision::parse(named) {
+                return EmbedderChoice {
+                    model: precision.model_id().to_string(),
+                    precision: Some(precision),
+                    reason: format!(
+                        "the env file already names the {} build",
+                        precision.as_str()
+                    ),
+                    differs_from_preset: false,
+                };
+            }
+        }
+        for key in ["KB_EMBEDDING_MODEL", "KB_PAGE_EMBEDDING_MODEL"] {
+            let Some(model) = file
+                .get(key)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            return EmbedderChoice {
+                model: model.to_string(),
+                precision: EmbedPrecision::of_model(model),
+                reason: format!("the env file already names {model}"),
+                differs_from_preset: false,
+            };
+        }
+    }
+
+    let same_tier = existing
+        .is_some_and(|file| file.get("KB_TIER").map(|value| value.trim()) == Some(tier.as_str()));
+    if same_tier {
+        return EmbedderChoice {
+            model: EmbedPrecision::Bf16.model_id().to_string(),
+            precision: Some(EmbedPrecision::Bf16),
+            reason: "this install already embeds with the BF16 build; the NVFP4 build \
+                     makes other vectors, so it stays until you opt in \
+                     (--embed-precision nvfp4) and re-index"
+                .to_string(),
+            differs_from_preset: false,
+        };
+    }
+
+    let preferred = EmbedPrecision::for_tier(tier);
+    if preferred == EmbedPrecision::Nvfp4 && hardware.has_fp4() {
+        return EmbedderChoice {
+            model: preferred.model_id().to_string(),
+            precision: Some(preferred),
+            reason: fp4_reason(hardware),
+            differs_from_preset: true,
+        };
+    }
+
+    EmbedderChoice {
+        model: EmbedPrecision::Bf16.model_id().to_string(),
+        precision: Some(EmbedPrecision::Bf16),
+        reason: bf16_reason(hardware, tier),
+        differs_from_preset: false,
+    }
+}
+
+/// Why the embedder runs in NVFP4 here, in a sentence.
+fn fp4_reason(hardware: &Hardware) -> String {
+    let Some(gpu) = hardware.fp4_gpu() else {
+        return "no NVIDIA GPU with native FP4 was found, so the BF16 build runs".to_string();
+    };
+    match gpu.compute_cap {
+        Some(capability) => format!(
+            "the {} has compute capability {capability}, which has native FP4",
+            gpu.name
+        ),
+        None => format!(
+            "the {} is a Blackwell part (the driver did not report its compute \
+             capability), so it has native FP4",
+            gpu.name
+        ),
+    }
+}
+
+/// The embedder plan for a tier, or `None` when the tier runs no local
+/// embedder under vLLM (Lite and Cloud run none; the two-embedder stack runs
+/// TEI and the Qwen3-VL embedders, which have no NVFP4 build).
+fn embedder_plan(
+    args: &SetupArgs,
+    tier: Tier,
+    hardware: &Hardware,
+    existing: Option<&BTreeMap<String, String>>,
+) -> Option<EmbedderPlan> {
+    if !tier.has_embedder_stacks() {
+        return None;
+    }
+    if args.embedders.unwrap_or_default() != crate::tier::Embedders::One {
+        return None;
+    }
+    let choice = choose_embedder(args, tier, hardware, existing);
+    let sizing = choice
+        .precision
+        .map(|precision| embedder_sizing(tier, precision, hardware));
+    Some(EmbedderPlan { choice, sizing })
+}
+
+/// Print the embedder's build, the flags sized for it and the note about
+/// re-indexing.
+fn write_embedder(
+    out: &mut dyn Write,
+    plan: &EmbedderPlan,
+    tier: Tier,
+    hardware: &Hardware,
+) -> Result<(), CliError> {
+    writeln!(out, "Embedder").map_err(io_failed)?;
+    let build = plan
+        .choice
+        .precision
+        .map(|precision| precision.as_str())
+        .unwrap_or("the tier's model");
+    writeln!(out, "  {} ({build})", plan.choice.model).map_err(io_failed)?;
+    writeln!(out, "  {}", plan.choice.reason).map_err(io_failed)?;
+    if let Some(sizing) = plan.sizing {
+        let fraction = sizing
+            .gpu_fraction
+            .map(|fraction| format!("{fraction:.3}"))
+            .unwrap_or_else(|| "unset".to_string());
+        writeln!(
+            out,
+            "  vLLM flags: --max-model-len {}, --max-num-seqs {}, --gpu-memory-utilization {fraction}",
+            sizing.max_model_len, sizing.max_num_seqs
+        )
+        .map_err(io_failed)?;
+        writeln!(
+            out,
+            "  footprint: ~{:.1} GB = {:.1} GB weights + {:.1} GB runtime + {:.1} GB KV cache",
+            sizing.target_gb, sizing.weights_gb, VLLM_RUNTIME_GIB, sizing.kv_gb
+        )
+        .map_err(io_failed)?;
+        if sizing.target_gb > embed_vram_cap_gb(tier) {
+            writeln!(
+                out,
+                "  note: the {} build needs ~{:.1} GB, more than {}'s ~{:.1} GB share of \
+                 the model budget; the NVFP4 build needs ~{:.1} GB",
+                build,
+                sizing.target_gb,
+                tier.as_str(),
+                embed_vram_cap_gb(tier),
+                embedder_sizing(tier, crate::tier::EmbedPrecision::Nvfp4, hardware).target_gb
+            )
+            .map_err(io_failed)?;
+        }
+    }
+    if plan.choice.differs_from_preset {
+        writeln!(
+            out,
+            "  note: the other build of this checkpoint makes other vectors: run \
+             `kb-server reindex` after switching, or the index stays empty"
+        )
+        .map_err(io_failed)?;
+    }
+    Ok(())
+}
+
+/// Why the embedder runs in BF16 here, in a sentence.
+fn bf16_reason(hardware: &Hardware, tier: Tier) -> String {
+    if tier == Tier::Station {
+        return "Station runs the BF16 build (the product owner's decision of 2026-11-20)"
+            .to_string();
+    }
+    let Some(gpu) = hardware.largest_nvidia() else {
+        return "no NVIDIA GPU was found, so the BF16 build runs".to_string();
+    };
+    match gpu.compute_cap {
+        Some(capability) => format!(
+            "the {} has compute capability {capability}, which has no native FP4",
+            gpu.name
+        ),
+        None => format!(
+            "the compute capability of the {} could not be read, so the BF16 build \
+             (which runs on every CUDA GPU) is used",
+            gpu.name
+        ),
     }
 }
 
@@ -714,6 +1260,12 @@ pub const LICENCES: &[LicenceEntry] = &[
         "text and page embedder on desk, studio and station (DEP-6, the default since 0.6.0)",
     ),
     entry(
+        "nvidia/Nemotron-3.5-Embed-1B-NVFP4",
+        "OpenMDW-1.1 (permissive: keep the licence and notices; patent-suit termination)",
+        LicenceClass::Green,
+        "the same checkpoint in 4-bit; the embedder on a Blackwell card (KB_EMBED_PRECISION=nvfp4)",
+    ),
+    entry(
         "Qwen/Qwen3-Reranker-0.6B",
         "Apache-2.0",
         LicenceClass::Green,
@@ -776,17 +1328,28 @@ pub fn licence_entry(model: &str) -> Option<&'static LicenceEntry> {
 /// `docs/kb-tiers.md` "What each tier runs".
 #[must_use]
 pub fn tier_models(tier: Tier) -> Vec<&'static str> {
-    tier_models_for(tier, crate::tier::Embedders::default())
+    tier_models_for(
+        tier,
+        crate::tier::Embedders::default(),
+        crate::tier::EmbedPrecision::default(),
+    )
 }
 
 /// The models a tier loads with an embedding stack. The GPU tiers' default is
 /// one embedder (`DEP-6`); `--embedders two` is the 0.3–0.5 stack. Cloud also
 /// gets `mistral-ocr-latest` when the operator supplies its key.
+///
+/// The one-embedder checkpoint has two builds; `precision` says which one the
+/// tier loads, and the licence gate covers both.
 #[must_use]
-pub fn tier_models_for(tier: Tier, embedders: crate::tier::Embedders) -> Vec<&'static str> {
+pub fn tier_models_for(
+    tier: Tier,
+    embedders: crate::tier::Embedders,
+    precision: crate::tier::EmbedPrecision,
+) -> Vec<&'static str> {
     if embedders == crate::tier::Embedders::One && tier.has_embedder_stacks() {
         return vec![
-            "nvidia/Nemotron-3.5-Embed-1B-BF16",
+            precision.model_id(),
             "Qwen/Qwen3-Reranker-0.6B",
             "xiaomi-research/Xiaomi-OCR-0",
             "Qwen/Qwen3-VL-2B-Instruct",
@@ -953,6 +1516,10 @@ pub struct SetupArgs {
     /// `--embedders one|two` (`DEP-6`): one embedder for text and pages, or
     /// the two-model stack. `None` keeps whatever the env file already says.
     pub embedders: Option<crate::tier::Embedders>,
+    /// `--embed-precision nvfp4|bf16`: which build of the one-embedder
+    /// checkpoint runs. `None` lets the hardware and the tier decide, and
+    /// keeps what an existing install already uses.
+    pub embed_precision: Option<crate::tier::EmbedPrecision>,
     /// `--vision`; `None` is the tier's default.
     pub vision: Option<VisionChoice>,
     /// `--vision-model` for `--vision <url>`.
@@ -1070,6 +1637,15 @@ impl SetupArgs {
                             )));
                         }
                     });
+                }
+                "--embed-precision" => {
+                    let value = value_of(args, &mut index, "--embed-precision")?;
+                    parsed.embed_precision =
+                        Some(crate::tier::EmbedPrecision::parse(&value).ok_or_else(|| {
+                            CliError::Usage(format!(
+                                "--embed-precision must be nvfp4 or bf16, got {value:?}"
+                            ))
+                        })?);
                 }
                 "--vision" => {
                     let value = value_of(args, &mut index, "--vision")?;
@@ -1229,6 +1805,8 @@ USAGE
 
 WHAT IT DOES
     1. Detects NVIDIA (nvidia-smi), Apple silicon (sysctl), CPU cores and RAM.
+       The CUDA compute capability is read too: it decides whether the 4-bit
+       (NVFP4) build of the embedder can run on this card.
     2. Suggests a tier and prints why. `cloud` is never suggested: it spends money.
     3. Compares the tier's VRAM estimate (docs/kb-tiers.md) to the hardware and
        refuses a tier that does not fit unless --force.
@@ -1260,6 +1838,12 @@ MODEL ROLES (each defaults to the tier's own local model)
     --ocr-tables <fast|accurate>  accurate adds the layout table pass (GPU tiers; ~+10
                                   points on tables, slower; detector on the CPU)
     --embedders <one|two>         One embedder for text and pages (DEP-6) or two; one is a re-index
+    --embed-precision <nvfp4|bf16> Which build of the embedder runs. nvfp4 is the same model in
+                                   4-bit and needs a Blackwell card (FP4 tensor cores); bf16
+                                   runs on every CUDA GPU. Without the flag the hardware
+                                   decides (nvfp4 on Desk and Studio, bf16 on Station) and an
+                                   existing install keeps the build it already uses. Changing
+                                   the build is a re-index (kb-server reindex).
     --vision <local|off|URL>      Where pictures are read (ING-5); off keeps them undescribed
     --vision-model <NAME>         Model name at --vision <URL>
     --set KEY=VALUE               Write any setting into .env (repeatable), e.g.
@@ -1652,10 +2236,14 @@ fn secret_from_env(
 ///
 /// Only operator-level settings: `KB_TIER` itself is the preset, so writing
 /// `KB_EMBEDDING_MODEL` here would duplicate what the preset already fills.
+/// The embedder's **build** is not a preset value — it depends on the card —
+/// so `KB_EMBED_PRECISION` is written, and the preset turns it into the
+/// model name.
 fn env_changes(
     args: &SetupArgs,
     tier: Tier,
     lookup: &dyn Fn(&str) -> Option<String>,
+    embedder: Option<&EmbedderPlan>,
 ) -> Vec<EnvChange> {
     let mut changes = vec![EnvChange::plain("KB_TIER", tier.as_str()).with_comment(
         "Deployment tier (docs/kb-tiers.md). The preset fills the model roles; an \
@@ -1686,6 +2274,67 @@ fn env_changes(
                 "http://llama-rerank:8082/v1/rerank",
             ));
             changes.push(EnvChange::plain("KB_RERANK_API_KEY", "local"));
+            // The build of the checkpoint, and the vLLM flags sized for this
+            // card. The model name itself is not written: the preset fills
+            // `KB_EMBEDDING_MODEL` and `KB_PAGE_EMBEDDING_MODEL` from
+            // `KB_EMBED_PRECISION`.
+            if let Some(plan) = embedder {
+                if let Some(precision) = plan.choice.precision {
+                    let comment = if precision == crate::tier::EmbedPrecision::Nvfp4 {
+                        "The 4-bit build of the embedder (the same checkpoint in NVFP4). It \
+                         needs a Blackwell card (compute capability 10.x/12.x) and holds \
+                         ~1.2 GB of weights instead of ~2.9 GB. It makes other vectors \
+                         than BF16: switching is a re-index (kb-server reindex)."
+                    } else {
+                        "The 16-bit build of the embedder; it runs on every CUDA GPU. \
+                         Switching to NVFP4 is a re-index (kb-server reindex)."
+                    };
+                    changes.push(
+                        EnvChange::plain("KB_EMBED_PRECISION", precision.as_str())
+                            .with_comment(comment),
+                    );
+                    changes.push(
+                        EnvChange::plain("KB_EMBED_MODEL", &plan.choice.model).with_comment(
+                            "The checkpoint the model server serves. The server asks for it by \
+                         the name the tier preset fills from KB_EMBED_PRECISION; both must \
+                         name the same build.",
+                        ),
+                    );
+                    if let Some(sizing) = plan.sizing {
+                        changes.push(
+                            EnvChange::plain(
+                                "KB_EMBED_MAX_MODEL_LEN",
+                                sizing.max_model_len.to_string(),
+                            )
+                            .with_comment(
+                                "The model server's context. The checkpoint supports 32768, \
+                                 but a chunk or a page is far shorter and the KV cache is \
+                                 what the embedder's footprint is made of.",
+                            ),
+                        );
+                        changes.push(
+                            EnvChange::plain(
+                                "KB_EMBED_MAX_NUM_SEQS",
+                                sizing.max_num_seqs.to_string(),
+                            )
+                            .with_comment(
+                                "How many page-sized requests the KV cache holds at once \
+                                 (~1,600 tokens each), sized from the card's memory.",
+                            ),
+                        );
+                        if let Some(fraction) = sizing.gpu_fraction {
+                            changes.push(
+                                EnvChange::plain("KB_EMBED_GPU_FRACTION", format!("{fraction:.3}"))
+                                    .with_comment(
+                                        "The share of the whole card the model server may hold. \
+                                     vLLM's fraction is of the card, not of the model, so \
+                                     it is sized from the card's memory.",
+                                    ),
+                            );
+                        }
+                    }
+                }
+            }
         } else {
             changes.push(EnvChange::plain("KB_EMBEDDERS", "two").with_comment(
                 "Two embedders (the 0.3-0.5 stack): Qwen3-Embedding-0.6B for text, \
@@ -1910,12 +2559,22 @@ pub fn plan_and_write(
     }
     writeln!(out).map_err(io_failed)?;
 
+    // The env file is read before the plan is written: an install that is
+    // already there keeps the embedder build its index was made with.
+    let existing_text = std::fs::read_to_string(env_path).ok();
+    let existing = existing_text.as_deref().map(parse_env);
+    let embedder = embedder_plan(args, tier, hardware, existing.as_ref());
+
     write_budget(out, hardware, tier, args.force, args.detect_only)?;
-    let models = models_for(args, tier, lookup);
+    if let Some(plan) = &embedder {
+        write_embedder(out, plan, tier, hardware)?;
+        writeln!(out).map_err(io_failed)?;
+    }
+    let models = models_for(args, tier, lookup, embedder.as_ref());
     write_licences(out, &models, args)?;
     writeln!(out).map_err(io_failed)?;
 
-    let mut changes = env_changes(args, tier, lookup);
+    let mut changes = env_changes(args, tier, lookup, embedder.as_ref());
     // An installed bundle has no source to build the image from, so its env
     // file points compose at the published images.
     let deploy_dir = deploy_dir_of(env_path);
@@ -1929,7 +2588,6 @@ pub fn plan_and_write(
         return Ok(());
     }
 
-    let existing_text = std::fs::read_to_string(env_path).ok();
     if let Some(text) = &existing_text {
         if !args.overwrite {
             let existing = parse_env(text);
@@ -2007,9 +2665,13 @@ fn models_for(
     args: &SetupArgs,
     tier: Tier,
     lookup: &dyn Fn(&str) -> Option<String>,
+    embedder: Option<&EmbedderPlan>,
 ) -> Vec<&'static str> {
     let _ = lookup;
-    let mut models = tier_models_for(tier, args.embedders.unwrap_or_default());
+    let precision = embedder
+        .and_then(|plan| plan.choice.precision)
+        .unwrap_or_default();
+    let mut models = tier_models_for(tier, args.embedders.unwrap_or_default(), precision);
     let ocr = effective_ocr(args, tier);
     if ocr != OcrChoice::Local {
         // The tier's own OCR model does not run.
@@ -2060,9 +2722,13 @@ fn write_hardware(out: &mut dyn Write, hardware: &Hardware, english: bool) -> Re
                 GpuVendor::Apple => "Apple silicon",
                 GpuVendor::Other => "unsupported",
             };
+            let capability = match gpu.compute_cap {
+                Some(capability) => format!(", compute capability {capability}"),
+                None => String::new(),
+            };
             writeln!(
                 out,
-                "  GPU       {kind} {} — {:.1} GB",
+                "  GPU       {kind} {} — {:.1} GB{capability}",
                 gpu.name, gpu.memory_gb
             )
             .map_err(io_failed)?;
@@ -3449,6 +4115,170 @@ mod tests {
         assert!(!lite.contains_key("KB_EMBEDDERS"));
     }
 
+    // ─── the embedder build (NVFP4 vs BF16) ────────────────────────────────
+
+    /// A Blackwell card gets the 4-bit build; a card without native FP4 falls
+    /// back to BF16, which runs on every CUDA GPU.
+    #[test]
+    fn a_blackwell_card_gets_the_nvfp4_build_and_an_older_card_the_bf16_one() {
+        let blackwell = nvidia_runner("NVIDIA GB10", 128.0, Some("12.1")).hardware();
+        assert!(blackwell.has_fp4());
+        assert_eq!(
+            blackwell.gpus[0].compute_cap,
+            Some(ComputeCapability {
+                major: 12,
+                minor: 1
+            })
+        );
+        let args = SetupArgs::parse(&args_of(&[])).expect("parse");
+        let choice = choose_embedder(&args, Tier::Desk, &blackwell, None);
+        assert_eq!(choice.precision, Some(EmbedPrecision::Nvfp4));
+        assert_eq!(choice.model, "nvidia/Nemotron-3.5-Embed-1B-NVFP4");
+        assert!(choice.differs_from_preset);
+
+        // An RTX 4090 (sm_89) has no FP4 tensor cores.
+        let ada = nvidia_runner("NVIDIA GeForce RTX 4090", 24.0, Some("8.9")).hardware();
+        assert!(!ada.has_fp4());
+        let choice = choose_embedder(&args, Tier::Desk, &ada, None);
+        assert_eq!(choice.precision, Some(EmbedPrecision::Bf16));
+        assert_eq!(choice.model, "nvidia/Nemotron-3.5-Embed-1B-BF16");
+        assert!(!choice.differs_from_preset);
+
+        // Station keeps BF16 even on a Blackwell card (the owner's decision).
+        let choice = choose_embedder(&args, Tier::Station, &blackwell, None);
+        assert_eq!(choice.precision, Some(EmbedPrecision::Bf16));
+    }
+
+    /// A driver that does not know the field answers `[N/A]`: that is
+    /// "unknown", not a wrong capability. The card's name is then the
+    /// fallback, and only for names that cannot mean anything else.
+    #[test]
+    fn an_unknown_compute_capability_falls_back_to_the_cards_name() {
+        let caps = parse_compute_caps("[N/A]\n");
+        assert_eq!(caps, vec![None]);
+        let blackwell = nvidia_runner("NVIDIA GB10", 128.0, Some("[N/A]")).hardware();
+        assert_eq!(blackwell.gpus[0].compute_cap, None);
+        assert!(blackwell.gpus[0].supports_fp4());
+        assert!(blackwell.has_fp4());
+
+        // A card whose name says nothing about Blackwell keeps BF16.
+        let older = nvidia_runner("NVIDIA GeForce RTX 4090", 24.0, Some("[N/A]")).hardware();
+        assert!(!older.gpus[0].supports_fp4());
+        assert!(!older.has_fp4());
+    }
+
+    /// An install that is already there keeps the build its index was made
+    /// with: switching the embedder is a re-index, not an upgrade.
+    #[test]
+    fn an_existing_install_keeps_its_build_until_the_operator_opts_in() {
+        let blackwell = nvidia_runner("NVIDIA GB10", 128.0, Some("12.1")).hardware();
+        let args = SetupArgs::parse(&args_of(&[])).expect("parse");
+        let mut existing = BTreeMap::new();
+        existing.insert("KB_TIER".to_string(), "desk".to_string());
+        let choice = choose_embedder(&args, Tier::Desk, &blackwell, Some(&existing));
+        assert_eq!(
+            choice.precision,
+            Some(EmbedPrecision::Bf16),
+            "an existing Desk install must not be switched to NVFP4 on an upgrade"
+        );
+        assert!(choice.reason.contains("re-index"), "{}", choice.reason);
+
+        // The operator opts in.
+        let asked = SetupArgs::parse(&args_of(&["--embed-precision", "nvfp4"])).expect("parse");
+        let choice = choose_embedder(&asked, Tier::Desk, &blackwell, Some(&existing));
+        assert_eq!(choice.precision, Some(EmbedPrecision::Nvfp4));
+
+        // An install that already runs NVFP4 keeps it.
+        let mut existing = BTreeMap::new();
+        existing.insert("KB_TIER".to_string(), "desk".to_string());
+        existing.insert("KB_EMBED_PRECISION".to_string(), "nvfp4".to_string());
+        let choice = choose_embedder(&args, Tier::Desk, &blackwell, Some(&existing));
+        assert_eq!(choice.precision, Some(EmbedPrecision::Nvfp4));
+    }
+
+    /// The vLLM flags are sized from the card: the memory fraction is of the
+    /// whole card, so one number cannot serve an 8 GB card and a 48 GB one.
+    #[test]
+    fn the_vllm_flags_are_sized_from_the_card() {
+        let desk = nvidia_box(8.0);
+        let nvfp4 = embedder_sizing(Tier::Desk, EmbedPrecision::Nvfp4, &desk);
+        assert_eq!(nvfp4.max_model_len, 8192);
+        assert_eq!(nvfp4.weights_gb, 1.18);
+        assert_eq!(nvfp4.max_num_seqs, 2, "Desk has two requests in flight");
+        // The 4-bit build fits Desk's share; the footprint is the weights,
+        // the runtime and one full-length sequence in the KV cache.
+        assert!(nvfp4.target_gb <= embed_vram_cap_gb(Tier::Desk));
+        assert!(
+            (nvfp4.gpu_fraction.expect("fraction") - nvfp4.target_gb / 8.0).abs() < 0.001,
+            "the fraction is of the whole card"
+        );
+
+        // The BF16 build needs more room than Desk's share: the flags grow
+        // with it, and the plan says so.
+        let bf16 = embedder_sizing(Tier::Desk, EmbedPrecision::Bf16, &desk);
+        assert_eq!(bf16.weights_gb, 2.90);
+        assert!(bf16.target_gb > embed_vram_cap_gb(Tier::Desk));
+        assert!(
+            bf16.kv_gb >= 0.49,
+            "the KV cache must hold one full-length sequence, got {}",
+            bf16.kv_gb
+        );
+
+        // The BF16 footprint on a GB10 (~3.8 GB) is the ~3.7 GB measured there
+        // with the sized flags (issue #37).
+        let gb10 = nvidia_box(128.0);
+        let bf16 = embedder_sizing(Tier::Desk, EmbedPrecision::Bf16, &gb10);
+        assert!(
+            (bf16.target_gb - 3.8).abs() < 0.05,
+            "the BF16 footprint should land near the measured 3.7 GB, got {}",
+            bf16.target_gb
+        );
+
+        let station = nvidia_box(48.0);
+        let bf16 = embedder_sizing(Tier::Station, EmbedPrecision::Bf16, &station);
+        assert!((bf16.gpu_fraction.expect("fraction") - (bf16.target_gb / 48.0)).abs() < 0.001);
+        assert_eq!(bf16.max_num_seqs, 8, "Station has eight requests in flight");
+    }
+
+    /// The env file names the build and the flags sized for it.
+    #[test]
+    fn the_env_file_names_the_build_and_the_sized_flags() {
+        let blackwell = nvidia_runner("NVIDIA GB10", 128.0, Some("12.1")).hardware();
+        let args = SetupArgs::parse(&args_of(&[])).expect("parse");
+        let env = written_with(&blackwell, &args, Tier::Desk, &|_: &str| None);
+        assert_eq!(
+            env.get("KB_EMBED_PRECISION").map(String::as_str),
+            Some("nvfp4")
+        );
+        assert_eq!(
+            env.get("KB_EMBED_MODEL").map(String::as_str),
+            Some("nvidia/Nemotron-3.5-Embed-1B-NVFP4")
+        );
+        assert_eq!(
+            env.get("KB_EMBED_MAX_MODEL_LEN").map(String::as_str),
+            Some("8192")
+        );
+        assert!(env.contains_key("KB_EMBED_MAX_NUM_SEQS"));
+        assert!(env.contains_key("KB_EMBED_GPU_FRACTION"));
+        // The model name itself is the preset's: it fills it from the build.
+        assert!(!env.contains_key("KB_EMBEDDING_MODEL"));
+
+        // The two-embedder stack runs other models; no build is written.
+        let two = SetupArgs::parse(&args_of(&["--embedders", "two"])).expect("parse");
+        let env = written_with(&blackwell, &two, Tier::Desk, &|_: &str| None);
+        assert!(!env.contains_key("KB_EMBED_PRECISION"));
+        assert!(!env.contains_key("KB_EMBED_MODEL"));
+    }
+
+    /// The licence gate covers the 4-bit build too: a model without a verdict
+    /// is refused.
+    #[test]
+    fn the_nvfp4_build_has_a_licence_verdict() {
+        assert!(licence_entry("nvidia/Nemotron-3.5-Embed-1B-NVFP4").is_some());
+        let report = gate_licences(&["nvidia/Nemotron-3.5-Embed-1B-NVFP4"], &[]).expect("gate");
+        assert_eq!(report.green.len(), 1);
+    }
+
     /// `--embedders two` writes the 0.3-0.5 stack's compose endpoints, which
     /// the compose file no longer defaults to.
     #[test]
@@ -3834,7 +4664,7 @@ mod tests {
             chat_llm_model: Some("qwen".to_string()),
             ..SetupArgs::default()
         };
-        let changes = env_changes(&args, Tier::Desk, &|_: &str| None);
+        let changes = env_changes(&args, Tier::Desk, &|_: &str| None, None);
         assert!(
             !changes
                 .iter()
@@ -3842,7 +4672,7 @@ mod tests {
             "{changes:?}"
         );
         // Studio has the page arm, so the same flags are written there.
-        let studio = env_changes(&args, Tier::Studio, &|_: &str| None);
+        let studio = env_changes(&args, Tier::Studio, &|_: &str| None, None);
         assert!(
             studio
                 .iter()
@@ -4168,6 +4998,24 @@ mod tests {
         }
     }
 
+    /// A runner whose `nvidia-smi` answers for one card, with its compute
+    /// capability when the driver knows it.
+    fn nvidia_runner(name: &str, vram_gb: f64, capability: Option<&str>) -> FakeRunner {
+        let mut runner = FakeRunner::linux(16, 64.0);
+        let mib = (vram_gb * 1024.0) as u64;
+        runner.commands.insert(
+            "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits".to_string(),
+            format!("{name}, {mib}"),
+        );
+        if let Some(capability) = capability {
+            runner.commands.insert(
+                "nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits".to_string(),
+                capability.to_string(),
+            );
+        }
+        runner
+    }
+
     impl CommandRunner for FakeRunner {
         fn stdout(&self, program: &str, args: &[&str]) -> Option<String> {
             let key = if args.is_empty() {
@@ -4197,6 +5045,7 @@ mod tests {
                 vendor: GpuVendor::Nvidia,
                 name: "Test GPU".to_string(),
                 memory_gb: vram_gb,
+                compute_cap: None,
             }],
             notes: Vec::new(),
         }
