@@ -276,6 +276,187 @@ async fn a_document_with_no_tables_does_not_touch_the_table_store() {
     );
 }
 
+/// A text layer that is not text: the shape a PDF with a broken font map has
+/// (`#29`). Punctuation and digits, no letters at all.
+fn broken_text() -> String {
+    "§¤¡¿«»¶·¸©® 1234567890 §¤¡¿«»¶·¸©® 1234567890".to_string()
+}
+
+/// Twenty pages whose text layer is broken: the document shape the gate
+/// refuses. A book whose font map is broken produces exactly this — pages
+/// full of characters, and nothing a reader could search for.
+fn broken_document_extraction() -> ExtractionResult {
+    ExtractionResult {
+        content: broken_text(),
+        file_type: "pdf".to_string(),
+        page_map: Some(
+            (0..20)
+                .map(|page| PageText {
+                    page,
+                    text: broken_text(),
+                })
+                .collect(),
+        ),
+        ..ExtractionResult::default()
+    }
+}
+
+/// A worker whose settings differ from the default ones.
+fn worker_with_settings(
+    jobs: Arc<FakeJobStore>,
+    documents: Arc<FakeDocumentStore>,
+    chunks: Arc<FakeChunkStore>,
+    blobs: Arc<FakeBlobStore>,
+    extractor: Arc<dyn Extractor>,
+    embedder: Arc<dyn Embedder>,
+    settings: IngestSettings,
+) -> IngestWorker {
+    IngestWorker::new(
+        jobs,
+        documents,
+        chunks,
+        blobs,
+        extractor,
+        embedder,
+        IngestSettings {
+            embedding_model: Some("bge-m3".to_string()),
+            ..settings
+        },
+    )
+}
+
+#[tokio::test]
+async fn a_document_with_a_broken_text_layer_is_refused_when_the_gate_is_on() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let worker = worker_with_settings(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        Arc::new(FakeExtractor::returning_result(broken_document_extraction())),
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings {
+            quality: Some(kb_core::quality::QualityOptions::default()),
+            ..IngestSettings::default()
+        },
+    );
+
+    let outcome = worker.run_job(job()).await;
+    assert!(
+        matches!(outcome, crate::ingest::JobOutcome::NeedsOcr { .. }),
+        "{outcome:?}"
+    );
+
+    // The document says it needs OCR instead of pretending it is searchable.
+    let docs = documents.docs.read().unwrap();
+    let meta = docs[&tenant()]
+        .iter()
+        .find(|d| d.id.as_str() == DOC)
+        .expect("the document");
+    assert_eq!(meta.status, "needs_ocr");
+
+    // The numbers are on the document, so a caller can see how little text the
+    // document really produced.
+    let quality = meta
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("quality"))
+        .expect("metadata.quality");
+    assert_eq!(quality["pages"], 20);
+    assert_eq!(quality["brokenPages"], 20);
+    assert_eq!(quality["needsOcr"], true);
+    let degrades = meta
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("degrades"))
+        .and_then(serde_json::Value::as_array)
+        .expect("metadata.degrades");
+    assert!(
+        degrades
+            .iter()
+            .any(|line| line.as_str().unwrap_or_default().starts_with("needs_ocr:")),
+        "{degrades:?}"
+    );
+    drop(docs);
+
+    // Nothing was indexed: a document that is not searchable has no chunks.
+    let written = chunks.stored_chunks.read().unwrap();
+    assert!(
+        written
+            .get(&DocumentId::new_unchecked(DOC))
+            .is_none_or(|list| list.is_empty())
+    );
+
+    // The job failed with a reason an operator can act on.
+    let finished = jobs.finished.read().unwrap();
+    assert_eq!(finished.len(), 1);
+    assert!(!finished[0].success);
+    assert!(
+        finished[0].detail.contains("needs OCR"),
+        "{}",
+        finished[0].detail
+    );
+}
+
+#[tokio::test]
+async fn the_quality_numbers_are_recorded_even_when_the_gate_is_off() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let worker = worker_with_settings(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        Arc::new(FakeExtractor::returning_result(broken_document_extraction())),
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings::default(),
+    );
+
+    let outcome = worker.run_job(job()).await;
+    assert!(
+        matches!(outcome, crate::ingest::JobOutcome::Ready { .. }),
+        "{outcome:?}"
+    );
+
+    // The gate is off, so the document keeps the behaviour it always had.
+    let docs = documents.docs.read().unwrap();
+    let meta = docs[&tenant()]
+        .iter()
+        .find(|d| d.id.as_str() == DOC)
+        .expect("the document");
+    assert_eq!(meta.status, "ready");
+    // But the numbers are recorded, so an operator can see what happened.
+    let quality = meta
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("quality"))
+        .expect("metadata.quality");
+    assert_eq!(quality["pages"], 20);
+    assert_eq!(quality["needsOcr"], true);
+    // The finding is a warning here, not a decision.
+    let degrades = meta
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("degrades"))
+        .and_then(serde_json::Value::as_array)
+        .expect("metadata.degrades");
+    assert!(
+        degrades
+            .iter()
+            .any(|line| line.as_str().unwrap_or_default().starts_with("quality:")),
+        "{degrades:?}"
+    );
+}
+
 #[tokio::test]
 async fn happy_path_indexes_chunks_and_finishes_the_job() {
     let h = harness(extractor()).await;
@@ -759,6 +940,7 @@ async fn the_ocr_report_is_stored_in_document_metadata_in_the_documented_shape()
         local_pages: 20,
         failed_pages: vec![7],
         skipped_pages: vec![],
+        reread_pages: vec![],
         breaker_opened: false,
         layout_pages: 0,
         layout_failed: 0,
@@ -1931,7 +2113,7 @@ async fn page_descriptions_are_indexed_as_figure_chunks_after_the_text_chunks() 
     );
     let written = match outcome {
         JobOutcome::Ready { chunks } => chunks,
-        JobOutcome::Failed { .. } => 0,
+        JobOutcome::Failed { .. } | JobOutcome::NeedsOcr { .. } => 0,
     };
     assert!(written > 0);
 
@@ -2010,7 +2192,7 @@ async fn a_failed_description_embedding_does_not_fail_the_document() {
     );
     let written = match outcome {
         JobOutcome::Ready { chunks } => chunks,
-        JobOutcome::Failed { .. } => 0,
+        JobOutcome::Failed { .. } | JobOutcome::NeedsOcr { .. } => 0,
     };
     let stored = index
         .ordered_chunks(&tenant(), &DocumentId::new_unchecked(DOC))

@@ -357,6 +357,12 @@ pub struct WorkerConfig {
     /// so a corpus is re-chunked only on re-ingest.
     pub chunk_size: u32,
     pub chunk_overlap: u32,
+    /// The extraction quality gate (`KB_EXTRACT_QUALITY_GATE`), when it is on
+    /// (`#29`).
+    ///
+    /// `None` means the gate does not run: every document keeps the
+    /// behaviour it always had, and the numbers are still recorded.
+    pub quality: Option<kb_core::quality::QualityOptions>,
 }
 
 impl WorkerConfig {
@@ -378,6 +384,7 @@ impl WorkerConfig {
                 overlap_size: Some(self.chunk_overlap),
                 ..kb_engine::INGEST_CHUNKING
             },
+            quality: self.quality,
             ..IngestSettings::default()
         }
     }
@@ -426,7 +433,10 @@ where
     Ok(capacity)
 }
 
-fn read_worker<F>(lookup: &F) -> Result<WorkerConfig>
+fn read_worker<F>(
+    lookup: &F,
+    quality: Option<kb_core::quality::QualityOptions>,
+) -> Result<WorkerConfig>
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -474,6 +484,7 @@ where
             .unwrap_or(800)
             .max(100),
         chunk_overlap: int_var(lookup, "KB_CHUNK_OVERLAP", 200u32).unwrap_or(200),
+        quality,
     })
 }
 
@@ -906,7 +917,7 @@ impl Config {
                  entity extraction writes them)"
             );
         }
-        let worker = read_worker(&lookup)?;
+        let worker = read_worker(&lookup, extract.quality_options())?;
         let version = lookup("KB_VERSION")
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| crate::state::DEFAULT_VERSION.to_string());

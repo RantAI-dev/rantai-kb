@@ -40,6 +40,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
+use kb_core::quality::{QualityOptions, check_page_against_median, count_chars, median_page_chars};
 use kb_ports::{
     ExtractedFigure, ExtractionOptions, ExtractionResult, OcrPageCache, OcrReport, PageBlock,
     PageBlockKind, PageText,
@@ -298,6 +299,12 @@ pub struct OcrRouterSettings {
     /// Attempts per provider call (one initial plus retries). Tests set 1 to
     /// exercise the breaker without waiting through backoff.
     pub attempts: u32,
+    /// The extraction quality gate (`KB_EXTRACT_QUALITY_GATE`), when it is on.
+    ///
+    /// With it on, a page whose text layer is unusable — garbage from a broken
+    /// font map, or a handful of stray strings — is read by OCR instead of
+    /// being indexed as it is (`#29`).
+    pub quality: Option<QualityOptions>,
 }
 
 impl OcrRouterSettings {
@@ -315,6 +322,7 @@ impl OcrRouterSettings {
             breaker_cooldown: cfg.ocr_breaker_cooldown,
             dpi: cfg.ocr_dpi,
             attempts: MAX_ATTEMPTS,
+            quality: cfg.quality_options(),
         }
     }
 }
@@ -382,6 +390,10 @@ struct PageArtifact {
 struct Candidates {
     send: Vec<u32>,
     skipped: Vec<u32>,
+    /// The pages the quality gate sent although they carry a text layer
+    /// (`#29`). The report names them, so an operator can see which pages of a
+    /// book had to be read again by a model.
+    quality_pages: Vec<u32>,
 }
 
 /// Routes PDF pages and image uploads to OCR under the mode's rules.
@@ -470,6 +482,10 @@ impl OcrRouter {
 
         let candidates = self.candidates(&facts, provider.is_some());
         report.skipped_pages = candidates.skipped.iter().map(|p| p + 1).collect();
+        // The pages the quality gate sent although they carry a text layer:
+        // the operator sees which pages of a book had to be read again by a
+        // model (`#29`).
+        report.reread_pages = candidates.quality_pages.iter().map(|p| p + 1).collect();
         let mut last_error: Option<String> = None;
         let mut skipped_by_breaker = 0u32;
         let mut transport_error = false;
@@ -751,26 +767,58 @@ impl OcrRouter {
         if !has_provider || self.settings.mode == OcrMode::Off {
             return out;
         }
+        // The median page of the document, so a page that holds far less text
+        // than the rest is caught (`#29`). It is the median of the pages that
+        // carry text at all: an empty page would drag it down.
+        let median = self.quality_median(facts);
         let mut budget = self.settings.max_pages;
         for fact in facts {
-            let wants = match self.settings.mode {
+            let scan = match self.settings.mode {
                 OcrMode::Full => true,
                 OcrMode::Hybrid => {
                     page_needs_ocr(fact, self.settings.scan_area, self.settings.scan_text)
                 }
                 OcrMode::Off | OcrMode::Auto => false,
             };
+            // A text layer that is not text: the page is a scan in everything
+            // but name, and indexing it as it is poisons the document.
+            let broken = !scan && self.quality_broken(fact, median);
+            let wants = scan || broken;
             if !wants {
                 continue;
             }
             if budget > 0 {
                 budget -= 1;
                 out.send.push(fact.page);
+                if broken {
+                    out.quality_pages.push(fact.page);
+                }
             } else {
                 out.skipped.push(fact.page);
             }
         }
         out
+    }
+
+    /// The median number of characters a page of this document carries.
+    fn quality_median(&self, facts: &[PageFacts]) -> usize {
+        if self.settings.quality.is_none() {
+            return 0;
+        }
+        let chars: Vec<usize> = facts
+            .iter()
+            .map(|f| count_chars(&f.text))
+            .filter(|c| *c > 0)
+            .collect();
+        median_page_chars(&chars)
+    }
+
+    /// Whether the page's own text layer is unusable.
+    fn quality_broken(&self, fact: &PageFacts, median: usize) -> bool {
+        let Some(opts) = self.settings.quality else {
+            return false;
+        };
+        check_page_against_median(&fact.text, median, &opts).is_broken()
     }
 
     /// Chat-style providers: render the candidate pages once, then read them

@@ -63,6 +63,50 @@ pub enum JobOutcome {
     },
     /// The job is terminal-failed; `reason` is what landed on the job row.
     Failed { reason: String },
+    /// The document's text layer is unusable and the job will not index it:
+    /// it needs OCR (`#29`). The document row says `needs_ocr`.
+    NeedsOcr { reason: String },
+}
+
+/// Why a job did not finish.
+///
+/// The reason a job failed is a string on the job row, but the *kind* of
+/// failure decides what happens next: a document that needs OCR is something
+/// the operator has to fix, and a failure that is not the document's fault is
+/// something to try again (`#29`, `#36`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobError {
+    /// The job failed for good.
+    Failed(String),
+    /// The document's text layer is unusable: it needs OCR (`#29`).
+    NeedsOcr(String),
+}
+
+impl From<String> for JobError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+
+impl JobError {
+    /// The reason that lands on the job row.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Failed(reason) | Self::NeedsOcr(reason) => reason,
+        }
+    }
+}
+
+/// What the extraction quality gate made of one document (`#29`).
+///
+/// The verdict is the numbers; the degrades are the same findings as lines an
+/// operator can read, stored on the document so a caller sees why it is not
+/// searchable.
+#[derive(Debug, Clone)]
+struct DocumentQuality {
+    verdict: kb_core::quality::DocumentVerdict,
+    degrades: Vec<String>,
 }
 
 /// Tunables, one per `KB_INGEST_*` environment variable.
@@ -106,6 +150,13 @@ pub struct IngestSettings {
     pub embedding_max_chars: usize,
     /// How many seats each stage of the pipeline has (`KB_SEATS`).
     pub seats: crate::seats::SeatCapacity,
+    /// The extraction quality gate (`KB_EXTRACT_QUALITY_GATE`), when it is on.
+    ///
+    /// With it on, a document whose text layer is unusable is not indexed as
+    /// `ready`: the job ends with `needs_ocr` and the document says why
+    /// (`#29`). `None` means the gate does not run and every document keeps
+    /// the behaviour it always had.
+    pub quality: Option<kb_core::quality::QualityOptions>,
 }
 
 impl Default for IngestSettings {
@@ -123,6 +174,7 @@ impl Default for IngestSettings {
             entity_extraction_enabled: true,
             embedding_max_chars: 0,
             seats: crate::seats::SeatCapacity::default(),
+            quality: None,
         }
     }
 }
@@ -399,7 +451,14 @@ impl IngestWorker {
                 }
                 JobOutcome::Ready { chunks }
             }
-            Err(reason) => {
+            Err(JobError::NeedsOcr(reason)) => {
+                // The document's text layer is unusable (`#29`). The job fails
+                // — the operator can retry it — and the document says
+                // `needs_ocr` instead of pretending it is searchable.
+                self.mark_needs_ocr(&job, &reason, &priority).await;
+                JobOutcome::NeedsOcr { reason }
+            }
+            Err(JobError::Failed(reason)) => {
                 self.mark_failed(&job, &reason, &priority).await;
                 JobOutcome::Failed { reason }
             }
@@ -443,12 +502,12 @@ impl IngestWorker {
         job: &JobRecord,
         started: Instant,
         priority: &crate::seats::SeatPriority,
-    ) -> Result<(usize, DocumentId), String> {
+    ) -> Result<(usize, DocumentId), JobError> {
         if job.tenant_id.as_str().trim().is_empty() {
-            return Err("job has no tenant".to_string());
+            return Err(JobError::Failed("job has no tenant".into()));
         }
         let (Some(document_id), Some(s3_key)) = (&job.document_id, &job.s3_key) else {
-            return Err("job missing documentId or s3Key".to_string());
+            return Err(JobError::Failed("job missing documentId or s3Key".into()));
         };
 
         let bytes = self
@@ -511,14 +570,14 @@ impl IngestWorker {
             .extract_with_options(&job.filename, mime, &bytes, options)
             .await;
         seat.release();
-        let extraction = extraction.map_err(|e| e.to_string())?;
+        let extraction = extraction.map_err(|e| JobError::Failed(e.to_string()))?;
 
         // A parser that could not read the file reports the reason and leaves
         // `content` empty (`extract.ts:192`). Indexing that would put an empty
         // document in the KB, so the job fails with the parser's own message —
         // retrying with different settings beats a poisoned document.
         if let Some(reason) = &extraction.error {
-            return Err(reason.clone());
+            return Err(JobError::Failed(reason.clone()));
         }
 
         // NUL bytes survive some extractors and break Postgres text columns.
@@ -659,6 +718,40 @@ impl IngestWorker {
             )
         });
 
+        // The extraction quality gate (`#29`). A document whose text layer is
+        // garbage — a shifted-letter text layer from a broken font map, or a
+        // handful of stray strings — used to be indexed as `ready` with a
+        // couple of chunks, and retrieval then silently missed the whole book.
+        //
+        // The numbers are always recorded (a caller can audit how much text a
+        // document really produced); the *decision* to refuse the document is
+        // the gate's, and the gate is off unless the operator turns it on.
+        let quality = self.assess_quality(&extraction, &content_for_chunks, chunks.len());
+        {
+            let patch = json!({
+                "quality": quality.verdict.metadata(),
+                "degrades": quality.degrades,
+            });
+            if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
+                tracing::warn!(error = %e, "could not store the extraction quality report");
+            }
+        }
+        if self.settings.quality.is_some() && quality.verdict.needs_ocr {
+            let reason = format!(
+                "the document needs OCR: {}",
+                quality.verdict.reasons.join("; ")
+            );
+            tracing::warn!(
+                job_id = %job.id,
+                pages = quality.verdict.pages,
+                chunks = quality.verdict.chunks,
+                chunks_per_page = quality.verdict.chunks_per_page,
+                broken_pages = quality.verdict.broken_pages,
+                "the extraction quality gate refused the document"
+            );
+            return Err(JobError::NeedsOcr(reason));
+        }
+
         // The tables (`TBL-1`): store each grid with its manifest and index the
         // two retrieval units. A document with no tables is untouched, and a
         // store failure fails the job like any other store failure; a grid that
@@ -758,11 +851,11 @@ impl IngestWorker {
                 && (outcome.is_upload || extraction.file_type == "image")
                 && self.page_ingest.is_none()
             {
-                return Err(crate::visuals::nothing_searchable_reason(
+                return Err(JobError::Failed(crate::visuals::nothing_searchable_reason(
                     &job.filename,
                     &outcome,
                     pipeline.can_describe(),
-                ));
+                )));
             }
             if !outcome.is_empty() {
                 let patch = crate::visuals::metadata_patch(&outcome);
@@ -779,10 +872,10 @@ impl IngestWorker {
             }
         } else if chunks.is_empty() && extraction.file_type == "image" && self.page_ingest.is_none()
         {
-            return Err(format!(
+            return Err(JobError::Failed(format!(
                 "nothing searchable in \"{}\": OCR found no text and no image describer is configured (set KB_IMAGE_DESCRIBE_MODEL)",
                 job.filename
-            ));
+            )));
         } else if !extraction.figures.is_empty() {
             self.progress(
                 job,
@@ -872,7 +965,7 @@ impl IngestWorker {
                         tracing::warn!(error = %err, "could not remove pages of a failed document");
                     }
                 }
-                return Err(e);
+                return Err(JobError::Failed(e));
             }
         };
         if let Some(pages) = pages {
@@ -905,6 +998,71 @@ impl IngestWorker {
 
         self.finish_ready(job, document_id, written, started, &flags, priority)
             .await
+            .map_err(JobError::Failed)
+    }
+
+    /// What the extraction quality gate made of a document.
+    fn assess_quality(
+        &self,
+        extraction: &kb_ports::ExtractionResult,
+        content: &str,
+        chunks: usize,
+    ) -> DocumentQuality {
+        let opts = self.settings.quality.unwrap_or_default();
+        // The pages the document has. The OCR report knows the real count —
+        // a page map only holds the pages that carry text — and without a
+        // router the page map is the only count there is.
+        let pages = extraction
+            .ocr
+            .as_ref()
+            .map(|report| report.pages as usize)
+            .filter(|count| *count > 0)
+            .or_else(|| {
+                extraction
+                    .page_map
+                    .as_ref()
+                    .map(|map| map.len())
+                    .filter(|count| *count > 0)
+            })
+            .unwrap_or(0);
+
+        // The pages that carry text, checked one by one. The median of the
+        // document says what a page of it should hold, so a page far below the
+        // rest is caught even when what it holds looks like text.
+        let page_texts: Vec<String> = extraction
+            .page_map
+            .iter()
+            .flatten()
+            .map(|p| p.text.clone())
+            .collect();
+        let median = kb_core::quality::median_page_chars(
+            &page_texts
+                .iter()
+                .map(|text| kb_core::quality::count_chars(text))
+                .collect::<Vec<_>>(),
+        );
+        let verdicts: Vec<kb_core::quality::PageVerdict> = page_texts
+            .iter()
+            .map(|text| kb_core::quality::check_page_against_median(text, median, &opts))
+            .collect();
+
+        let chars = kb_core::quality::count_chars(content);
+        let verdict = kb_core::quality::assess_document(&verdicts, pages, chars, chunks, &opts);
+        // The reasons a reader can act on, one line each. With the gate on
+        // the finding is a decision — the document was refused — so it is
+        // named `needs_ocr`; with the gate off the same finding is a warning,
+        // because the document was indexed as it is.
+        let prefix = if self.settings.quality.is_some() {
+            "needs_ocr"
+        } else {
+            "quality"
+        };
+        let degrades = verdict
+            .reasons
+            .iter()
+            .map(|reason| format!("{prefix}: {reason}"))
+            .collect();
+        DocumentQuality { verdict, degrades }
     }
 
     /// Store a document's tables and index their two retrieval units (`TBL-1`).
@@ -1714,6 +1872,36 @@ impl IngestWorker {
             let _seat = self.seats.store.acquire(priority.clone()).await;
             if let Err(err) = self.documents.set_status(document_id, "failed").await {
                 tracing::error!(error = %err, "could not mark document failed");
+            }
+        }
+        self.emit_terminal(
+            job,
+            "failed",
+            job.document_id.as_ref().map(|d| d.0.as_str()),
+            reason,
+        )
+        .await;
+    }
+
+    /// The document is not usable as it stands: it needs OCR (`#29`).
+    ///
+    /// The job fails — the operator can retry it once the corpus is
+    /// re-extracted — and the document says `needs_ocr`, so a caller that
+    /// lists the documents sees why the one is not searchable instead of an
+    /// empty `ready`.
+    async fn mark_needs_ocr(
+        &self,
+        job: &JobRecord,
+        reason: &str,
+        priority: &crate::seats::SeatPriority,
+    ) {
+        if let Err(err) = self.jobs.finish_failure(&job.id, reason).await {
+            tracing::error!(error = %err, job_id = %job.id, "could not mark job failed");
+        }
+        if let Some(document_id) = &job.document_id {
+            let _seat = self.seats.store.acquire(priority.clone()).await;
+            if let Err(err) = self.documents.set_status(document_id, "needs_ocr").await {
+                tracing::error!(error = %err, "could not mark the document needs_ocr");
             }
         }
         self.emit_terminal(

@@ -1181,6 +1181,16 @@ pub struct DocumentSummary {
     /// The knowledge bases the document belongs to.
     #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Vec<String>,
+    /// How many pages the document has (`#29`).
+    #[serde(rename = "pages")]
+    pub pages: Option<u32>,
+    /// How much text the document really produced, in characters (`#29`).
+    #[serde(rename = "charsExtracted")]
+    pub chars_extracted: Option<u64>,
+    /// What kept the document from being fully searchable, one line each
+    /// (`#29`).
+    #[serde(rename = "degrades")]
+    pub degrades: Vec<String>,
 }
 
 /// List the caller's documents.
@@ -1247,17 +1257,23 @@ pub async fn list_documents(
         .map_err(ApiError::from)?;
     let documents = docs
         .into_iter()
-        .map(|d| DocumentSummary {
-            id: d.id.0,
-            title: d.title,
-            categories: d.categories,
-            subcategory: d.subcategory,
-            file_type: d.file_type,
-            file_size: d.file_size,
-            status: d.status,
-            external_ref: d.external_ref,
-            created_at: d.created_at,
-            knowledge_base_ids: d.knowledge_base_ids,
+        .map(|d| {
+            let quality = read_document_quality(d.metadata.as_ref());
+            DocumentSummary {
+                id: d.id.0,
+                title: d.title,
+                categories: d.categories,
+                subcategory: d.subcategory,
+                file_type: d.file_type,
+                file_size: d.file_size,
+                status: d.status,
+                external_ref: d.external_ref,
+                created_at: d.created_at,
+                knowledge_base_ids: d.knowledge_base_ids,
+                pages: quality.pages,
+                chars_extracted: quality.chars_extracted,
+                degrades: quality.degrades,
+            }
         })
         .collect();
     Ok(Json(DocumentListResponse { documents }))
@@ -1318,6 +1334,57 @@ pub fn read_document_figures(metadata: Option<&serde_json::Value>) -> Vec<Figure
         .collect()
 }
 
+/// The extraction quality of a document, as the ingest worker recorded it
+/// (`#29`).
+///
+/// Additive: a document ingested before the gate existed has no numbers, and
+/// the fields are then null / empty rather than zero, so a caller can tell
+/// "not measured" from "measured and empty".
+#[derive(Debug, Clone, Default)]
+pub struct DocumentQuality {
+    /// How many pages the document has.
+    pub pages: Option<u32>,
+    /// How much text the document produced, in characters.
+    pub chars_extracted: Option<u64>,
+    /// What kept the document from being fully searchable, one line each.
+    ///
+    /// Empty when nothing was wrong — or when the gate is off and no
+    /// complaint was recorded.
+    pub degrades: Vec<String>,
+}
+
+/// The quality numbers and the complaints from `Document.metadata`.
+///
+/// The ingest worker writes `metadata.quality` (the numbers) and
+/// `metadata.degrades` (the complaints) when it indexes a document; a
+/// document indexed before that has neither.
+#[must_use]
+pub fn read_document_quality(metadata: Option<&serde_json::Value>) -> DocumentQuality {
+    let quality = metadata.and_then(|m| m.get("quality"));
+    let pages = quality
+        .and_then(|q| q.get("pages"))
+        .and_then(serde_json::Value::as_u64)
+        .map(|v| v as u32);
+    let chars_extracted = quality
+        .and_then(|q| q.get("charsExtracted"))
+        .and_then(serde_json::Value::as_u64);
+    let degrades = metadata
+        .and_then(|m| m.get("degrades"))
+        .and_then(serde_json::Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    DocumentQuality {
+        pages,
+        chars_extracted,
+        degrades,
+    }
+}
+
 #[derive(Debug, Serialize, ToSchema)]
 pub struct DocumentDetailResponse {
     /// The document's row.
@@ -1361,6 +1428,16 @@ pub struct DocumentDetail {
     pub chunk_count: u32,
     /// The document's figures.
     pub figures: Vec<FigureView>,
+    /// How many pages the document has (`#29`).
+    #[serde(rename = "pages")]
+    pub pages: Option<u32>,
+    /// How much text the document really produced, in characters (`#29`).
+    #[serde(rename = "charsExtracted")]
+    pub chars_extracted: Option<u64>,
+    /// What kept the document from being fully searchable, one line each
+    /// (`#29`).
+    #[serde(rename = "degrades")]
+    pub degrades: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1409,6 +1486,7 @@ pub async fn get_document(
         return Err(ApiError::missing_scope("kb:read"));
     }
     let meta = find_visible_document(&state, &auth, &id).await?;
+    let quality = read_document_quality(meta.metadata.as_ref());
     let chunks = state
         .index
         .ordered_chunks(&auth.tenant_id, &meta.id)
@@ -1447,6 +1525,9 @@ pub async fn get_document(
             knowledge_base_ids: meta.knowledge_base_ids,
             chunk_count,
             figures: read_document_figures(meta.metadata.as_ref()),
+            pages: quality.pages,
+            chars_extracted: quality.chars_extracted,
+            degrades: quality.degrades,
         },
         chunks: chunk_views,
     }))

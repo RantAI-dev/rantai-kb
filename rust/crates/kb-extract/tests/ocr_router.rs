@@ -309,6 +309,12 @@ impl OcrPageCache for MemoryCache {
     }
 }
 
+/// A page whose text layer is not text: the shape a PDF with a broken font map
+/// has. Punctuation and digits, no letters at all.
+fn broken_text_page() -> Page {
+    text_page("§¤¡¿«»¶·¸©® 1234567890 §¤¡¿«»¶·¸©® 1234567890")
+}
+
 fn settings(mode: OcrMode) -> OcrRouterSettings {
     OcrRouterSettings {
         mode,
@@ -321,6 +327,15 @@ fn settings(mode: OcrMode) -> OcrRouterSettings {
         breaker_cooldown: Duration::from_secs(60),
         dpi: 72,
         attempts: 1,
+        quality: None,
+    }
+}
+
+/// The same settings with the extraction quality gate on (`#29`).
+fn settings_with_quality(mode: OcrMode) -> OcrRouterSettings {
+    OcrRouterSettings {
+        quality: Some(kb_core::quality::QualityOptions::default()),
+        ..settings(mode)
     }
 }
 
@@ -333,6 +348,22 @@ fn router(
     let cache = cache.map(|c| c as Arc<dyn OcrPageCache>);
     OcrRouter::new(
         settings(mode),
+        provider,
+        cache,
+        Some(Arc::new(OcrBreaker::new(3, Duration::from_secs(60)))),
+    )
+}
+
+/// A router with the extraction quality gate on (`#29`).
+fn router_with_quality(
+    mode: OcrMode,
+    provider: Option<Arc<FakeProvider>>,
+    cache: Option<Arc<MemoryCache>>,
+) -> OcrRouter {
+    let provider = provider.map(|p| p as Arc<dyn OcrPageProvider>);
+    let cache = cache.map(|c| c as Arc<dyn OcrPageCache>);
+    OcrRouter::new(
+        settings_with_quality(mode),
         provider,
         cache,
         Some(Arc::new(OcrBreaker::new(3, Duration::from_secs(60)))),
@@ -368,6 +399,47 @@ async fn extract(router: &OcrRouter, pdf: &[u8]) -> kb_ports::ExtractionResult {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// The quality gate sends a page whose text layer is unusable to OCR, even
+/// though the page carries visible characters (`#29`).
+///
+/// The page is not a scan: it has no image, and it has text. What it has is
+/// punctuation and digits — the shape a PDF with a broken font map produces.
+/// Without the gate the page is indexed as it is and the document comes out
+/// with a handful of junk chunks.
+async fn case_the_quality_gate_sends_a_page_with_a_broken_text_layer() {
+    let pdf = build_pdf(&[
+        text_page(
+            "Digital page one carries a real text layer with plenty of words and characters.",
+        ),
+        broken_text_page(),
+    ]);
+
+    // The gate off: the broken page is indexed as it is.
+    let quiet = router(OcrMode::Hybrid, Some(FakeProvider::document(8)), None);
+    let result = extract(&quiet, &pdf).await;
+    let report = result.ocr.expect("the router reports what it did");
+    assert!(
+        report.reread_pages.is_empty(),
+        "without the gate no page is read again: {:?}",
+        report.reread_pages
+    );
+
+    // The gate on: the broken page goes to the provider.
+    let provider = FakeProvider::document(8);
+    let router = router_with_quality(OcrMode::Hybrid, Some(provider.clone()), None);
+    let result = extract(&router, &pdf).await;
+    let report = result.ocr.expect("the router reports what it did");
+    assert_eq!(
+        report.reread_pages,
+        vec![2],
+        "the page with the broken text layer is read again by the model"
+    );
+    assert!(
+        provider.calls() > 0,
+        "the provider was asked for the broken page"
+    );
+}
 
 async fn case_hybrid_sends_exactly_the_scanned_pages() {
     let pdf = mixed_pdf(20, 3);
@@ -766,6 +838,7 @@ async fn case_a_page_subset_holds_exactly_the_pages_it_was_given() {
 /// behaviour that broke.
 #[tokio::test]
 async fn the_page_router_meets_its_contract() {
+    case_the_quality_gate_sends_a_page_with_a_broken_text_layer().await;
     case_hybrid_sends_exactly_the_scanned_pages().await;
     case_hybrid_sends_a_page_with_no_text_at_all().await;
     case_full_sends_every_page().await;
