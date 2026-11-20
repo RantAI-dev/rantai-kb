@@ -665,23 +665,32 @@ pub struct EmbedderSizing {
 
 /// The VRAM the embedder may hold, per tier, in GiB.
 ///
-/// Desk's is its share of the 4.5 GB KB budget (`docs/kb-tiers.md`; the
-/// reranker takes 1.2 of it), Studio's the same share of its 10 GB (the OCR
-/// model takes 4.4 of it), and Station's 8 GB of its 20 GB: the card has
-/// room, but the chat LLM comes first.
+/// It is the embedder's **share** of the tier's model budget, from the VRAM
+/// tables in `docs/kb-tiers.md`: Desk's is the ~5 GB KB budget less the
+/// ~1.2 GB reranker, Studio's the ~10 GB budget less the reranker and the
+/// ~4.4 GB OCR model, and Station's 8 GB of its ~20 GB (the card has room,
+/// but the chat LLM comes first).
 ///
 /// This is a **cap**, not a target: the flags are sized for what the model
-/// needs, and a build that does not fit under the cap is reported.
+/// needs, and a build that fills the cap is reported, with the smaller one
+/// beside it.
 ///
 /// **Every number is an estimate from model sizes, not a measurement.**
 fn embed_vram_cap_gb(tier: Tier) -> f64 {
     match tier {
-        Tier::Desk => 3.2,
-        Tier::Studio => 4.0,
+        Tier::Desk => 3.8,
+        Tier::Studio => 4.4,
         Tier::Station => 8.0,
         _ => 4.0,
     }
 }
+
+/// How close to the cap a build has to be before it is worth saying so.
+///
+/// The 4-bit build leaves room on every tier; the 16-bit one fills Desk's
+/// share exactly, which is the thing an operator on a Desk card needs to
+/// hear.
+const EMBED_CAP_WARN_RATIO: f64 = 0.9;
 
 /// The weights a build holds, in GiB.
 fn embed_weights_gib(precision: EmbedPrecision) -> f64 {
@@ -941,16 +950,18 @@ fn write_embedder(
             sizing.target_gb, sizing.weights_gb, VLLM_RUNTIME_GIB, sizing.kv_gb
         )
         .map_err(io_failed)?;
-        if sizing.target_gb > embed_vram_cap_gb(tier) {
+        let cap = embed_vram_cap_gb(tier);
+        if sizing.target_gb >= cap * EMBED_CAP_WARN_RATIO {
+            let nvfp4 = embedder_sizing(tier, crate::tier::EmbedPrecision::Nvfp4, hardware);
             writeln!(
                 out,
-                "  note: the {} build needs ~{:.1} GB, more than {}'s ~{:.1} GB share of \
-                 the model budget; the NVFP4 build needs ~{:.1} GB",
+                "  note: the {} build needs ~{:.1} GB of {}'s ~{:.1} GB share of the model \
+                 budget; the NVFP4 build needs ~{:.1} GB",
                 build,
                 sizing.target_gb,
                 tier.as_str(),
-                embed_vram_cap_gb(tier),
-                embedder_sizing(tier, crate::tier::EmbedPrecision::Nvfp4, hardware).target_gb
+                cap,
+                nvfp4.target_gb
             )
             .map_err(io_failed)?;
         }
@@ -4225,19 +4236,20 @@ mod tests {
         assert_eq!(nvfp4.max_model_len, 8192);
         assert_eq!(nvfp4.weights_gb, 1.18);
         assert_eq!(nvfp4.max_num_seqs, 2, "Desk has two requests in flight");
-        // The 4-bit build fits Desk's share; the footprint is the weights,
-        // the runtime and one full-length sequence in the KV cache.
-        assert!(nvfp4.target_gb <= embed_vram_cap_gb(Tier::Desk));
+        // The 4-bit build fits Desk's share with room to spare; the footprint
+        // is the weights, the runtime and one full-length sequence in the KV
+        // cache.
+        assert!(nvfp4.target_gb <= embed_vram_cap_gb(Tier::Desk) * EMBED_CAP_WARN_RATIO);
         assert!(
             (nvfp4.gpu_fraction.expect("fraction") - nvfp4.target_gb / 8.0).abs() < 0.001,
             "the fraction is of the whole card"
         );
 
-        // The BF16 build needs more room than Desk's share: the flags grow
-        // with it, and the plan says so.
+        // The BF16 build fills Desk's share: the flags grow with it, and the
+        // plan says so.
         let bf16 = embedder_sizing(Tier::Desk, EmbedPrecision::Bf16, &desk);
         assert_eq!(bf16.weights_gb, 2.90);
-        assert!(bf16.target_gb > embed_vram_cap_gb(Tier::Desk));
+        assert!(bf16.target_gb >= embed_vram_cap_gb(Tier::Desk) * EMBED_CAP_WARN_RATIO);
         assert!(
             bf16.kv_gb >= 0.49,
             "the KV cache must hold one full-length sequence, got {}",
