@@ -503,6 +503,7 @@ measurement (build order 5); the Desk / Studio / Station rerank widths are estim
 | `KB_RERANK_BASE_URL` | — | `http://127.0.0.1:8082` | same | same | `https://openrouter.ai/api/v1/rerank` |
 | `KB_RERANK_MODEL` | — | `BAAI/bge-reranker-v2-m3` | `Qwen/Qwen3-VL-Reranker-2B` | `Qwen/Qwen3-VL-Reranker-8B` | `voyageai/rerank-2.5` |
 | `KB_RERANK_CANDIDATE_LIMIT` | — | 10 | 20 | 30 | 20 |
+| `KB_RERANK_MAX_K` | — | — (10) | — (10) | — (10) | — (10) |
 | `KB_OCR_BASE_URL` | `http://127.0.0.1:8083/v1/chat/completions` | same | same | same | — (Mistral OCR when `KB_MISTRAL_OCR_KEY` is set) |
 | `KB_OCR_MODEL` | `rantai-kb/ocr-cpu` | `xiaomi-research/Xiaomi-OCR-0` | same as desk | same as desk | — |
 | `KB_OCR_RECIPE` | — (`paddle`) | `xiaomi` | `xiaomi` | `xiaomi` | — |
@@ -521,6 +522,16 @@ A dash means the preset leaves the setting alone, so that setting's own default 
 `same` means the value in lite's column, unless it says otherwise. Lite's e5-small was chosen by
 measurement on 2 cores (`docs/eval-ab/lite-2core`); run its embedder with 1 thread so it leaves a
 core for kb-server.
+
+`KB_RERANK_MAX_K` is the width of the **reranked head**: the candidates that come back with a
+`rerankScore` and are ordered by it. The candidates past it keep the fused order, unscored. The
+default (10) covers the default answer of 8 chunks, and stops where the measurement says the
+reranker's ordering stops beating the fused order (`docs/eval-ab/rerank-max-k/README.md`). It
+costs no extra compute and no extra spend: a cross-encoder scores every document it is sent
+either way, so the width only decides how many of those scores are kept. The head can never be
+wider than what was sent (`KB_RERANK_CANDIDATE_LIMIT`), so Desk's send width of 10 caps its head
+at 10 anyway. Raise `KB_RERANK_MAX_K` to at least `KB_DEFAULT_MAX_CHUNKS` if you raise the
+answer size, so every returned chunk still carries a score. `KB_RERANK_MAX_K=0` means no cap.
 
 **`lite-en`** is Lite for English-only deployments: the same settings, but text is embedded with
 `sentence-transformers/all-MiniLM-L6-v2` (384-d, no prefixes) and the dense vector sees only the

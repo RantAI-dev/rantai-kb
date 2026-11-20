@@ -746,6 +746,34 @@ Operational notes: `KB_TABLES=false` disables the store and the routes (404);
 are cached under `KB_CACHE_DIR/tables/` (or the system temporary directory), one
 file per grid version; a hard delete removes the document's table rows and Parquet.
 
+### 23. Additive: the reranked head and `stats.rerankedCount` (2026-11-20, issue #31)
+- **Bun**: the reranker's `top_k` (`KB_RERANK_FINAL_K`) decided both how many
+  candidates were sent and how many came back with a `rerankScore`; the rest of
+  the pool was returned in the fused order, unscored.
+- **Rust (now)**: two settings. `KB_RERANK_CANDIDATE_LIMIT` still decides how
+  many candidates are **sent**; `KB_RERANK_MAX_K` decides how many of the
+  scores that came back are **kept** and used for the order. The head is
+  `max(KB_RERANK_FINAL_K, KB_RERANK_MAX_K)` wide, so `KB_RERANK_FINAL_K` keeps
+  its old meaning ("the head is at least this wide") and an operator who raised
+  it keeps the head they had. `KB_RERANK_MAX_K=0` means no cap. The default is
+  10, which covers the default answer of 8 chunks — before, only 5 of the 8
+  carried a score.
+- **What it changes in the API**: additive. `stats.rerankedCount` says how many
+  of the returned chunks carry a `rerankScore`; it is absent when no reranker
+  ran, so a search without a reranker keeps exactly the earlier shape. Chunks
+  that carry a score are ordered by it; the ones past them keep the fused
+  order.
+- **Cost**: none per query. A cross-encoder scores every document it is sent, so
+  the head width changes no compute and no spend — it only decides how many of
+  the scores already produced are kept. The on-disk rerank cache keys on the ask
+  width, so the first query after the upgrade re-runs the reranker once and
+  re-populates the cache; the provider spend is the same, it is paid once.
+- **The LLM reranker is excluded**: `KB_RERANK_PROVIDER=llm` asks a chat model
+  for a top-N list and returns ranks, not relevance scores, so its head stays
+  at `KB_RERANK_FINAL_K`.
+- **Evidence**: `docs/eval-ab/rerank-max-k/README.md` (200 MIRACL-id queries,
+  paired bootstrap over cached rerank scores, 10,000 resamples).
+
 ---
 
 ## 6. Shared Known Issues
