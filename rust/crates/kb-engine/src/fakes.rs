@@ -1791,6 +1791,13 @@ impl JobStore for FakeJobStore {
             reason: reason.to_string(),
             resume_at_ms,
         });
+        // The store counts the attempt when it parks the job, exactly as the
+        // Postgres store does in `PARK_JOB`: a job that keeps meeting an
+        // unavailable backend runs out of tries instead of waiting forever.
+        let mut records = self.records.write().unwrap();
+        if let Some(record) = records.get_mut(job_id) {
+            record.attempt = record.attempt.saturating_add(1);
+        }
         Ok(())
     }
 

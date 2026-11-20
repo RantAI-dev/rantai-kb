@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use kb_ports::{
     BlobStore, ChunkToStore, DocumentId, DocumentMeta, Embedder, Entity, ExtractedFigure,
-    ExtractionResult, Extractor, JobRecord, OcrReport, PageBlock, PageBlockKind, PageText,
+    ExtractionResult, Extractor, JobRecord, JobStore, OcrReport, PageBlock, PageBlockKind, PageText,
     PortError, Relation, TenantId, document_path,
 };
 
@@ -473,7 +473,8 @@ async fn a_job_whose_backend_is_unavailable_waits_instead_of_failing() {
         .await
         .unwrap();
     let extractor = Arc::new(FakeExtractor::returning(&long_text(), "markdown"));
-    extractor.fail.store(true, Ordering::Relaxed);
+    // The provider cannot be reached: the file is fine, the backend is not.
+    extractor.unavailable.store(true, Ordering::Relaxed);
     let worker = worker_with_settings(
         jobs.clone(),
         documents.clone(),
@@ -498,7 +499,7 @@ async fn a_job_whose_backend_is_unavailable_waits_instead_of_failing() {
     let parked = jobs.parked();
     assert_eq!(parked.len(), 1);
     assert!(
-        parked[0].reason.contains("forced extract failure"),
+        parked[0].reason.contains("the OCR provider is unreachable"),
         "{}",
         parked[0].reason
     );
@@ -512,9 +513,9 @@ async fn a_job_whose_backend_is_unavailable_waits_instead_of_failing() {
         parked[0].resume_at_ms
     );
 
-    // The document is not failed either: nothing is wrong with it.
-    let docs = documents.docs.read().unwrap();
-    assert_eq!(docs[&tenant()][0].status, "processing");
+    // The document says the same thing: it is waiting for a backend, not
+    // broken. Nothing is wrong with the file.
+    assert_eq!(document_status_of(&documents), "waiting_for_ocr");
 }
 
 /// The queue keeps working while a job waits (`#36`).
@@ -530,7 +531,7 @@ async fn the_queue_keeps_working_while_a_job_waits() {
         .await
         .unwrap();
     let extractor = Arc::new(FakeExtractor::returning(&long_text(), "markdown"));
-    extractor.fail.store(true, Ordering::Relaxed);
+    extractor.unavailable.store(true, Ordering::Relaxed);
     let worker = worker_with_settings(
         jobs.clone(),
         documents.clone(),
@@ -547,7 +548,7 @@ async fn the_queue_keeps_working_while_a_job_waits() {
     assert_eq!(jobs.parked().len(), 1);
 
     // The backend comes back and the next document goes through.
-    extractor.fail.store(false, Ordering::Relaxed);
+    extractor.unavailable.store(false, Ordering::Relaxed);
     let mut second = job();
     second.id = "job_2".to_string();
     second.document_id = Some(DocumentId::new_unchecked("doc_2"));
@@ -558,6 +559,98 @@ async fn the_queue_keeps_working_while_a_job_waits() {
     assert_eq!(finished.len(), 1, "{finished:?}");
     assert!(finished[0].success, "{:?}", finished[0]);
     assert_eq!(finished[0].job_id, "job_2");
+}
+
+/// A waiting job is not claimed while it waits (`#36`).
+///
+/// The queue claims `pending` rows only. A job that is waiting holds no
+/// worker slot, is not retried in a hot loop, and does not take the place of
+/// a document that arrived after it.
+#[tokio::test]
+async fn a_waiting_job_is_not_claimed_while_it_waits() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let extractor = Arc::new(FakeExtractor::returning(&long_text(), "markdown"));
+    extractor.unavailable.store(true, Ordering::Relaxed);
+    let worker = worker_with_settings(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        extractor.clone(),
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings {
+            // The wait is long, so the job stays where it is.
+            ocr_wait_backoff: Duration::from_secs(3600),
+            ..IngestSettings::default()
+        },
+    );
+
+    jobs.push(job());
+    assert!(worker.run_once().await.unwrap());
+    assert_eq!(jobs.parked().len(), 1);
+    assert_eq!(jobs.pending_len(), 0, "a waiting job is not in the queue");
+
+    // The worker polls again: the waiting job is still waiting and is not
+    // claimed a second time.
+    assert!(
+        !worker.run_once().await.unwrap(),
+        "there is nothing to claim while the job waits"
+    );
+    assert_eq!(jobs.parked().len(), 1);
+    assert_eq!(jobs.pending_len(), 0);
+    assert!(
+        jobs.finished.read().unwrap().is_empty(),
+        "the waiting job is not finished"
+    );
+}
+
+/// A waiting job goes back to `pending` when its wait is over (`#36`).
+///
+/// The sweep is what makes the job come back by itself: the worker moves the
+/// rows whose `resumeAt` has passed back to `pending`, and the claim picks
+/// them up like any other job.
+#[tokio::test]
+async fn a_waiting_job_goes_back_to_pending_when_its_wait_is_over() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let extractor = Arc::new(FakeExtractor::returning(&long_text(), "markdown"));
+    extractor.unavailable.store(true, Ordering::Relaxed);
+    let worker = worker_with_settings(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        extractor,
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings {
+            // The wait is over at once, so the test does not sleep through it.
+            ocr_wait_backoff: Duration::from_millis(0),
+            ..IngestSettings::default()
+        },
+    );
+
+    jobs.push(job());
+    assert!(worker.run_once().await.unwrap());
+    assert_eq!(jobs.parked().len(), 1);
+    assert_eq!(jobs.pending_len(), 0);
+
+    // The wait is over: the sweep puts the job back in the queue.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    assert_eq!(jobs.resume_parked(now).await.unwrap(), 1);
+    assert_eq!(jobs.pending_len(), 1, "the waiting job is queued again");
+    assert!(jobs.parked().is_empty(), "it is not waiting any more");
 }
 
 /// A waiting job is picked up again by itself (`#36`).
@@ -572,7 +665,7 @@ async fn a_waiting_job_is_resumed_by_the_worker() {
         .await
         .unwrap();
     let extractor = Arc::new(FakeExtractor::returning(&long_text(), "markdown"));
-    extractor.fail.store(true, Ordering::Relaxed);
+    extractor.unavailable.store(true, Ordering::Relaxed);
     let worker = worker_with_settings(
         jobs.clone(),
         documents.clone(),
@@ -593,13 +686,19 @@ async fn a_waiting_job_is_resumed_by_the_worker() {
     assert!(jobs.finished.read().unwrap().is_empty());
 
     // The backend comes back. The next poll resumes the waiting job.
-    extractor.fail.store(false, Ordering::Relaxed);
+    extractor.unavailable.store(false, Ordering::Relaxed);
     assert!(worker.run_once().await.unwrap());
 
     let finished = jobs.finished.read().unwrap();
     assert_eq!(finished.len(), 1, "{finished:?}");
     assert!(finished[0].success, "{:?}", finished[0]);
     assert_eq!(document_status_of(&documents), "ready");
+    // The document is indexed: the chunks are there.
+    let stored = chunks.stored_chunks.read().unwrap();
+    let units = stored
+        .get(&DocumentId::new_unchecked(DOC))
+        .expect("the document's chunks");
+    assert!(!units.is_empty(), "the document is indexed");
     // The job is not waiting any more.
     assert!(jobs.parked().is_empty());
 }
@@ -617,7 +716,7 @@ async fn a_job_that_keeps_waiting_fails_for_good() {
         .await
         .unwrap();
     let extractor = Arc::new(FakeExtractor::returning(&long_text(), "markdown"));
-    extractor.fail.store(true, Ordering::Relaxed);
+    extractor.unavailable.store(true, Ordering::Relaxed);
     let worker = worker_with_settings(
         jobs.clone(),
         documents.clone(),
@@ -648,6 +747,8 @@ async fn a_job_that_keeps_waiting_fails_for_good() {
         finished[0].detail
     );
     assert!(jobs.parked().is_empty(), "the job must not wait any more");
+    // The document says it failed: it is not waiting for a backend any more.
+    assert_eq!(document_status_of(&documents), "failed");
 }
 
 /// The wait grows with the attempts and is capped (`#36`).
@@ -663,7 +764,7 @@ async fn the_wait_grows_with_the_attempts_and_is_capped() {
         .await
         .unwrap();
     let extractor = Arc::new(FakeExtractor::returning(&long_text(), "markdown"));
-    extractor.fail.store(true, Ordering::Relaxed);
+    extractor.unavailable.store(true, Ordering::Relaxed);
     let worker = worker_with_settings(
         jobs.clone(),
         documents.clone(),

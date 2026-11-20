@@ -199,8 +199,12 @@ pub struct IngestSettings {
     /// The longest a job waits between two tries (`KB_OCR_WAIT_MAX_S`,
     /// default 600 s).
     pub ocr_wait_max_backoff: Duration,
-    /// How many times a job may wait for an unavailable backend before it
-    /// fails for good (`KB_OCR_WAIT_MAX_ATTEMPTS`, default 10).
+    /// The most attempts a job makes before it gives up on a backend that is
+    /// not there (`KB_OCR_WAIT_MAX_ATTEMPTS`, default 10).
+    ///
+    /// The attempt counter goes up every time the job is parked, so a job that
+    /// keeps meeting an unavailable backend fails for good instead of waiting
+    /// forever.
     pub ocr_wait_max_attempts: u32,
 }
 
@@ -2013,8 +2017,8 @@ impl IngestWorker {
     /// The job waits instead of failing: the file may be perfectly fine and
     /// the provider may be back in a minute. The wait grows with the attempt
     /// count and is capped, and after
-    /// [`IngestSettings::ocr_wait_max_attempts`] waits the job fails for good
-    /// — a document must not wait forever.
+    /// [`IngestSettings::ocr_wait_max_attempts`] attempts the job fails for
+    /// good — a document must not wait forever.
     async fn park_for_backend(&self, job: &JobRecord, reason: &str) -> JobOutcome {
         let attempt = job.attempt.max(1) as u32;
         if attempt >= self.settings.ocr_wait_max_attempts {
@@ -2050,6 +2054,24 @@ impl IngestWorker {
             return JobOutcome::Failed {
                 reason: reason.to_string(),
             };
+        }
+        // The document says what the job says: it is waiting for a backend,
+        // not broken. A caller that lists the documents sees why the one is
+        // not searchable yet, instead of a `processing` row that never moves
+        // (`#36`).
+        if let Some(document_id) = &job.document_id {
+            let _seat = self
+                .seats
+                .store
+                .acquire(crate::seats::SeatPriority::of_job(job))
+                .await;
+            if let Err(err) = self
+                .documents
+                .set_status(document_id, "waiting_for_ocr")
+                .await
+            {
+                tracing::error!(error = %err, "could not mark the document waiting_for_ocr");
+            }
         }
         JobOutcome::Waiting {
             reason: reason.to_string(),
