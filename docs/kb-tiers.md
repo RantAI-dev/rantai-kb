@@ -37,7 +37,7 @@ Metal); that is accepted for the chat model only.
 | Scans / complex pages | CPU document OCR sidecar: PP-Layout + PP-OCRv6 tiny + SLANet-plus tables (0.69 pages/s on 2 cores) | Xiaomi-OCR-0, vLLM fp8 (1.35 pages/s, 4.4 GB peak) | Xiaomi-OCR-0 (1.5 pages/s), table pass optional | Xiaomi-OCR-0 + layout table pass | Mistral OCR |
 | Pictures (photos, charts, diagrams, embedded images; `ING-5`) | Qwen3-VL-2B-Instruct Q4 on CPU (llama.cpp sidecar `vlm-cpu`) | Qwen3-VL-2B-Instruct on GPU (`vlm-gpu`, ~2.5 GB) | same | same | nemotron-3.5-super-vl (API) |
 | Page-image search | optional tiny model (colSmol-256M), off by default | yes (the same embedder) | yes | yes | yes |
-| Est. VRAM chat / KB | — | ~3.5 / ~5 GB (tight; ~3.3 GB of KB with the 4-bit build) | ~9 / ~10 GB | ~26 / ~20 GB on 48 GB | — |
+| Est. VRAM chat / KB | — | ~3.5 / ~4.5 GB (tight; the KB models need ~5 GB with BF16 — only the 4-bit build's ~3.3 GB fits) | ~9 / ~10 GB | ~26 / ~20 GB on 48 GB | — |
 
 ### Lite: cheapest tool per page
 
@@ -136,6 +136,11 @@ full-length sequence (8,192 tokens at 64 KiB each = 0.5 GiB, from the checkpoint
 | Studio | 24 GB | BF16 | 2.90 | ~0.4 | 0.5 | **~3.8 GB** | 0.158 |
 | Station | 48 GB | BF16 | 2.90 | ~0.4 | 0.8 | **~4.1 GB** | 0.085 |
 | Station | 48 GB | NVFP4 | 1.18 | ~0.4 | 0.8 | **~2.4 GB** | 0.050 |
+
+**On Desk the 16-bit build does not fit.** The tier's share of the model budget is ~3.3 GB
+(what an 8 GB card has left after the chat model, less the ~1.2 GB reranker): the 4-bit
+build's 2.1 GB fits, the 16-bit one's 3.8 GB does not. `kb-server setup` says so when it
+sizes the flags.
 
 **Measured (issue #37, NVIDIA GB10):** ~13.8 GiB with vLLM's defaults, ~3.7 GiB with the
 sized flags. The BF16 row above (3.8 GB) is the estimate for the same thing; **the NVFP4

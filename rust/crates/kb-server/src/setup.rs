@@ -666,10 +666,12 @@ pub struct EmbedderSizing {
 /// The VRAM the embedder may hold, per tier, in GiB.
 ///
 /// It is the embedder's **share** of the tier's model budget, from the VRAM
-/// tables in `docs/kb-tiers.md`: Desk's is the ~5 GB KB budget less the
-/// ~1.2 GB reranker, Studio's the ~10 GB budget less the reranker and the
-/// ~4.4 GB OCR model, and Station's 8 GB of its ~20 GB (the card has room,
-/// but the chat LLM comes first).
+/// tables in `docs/kb-tiers.md`: Desk's is the ~4.5 GB the card has left
+/// after the chat model, less the ~1.2 GB reranker — so the 4-bit build
+/// (2.1 GB) fits and the 16-bit one (3.8 GB) does not. Studio's is the
+/// ~10 GB budget less the reranker and the ~4.4 GB OCR model, and
+/// Station's 8 GB of its ~20 GB (the card has room, but the chat LLM comes
+/// first).
 ///
 /// This is a **cap**, not a target: the flags are sized for what the model
 /// needs, and a build that fills the cap is reported, with the smaller one
@@ -678,7 +680,7 @@ pub struct EmbedderSizing {
 /// **Every number is an estimate from model sizes, not a measurement.**
 fn embed_vram_cap_gb(tier: Tier) -> f64 {
     match tier {
-        Tier::Desk => 3.8,
+        Tier::Desk => 3.3,
         Tier::Studio => 4.4,
         Tier::Station => 8.0,
         _ => 4.0,
@@ -1025,6 +1027,9 @@ pub fn tier_budget(tier: Tier) -> Option<TierBudget> {
     match tier {
         Tier::Desk => Some(TierBudget {
             chat_gb: 3.5,
+            // What is left of an 8 GB card after the chat model. The BF16
+            // embedder (3.8 GB) plus the reranker (1.2 GB) do **not** fit
+            // here; the 4-bit build's 3.3 GB does.
             kb_gb: 4.5,
         }),
         Tier::Studio => Some(TierBudget {
@@ -4245,11 +4250,11 @@ mod tests {
             "the fraction is of the whole card"
         );
 
-        // The BF16 build fills Desk's share: the flags grow with it, and the
-        // plan says so.
+        // The BF16 build does not fit Desk's share: the flags grow with it,
+        // and the plan says so.
         let bf16 = embedder_sizing(Tier::Desk, EmbedPrecision::Bf16, &desk);
         assert_eq!(bf16.weights_gb, 2.90);
-        assert!(bf16.target_gb >= embed_vram_cap_gb(Tier::Desk) * EMBED_CAP_WARN_RATIO);
+        assert!(bf16.target_gb > embed_vram_cap_gb(Tier::Desk));
         assert!(
             bf16.kv_gb >= 0.49,
             "the KV cache must hold one full-length sequence, got {}",
