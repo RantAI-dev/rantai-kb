@@ -846,3 +846,20 @@ created. Wipe and rebuild from the S3 originals:
 
 The measured numbers behind the option are in `docs/eval-ab/one-embedder/` and
 `docs/eval-ab/rerank-2026-11-17/`; the spec is `docs/core/specs/dep-6.md`.
+
+### 23. The upload limit is 256 MiB, and a `413` says how to move it
+
+`KB_MAX_FILE_BYTES` defaults to `268435456` bytes (256 MiB). The Bun service it replaced defaulted to
+50 MB (`src/lib/files/mime-types.ts`) — an inherited default rather than a considered limit: a 50.9 MB
+computer-science textbook (ViDoRe's) already did not fit. A deployment that sets the variable keeps
+its own limit; an unset one is now 256 MiB. Nothing else changes: the same files are accepted, the
+same ones are refused.
+
+The `413` body changed shape. It used to read `"<file>" is 300.0MB — the limit is 50MB.`; it now
+reads:
+
+    "<file>" is 300.0 MiB — the limit is 256 MiB (268435456 bytes). Raise KB_MAX_FILE_BYTES to accept a larger file.
+
+The bytes are exact, the MiB is the limit rounded up, and the variable is named so an operator can
+find the knob. The status code, the JSON shape (`{"error": "…"}`) and every other field are
+unchanged, so no client has to change to read the new message.

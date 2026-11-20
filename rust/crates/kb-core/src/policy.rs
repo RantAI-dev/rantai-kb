@@ -50,6 +50,8 @@ impl MimeRegistry {
     }
 
     /// KB upload limit in bytes.
+    ///
+    /// The default is 256 MiB; `KB_MAX_FILE_BYTES` overrides it at runtime.
     #[must_use]
     pub fn kb_max_file_bytes() -> u64 {
         KB_MAX_FILE_BYTES
@@ -123,7 +125,15 @@ pub fn parse_figure_mode(value: Option<&str>, legacy_force_ocr: Option<bool>) ->
     FigureMode::Auto
 }
 
-const KB_MAX_FILE_BYTES: u64 = 50 * 1024 * 1024;
+/// The default upload limit: 256 MiB.
+///
+/// The Bun service it replaced accepted 50 MB, which was its own inherited
+/// default rather than a considered limit — a 50.9 MB computer-science textbook
+/// (ViDoRe's) already did not fit. 256 MiB is big enough for the manuals,
+/// textbooks and scanned archives that actually get uploaded, and small enough
+/// that one request cannot exhaust a worker's memory. `KB_MAX_FILE_BYTES`
+/// overrides it.
+const KB_MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 
 const EXT_TO_MIME: &[(&str, &str)] = &[
     (".pdf", "application/pdf"),

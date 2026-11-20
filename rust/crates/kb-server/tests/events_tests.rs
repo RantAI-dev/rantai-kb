@@ -230,7 +230,7 @@ async fn formats_reports_the_accepted_extensions_and_the_byte_limit() {
     let response = h.send("GET", "/v1/formats", &tenant_key(TENANT)).await;
     assert_eq!(response.status(), StatusCode::OK);
     let body = json_body(response).await;
-    assert_eq!(body["maxFileBytes"], 50 * 1024 * 1024);
+    assert_eq!(body["maxFileBytes"], 256 * 1024 * 1024);
     let extensions = body["extensions"].as_array().expect("extensions");
     assert_eq!(extensions[0], ".pdf");
     assert!(extensions.contains(&serde_json::json!(".gltf")));
@@ -271,7 +271,7 @@ async fn formats_needs_no_key() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(json_body(response).await["maxFileBytes"], 50 * 1024 * 1024);
+    assert_eq!(json_body(response).await["maxFileBytes"], 256 * 1024 * 1024);
 }
 
 #[tokio::test]

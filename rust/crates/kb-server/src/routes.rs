@@ -50,9 +50,11 @@ pub mod taxonomy;
 pub mod upload;
 
 /// Largest accepted upload, in bytes: `KB_MAX_FILE_BYTES`, read once per
-/// process, defaulting to Bun's 50 MB (`src/lib/files/mime-types.ts`) so an
-/// unset variable keeps the two runtimes identical. Large manuals and
-/// textbooks (ViDoRe's 943-page computer science book is 50.9 MB) need more.
+/// process. The default is 256 MiB (see [`MimeRegistry::kb_max_file_bytes`]).
+/// Large manuals and textbooks need more: ViDoRe's 943-page computer science
+/// book is 50.9 MB, and the 50 MB the Bun service accepted (`src/lib/files/
+/// mime-types.ts`) was its own inherited default rather than a considered
+/// limit.
 pub fn max_file_bytes() -> u64 {
     static LIMIT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *LIMIT.get_or_init(|| parse_max_file_bytes(std::env::var("KB_MAX_FILE_BYTES").ok().as_deref()))
@@ -66,6 +68,29 @@ fn parse_max_file_bytes(value: Option<&str>) -> u64 {
         .unwrap_or_else(MimeRegistry::kb_max_file_bytes)
 }
 
+/// The body a `413` answers with.
+///
+/// A caller that is told only "too large" can do nothing but guess; one that
+/// is told the limit in bytes, the limit in MiB and the name of the variable
+/// that moves it can act. So the message names all three, and the file that
+/// was refused when the route knows it.
+pub fn payload_too_large_message(file_name: Option<&str>, size: Option<u64>) -> String {
+    let max = max_file_bytes();
+    let max_mib = max.div_ceil(1024 * 1024);
+    let subject = match file_name {
+        Some(name) => format!("\"{name}\""),
+        None => "The upload".to_string(),
+    };
+    let size_text = match size {
+        Some(bytes) => format!(" is {:.1} MiB", bytes as f64 / (1024.0 * 1024.0)),
+        None => String::new(),
+    };
+    format!(
+        "{subject}{size_text} — the limit is {max_mib} MiB ({max} bytes). \
+         Raise KB_MAX_FILE_BYTES to accept a larger file."
+    )
+}
+
 /// Upper bound on a multipart upload body. The file itself is capped at
 /// [`max_file_bytes`] by the upload route; the slack covers the part headers,
 /// the form fields and the multipart framing around a file exactly at the limit.
@@ -75,15 +100,41 @@ pub fn upload_body_limit() -> usize {
 
 #[cfg(test)]
 mod max_file_bytes_tests {
-    use super::parse_max_file_bytes;
+    use super::{parse_max_file_bytes, payload_too_large_message};
 
     #[test]
-    fn unset_or_invalid_keeps_buns_50_mb() {
-        let bun = 50 * 1024 * 1024;
-        assert_eq!(parse_max_file_bytes(None), bun);
-        assert_eq!(parse_max_file_bytes(Some("lots")), bun);
-        assert_eq!(parse_max_file_bytes(Some("0")), bun);
+    fn unset_or_invalid_keeps_the_256_mib_default() {
+        let default = 256 * 1024 * 1024;
+        assert_eq!(parse_max_file_bytes(None), default);
+        assert_eq!(parse_max_file_bytes(Some("lots")), default);
+        assert_eq!(parse_max_file_bytes(Some("0")), default);
         assert_eq!(parse_max_file_bytes(Some(" 104857600 ")), 104_857_600);
+    }
+
+    #[test]
+    fn the_413_body_names_the_limit_in_bytes_and_mib_and_the_variable() {
+        // The limit is the process-wide default here (no `KB_MAX_FILE_BYTES`
+        // in the test environment), so the message is checked against it.
+        let message = payload_too_large_message(Some("book.pdf"), Some(300 * 1024 * 1024));
+        assert!(message.contains("KB_MAX_FILE_BYTES"), "{message}");
+        assert!(message.contains("256 MiB"), "{message}");
+        assert!(
+            message.contains(&(256 * 1024 * 1024).to_string()),
+            "{message}"
+        );
+        assert!(message.contains("300.0 MiB"), "{message}");
+        assert!(message.contains("book.pdf"), "{message}");
+    }
+
+    #[test]
+    fn the_413_body_works_without_a_file_name() {
+        let message = payload_too_large_message(None, None);
+        assert!(message.contains("KB_MAX_FILE_BYTES"), "{message}");
+        assert!(message.contains("256 MiB"), "{message}");
+        assert!(
+            message.contains(&(256 * 1024 * 1024).to_string()),
+            "{message}"
+        );
     }
 }
 

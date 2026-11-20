@@ -177,12 +177,9 @@ pub async fn ingest_document(
     }
     let size = upload.bytes.len() as u64;
     if size > max_bytes {
-        let max_mb = max_bytes.div_ceil(1024 * 1024);
-        return Err(ApiError::PayloadTooLarge(format!(
-            "\"{}\" is {:.1}MB — the limit is {max_mb}MB.",
-            upload.file_name,
-            size as f64 / (1024.0 * 1024.0)
-        )));
+        return Err(ApiError::PayloadTooLarge(
+            crate::routes::payload_too_large_message(Some(&upload.file_name), Some(size)),
+        ));
     }
 
     let title = upload
@@ -385,10 +382,7 @@ async fn read_upload(
     loop {
         let field = multipart.next_field().await.map_err(|err| {
             if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                ApiError::PayloadTooLarge(format!(
-                    "The upload is larger than the {}-byte limit.",
-                    crate::routes::max_file_bytes()
-                ))
+                ApiError::PayloadTooLarge(crate::routes::payload_too_large_message(None, None))
             } else {
                 ApiError::BadRequest(format!("Malformed multipart body: {err}"))
             }
@@ -404,9 +398,8 @@ async fn read_upload(
                 .await
                 .map_err(|err| {
                     if err.status() == StatusCode::PAYLOAD_TOO_LARGE {
-                        ApiError::PayloadTooLarge(format!(
-                            "The upload is larger than the {}-byte limit.",
-                            crate::routes::max_file_bytes()
+                        ApiError::PayloadTooLarge(crate::routes::payload_too_large_message(
+                            None, None,
                         ))
                     } else {
                         ApiError::BadRequest(format!("Could not read the uploaded file: {err}"))

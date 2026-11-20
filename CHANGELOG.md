@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- **The upload limit is 256 MiB, and a `413` says how to move it.** `KB_MAX_FILE_BYTES` still wins when
+  it is set, but the default is now `268435456` bytes (256 MiB) instead of the Bun service's inherited
+  50 MB (`src/lib/files/mime-types.ts`) — a limit that a 50.9 MB textbook (ViDoRe's) already did not
+  fit. The `413` body names the limit in bytes, the limit in MiB and the variable that moves it, so a
+  caller can act instead of guessing. The status code and the JSON shape are unchanged.
+
 ## 0.6.0 — 2026-11-18
 
 ### Changed
