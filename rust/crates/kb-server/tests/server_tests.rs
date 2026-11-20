@@ -246,6 +246,7 @@ async fn the_search_response_says_how_much_of_the_answer_was_reranked() {
     harness.documents.insert_doc(
         tenant,
         DocumentMeta {
+            sha256: None,
             id: DocumentId("doc-1".into()),
             title: "Reranked Document".into(),
             categories: vec![],
