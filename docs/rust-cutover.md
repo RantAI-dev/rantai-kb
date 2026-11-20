@@ -794,6 +794,13 @@ matters for a stale cutover deployment: a Bun worker never claims `waiting_for_o
 resumes it, so a job parked by a Rust worker stays parked while a Bun worker runs. Run one
 worker.
 
+**`needs_ocr` and the quality fields (`#29`).** With `KB_EXTRACT_QUALITY_GATE=on` (off by
+default), a document whose text layer is still unusable after OCR ends with `Document.status =
+needs_ocr` and its job `failed` with the reason, instead of `ready`. Treat `needs_ocr` as a failed
+document. `GET /v1/documents` and `GET /v1/documents/{id}` gain `pages`, `charsExtracted` and
+`degrades` (additive; null or empty for documents indexed before this). With the gate off, nothing
+about the status changes; the numbers are still recorded in `metadata.quality`.
+
 ---
 
 ## 6. Shared Known Issues
