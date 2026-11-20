@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use kb_core::policy::UploadDedupe;
 use kb_engine::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityStore, FakeJobStore,
     FakeReranker, FakeTableStore,
@@ -49,6 +50,13 @@ impl Default for Harness {
 
 impl Harness {
     pub fn new() -> Self {
+        Self::with_upload_dedupe(UploadDedupe::default())
+    }
+
+    /// A harness whose upload route refuses a file the tenant already has
+    /// (`KB_UPLOAD_DEDUPE=reject`, the default) or stores it again
+    /// (`KB_UPLOAD_DEDUPE=off`).
+    pub fn with_upload_dedupe(upload_dedupe: UploadDedupe) -> Self {
         let documents = FakeDocumentStore::default();
         let chunks = FakeChunkStore::default();
         let blobs = FakeBlobStore::default();
@@ -71,6 +79,7 @@ impl Harness {
                 events: Arc::clone(&events),
                 tables: Some(Arc::new(tables.clone())),
                 version: "test".to_string(),
+                upload_dedupe,
             },
             Arc::new(FakeReranker::default()),
             engine_settings(),
@@ -117,6 +126,7 @@ impl Harness {
                 events: Arc::clone(&events),
                 tables: Some(Arc::new(tables.clone())),
                 version: "test".to_string(),
+                upload_dedupe: UploadDedupe::default(),
             },
             Arc::new(FakeReranker::default()),
             engine_settings(),
@@ -279,6 +289,7 @@ pub fn tenant_key(tenant: &str) -> String {
 /// A document row the tests can seed.
 pub fn doc_meta(id: &str, title: &str) -> DocumentMeta {
     DocumentMeta {
+        sha256: None,
         id: kb_ports::DocumentId(id.to_string()),
         title: title.to_string(),
         categories: vec![],

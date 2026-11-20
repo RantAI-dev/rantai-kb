@@ -182,11 +182,14 @@ async fn tiff_scans_and_legacy_office_files_are_accepted() {
     let h = Harness::new();
     h.with_tenant(TENANT);
     for name in ["fax.tif", "SCAN.TIFF", "memo.doc", "budget.xls", "deck.ppt"] {
+        // Each file carries its own bytes: the dedupe refuses an upload of
+        // bytes the tenant already has, and this test is about the extension,
+        // not about uploading the same content five times.
         let response = h
             .send_multipart(
                 "/v1/documents",
                 &tenant_key(TENANT),
-                vec![("file", format!("{name}\u{1}bytes"))],
+                vec![("file", format!("{name}\u{1}bytes of {name}"))],
             )
             .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED, "{name}");

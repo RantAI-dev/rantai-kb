@@ -19,6 +19,9 @@ pub fn row_to_doc_meta(row: &sqlx::postgres::PgRow) -> Result<DocumentMeta, sqlx
     let updated_at: String = row.try_get("updated_at")?;
     let knowledge_base_ids: Vec<String> = row.try_get("knowledge_base_ids")?;
     let metadata: Option<serde_json::Value> = row.try_get("metadata")?;
+    // Tolerant like `external_ref`: a statement that does not select the hash
+    // yields `None` rather than failing the whole read.
+    let sha256: Option<String> = row.try_get("sha256").ok().flatten();
     Ok(DocumentMeta {
         id: DocumentId(id),
         title,
@@ -35,5 +38,6 @@ pub fn row_to_doc_meta(row: &sqlx::postgres::PgRow) -> Result<DocumentMeta, sqlx
         updated_at,
         knowledge_base_ids,
         metadata,
+        sha256,
     })
 }

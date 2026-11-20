@@ -52,6 +52,10 @@ pub struct AppState {
     /// de-duplicated. Reported by `GET /health` so a caller can refuse to send
     /// content that would leave the platform.
     pub egress: Vec<String>,
+    /// What the upload route does with a file the tenant already has
+    /// (`KB_UPLOAD_DEDUPE`). `reject` by default: the same bytes twice cost a
+    /// whole ingest and produce a second copy of the same answer.
+    pub upload_dedupe: kb_core::policy::UploadDedupe,
 }
 
 /// Adapters a caller supplies. Grouped so tests can build a state from fakes
@@ -70,6 +74,9 @@ pub struct StateParts {
     /// does not exercise tables.
     pub tables: Option<Arc<dyn TableStore>>,
     pub version: String,
+    /// What the upload route does with a file the tenant already has
+    /// (`KB_UPLOAD_DEDUPE`).
+    pub upload_dedupe: kb_core::policy::UploadDedupe,
 }
 
 impl AppState {
@@ -260,6 +267,7 @@ impl AppState {
             version: config.version,
             tier,
             egress,
+            upload_dedupe: config.upload_dedupe,
         })
     }
 
@@ -303,6 +311,7 @@ impl AppState {
             // process through a model endpoint they did not configure.
             tier: None,
             egress: Vec::new(),
+            upload_dedupe: parts.upload_dedupe,
         }
     }
 

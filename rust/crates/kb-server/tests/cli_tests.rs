@@ -49,7 +49,15 @@ fn a_migration_checksum_is_the_sha256_of_the_file_on_disk() {
         );
         assert_eq!(migration.checksum.len(), 64);
         assert!(migration.checksum.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(migration.sql.contains("CREATE TABLE"));
+        // A migration must change the schema. Most create a table; an additive
+        // one (a new column) alters it, and both are real migrations.
+        assert!(
+            migration.sql.contains("CREATE TABLE")
+                || migration.sql.contains("ALTER TABLE")
+                || migration.sql.contains("CREATE INDEX"),
+            "migration {} carries no schema statement",
+            migration.name
+        );
     }
 }
 

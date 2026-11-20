@@ -16,6 +16,7 @@ pub mod graph;
 pub mod intelligence;
 pub mod page_fusion;
 pub mod page_map;
+pub mod pagination;
 pub mod policy;
 mod progress;
 pub mod query_class;
@@ -60,6 +61,10 @@ pub use intelligence::{
     PatternRelationConfig, PatternRelationExtractor, Relation, key_of, query_terms,
 };
 pub use page_map::{PageBlock, assign_chunk_pages};
+pub use pagination::{
+    Cursor, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, PageSize, created_at_timestamp, decode,
+    format_timestamp, resolve_page_size,
+};
 pub use policy::{
     FigureMode, IngestPolicy, MimeRegistry, parse_figure_mode, resolve_ingest_policy,
 };

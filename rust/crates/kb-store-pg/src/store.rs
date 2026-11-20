@@ -5,9 +5,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use kb_ports::{
     AuthContext, CategoryRecord, CreateCategory, CreateKnowledgeBase, DocumentDownloadMeta,
-    DocumentFilter, DocumentId, DocumentMeta, DocumentScope, DocumentStore, KnowledgeBaseId,
-    KnowledgeBaseRecord, KnowledgeBaseSummary, NewDocument, PatchCategory, PatchDocument,
-    PatchKnowledgeBase, PortError, ScopeRequest, TenantId, adapter::ScopeToken,
+    DocumentFilter, DocumentId, DocumentMeta, DocumentPage, DocumentScope, DocumentStore,
+    KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary, NewDocument, PatchCategory,
+    PatchDocument, PatchKnowledgeBase, PortError, ScopeRequest, TenantId, adapter::ScopeToken,
 };
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
@@ -15,10 +15,11 @@ use sqlx::{PgPool, Row};
 use crate::auth::resolve_api_key_query;
 use crate::documents::row_to_doc_meta;
 use crate::queries::{
-    DELETE_CATEGORY, DELETE_DOCUMENT_GROUPS, DELETE_KB_GROUPS, DELETE_KNOWLEDGE_BASE,
-    INSERT_CATEGORY, INSERT_DOCUMENT, INSERT_DOCUMENT_GROUP, INSERT_KNOWLEDGE_BASE, MAX_LIMIT,
-    SELECT_ALIVE_BY_IDS, SELECT_BY_ID, SELECT_BY_ID_WITH_DELETED, SELECT_CATEGORIES,
-    SELECT_CATEGORY_BY_ID_TENANT, SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB,
+    COUNT_DOCS_TENANT_ONLY, COUNT_DOCS_WITH_KB, DELETE_CATEGORY, DELETE_DOCUMENT_GROUPS,
+    DELETE_KB_GROUPS, DELETE_KNOWLEDGE_BASE, INSERT_CATEGORY, INSERT_DOCUMENT,
+    INSERT_DOCUMENT_GROUP, INSERT_KNOWLEDGE_BASE, MAX_LIMIT, SELECT_ALIVE_BY_IDS, SELECT_BY_ID,
+    SELECT_BY_ID_WITH_DELETED, SELECT_CATEGORIES, SELECT_CATEGORY_BY_ID_TENANT,
+    SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB, SELECT_DUPLICATE_BY_SHA256,
     SELECT_EXISTS_FOR_PATCH, SELECT_FOR_DOWNLOAD, SELECT_KB_BY_ID_TENANT, SELECT_KNOWLEDGE_BASES,
     SELECT_OUTLINES, SELECT_OWNED_KB_IDS, SET_DOCUMENT_STATUS, UPDATE_CATEGORY,
     UPDATE_DOCUMENT_PATCH, UPDATE_EXTRACTED_CONTENT, UPDATE_KNOWLEDGE_BASE, UPDATE_METADATA,
@@ -395,20 +396,50 @@ impl DocumentStore for PgDocumentStore {
         Ok(out)
     }
 
-    async fn list(
+    async fn find_duplicate_by_sha256(
+        &self,
+        tenant: &TenantId,
+        sha256: &str,
+        knowledge_base_ids: &[KnowledgeBaseId],
+    ) -> Result<Option<DocumentId>, PortError> {
+        let ids: Vec<&str> = knowledge_base_ids.iter().map(|k| k.0.as_str()).collect();
+        let row = sqlx::query(SELECT_DUPLICATE_BY_SHA256)
+            .bind(tenant.0.as_str())
+            .bind(sha256)
+            .bind(&ids)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg duplicate: {e}")))?;
+        match row {
+            Some(row) => Ok(Some(DocumentId(text(&row, "id")?))),
+            None => Ok(None),
+        }
+    }
+
+    async fn list_page(
         &self,
         tenant: &TenantId,
         limit: u32,
         knowledge_base_ids: &[KnowledgeBaseId],
         external_ref: Option<&str>,
-    ) -> Result<Vec<DocumentMeta>, PortError> {
-        let limit = (limit.clamp(1, MAX_LIMIT)) as i64;
+        cursor: Option<&kb_core::pagination::Cursor>,
+    ) -> Result<DocumentPage, PortError> {
+        let limit = limit.clamp(1, MAX_LIMIT);
+        // One row more than the page holds: that is how the adapter learns
+        // that another page exists without counting the whole table twice.
+        let fetch = i64::from(limit) + 1;
+        // The cursor's timestamp is the raw column's value, so the predicate
+        // compares exactly what the ordering sorts on.
+        let cursor_ts = cursor.and_then(kb_core::pagination::created_at_timestamp);
+        let cursor_id = cursor.map(|c| c.id.as_str());
 
         let rows = if knowledge_base_ids.is_empty() {
             sqlx::query(SELECT_DOCS_TENANT_ONLY)
                 .bind(tenant.0.as_str())
-                .bind(limit)
+                .bind(fetch)
                 .bind(external_ref)
+                .bind(cursor_ts)
+                .bind(cursor_id)
                 .fetch_all(&self.pool)
                 .await
         } else {
@@ -416,20 +447,70 @@ impl DocumentStore for PgDocumentStore {
             sqlx::query(SELECT_DOCS_WITH_KB)
                 .bind(tenant.0.as_str())
                 .bind(&ids)
-                .bind(limit)
+                .bind(fetch)
                 .bind(external_ref)
+                .bind(cursor_ts)
+                .bind(cursor_id)
                 .fetch_all(&self.pool)
                 .await
         }
         .map_err(|e| PortError::Unavailable(format!("pg list: {e}")))?;
 
-        let mut out = Vec::with_capacity(rows.len());
-        for row in &rows {
-            out.push(
+        let has_more = rows.len() > limit as usize;
+        let mut documents = Vec::with_capacity(rows.len().min(limit as usize));
+        for row in rows.iter().take(limit as usize) {
+            documents.push(
                 row_to_doc_meta(row).map_err(|e| PortError::Unavailable(format!("pg row: {e}")))?,
             );
         }
-        Ok(out)
+
+        // The cursor names the last row of the page, so the next page starts
+        // strictly after it. No next page, no cursor.
+        let next_cursor = if has_more {
+            let row = &rows[limit as usize - 1];
+            let timestamp: chrono::NaiveDateTime = row
+                .try_get("created_at_ts")
+                .map_err(|e| PortError::Unavailable(format!("pg row: {e}")))?;
+            let id: String = row
+                .try_get("id")
+                .map_err(|e| PortError::Unavailable(format!("pg row: {e}")))?;
+            Some(kb_core::pagination::encode(
+                &kb_core::pagination::Cursor::new(
+                    kb_core::pagination::format_timestamp(timestamp),
+                    id,
+                ),
+            ))
+        } else {
+            None
+        };
+
+        // The count is of the whole filtered set, not of the page: it is the
+        // same on every page, so a caller can say "17 of 340" without
+        // counting rows itself.
+        let total: i64 = if knowledge_base_ids.is_empty() {
+            sqlx::query(COUNT_DOCS_TENANT_ONLY)
+                .bind(tenant.0.as_str())
+                .bind(external_ref)
+                .fetch_one(&self.pool)
+                .await
+        } else {
+            let ids: Vec<&str> = knowledge_base_ids.iter().map(|k| k.0.as_str()).collect();
+            sqlx::query(COUNT_DOCS_WITH_KB)
+                .bind(tenant.0.as_str())
+                .bind(&ids)
+                .bind(external_ref)
+                .fetch_one(&self.pool)
+                .await
+        }
+        .map_err(|e| PortError::Unavailable(format!("pg count: {e}")))?
+        .try_get("count")
+        .map_err(|e| PortError::Unavailable(format!("pg count: {e}")))?;
+
+        Ok(DocumentPage {
+            documents,
+            total: u64::try_from(total).unwrap_or(0),
+            next_cursor,
+        })
     }
 
     async fn list_knowledge_bases(
@@ -554,6 +635,7 @@ impl DocumentStore for PgDocumentStore {
             .bind(&doc.status)
             .bind(doc.external_ref.as_deref())
             .bind(doc.metadata.as_ref())
+            .bind(doc.sha256.as_deref())
             .execute(&mut *tx)
             .await
             .map_err(|e| PortError::Unavailable(format!("pg insert document: {e}")))?;
