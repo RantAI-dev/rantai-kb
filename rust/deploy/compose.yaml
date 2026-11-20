@@ -519,11 +519,13 @@ services:
   #
   # The three flags below are sized from the card by `kb-server setup`, which
   # writes them into the env file (KB_EMBED_MAX_MODEL_LEN,
-  # KB_EMBED_MAX_NUM_SEQS, KB_EMBED_GPU_FRACTION). With vLLM's defaults the
+  # KB_EMBED_MAX_NUM_SEQS, KB_EMBED_GPU_FRACTION). With the old fixed flags the
   # embedder took ~13.8 GB on a GB10; with the sized flags ~3.7 GB (issue #37).
-  # The defaults here suit the smallest card we support (8 GB → 4 GB for the
-  # BF16 build) and are too large on a big card: run setup, or set the three
-  # variables yourself.
+  #
+  # The fallbacks here suit the *smallest* card we support (8 GB → 4 GB, enough
+  # for the 16-bit build). On a bigger card they reserve too much of it next
+  # to the chat model: run `kb-server setup <tier>` — which every install needs
+  # anyway to write the tier file — or set the three variables yourself.
   vllm-embed:
     <<: *vllm
     profiles: ["desk-one", "studio-one", "station-one"]

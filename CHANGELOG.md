@@ -32,7 +32,11 @@
   index and an NVFP4 index are different collections: switching is a **re-index**, not an upgrade.
   `kb-server setup` keeps the build the env file already names and says so. To switch:
   `kb-server setup <tier> --embed-precision nvfp4`, then `kb-server reindex`. The old collection is
-  left alone (`docs/rust-cutover.md` §17).
+  left alone (`docs/rust-cutover.md` §18).
+- **Re-run `kb-server setup <tier>` after upgrading** to get the embedder's sized vLLM flags. Until
+  it runs, the container keeps the old fixed flags (`--max-model-len 32768`, 15% of the card), which
+  is too small for the embedder's weights on an 8 GB card and too large on a 48 GB one. Setup only
+  writes the flags; it does not change the build.
 
 ## 0.6.0 — 2026-11-18
 

@@ -882,6 +882,12 @@ the compose file reads them. Before, the container ran `--max-model-len 32768` w
 fraction, which took ~13.8 GiB on a GB10; with the sized flags it is ~3.7 GiB (issue
 #37). The NVFP4 footprint is an estimate and is not measured yet.
 
+**Upgrading an existing GPU-tier deployment.** Re-run `kb-server setup <tier>` once. It writes the
+sized flags into the env file and leaves the build alone, so nothing about the index changes. Until
+it runs, the container keeps the old fixed flags, which are too small for the embedder's weights on
+an 8 GB card and too large on a 48 GB one. `setup` never changes the build of an install that is
+already there — that is the opt-in below.
+
 `KB_EMBED_PRECISION` is a new variable: unset or `bf16` is the old behaviour, `nvfp4` asks for the
 4-bit build. An unknown value is a startup error, not a fallback. `docs/kb-tiers.md` has the
 per-tier VRAM budgets per build.
