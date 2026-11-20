@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **The embedder runs in NVFP4 on Blackwell cards.** `Nemotron-3.5-Embed-1B` ships in two builds of the
+  same checkpoint: BF16 (16-bit, every CUDA GPU) and NVFP4 (4-bit, Blackwell cards with native FP4 —
+  sm_100, sm_120, sm_121). `kb-server setup` reads the card's CUDA compute capability
+  (`nvidia-smi --query-gpu=compute_cap`; the card's name is the fallback when the driver does not know
+  the field) and writes the build it picked: NVFP4 on Desk and Studio, BF16 on Station and on every
+  card without FP4 (RTX 30/40, Ampere, Ada, Hopper fall back automatically). The tier preset turns the
+  new `KB_EMBED_PRECISION` into the model name the server asks for, so the server and the model server
+  always name the same build; `--embed-precision nvfp4|bf16` overrides the choice.
+- **The embedder's vLLM flags are sized from the card.** `kb-server setup` writes
+  `KB_EMBED_MAX_MODEL_LEN`, `KB_EMBED_MAX_NUM_SEQS` and `KB_EMBED_GPU_FRACTION`, and compose reads
+  them. The container no longer runs `--max-model-len 32768` with a fixed memory fraction: with
+  the old flags the embedder took ~13.8 GiB on a GB10, with the sized flags ~3.7 GiB (issue #37).
+
+### Changed
+
+- `docs/kb-tiers.md` describes the stack the preset actually fills (one embedder for text and page
+  images, `KB_EMBEDDERS=one` by default) instead of the 0.3–0.5 Qwen3-VL stack, and gives the VRAM
+  budget per tier **per build**.
+- The compose file's `vllm-embed` service no longer forces `--dtype bfloat16`: vLLM reads the build
+  from the checkpoint's own metadata, and forcing a dtype breaks the 4-bit one.
+
+### Upgrading
+
+- **An existing install is never switched to the 4-bit build.** The two builds are different
+  checkpoints with different vectors, and Qdrant's collection name carries the model slug, so a BF16
+  index and an NVFP4 index are different collections: switching is a **re-index**, not an upgrade.
+  `kb-server setup` keeps the build the env file already names and says so. To switch:
+  `kb-server setup <tier> --embed-precision nvfp4`, then `kb-server reindex`. The old collection is
+  left alone (`docs/rust-cutover.md` §17).
+
 ## 0.6.0 — 2026-11-18
 
 ### Changed

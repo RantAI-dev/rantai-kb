@@ -31,13 +31,13 @@ Metal); that is accepted for the chat model only.
 | Role | Lite | Desk (8 GB) | Studio (24 GB) | Station | Cloud |
 |---|---|---|---|---|---|
 | Chat LLM (the app's) | elsewhere | Bonsai-2-9B (2.0–2.6 GB + 0.6 GB vision), 5 users | Bonsai-2-27B (6.0–7.2 GB + 0.6 GB vision), 5 users | 32–35B × 5 users, or 8–9B × 20 users | API |
-| Embedding (text + page images, one space) | multilingual-e5-small on CPU (measured: `docs/eval-ab/lite-2core`) | **`Nemotron-3.5-Embed-1B`, 2048-d, text and pages** (the default since 0.6.0; `--embedders two` keeps the Qwen pair) | same | same | voyage-multimodal-3.5 or gemini-embedding-2 |
+| Embedding (text + page images, one space) | multilingual-e5-small on CPU (measured: `docs/eval-ab/lite-2core`) | **`Nemotron-3.5-Embed-1B`, 2048-d, text and pages** (the default since 0.6.0; `--embedders two` keeps the Qwen pair). NVFP4 (4-bit) on a Blackwell card, BF16 everywhere else | same | same, always BF16 | voyage-multimodal-3.5 or gemini-embedding-2 |
 | Reranker | tiny text reranker, or none | **Qwen3-Reranker-0.6B**, 1.19 GB (measured 2026-11-17: +0.055) | same | same | voyage rerank-2.5 / cohere rerank-4 / qwen3-reranker-8b |
 | Digital PDF text | pdfium text layer | text layer | text layer | text layer | text layer |
 | Scans / complex pages | CPU document OCR sidecar: PP-Layout + PP-OCRv6 tiny + SLANet-plus tables (0.69 pages/s on 2 cores) | Xiaomi-OCR-0, vLLM fp8 (1.35 pages/s, 4.4 GB peak) | Xiaomi-OCR-0 (1.5 pages/s), table pass optional | Xiaomi-OCR-0 + layout table pass | Mistral OCR |
 | Pictures (photos, charts, diagrams, embedded images; `ING-5`) | Qwen3-VL-2B-Instruct Q4 on CPU (llama.cpp sidecar `vlm-cpu`) | Qwen3-VL-2B-Instruct on GPU (`vlm-gpu`, ~2.5 GB) | same | same | nemotron-3.5-super-vl (API) |
 | Page-image search | optional tiny model (colSmol-256M), off by default | yes (the same embedder) | yes | yes | yes |
-| Est. VRAM chat / KB | — | ~3.5 / ~4.5 GB (tight) | ~9 / ~10 GB | ~26 / ~20 GB on 48 GB | — |
+| Est. VRAM chat / KB | — | ~3.5 / ~5 GB (tight; ~3.3 GB of KB with the 4-bit build) | ~9 / ~10 GB | ~26 / ~20 GB on 48 GB | — |
 
 ### Lite: cheapest tool per page
 
@@ -58,20 +58,113 @@ On 1–2 cores no model is fast enough to run on every page, so ingest routes **
 |---|---:|
 | Bonsai-2-9B + vision | 2.6–3.2 GB |
 | KV cache, 5 users (hybrid attention, 8 of 32 layers keep KV) | ~0.5–1 GB |
-| Nemotron-3.5-Embed-1B bf16, text and pages (vLLM; weights 2.4 GB, plus runtime) | ~3 GB |
+| Nemotron-3.5-Embed-1B **NVFP4**, text and pages (vLLM; weights 1.18 GB measured + runtime + KV cache) | ~2.1 GB |
+| Nemotron-3.5-Embed-1B **BF16** (weights 2.90 GB measured + runtime + KV cache) | ~3.8 GB |
 | Qwen3-Reranker-0.6B Q8 (llama.cpp; measured 1.19 GB) | ~1.2 GB |
-| **Total** | **~7.3–8.4 GB** |
+| **Total with NVFP4** | **~6.4–7.5 GB** |
+| **Total with BF16** | **~8.1–9.2 GB** |
 
 Desk runs the same one embedder as Studio and Station (`DEP-6`, decided 2026-11-17, the
 default since 0.6.0), which gives it the page-image search it could not afford with two
 models. It is ~0.5 GB heavier than the 0.5.0 Desk stack (Qwen3-Embedding-0.6B + bge, ~3.7 GB)
-and **has not been measured on a real 8 GB card**. Xiaomi-OCR-0 (4.4 GB peak) does not fit
+and **has not been measured on a real 8 GB card**. The 4-bit build is what makes it fit: the
+KB models need ~5 GB next to the chat model with BF16 and ~3.3 GB with NVFP4, and only the
+second leaves room on 8 GB. Xiaomi-OCR-0 (4.4 GB peak) does not fit
 on the same 8 GB beside the chat model and the embedder either; that was already true in 0.5.0.
 
 If it doesn't fit when measured: reranker at 6-bit first, then fewer rerank candidates. The
 parser does not stay resident unless the operator asks for it.
 
+## The embedder build: NVFP4 and BF16
+
+`Nemotron-3.5-Embed-1B` ships in **two builds of the same checkpoint**:
+
+| Build | Checkpoint | Weights | Runs on |
+|---|---|---:|---|
+| BF16 (16-bit) | `nvidia/Nemotron-3.5-Embed-1B-BF16` | 2.90 GiB (measured: the Hub's `model.safetensors.index.json`) | every CUDA GPU |
+| NVFP4 (4-bit) | `nvidia/Nemotron-3.5-Embed-1B-NVFP4` | 1.18 GiB (measured, same file) | Blackwell cards with **native FP4** tensor cores: sm_100 (B200, GB200), sm_120 (RTX 50-series, RTX PRO), sm_121 (GB10, DGX Spark) |
+
+Nothing before Blackwell has FP4 tensor cores — Ada is 8.9, Hopper 9.0, Ampere 8.x — so an
+RTX 3090, an RTX 4090 or an H100 **falls back to BF16 automatically**. vLLM reads the build
+from the checkpoint's own metadata, so there is no `--quantization` and no `--dtype` flag.
+
+**Who runs what** (the product owner's decision of 2026-11-20): the tiers below the top one
+(Desk, Studio) run **NVFP4** where the hardware allows it; **Station keeps BF16**. An install
+that is already there keeps the build its index was made with — see "Switching is a re-index"
+below.
+
+**How the choice is made.** The server cannot see the GPU, so the tier preset names BF16 (the
+build that runs everywhere) and `KB_EMBED_PRECISION` moves it:
+
+1. `kb-server setup` reads the card's CUDA compute capability
+   (`nvidia-smi --query-gpu=compute_cap`; when the driver does not know the field it answers
+   `[N/A]` and the card's **name** is the fallback, for names that cannot mean anything else:
+   GB10, GB200, GB300, B200, B300, Blackwell, RTX 5050–5090).
+2. It picks the build: NVFP4 on Desk and Studio when the card has native FP4, BF16 on Station
+   and on every card without it, BF16 when there is no NVIDIA card at all.
+3. It writes `KB_EMBED_PRECISION`, the checkpoint the model server serves (`KB_EMBED_MODEL`)
+   and the three vLLM flags sized for the card into the env file.
+4. The tier preset turns `KB_EMBED_PRECISION` into the model name the server asks for
+   (`KB_EMBEDDING_MODEL`, `KB_PAGE_EMBEDDING_MODEL`), so the server and the model server
+   always name the same build. A `KB_EMBED_MODEL` that disagrees with `KB_EMBEDDING_MODEL` is
+   logged at boot as a warning.
+
+`--embed-precision nvfp4|bf16` overrides the choice, and `KB_EMBED_PRECISION` in the env file
+does too. An unknown value is a startup error naming both, never a silent fallback.
+
+### The vLLM flags, sized
+
+The embedder ran with `--max-model-len 32768` and a fixed `--gpu-memory-utilization 0.15`,
+which is 19 GB of a 128 GB card and 1.2 GB of an 8 GB one — too small for the 2.90 GiB of
+BF16 weights. `kb-server setup` sizes the three flags from the model and the card:
+
+* `--max-model-len 8192` — the checkpoint supports 32,768, but a chunk or a page is far
+  shorter and the KV cache is what the footprint is made of;
+* `--max-num-seqs` — the tier's in-flight embedding requests (Desk 2, Studio 4, Station 8);
+* `--gpu-memory-utilization` — the footprint over the **whole card**: vLLM's fraction is of
+  the card, not of the model, so one number cannot serve an 8 GB card and a 48 GB one.
+
+The footprint is the weights + the runtime (≈0.4 GiB, estimated) + a KV cache that holds one
+full-length sequence (8,192 tokens at 64 KiB each = 0.5 GiB, from the checkpoint's
+`config.json`: 16 layers × 8 KV heads × 128 head_dim × 2 × 2 bytes).
+
+| Tier | Card | Build | Weights | Runtime | KV cache | Footprint | `--gpu-memory-utilization` |
+|---|---|---|---:|---:|---:|---:|---:|
+| Desk | 8 GB | NVFP4 | 1.18 | ~0.4 | 0.5 | **~2.1 GB** | 0.26 |
+| Desk | 8 GB | BF16 | 2.90 | ~0.4 | 0.5 | **~3.8 GB** | 0.475 |
+| Studio | 24 GB | NVFP4 | 1.18 | ~0.4 | 0.5 | **~2.1 GB** | 0.087 |
+| Studio | 24 GB | BF16 | 2.90 | ~0.4 | 0.5 | **~3.8 GB** | 0.158 |
+| Station | 48 GB | BF16 | 2.90 | ~0.4 | 0.8 | **~4.1 GB** | 0.085 |
+| Station | 48 GB | NVFP4 | 1.18 | ~0.4 | 0.8 | **~2.4 GB** | 0.050 |
+
+**Measured (issue #37, NVIDIA GB10):** ~13.8 GiB with vLLM's defaults, ~3.7 GiB with the
+sized flags. The BF16 row above (3.8 GB) is the estimate for the same thing; **the NVFP4
+footprint has not been measured** — only the two weight sizes are measured, and everything
+else in the table is arithmetic from them.
+
+### Switching is a re-index
+
+The two builds are the same weights in a different precision, but they are **not the same
+vectors**: the model card reports them as two checkpoints with separate scores (ViDoRe V3,
+NVFP4 57.82/57.53/58.71 against BF16 58.02/57.80/58.82) and says only that the two "share
+the embedding space" ([model card](https://huggingface.co/nvidia/Nemotron-3.5-Embed-1B-NVFP4)).
+Qdrant fixes a collection's width and name at creation, and the name
+carries the model's slug (`chunks__<model-slug>__<dim>`), so a BF16 index and an NVFP4 index
+are **different collections**.
+
+So switching the build is an embedder change, not an upgrade:
+
+* an existing install is **never switched silently** — `kb-server setup` keeps the build the
+  env file already names and says so;
+* to switch: `kb-server setup <tier> --embed-precision nvfp4` (or set `KB_EMBED_PRECISION`),
+  then `kb-server reindex` to rebuild the index from the originals in S3;
+* the old collection is left alone. Remove it when the new one is good.
+
 ## Local page embedder (vLLM)
+
+This is the `--embedders two` stack's page arm: the default one-embedder stack embeds pages
+with the same Nemotron model as the text and talks to vLLM's `/v2/embed` instead (see "The
+embedder build" above).
 
 The page-image arm talks to vLLM's **Chat Embeddings API** when
 `KB_PAGE_EMBEDDING_FORMAT=vllm`. The shape is a chat conversation per page, not OpenAI's
@@ -437,7 +530,8 @@ numbers and how to override a setting.
 | Setting | Values | Default |
 |---|---|---|
 | `KB_TIER` | `lite`, `lite-en`, `desk`, `studio`, `station`, `cloud` | unset: today's explicit per-role settings |
-| `KB_EMBEDDERS` | `two` (default) or `one` (`DEP-6`): on the GPU tiers, `one` embeds text **and** pages with `Nemotron-3.5-Embed-1B` at 2048-d in a single space, and reranks with `Qwen3-Reranker-0.6B`. Measured in [`eval-ab/one-embedder`](eval-ab/one-embedder/README.md) and [`eval-ab/rerank-2026-11-17`](eval-ab/rerank-2026-11-17/README.md): text 0.826 vs 0.796, pages 0.621 one space vs 0.277 for the Qwen3-VL stack, reranker +0.055. It points at `http://127.0.0.1:8081/v2/embed` and `:8082/v1/rerank`, so a bare-metal install or any operator-supplied endpoint can run it today; the compose services land with the flip ([`specs/dep-6.md`](core/specs/dep-6.md)) |
+| `KB_EMBEDDERS` | `one` (default) or `two` (`DEP-6`): on the GPU tiers, `one` embeds text **and** pages with `Nemotron-3.5-Embed-1B` at 2048-d in a single space, and reranks with `Qwen3-Reranker-0.6B`. Measured in [`eval-ab/one-embedder`](eval-ab/one-embedder/README.md) and [`eval-ab/rerank-2026-11-17`](eval-ab/rerank-2026-11-17/README.md): text 0.826 vs 0.796, pages 0.621 one space vs 0.277 for the Qwen3-VL stack, reranker +0.055. It points at `http://127.0.0.1:8081/v2/embed` and `:8082/v1/rerank`, so a bare-metal install or any operator-supplied endpoint can run it today; the compose services land with the flip ([`specs/dep-6.md`](core/specs/dep-6.md)) |
+| `KB_EMBED_PRECISION` | `bf16` (default) or `nvfp4`: which build of the one-embedder checkpoint runs. `nvfp4` is the same weights in 4-bit and needs a Blackwell card (native FP4); `bf16` runs on every CUDA GPU. `kb-server setup` picks the one the card can run (NVFP4 on Desk and Studio, BF16 on Station) and writes it; an install that is already there keeps the build its index was made with. **Switching is a re-index**, not an upgrade | `bf16` |
 | `KB_PARSE_RESIDENCY` | `on-demand`, `always` | Desk `on-demand`, Studio and up `always` |
 | `KB_PARSE_IDLE_UNLOAD_S` | seconds | 300 |
 | `KB_CAPTION_RESIDENCY` | `on-demand`, `always` | same as parse |
@@ -484,12 +578,17 @@ with the service name. **The Studio/Station page and rerank roles are mock-teste
 NVIDIA machine here): see "Local page embedder (vLLM)" for what is and is not verified. Lite's concurrency and batch numbers are **placeholders** until the 2-core
 measurement (build order 5); the Desk / Studio / Station rerank widths are estimates.
 
+This is the **one-embedder stack** (`KB_EMBEDDERS=one`, the default on the GPU tiers since
+0.6.0). The table is the preset in `rust/crates/kb-server/src/tier.rs`; an explicit `KB_*`
+setting always wins.
+
 | Variable | lite | desk | studio | station | cloud |
 |---|---|---|---|---|---|
-| `KB_EMBEDDING_MODEL` | `intfloat/multilingual-e5-small` | `Qwen/Qwen3-Embedding-0.6B` | same as desk | same as desk | `voyageai/voyage-multimodal-3.5` |
-| `KB_EMBEDDING_DIM` | 384 | 1024 | 1024 | 1024 | 1024 |
-| `KB_EMBEDDING_BASE_URL` | `http://127.0.0.1:8081/v1/embeddings` | same | same | same | OpenRouter (built-in default) |
-| `KB_EMBEDDING_QUERY_PREFIX` | `query: ` | Qwen3 instruction¹ | same as desk | same as desk | — |
+| `KB_EMBEDDING_MODEL` | `intfloat/multilingual-e5-small` | `nvidia/Nemotron-3.5-Embed-1B-BF16`¹ | same as desk | same as desk | `voyageai/voyage-multimodal-3.5` |
+| `KB_EMBEDDING_DIM` | 384 | 2048 | 2048 | 2048 | 1024 |
+| `KB_EMBEDDING_FORMAT` | — | `omniembed` | same as desk | same as desk | — |
+| `KB_EMBEDDING_BASE_URL` | `http://127.0.0.1:8081/v1/embeddings` | `http://127.0.0.1:8081/v2/embed` | same as desk | same as desk | OpenRouter (built-in default) |
+| `KB_EMBEDDING_QUERY_PREFIX` | `query: ` | —² | same as desk | same as desk | — |
 | `KB_EMBEDDING_PASSAGE_PREFIX` | `passage: ` | — | — | — | — |
 | `KB_EMBEDDING_TIMEOUT_MS` | 120000 | same | same | same | — |
 | `KB_EMBEDDING_INPUT_TYPE` | — | — | — | — | `true` |
@@ -499,23 +598,36 @@ measurement (build order 5); the Desk / Studio / Station rerank widths are estim
 | `KB_SEATS` | — | — | — | — | — (the default `extract=2,embed=4,store=2`) |
 | `KB_ENTITY_EXTRACTION_ENABLED` | `false` | `false` | `false` | `false` | `false` (a paid LLM call per document; only written to the Postgres graph when `KB_GRAPH_STORE=pg`) |
 | `KB_RERANK_ENABLED` | `false` | `true` | `true` | `true` | `true` |
-| `KB_RERANK_PROVIDER` | — | `tei` | `vllm` | `vllm` | `cohere` |
-| `KB_RERANK_BASE_URL` | — | `http://127.0.0.1:8082` | same | same | `https://openrouter.ai/api/v1/rerank` |
-| `KB_RERANK_MODEL` | — | `BAAI/bge-reranker-v2-m3` | `Qwen/Qwen3-VL-Reranker-2B` | `Qwen/Qwen3-VL-Reranker-8B` | `voyageai/rerank-2.5` |
+| `KB_RERANK_PROVIDER` | — | `cohere` | same as desk | same as desk | `cohere` |
+| `KB_RERANK_BASE_URL` | — | `http://127.0.0.1:8082/v1/rerank` | same as desk | same as desk | `https://openrouter.ai/api/v1/rerank` |
+| `KB_RERANK_MODEL` | — | `Qwen/Qwen3-Reranker-0.6B` | same as desk | same as desk | `voyageai/rerank-2.5` |
+| `KB_RERANK_API_KEY` | — | `local` | same as desk | same as desk | — |
 | `KB_RERANK_CANDIDATE_LIMIT` | — | 10 | 20 | 30 | 20 |
 | `KB_OCR_BASE_URL` | `http://127.0.0.1:8083/v1/chat/completions` | same | same | same | — (Mistral OCR when `KB_MISTRAL_OCR_KEY` is set) |
 | `KB_OCR_MODEL` | `rantai-kb/ocr-cpu` | `xiaomi-research/Xiaomi-OCR-0` | same as desk | same as desk | — |
 | `KB_OCR_RECIPE` | — (`paddle`) | `xiaomi` | `xiaomi` | `xiaomi` | — |
 | `KB_OCR_DPI` | 110 | — (150) | — (150) | — (150) | — |
 | `KB_OCR_CONCURRENCY` | 2 | 16 | 32 | 32 | — |
-| `KB_PAGE_EMBEDDING_MODEL` | — | — | `Qwen/Qwen3-VL-Embedding-2B` | `Qwen/Qwen3-VL-Embedding-8B` | `voyageai/voyage-multimodal-3.5` |
-| `KB_PAGE_EMBEDDING_FORMAT` | — | — | `vllm` | `vllm` | — (OpenRouter) |
-| `KB_PAGE_EMBEDDING_BASE_URL` | — | — | `http://127.0.0.1:8084/v1/embeddings` | same | — (OpenRouter) |
-| `KB_PAGE_EMBEDDING_DIM` | — | — | 2048 | 4096 | 1024 |
+| `KB_PAGE_EMBEDDING_MODEL` | — | same as `KB_EMBEDDING_MODEL`¹ | same as desk | same as desk | `voyageai/voyage-multimodal-3.5` |
+| `KB_PAGE_EMBEDDING_FORMAT` | — | `omniembed` | same as desk | same as desk | — (OpenRouter) |
+| `KB_PAGE_EMBEDDING_BASE_URL` | — | `http://127.0.0.1:8081/v2/embed` | same as desk | same as desk | — (OpenRouter) |
+| `KB_PAGE_EMBEDDING_DIM` | — | 2048 | 2048 | 2048 | 1024 |
 | `KB_PAGE_RERANK` | `false` | `false` | `false` | `false` | `true` |
 
-¹ `Instruct: Given a question, retrieve passages that answer it\nQuery: ` — the same string
-`rust/scripts/stack-up.sh` and `docs/local-models.md` already use.
+¹ The build: BF16 unless `KB_EMBED_PRECISION=nvfp4`, which names the 4-bit build of the same
+checkpoint (see "The embedder build" above). The preset fills it from that one variable, so
+the server and the model server always name the same build.
+
+² The instruction lives in the checkpoint and is selected with `input_type` (`omniembed`), so
+there is no client-side prefix on this stack. The `query: ` / `passage: ` prefixes above are
+Lite's own.
+
+**With `KB_EMBEDDERS=two`** the GPU tiers go back to the 0.3–0.5 stack: text with
+`Qwen/Qwen3-Embedding-0.6B` (1024-d, the Qwen3 instruction as the query prefix), pages with
+`Qwen/Qwen3-VL-Embedding-2B` (2048-d) on Studio and `Qwen/Qwen3-VL-Embedding-8B` (4096-d) on
+Station, and the reranker with `BAAI/bge-reranker-v2-m3` (`tei`) on Desk,
+`Qwen/Qwen3-VL-Reranker-2B` (`vllm`) on Studio and `Qwen/Qwen3-VL-Reranker-8B` (`vllm`) on
+Station. Desk has no page arm in that stack either.
 
 A dash means the preset leaves the setting alone, so that setting's own default applies.
 `same` means the value in lite's column, unless it says otherwise. Lite's e5-small was chosen by
@@ -544,10 +656,11 @@ On 2 cores it ingests ViDoRe HR at 6.43 pages/s (page nDCG@10 0.517) against Lit
   operator's `KB_EMBEDDING_CONCURRENCY`.
 - The local vLLM page embedder never receives `OPENROUTER_API_KEY`: with
   `KB_PAGE_EMBEDDING_FORMAT=vllm` only `KB_PAGE_EMBEDDING_API_KEY` is sent.
-- Studio and Station embed **text** with Qwen3-Embedding-0.6B (the measured local text stack)
-  and **pages** with Qwen3-VL-Embedding in a separate Qdrant vector, fused at search time. One
-  shared text+page space, as the role table puts it, would need the VL model to embed text too;
-  that is unmeasured, so it is not the preset.
+- The GPU tiers embed **text and pages with one model in one space** (`DEP-6`): Nemotron-3.5-Embed-1B
+  at 2048-d, measured on the GB10 at text 0.826 and pages 0.621 against 0.796 / 0.277 for the
+  two-model stack (`docs/eval-ab/one-embedder`). The older stack (text with Qwen3-Embedding-0.6B,
+  pages with Qwen3-VL-Embedding in a second Qdrant vector) is still what `KB_EMBEDDERS=two`
+  selects.
 - Every GPU tier runs Xiaomi-OCR-0, the best measured local OCR (`docs/eval-ab/ocr-tiers`):
   PaddleOCR-VL-1.6 scored 9.4 on tables read whole-page, LightOnOCR-2-1B was too slow at a
   Desk-sized share. MinerU2.5-Pro and PaddleOCR-VL stay documented alternatives; no preset
@@ -565,7 +678,9 @@ Implemented 2026-10-30 (`rust/crates/kb-server/src/setup.rs`, run as
 `rust/scripts/kb-dev.sh setup [flags]`). It plans and writes the config; it does not download
 or start anything, so it works on a machine with no Postgres, Qdrant, Docker or models.
 
-1. **Detect** each NVIDIA GPU (`nvidia-smi --query-gpu=name,memory.total`), Apple silicon
+1. **Detect** each NVIDIA GPU (`nvidia-smi --query-gpu=name,memory.total` and
+   `--query-gpu=compute_cap`, which decides whether the 4-bit build of the embedder can run
+   here), Apple silicon
    (`uname -s` + `sysctl hw.memsize` + the CPU brand; unified memory), CPU cores and RAM
    (`/proc/meminfo`, `available_parallelism`). AMD/other GPUs and virtual displays are
    reported as "unsupported accelerator, treated as CPU". There is no Windows tier.
@@ -584,7 +699,9 @@ or start anything, so it works on a machine with no Postgres, Qdrant, Docker or 
 5. **Write the config**: `rust/deploy/.env` (starting from `.env.example`) and
    `rust/deploy/.tier`, never overwriting an existing `.env` without `--overwrite`. Only
    operator-level keys are written — `KB_TIER` selects the preset, so preset values are not
-   duplicated. Cloud takes `--openrouter-key-env NAME` (the value is written only with
+   duplicated. The embedder's **build** is written (`KB_EMBED_PRECISION`, `KB_EMBED_MODEL` and
+   the three sized vLLM flags), because it depends on the card and not on the tier. Cloud
+   takes `--openrouter-key-env NAME` (the value is written only with
    `--write-secrets`, otherwise an empty placeholder with a comment) and optionally
    `--mistral-key-env NAME` (which adds `mistral` to `KB_LAYOUT_EXTRACTOR_ORDER`). Studio,
    Station and Cloud — the tiers with the page arm — take `--chat-llm-url` /
