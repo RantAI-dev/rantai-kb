@@ -1,5 +1,45 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **An ingest job waits for a backend that is not there instead of failing (`#36`).** A job whose
+  pages need OCR while the OCR backend is stopped, still starting, or gone mid-job now parks in
+  `waiting_for_ocr` with the reason in the job's `error`, holds no worker slot, and is resumed by
+  the worker itself when the wait is over — nobody presses retry, and the pages that were already
+  read are not paid for twice. The wait doubles every try and is capped (`KB_OCR_WAIT_BACKOFF_S`,
+  default 30 s; `KB_OCR_WAIT_MAX_S`, default 600 s; `KB_OCR_WAIT_MAX_ATTEMPTS`, default 10); after
+  the last try the job fails for good, so a document does not wait forever. The document's status
+  says `waiting_for_ocr` too, and `POST /v1/jobs/:id/retry` still refuses it (only a failed job can
+  be retried). Additive: `IngestJob.status` and `Document.status` are TEXT columns, and one
+  nullable column was added (`prisma/migrations/20261120130000_job_waiting_for_ocr`).
+- **`GET /health` and `GET /v1/health` report the model backends (`#36`).** The body carries a
+  `backends` object: the embedder, the reranker and the OCR backend, each `ready`, `starting` or
+  `unavailable`, with the reason as a plain string. A client that uploads a scanned document can
+  hold the upload until the OCR backend says `ready`. The status code of the health route is
+  unchanged — a missing OCR model does not make the service dead. The probe is a `GET` on the
+  endpoint the configuration names; it never reads the body, never runs a model, and its answer is
+  reused for ten seconds. A probe that sees the OCR backend answer also closes the outage breaker,
+  which is otherwise only closed by a page read, so a job that arrived inside the cooldown window
+  was refused every page (`#35`).
+
+### Changed
+
+- The OCR vLLM containers (`vllm-ocr-desk`, `vllm-ocr-studio`, `vllm-ocr-station`) take extra
+  command-line flags from `KB_OCR_VLLM_EXTRA_ARGS`. On an NVIDIA GB10 (arm64, sm_121) the OCR
+  model crashed inside a torch.compile/Triton kernel while it started, and `--enforce-eager` fixed
+  it; the flag costs throughput, so it is off by default. The OCR model wants about 8 GiB of the
+  card, and a job that needs OCR while the container is off now waits instead of failing
+  (`rust/deploy/README.md`, GPU notes).
+
+### Fixed
+
+- The quality gate's own test counted 36 characters in a 34-character sentence, so the gate's test
+  failed while the gate was right.
+- The migration check accepted only a migration that creates a table; a migration that adds a
+  column (`IngestJob.resumeAt`) was refused.
+
 ## 0.6.0 — 2026-11-18
 
 ### Changed

@@ -62,6 +62,7 @@ Started 2026-11-04 from:
 | `ING-3` | Feature | A document-structure read: `GET /v1/documents/:id/structure` returning pages (number, OCR text when scanned, has-text-layer), figures (key, page, bbox, caption, OCR text, crop asset key) and the chunk → page map, with `externalRef`. A calling app can then show, cite or keep its own record of a document's pages and figures without re-parsing the file. Additive API. **Targets:** every figure and page that search can return is listed; the endpoint enforces the tenant and the key's knowledge-base limit (`SEC-1`) **Live 2026-11-04:** a 111-page ViDoRe PDF lists 111 pages with `hasTextLayer` and 619 chunks with pages; other tenant, and a key limited to another KB, get 404. Page JPEGs (`imageAssetKey`) exist only when the vision rerank is on; figures were not extracted in that config, so the figure list is unit-tested only (`docs/eval-ab/retrieval-gaps/README.md`) | Ingest | P1 | In Acceptance | | Feature comparison 2026-11-04; today only `/v1/documents/:id/assets` (one crop) exists |
 | `DEC-3` | Decision | Retire Bun from `main` at the release, or keep it frozen beside Rust for one more release. **Decided 2026-11-04: remove Bun (product owner)** | Platform | P1 | Decided | | PRODUCT §6; `docs/rust-cutover.md` §3 phase 4 |
 | `API-1` | Task | The HTTP API has no machine-readable contract: a calling app cannot see the routes, the bodies, the status codes or the auth without reading the Rust. An OpenAPI 3.1 document plus a Swagger UI, served without a key, derived from the handlers and checked against the route table | Delivery | P1 | Done | | Session 2026-11-16 (`feat/openapi`); `rust/crates/kb-server/src/openapi.rs` |
+| `ING-10` | Feature | **The OCR path says what it cannot do.** Four reported failures had one cause: a state the operator could not see. #28: a PDF with no text layer sent 0 pages to OCR in `hybrid` mode; #35: a retry after an OCR outage failed with "no text for any page" while the breaker was still open; #29: a document whose text layer was garbage was marked `ready` with a handful of chunks; #36: a job submitted while OCR was starting failed outright, and `/v1/health` said nothing about OCR. **Done 2026-11-20** (#36): a page with no visible characters is an OCR candidate; a breaker-skipped page is a retryable error that names the breaker; a document whose text layer is unusable ends as `needs_ocr` with a reason (behind `KB_EXTRACT_QUALITY_GATE`, off by default); a job whose backend is not there parks in `waiting_for_ocr` with bounded backoff, holds no worker slot, and the worker resumes it by itself when the wait is over — ahead of the uploads that arrived after it; after the last try it fails for good, so a document does not wait forever; `GET /v1/health` reports the embedder, the reranker and OCR as `ready` / `starting` / `unavailable`, and a probe that sees the OCR backend answer closes a stale outage breaker (otherwise only a page read closes it). [Spec](specs/ocr-reliability.md) | Ingest | P1 | In Acceptance | | Issues #28, #35, #29, #36; `docs/core/specs/ocr-reliability.md` |
 
 ## Next (P2)
 
@@ -126,6 +127,7 @@ Due dates are set by the product owner and stay empty until they are.
 | `DEP-6` | 2026-11-17 | 2026-11-18 | |
 | `DEP-7` | 2026-11-18 | | |
 | `ING-9` | 2026-11-17 | | |
+| `ING-10` | 2026-11-20 | | |
 
 ## Done and rejected
 
@@ -141,3 +143,4 @@ Measured and left off, so nobody re-runs them without a new reason:
 | ID | Spec | Size |
 | --- | --- | --- |
 | [`SEC-1`](specs/sec-1.md) | A key limited to some knowledge bases cannot open other documents by ID | S |
+| [`ING-10`](specs/ocr-reliability.md) | The OCR path says what it cannot do: a waiting job, a `needs_ocr` document, a per-backend health | M |

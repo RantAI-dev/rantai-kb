@@ -113,3 +113,32 @@ against the reported symptom, not against my reading of it.
   that is down.
 - The quality gate's thresholds are heuristics; they are behind a flag and
   off by default because a false positive costs a full OCR pass.
+
+## Landed
+
+#36 (2026-11-20). The job parks, the document says so, and the health route
+names the backends:
+
+- `IngestJob.status` and `Document.status` are TEXT columns, so
+  `waiting_for_ocr` is a value, not an enum. One nullable column was added:
+  `IngestJob.resumeAt` (`prisma/migrations/20261120130000_job_waiting_for_ocr`).
+- `PARK_JOB` parks a job that is still `processing`, counts the attempt and
+  sets `resumeAt`; `RESUME_PARKED_JOBS` moves the jobs whose wait is over
+  back to `pending`; `CLAIM_NEXT_PENDING` claims `pending` only, so a waiting
+  job holds no worker slot. The worker sweeps before every claim.
+- The wait doubles every try, is capped by `KB_OCR_WAIT_MAX_S`, and after
+  `KB_OCR_WAIT_MAX_ATTEMPTS` tries the job fails for good.
+- `GET /health` and `GET /v1/health` carry `backends.embedder`,
+  `backends.reranker` and `backends.ocr`, each `ready` / `starting` /
+  `unavailable`. The status code of the route does not change.
+- The probe closes the outage breaker when the OCR backend answers again.
+
+Tests: `kb-engine` (`a_job_whose_backend_is_unavailable_waits_instead_of_failing`,
+`the_queue_keeps_working_while_a_job_waits`,
+`a_waiting_job_is_not_claimed_while_it_waits`,
+`a_waiting_job_goes_back_to_pending_when_its_wait_is_over`,
+`a_waiting_job_is_resumed_by_the_worker`, `a_job_that_keeps_waiting_fails_for_good`,
+`the_wait_grows_with_the_attempts_and_is_capped`),
+`kb-store-pg` (`a_waiting_job_holds_no_worker_slot`,
+`a_waiting_job_comes_back_when_its_wait_is_over`, `a_requeued_job_forgets_its_wait`),
+`kb-server` (`backends_tests.rs`, `waiting_tests.rs`).

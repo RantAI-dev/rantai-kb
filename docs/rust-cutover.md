@@ -746,6 +746,54 @@ Operational notes: `KB_TABLES=false` disables the store and the routes (404);
 are cached under `KB_CACHE_DIR/tables/` (or the system temporary directory), one
 file per grid version; a hard delete removes the document's table rows and Parquet.
 
+### 23. Additive: the `waiting_for_ocr` job state and the per-backend health (`#36`, 2026-11-20)
+
+A document whose OCR backend was not there used to fail on the first error: the job went to
+`failed`, the operator had to press retry, and a ten-minute provider outage lost every document
+that arrived during it. The job now waits.
+
+**The new state.** `IngestJob.status` is a TEXT column, so `waiting_for_ocr` needs no enum value;
+it is another value in the column. One nullable column was added next to it:
+`prisma/migrations/20261120130000_job_waiting_for_ocr` adds `IngestJob.resumeAt TIMESTAMP(3)`,
+which says when the job may be tried again. Apply it with `kb-server migrate` before the new
+binary serves traffic. `Document.status` is a TEXT column too, so the document says
+`waiting_for_ocr` while its job waits.
+
+**What a client sees.** Nothing that existed changes shape:
+
+| Where | What is new |
+|---|---|
+| `GET /v1/jobs/:id` | `status` may be `waiting_for_ocr`; `error` says why it is waiting. |
+| `GET /v1/documents`, `GET /v1/documents/:id` | `status` may be `waiting_for_ocr`. |
+| `GET /health`, `GET /v1/health` | a `backends` object: `embedder`, `reranker` and `ocr`, each `{state, detail}` with `state` one of `ready`, `starting`, `unavailable`. |
+| `POST /v1/jobs/:id/retry` | unchanged: only a failed job can be retried (409 otherwise). A waiting job is resumed by the worker, not by the operator. |
+
+The health route's **status code does not change**: it is still `200` when Postgres and the vector
+store answer, `503` otherwise. A missing OCR model does not make the service dead, and the model
+backends are reported next to the `checks` instead of inside them.
+
+**How the wait works.** A job whose backend is not there parks: the row goes to
+`waiting_for_ocr` with a `resumeAt`, and the attempt counter goes up. The queue claims `pending`
+rows only, so a waiting job holds no worker slot and does not block the documents behind it. The
+worker sweeps the parked rows before every claim and moves the ones whose wait is over back to
+`pending`, so the job comes back on its own — ahead of the uploads that arrived after it. The wait
+doubles every try and is capped; after the last try the job fails for good, because a document
+must not wait forever.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `KB_OCR_WAIT_BACKOFF_S` | 30 | The first wait; every later wait is a multiple of it. |
+| `KB_OCR_WAIT_MAX_S` | 600 | The longest wait between two tries. |
+| `KB_OCR_WAIT_MAX_ATTEMPTS` | 10 | How many times a job may wait before it fails for good. |
+
+**Pages that were already read are not lost.** The OCR page cache is on disk and keyed by the
+page's content, so a job that is resumed re-reads nothing it already has.
+
+**The Bun worker does not know the state.** The Bun service was removed in v0.2.0, so this only
+matters for a stale cutover deployment: a Bun worker never claims `waiting_for_ocr` and never
+resumes it, so a job parked by a Rust worker stays parked while a Bun worker runs. Run one
+worker.
+
 ---
 
 ## 6. Shared Known Issues
