@@ -17,6 +17,11 @@
 //! The probe is a `GET` on the endpoint the configuration names. It never
 //! reads the body and never sends a prompt, so it costs nothing on a paid
 //! provider and it never runs a model.
+//!
+//! The probe also closes a stale OCR breaker: the outage breaker is
+//! process-wide, and without a page read there is nothing else that could
+//! close it, so a job that arrived inside the cooldown window was refused
+//! every page (`#35`). A backend that answers again means the outage is over.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -198,11 +203,31 @@ impl BackendTargets {
             ocr,
         }
     }
+
+    /// Probe every backend at once.
+    ///
+    /// The three probes run together: the health endpoint must not take three
+    /// timeouts to answer.
+    pub async fn probe(&self, client: Option<&reqwest::Client>) -> BackendHealth {
+        let (embedder, reranker, ocr) = tokio::join!(
+            probe_endpoint(client, self.embedder.as_ref()),
+            probe_endpoint(client, self.reranker.as_ref()),
+            probe_endpoint(client, self.ocr.as_ref()),
+        );
+        BackendHealth {
+            embedder,
+            reranker,
+            ocr,
+        }
+    }
 }
 
 /// The backends a health check probes, with a short cache.
 pub struct BackendProbe {
     targets: BackendTargets,
+    /// One client for every probe. Building a client per probe would open a
+    /// new connection pool every ten seconds.
+    client: Option<reqwest::Client>,
     /// The last result and when it was taken. `Mutex` (not an async lock):
     /// the lock is held for a copy, never across an await.
     cached: Mutex<Option<(Instant, BackendHealth)>>,
@@ -218,8 +243,13 @@ impl BackendProbe {
     /// Probe the given endpoints.
     #[must_use]
     pub fn new(targets: BackendTargets) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(PROBE_TIMEOUT)
+            .build()
+            .ok();
         Self {
             targets,
+            client,
             cached: Mutex::new(None),
         }
     }
@@ -237,28 +267,26 @@ impl BackendProbe {
                 return health;
             }
         }
-        let health = self.targets.probe().await;
+        let health = self.targets.probe(self.client.as_ref()).await;
+        // The OCR backend answered: the outage it was in is over, so the
+        // process-wide breaker must not refuse the next page (`#35`).
+        if health.ocr.state == BackendState::Ready {
+            close_ocr_breaker();
+        }
         *self.cached.lock().unwrap() = Some((Instant::now(), health.clone()));
         health
     }
 }
 
-impl BackendTargets {
-    /// Probe every backend at once.
-    ///
-    /// The three probes run together: the health endpoint must not take three
-    /// timeouts to answer.
-    pub async fn probe(&self) -> BackendHealth {
-        let (embedder, reranker, ocr) = tokio::join!(
-            probe_endpoint(self.embedder.as_ref()),
-            probe_endpoint(self.reranker.as_ref()),
-            probe_endpoint(self.ocr.as_ref()),
-        );
-        BackendHealth {
-            embedder,
-            reranker,
-            ocr,
-        }
+/// Close the OCR outage breaker when the backend answers again.
+///
+/// The breaker is process-wide and only a page read closes it, so a job that
+/// arrived inside the cooldown window was refused every page and reported
+/// "no text for any page" (`#35`). A probe that sees the backend answer is
+/// the other proof that the outage is over.
+fn close_ocr_breaker() {
+    if let Some(breaker) = kb_extract::ocr_router::existing_breaker() {
+        breaker.record_success();
     }
 }
 
@@ -266,18 +294,15 @@ impl BackendTargets {
 ///
 /// A `GET` on the endpoint: the server answers, or it does not. The status
 /// says which.
-async fn probe_endpoint(endpoint: Option<&Endpoint>) -> BackendStatus {
+async fn probe_endpoint(
+    client: Option<&reqwest::Client>,
+    endpoint: Option<&Endpoint>,
+) -> BackendStatus {
     let Some(endpoint) = endpoint else {
         return BackendStatus::new(BackendState::Unavailable, "not configured");
     };
-    let client = match reqwest::Client::builder()
-        .timeout(PROBE_TIMEOUT)
-        .build()
-    {
-        Ok(client) => client,
-        Err(err) => {
-            return BackendStatus::new(BackendState::Unavailable, format!("client: {err}"));
-        }
+    let Some(client) = client else {
+        return BackendStatus::new(BackendState::Unavailable, "no HTTP client");
     };
     let mut request = client.get(&endpoint.url);
     if let Some(key) = &endpoint.api_key {
@@ -346,9 +371,14 @@ mod tests {
         format!("http://{addr}/v1/models")
     }
 
+    /// A client for the probes.
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder().timeout(PROBE_TIMEOUT).build().unwrap()
+    }
+
     #[tokio::test]
     async fn a_backend_that_is_not_configured_is_unavailable() {
-        let status = probe_endpoint(None).await;
+        let status = probe_endpoint(Some(&client()), None).await;
         assert_eq!(status.state, BackendState::Unavailable);
         assert_eq!(status.detail, "not configured");
     }
@@ -356,29 +386,32 @@ mod tests {
     #[tokio::test]
     async fn a_backend_that_answers_is_ready() {
         let url = serve_status(200).await;
-        let status = probe_endpoint(Some(&Endpoint::anonymous(url))).await;
+        let status = probe_endpoint(Some(&client()), Some(&Endpoint::anonymous(url))).await;
         assert_eq!(status.state, BackendState::Ready);
     }
 
     #[tokio::test]
     async fn a_backend_that_says_it_is_not_ready_is_starting() {
         let url = serve_status(503).await;
-        let status = probe_endpoint(Some(&Endpoint::anonymous(url))).await;
+        let status = probe_endpoint(Some(&client()), Some(&Endpoint::anonymous(url))).await;
         assert_eq!(status.state, BackendState::Starting);
     }
 
     #[tokio::test]
     async fn a_backend_that_refuses_the_request_is_unavailable() {
         let url = serve_status(401).await;
-        let status = probe_endpoint(Some(&Endpoint::anonymous(url))).await;
+        let status = probe_endpoint(Some(&client()), Some(&Endpoint::anonymous(url))).await;
         assert_eq!(status.state, BackendState::Unavailable);
     }
 
     #[tokio::test]
     async fn a_backend_that_is_not_there_is_unavailable() {
         // Port 1 on the loopback interface: nothing listens there.
-        let status =
-            probe_endpoint(Some(&Endpoint::anonymous("http://127.0.0.1:1/v1/models"))).await;
+        let status = probe_endpoint(
+            Some(&client()),
+            Some(&Endpoint::anonymous("http://127.0.0.1:1/v1/models")),
+        )
+        .await;
         assert_eq!(status.state, BackendState::Unavailable);
     }
 
@@ -391,5 +424,23 @@ mod tests {
             .expect("json");
         assert_eq!(json["state"], "starting");
         assert_eq!(json["detail"], "HTTP 503");
+    }
+
+    #[tokio::test]
+    async fn the_answer_is_reused_until_it_is_stale() {
+        // A health check is polled every few seconds; the probe must not
+        // become an outbound request per poll.
+        let url = serve_status(200).await;
+        let probe = BackendProbe::new(BackendTargets {
+            embedder: Some(Endpoint::anonymous(url)),
+            ..BackendTargets::default()
+        });
+        let first = probe.health().await;
+        let second = probe.health().await;
+        assert_eq!(first, second);
+        assert_eq!(first.embedder.state, BackendState::Ready);
+        // A backend that is not configured says so.
+        assert_eq!(first.reranker.state, BackendState::Unavailable);
+        assert_eq!(first.ocr.state, BackendState::Unavailable);
     }
 }

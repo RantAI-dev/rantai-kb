@@ -1182,7 +1182,7 @@ pub struct DocumentSummary {
     /// The file's size in bytes.
     #[serde(rename = "fileSize")]
     pub file_size: Option<i32>,
-    /// `processing`, `ready` or `failed`.
+    /// `processing`, `waiting_for_ocr`, `needs_ocr`, `ready` or `failed`.
     pub status: String,
     /// Additive: the caller's opaque document reference, or null.
     #[serde(rename = "externalRef")]
@@ -1424,7 +1424,7 @@ pub struct DocumentDetail {
     /// The file's MIME type.
     #[serde(rename = "mimeType")]
     pub mime_type: Option<String>,
-    /// `processing`, `ready` or `failed`.
+    /// `processing`, `waiting_for_ocr`, `needs_ocr`, `ready` or `failed`.
     pub status: String,
     /// When the document was created.
     #[serde(rename = "createdAt")]

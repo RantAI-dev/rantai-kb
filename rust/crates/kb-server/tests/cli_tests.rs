@@ -49,7 +49,14 @@ fn a_migration_checksum_is_the_sha256_of_the_file_on_disk() {
         );
         assert_eq!(migration.checksum.len(), 64);
         assert!(migration.checksum.chars().all(|c| c.is_ascii_hexdigit()));
-        assert!(migration.sql.contains("CREATE TABLE"));
+        // A migration carries schema statements. Most of them create a
+        // table; a migration that only adds a column changes the schema with
+        // an `ALTER TABLE` (`#36` added `IngestJob.resumeAt` that way).
+        assert!(
+            migration.sql.contains("CREATE TABLE") || migration.sql.contains("ALTER TABLE"),
+            "the migration {} carries no schema statement",
+            migration.name
+        );
     }
 }
 

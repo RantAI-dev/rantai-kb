@@ -30,7 +30,10 @@ use utoipa::ToSchema;
 pub struct JobView {
     /// The job's id.
     pub id: String,
-    /// `pending`, `processing`, `done` or `failed`.
+    /// `pending`, `processing`, `waiting_for_ocr`, `success` or `failed`.
+    ///
+    /// `waiting_for_ocr` is the state a job parks in while the backend it
+    /// needs is not there (`#36`). The worker resumes it by itself.
     pub status: String,
     /// The step the job is on, when it reports one.
     pub step: Option<String>,
