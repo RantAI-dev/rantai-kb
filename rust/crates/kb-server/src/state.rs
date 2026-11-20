@@ -52,6 +52,10 @@ pub struct AppState {
     /// de-duplicated. Reported by `GET /health` so a caller can refuse to send
     /// content that would leave the platform.
     pub egress: Vec<String>,
+    /// The model backends, probed by `GET /health` so a client can see
+    /// whether the embedder, the reranker and the OCR backend can serve
+    /// (`#36`).
+    pub backends: crate::backends::BackendProbe,
 }
 
 /// Adapters a caller supplies. Grouped so tests can build a state from fakes
@@ -83,6 +87,9 @@ impl AppState {
             .as_ref()
             .map(|plan| plan.tier.as_str().to_string());
         let egress = config.egress_hosts();
+        // The model backends the health route probes (`#36`). Read before any
+        // field is moved out of the config.
+        let backends = crate::backends::BackendTargets::from_config(&config);
         let pool = kb_store_pg::connect_pool(&config.pg)
             .await
             .map_err(|e| anyhow::anyhow!("pg: {e}"))?;
@@ -260,6 +267,8 @@ impl AppState {
             version: config.version,
             tier,
             egress,
+            // The backends the health route probes (`#36`).
+            backends: crate::backends::BackendProbe::new(backends),
         })
     }
 
@@ -303,6 +312,9 @@ impl AppState {
             // process through a model endpoint they did not configure.
             tier: None,
             egress: Vec::new(),
+            // No configured backends: a hand-built state has no model
+            // endpoints to probe.
+            backends: crate::backends::BackendProbe::default(),
         }
     }
 

@@ -240,6 +240,35 @@ pub const FINISH_JOB_FAILURE: &str = r#"
 /// Heartbeat. A long emit-less step would otherwise trip the stale reclaim.
 pub const TOUCH_JOB: &str = r#"UPDATE "IngestJob" SET "updatedAt" = now() WHERE id = $1"#;
 
+/// Park a job whose backend was unavailable (`#36`).
+///
+/// The status is `waiting_for_ocr` — a state the queue does not claim — and
+/// `resumeAt` says when the job may be tried again. The attempt counter goes
+/// up, so a job that keeps meeting an unavailable backend eventually fails
+/// for good instead of waiting forever.
+pub const PARK_JOB: &str = r#"
+    UPDATE "IngestJob"
+       SET status = 'waiting_for_ocr', error = $2,
+           "resumeAt" = to_timestamp($3::double precision / 1000.0),
+           attempt = attempt + 1, "updatedAt" = now()
+     WHERE id = $1
+       AND status = 'processing'
+"#;
+
+/// Move the parked jobs whose wait is over back to `pending` (`#36`).
+///
+/// The worker calls this before it claims a job, so a job that waited for an
+/// OCR provider comes back on its own.
+pub const RESUME_PARKED_JOBS: &str = r#"
+    UPDATE "IngestJob"
+       SET status = 'pending', "resumeAt" = NULL, error = NULL,
+           step = 'queued', progress = 0, "startedAt" = NULL, "updatedAt" = now()
+     WHERE status = 'waiting_for_ocr'
+       AND "resumeAt" IS NOT NULL
+       AND "resumeAt" <= to_timestamp($1::double precision / 1000.0)
+    RETURNING id
+"#;
+
 /// Jobs whose worker died mid-run. Takes no row locks, exactly like the
 /// TypeScript sweep's `findMany`; `REQUEUE_JOB` and `FAIL_JOB_STALLED` carry
 /// the guard that the missing lock used to provide.

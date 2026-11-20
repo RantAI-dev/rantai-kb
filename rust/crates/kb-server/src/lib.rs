@@ -3,6 +3,7 @@
 //! `KB_WORKER_ENABLED=false` — runs the ingest worker in the same process.
 
 pub mod auth;
+pub mod backends;
 pub mod boundary;
 pub mod cli;
 pub mod communities;

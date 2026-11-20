@@ -1653,23 +1653,55 @@ pub struct FakeJobStore {
     pub touches: Arc<RwLock<Vec<String>>>,
     pub job_views: Arc<RwLock<HashMap<(TenantId, String), JobView>>>,
     pub reapables: Arc<RwLock<Vec<ReapableJob>>>,
+    /// The jobs that are waiting for a backend (`#36`).
+    pub parked: Arc<RwLock<Vec<ParkedJob>>>,
+    /// Every job the store has seen, by id, so a parked job can be queued
+    /// again when its wait is over.
+    pub records: Arc<RwLock<HashMap<String, JobRecord>>>,
+}
+
+/// A job that waits for a backend to come back (`#36`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParkedJob {
+    /// The job's id.
+    pub job_id: String,
+    /// Why the job is waiting.
+    pub reason: String,
+    /// When the job may be tried again, in milliseconds since the epoch.
+    pub resume_at_ms: i64,
 }
 
 impl FakeJobStore {
     /// Queue a job for the next claim.
     pub fn push(&self, job: JobRecord) {
+        self.records
+            .write()
+            .unwrap()
+            .insert(job.id.clone(), job.clone());
         self.pending.write().unwrap().push_back(job);
     }
 
     pub fn pending_len(&self) -> usize {
         self.pending.read().unwrap().len()
     }
+
+    /// The jobs that are waiting for a backend (`#36`).
+    pub fn parked(&self) -> Vec<ParkedJob> {
+        self.parked.read().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl JobStore for FakeJobStore {
     async fn claim_next_pending(&self) -> Result<Option<JobRecord>, PortError> {
-        Ok(self.pending.write().unwrap().pop_front())
+        let job = self.pending.write().unwrap().pop_front();
+        if let Some(job) = &job {
+            self.records
+                .write()
+                .unwrap()
+                .insert(job.id.clone(), job.clone());
+        }
+        Ok(job)
     }
 
     async fn update_progress(
@@ -1746,6 +1778,41 @@ impl JobStore for FakeJobStore {
     async fn touch(&self, job_id: &str) -> Result<(), PortError> {
         self.touches.write().unwrap().push(job_id.to_string());
         Ok(())
+    }
+
+    async fn park(
+        &self,
+        job_id: &str,
+        reason: &str,
+        resume_at_ms: i64,
+    ) -> Result<(), PortError> {
+        self.parked.write().unwrap().push(ParkedJob {
+            job_id: job_id.to_string(),
+            reason: reason.to_string(),
+            resume_at_ms,
+        });
+        Ok(())
+    }
+
+    async fn resume_parked(&self, now_ms: i64) -> Result<u32, PortError> {
+        let mut parked = self.parked.write().unwrap();
+        let mut resumed = Vec::new();
+        let mut kept = Vec::new();
+        for job in parked.drain(..) {
+            if job.resume_at_ms <= now_ms {
+                resumed.push(job);
+            } else {
+                kept.push(job);
+            }
+        }
+        *parked = kept;
+        let count = resumed.len() as u32;
+        for job in resumed {
+            if let Some(record) = self.records.read().unwrap().get(&job.job_id).cloned() {
+                self.pending.write().unwrap().push_back(record);
+            }
+        }
+        Ok(count)
     }
 
     async fn reclaim_stale(
@@ -1840,7 +1907,11 @@ pub struct FakeExtractor {
     pub result: Arc<RwLock<Option<ExtractionResult>>>,
     pub content: Arc<RwLock<String>>,
     pub file_type: Arc<RwLock<String>>,
+    /// The document cannot be read: a parse failure, which fails the job.
     pub fail: Arc<AtomicBool>,
+    /// The backend is not there: an unreachable OCR provider, which makes the
+    /// job wait instead of failing (`#36`).
+    pub unavailable: Arc<AtomicBool>,
     pub calls: Arc<AtomicBool>,
 }
 
@@ -1852,6 +1923,7 @@ impl FakeExtractor {
             content: Arc::new(RwLock::new(content.to_string())),
             file_type: Arc::new(RwLock::new(file_type.to_string())),
             fail: Arc::new(AtomicBool::new(false)),
+            unavailable: Arc::new(AtomicBool::new(false)),
             calls: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1863,6 +1935,7 @@ impl FakeExtractor {
             file_type: Arc::new(RwLock::new(result.file_type.clone())),
             result: Arc::new(RwLock::new(Some(result))),
             fail: Arc::new(AtomicBool::new(false)),
+            unavailable: Arc::new(AtomicBool::new(false)),
             calls: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1893,8 +1966,13 @@ impl Extractor for FakeExtractor {
         _options: ExtractionOptions,
     ) -> Result<ExtractionResult, PortError> {
         self.calls.store(true, Ordering::Relaxed);
+        if self.unavailable.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable(
+                "the OCR provider is unreachable".to_string(),
+            ));
+        }
         if self.fail.load(Ordering::Relaxed) {
-            return Err(PortError::Unavailable("forced extract failure".to_string()));
+            return Err(PortError::Malformed("forced extract failure".to_string()));
         }
         if let Some(res) = self.result.read().unwrap().as_ref() {
             return Ok(res.clone());

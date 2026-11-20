@@ -363,6 +363,15 @@ pub struct WorkerConfig {
     /// `None` means the gate does not run: every document keeps the
     /// behaviour it always had, and the numbers are still recorded.
     pub quality: Option<kb_core::quality::QualityOptions>,
+    /// How long a job waits before it tries an unavailable backend again
+    /// (`KB_OCR_WAIT_BACKOFF_S`, default 30 s).
+    pub ocr_wait_backoff_s: u64,
+    /// The longest a job waits between two tries (`KB_OCR_WAIT_MAX_S`,
+    /// default 600 s).
+    pub ocr_wait_max_s: u64,
+    /// How many times a job may wait for an unavailable backend before it
+    /// fails for good (`KB_OCR_WAIT_MAX_ATTEMPTS`, default 10).
+    pub ocr_wait_max_attempts: u32,
 }
 
 impl WorkerConfig {
@@ -385,6 +394,12 @@ impl WorkerConfig {
                 ..kb_engine::INGEST_CHUNKING
             },
             quality: self.quality,
+            // The wait for an unavailable backend (`#36`). Bounded on both
+            // ends: the wait grows with the attempt count, and a job that
+            // keeps waiting eventually fails instead of waiting forever.
+            ocr_wait_backoff: Duration::from_secs(self.ocr_wait_backoff_s),
+            ocr_wait_max_backoff: Duration::from_secs(self.ocr_wait_max_s),
+            ocr_wait_max_attempts: self.ocr_wait_max_attempts,
             ..IngestSettings::default()
         }
     }
@@ -485,6 +500,17 @@ where
             .max(100),
         chunk_overlap: int_var(lookup, "KB_CHUNK_OVERLAP", 200u32).unwrap_or(200),
         quality,
+        // How long a job waits for a backend that is not there (`#36`).
+        // The floor is one second: a zero wait is a hot loop.
+        ocr_wait_backoff_s: int_var(lookup, "KB_OCR_WAIT_BACKOFF_S", 30u64)
+            .unwrap_or(30)
+            .max(1),
+        ocr_wait_max_s: int_var(lookup, "KB_OCR_WAIT_MAX_S", 600u64)
+            .unwrap_or(600)
+            .max(1),
+        ocr_wait_max_attempts: int_var(lookup, "KB_OCR_WAIT_MAX_ATTEMPTS", 10u32)
+            .unwrap_or(10)
+            .max(1),
     })
 }
 

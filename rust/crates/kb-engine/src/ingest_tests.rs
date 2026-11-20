@@ -457,6 +457,269 @@ async fn the_quality_numbers_are_recorded_even_when_the_gate_is_off() {
     );
 }
 
+// ─── #36: a backend that is not there ───────────────────────────────────────
+
+/// A job whose OCR backend is not there waits instead of failing (`#36`).
+///
+/// The file may be perfectly fine and the provider may be back in a minute.
+/// Failing the job loses the pages that were already read and makes the
+/// operator press retry for every document that arrived during the outage.
+#[tokio::test]
+async fn a_job_whose_backend_is_unavailable_waits_instead_of_failing() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let extractor = Arc::new(FakeExtractor::returning(&long_text(), "markdown"));
+    extractor.fail.store(true, Ordering::Relaxed);
+    let worker = worker_with_settings(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        extractor,
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings::default(),
+    );
+
+    let outcome = worker.run_job(job()).await;
+    assert!(
+        matches!(outcome, crate::ingest::JobOutcome::Waiting { .. }),
+        "{outcome:?}"
+    );
+
+    // The job is not finished: it is waiting, with the reason it is waiting
+    // for, and a time it may be tried again.
+    let finished = jobs.finished.read().unwrap();
+    assert!(finished.is_empty(), "the job must not be failed: {finished:?}");
+    drop(finished);
+    let parked = jobs.parked();
+    assert_eq!(parked.len(), 1);
+    assert!(
+        parked[0].reason.contains("forced extract failure"),
+        "{}",
+        parked[0].reason
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    assert!(
+        parked[0].resume_at_ms > now,
+        "the job must wait before it is tried again: {}",
+        parked[0].resume_at_ms
+    );
+
+    // The document is not failed either: nothing is wrong with it.
+    let docs = documents.docs.read().unwrap();
+    assert_eq!(docs[&tenant()][0].status, "processing");
+}
+
+/// The queue keeps working while a job waits (`#36`).
+///
+/// A job that is waiting must not hold a worker slot or block the documents
+/// behind it.
+#[tokio::test]
+async fn the_queue_keeps_working_while_a_job_waits() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let extractor = Arc::new(FakeExtractor::returning(&long_text(), "markdown"));
+    extractor.fail.store(true, Ordering::Relaxed);
+    let worker = worker_with_settings(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        extractor.clone(),
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings::default(),
+    );
+
+    // The first job meets the outage and waits.
+    jobs.push(job());
+    assert!(worker.run_once().await.unwrap());
+    assert_eq!(jobs.parked().len(), 1);
+
+    // The backend comes back and the next document goes through.
+    extractor.fail.store(false, Ordering::Relaxed);
+    let mut second = job();
+    second.id = "job_2".to_string();
+    second.document_id = Some(DocumentId::new_unchecked("doc_2"));
+    jobs.push(second);
+    assert!(worker.run_once().await.unwrap());
+
+    let finished = jobs.finished.read().unwrap();
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert!(finished[0].success, "{:?}", finished[0]);
+    assert_eq!(finished[0].job_id, "job_2");
+}
+
+/// A waiting job is picked up again by itself (`#36`).
+///
+/// Nobody presses retry: the worker resumes the job when its wait is over.
+#[tokio::test]
+async fn a_waiting_job_is_resumed_by_the_worker() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let extractor = Arc::new(FakeExtractor::returning(&long_text(), "markdown"));
+    extractor.fail.store(true, Ordering::Relaxed);
+    let worker = worker_with_settings(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        extractor.clone(),
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings {
+            // The wait is over at once, so the test does not sleep through it.
+            ocr_wait_backoff: Duration::from_millis(0),
+            ..IngestSettings::default()
+        },
+    );
+
+    jobs.push(job());
+    assert!(worker.run_once().await.unwrap());
+    assert_eq!(jobs.parked().len(), 1);
+    assert!(jobs.finished.read().unwrap().is_empty());
+
+    // The backend comes back. The next poll resumes the waiting job.
+    extractor.fail.store(false, Ordering::Relaxed);
+    assert!(worker.run_once().await.unwrap());
+
+    let finished = jobs.finished.read().unwrap();
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    assert!(finished[0].success, "{:?}", finished[0]);
+    assert_eq!(document_status_of(&documents), "ready");
+    // The job is not waiting any more.
+    assert!(jobs.parked().is_empty());
+}
+
+/// A job that keeps meeting an unavailable backend eventually fails (`#36`).
+///
+/// A document must not wait forever: after the last try the job fails for
+/// good, so an operator sees it.
+#[tokio::test]
+async fn a_job_that_keeps_waiting_fails_for_good() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let extractor = Arc::new(FakeExtractor::returning(&long_text(), "markdown"));
+    extractor.fail.store(true, Ordering::Relaxed);
+    let worker = worker_with_settings(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        extractor,
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings {
+            ocr_wait_max_attempts: 2,
+            ..IngestSettings::default()
+        },
+    );
+
+    // The second try is the last one the operator allows.
+    let mut last = job();
+    last.attempt = 2;
+    let outcome = worker.run_job(last).await;
+    assert!(
+        matches!(outcome, crate::ingest::JobOutcome::Failed { .. }),
+        "{outcome:?}"
+    );
+    let finished = jobs.finished.read().unwrap();
+    assert_eq!(finished.len(), 1);
+    assert!(!finished[0].success);
+    assert!(
+        finished[0].detail.contains("still unavailable"),
+        "{}",
+        finished[0].detail
+    );
+    assert!(jobs.parked().is_empty(), "the job must not wait any more");
+}
+
+/// The wait grows with the attempts and is capped (`#36`).
+///
+/// A short outage must not cost a long wait, and a long outage must not turn
+/// into a hot loop.
+#[tokio::test]
+async fn the_wait_grows_with_the_attempts_and_is_capped() {
+    let (jobs, documents, chunks, blobs) = parts();
+    documents.insert_doc(tenant(), document());
+    blobs
+        .upload(BLOB_KEY, b"%PDF-1.7 fake".to_vec(), "application/pdf")
+        .await
+        .unwrap();
+    let extractor = Arc::new(FakeExtractor::returning(&long_text(), "markdown"));
+    extractor.fail.store(true, Ordering::Relaxed);
+    let worker = worker_with_settings(
+        jobs.clone(),
+        documents.clone(),
+        chunks.clone(),
+        blobs.clone(),
+        extractor,
+        Arc::new(FakeEmbedder::default()),
+        IngestSettings {
+            ocr_wait_backoff: Duration::from_secs(30),
+            ocr_wait_max_backoff: Duration::from_secs(600),
+            ocr_wait_max_attempts: 100,
+            ..IngestSettings::default()
+        },
+    );
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    // The first try waits the base time.
+    let mut first = job();
+    first.id = "job_1".to_string();
+    first.attempt = 1;
+    worker.run_job(first).await;
+    let first_wait = jobs.parked()[0].resume_at_ms - now;
+
+    // The third try waits four times the base time.
+    let mut third = job();
+    third.id = "job_3".to_string();
+    third.attempt = 3;
+    worker.run_job(third).await;
+    let third_wait = jobs.parked()[1].resume_at_ms - now;
+
+    // A late try waits no longer than the cap.
+    let mut late = job();
+    late.id = "job_9".to_string();
+    late.attempt = 9;
+    worker.run_job(late).await;
+    let late_wait = jobs.parked()[2].resume_at_ms - now;
+
+    let second = 1000;
+    assert!(
+        (first_wait - 30 * second).abs() < 5 * second,
+        "the first wait is the base time: {first_wait} ms"
+    );
+    assert!(
+        (third_wait - 120 * second).abs() < 5 * second,
+        "the third wait is four base times: {third_wait} ms"
+    );
+    assert!(
+        (late_wait - 600 * second).abs() < 5 * second,
+        "the wait is capped: {late_wait} ms"
+    );
+}
+
 #[tokio::test]
 async fn happy_path_indexes_chunks_and_finishes_the_job() {
     let h = harness(extractor()).await;
@@ -2113,7 +2376,9 @@ async fn page_descriptions_are_indexed_as_figure_chunks_after_the_text_chunks() 
     );
     let written = match outcome {
         JobOutcome::Ready { chunks } => chunks,
-        JobOutcome::Failed { .. } | JobOutcome::NeedsOcr { .. } => 0,
+        JobOutcome::Failed { .. }
+        | JobOutcome::NeedsOcr { .. }
+        | JobOutcome::Waiting { .. } => 0,
     };
     assert!(written > 0);
 
@@ -2192,7 +2457,9 @@ async fn a_failed_description_embedding_does_not_fail_the_document() {
     );
     let written = match outcome {
         JobOutcome::Ready { chunks } => chunks,
-        JobOutcome::Failed { .. } | JobOutcome::NeedsOcr { .. } => 0,
+        JobOutcome::Failed { .. }
+        | JobOutcome::NeedsOcr { .. }
+        | JobOutcome::Waiting { .. } => 0,
     };
     let stored = index
         .ordered_chunks(&tenant(), &DocumentId::new_unchecked(DOC))

@@ -53,6 +53,28 @@ pub const PROGRESS_EMIT_MIN_GAP: Duration = Duration::from_millis(900);
 /// (`KB_JOB_WORKERS`).
 pub const DEFAULT_JOB_WORKERS: usize = 6;
 
+/// How long a job waits before it tries an unavailable backend again
+/// (`KB_OCR_WAIT_BACKOFF_S`). Long enough that an outage is not a hot loop,
+/// short enough that a document indexed after a five-minute provider blip is
+/// not late (`#36`).
+pub const DEFAULT_OCR_WAIT_BACKOFF: Duration = Duration::from_secs(30);
+
+/// The longest a job waits between two tries (`KB_OCR_WAIT_MAX_S`).
+pub const DEFAULT_OCR_WAIT_MAX_BACKOFF: Duration = Duration::from_secs(600);
+
+/// How many times a job may wait for an unavailable backend before it fails
+/// for good (`KB_OCR_WAIT_MAX_ATTEMPTS`).
+pub const DEFAULT_OCR_WAIT_MAX_ATTEMPTS: u32 = 10;
+
+/// The current time in milliseconds since the epoch — the clock the job queue
+/// stores its times in.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
 /// How a claimed job ended.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobOutcome {
@@ -66,20 +88,29 @@ pub enum JobOutcome {
     /// The document's text layer is unusable and the job will not index it:
     /// it needs OCR (`#29`). The document row says `needs_ocr`.
     NeedsOcr { reason: String },
+    /// A backend the job needs was unavailable (`#36`). The job is parked in
+    /// `waiting_for_ocr` and resumed automatically.
+    Waiting { reason: String },
 }
 
 /// Why a job did not finish.
 ///
 /// The reason a job failed is a string on the job row, but the *kind* of
 /// failure decides what happens next: a document that needs OCR is something
-/// the operator has to fix, and a failure that is not the document's fault is
-/// something to try again (`#29`, `#36`).
+/// the operator has to fix, a backend that is down is a job that has to wait,
+/// and anything else is a job that failed for good (`#29`, `#36`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JobError {
     /// The job failed for good.
     Failed(String),
     /// The document's text layer is unusable: it needs OCR (`#29`).
     NeedsOcr(String),
+    /// A backend the job needs was unavailable. The job waits for it and is
+    /// tried again (`#36`).
+    Unavailable {
+        /// Why the backend was not usable.
+        reason: String,
+    },
 }
 
 impl From<String> for JobError {
@@ -94,6 +125,7 @@ impl JobError {
     pub fn reason(&self) -> &str {
         match self {
             Self::Failed(reason) | Self::NeedsOcr(reason) => reason,
+            Self::Unavailable { reason } => reason,
         }
     }
 }
@@ -157,6 +189,19 @@ pub struct IngestSettings {
     /// (`#29`). `None` means the gate does not run and every document keeps
     /// the behaviour it always had.
     pub quality: Option<kb_core::quality::QualityOptions>,
+    /// How long a job waits before it tries an unavailable backend again
+    /// (`KB_OCR_WAIT_BACKOFF_S`, default 30 s).
+    ///
+    /// The wait grows with the attempt count and is capped by
+    /// [`Self::ocr_wait_max_backoff`], so a long outage does not turn into a
+    /// hot loop and a short one does not wait long (`#36`).
+    pub ocr_wait_backoff: Duration,
+    /// The longest a job waits between two tries (`KB_OCR_WAIT_MAX_S`,
+    /// default 600 s).
+    pub ocr_wait_max_backoff: Duration,
+    /// How many times a job may wait for an unavailable backend before it
+    /// fails for good (`KB_OCR_WAIT_MAX_ATTEMPTS`, default 10).
+    pub ocr_wait_max_attempts: u32,
 }
 
 impl Default for IngestSettings {
@@ -175,6 +220,9 @@ impl Default for IngestSettings {
             embedding_max_chars: 0,
             seats: crate::seats::SeatCapacity::default(),
             quality: None,
+            ocr_wait_backoff: DEFAULT_OCR_WAIT_BACKOFF,
+            ocr_wait_max_backoff: DEFAULT_OCR_WAIT_MAX_BACKOFF,
+            ocr_wait_max_attempts: DEFAULT_OCR_WAIT_MAX_ATTEMPTS,
         }
     }
 }
@@ -397,6 +445,10 @@ impl IngestWorker {
     /// Claims as many as there is room for, so a backlog does not wait for a
     /// poll interval between documents.
     async fn claim_into(&self, inflight: &mut JoinSet<JobOutcome>) {
+        // The jobs that waited for an unavailable backend come back first
+        // (`#36`): their wait is over, and a document that waited must not
+        // queue behind the uploads that arrived after it.
+        self.resume_parked().await;
         let slots = self.settings.job_workers.max(1);
         while inflight.len() < slots {
             match self.jobs.claim_next_pending().await {
@@ -413,6 +465,22 @@ impl IngestWorker {
         }
     }
 
+    /// Move the jobs whose wait is over back to `pending` (`#36`).
+    ///
+    /// A failure here is logged and dropped: the sweep runs again on the next
+    /// poll, and a job that stays parked is not lost.
+    async fn resume_parked(&self) {
+        match self.jobs.resume_parked(now_ms()).await {
+            Ok(0) => {}
+            Ok(resumed) => {
+                tracing::info!(resumed, "resumed the jobs that waited for a backend");
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "could not resume the parked jobs");
+            }
+        }
+    }
+
     /// Claim and run one job. Returns `false` when the queue was empty.
     ///
     /// This is the unit the tests drive: it is the whole claim-to-finish
@@ -423,6 +491,10 @@ impl IngestWorker {
     /// Only a failed claim propagates. A job that runs and fails is recorded
     /// on the job row, exactly as the Bun worker records it.
     pub async fn run_once(&self) -> Result<bool, PortError> {
+        // A job that waited for a backend comes back before a new one is
+        // claimed (`#36`): it has been waiting longer than the upload that
+        // arrived after it.
+        self.resume_parked().await;
         let Some(job) = self.jobs.claim_next_pending().await? else {
             return Ok(false);
         };
@@ -457,6 +529,12 @@ impl IngestWorker {
                 // `needs_ocr` instead of pretending it is searchable.
                 self.mark_needs_ocr(&job, &reason, &priority).await;
                 JobOutcome::NeedsOcr { reason }
+            }
+            Err(JobError::Unavailable { reason }) => {
+                // A backend the job needs was not available (`#36`). The file
+                // itself may be perfectly fine, so the job waits for the
+                // backend instead of failing.
+                self.park_for_backend(&job, &reason).await
             }
             Err(JobError::Failed(reason)) => {
                 self.mark_failed(&job, &reason, &priority).await;
@@ -570,7 +648,16 @@ impl IngestWorker {
             .extract_with_options(&job.filename, mime, &bytes, options)
             .await;
         seat.release();
-        let extraction = extraction.map_err(|e| JobError::Failed(e.to_string()))?;
+        // A backend the extraction needs was not available (`#36`). The file
+        // itself may be perfectly fine, so the job waits for the backend
+        // instead of failing.
+        let extraction = match extraction {
+            Ok(result) => result,
+            Err(PortError::Unavailable(reason)) => {
+                return Err(JobError::Unavailable { reason });
+            }
+            Err(other) => return Err(JobError::Failed(other.to_string())),
+        };
 
         // A parser that could not read the file reports the reason and leaves
         // `content` empty (`extract.ts:192`). Indexing that would put an empty
@@ -965,7 +1052,7 @@ impl IngestWorker {
                         tracing::warn!(error = %err, "could not remove pages of a failed document");
                     }
                 }
-                return Err(JobError::Failed(e));
+                return Err(JobError::Failed(e.reason().to_string()));
             }
         };
         if let Some(pages) = pages {
@@ -1199,7 +1286,7 @@ impl IngestWorker {
         started: Instant,
         flags: &ProgressFlags,
         priority: &crate::seats::SeatPriority,
-    ) -> Result<usize, String> {
+    ) -> Result<usize, JobError> {
         if chunks.is_empty() {
             return Ok(0);
         }
@@ -1240,19 +1327,27 @@ impl IngestWorker {
         let embeddings = {
             // The embed seat: one document's embedding requests at a time.
             let _seat = self.seats.embed.acquire(priority.clone()).await;
-            self.embedder
-                .embed_passages(&texts)
-                .await
-                .map_err(|e| format!("embedding failed: {e}"))?
+            self.embedder.embed_passages(&texts).await
+        };
+        // An embedder that is not answering is a backend that is down, not a
+        // document that is bad: the job waits for it (`#36`).
+        let embeddings = match embeddings {
+            Ok(vectors) => vectors,
+            Err(PortError::Unavailable(reason)) => {
+                return Err(JobError::Unavailable {
+                    reason: format!("embedding failed: {reason}"),
+                });
+            }
+            Err(other) => return Err(JobError::Failed(format!("embedding failed: {other}"))),
         };
         if embeddings.len() != chunks.len() {
             // `generateEmbeddings` degrades to a short list rather than
             // throwing, and a short list would index some chunks with nothing.
-            return Err(format!(
+            return Err(JobError::Failed(format!(
                 "embedding batch returned {} vectors for {} chunks",
                 embeddings.len(),
                 chunks.len()
-            ));
+            )));
         }
 
         self.progress(
@@ -1308,11 +1403,11 @@ impl IngestWorker {
             self.index
                 .delete_document(&job.tenant_id, document_id)
                 .await
-                .map_err(|e| format!("clearing old chunks failed: {e}"))?;
+                .map_err(|e| JobError::Failed(format!("clearing old chunks failed: {e}")))?;
             self.index
                 .upsert(units)
                 .await
-                .map_err(|e| format!("storing chunks failed: {e}"))?;
+                .map_err(|e| JobError::Failed(format!("storing chunks failed: {e}")))?;
         }
         Ok(written)
     }
@@ -1911,6 +2006,63 @@ impl IngestWorker {
             reason,
         )
         .await;
+    }
+
+    /// A backend the job needs was not available (`#36`).
+    ///
+    /// The job waits instead of failing: the file may be perfectly fine and
+    /// the provider may be back in a minute. The wait grows with the attempt
+    /// count and is capped, and after
+    /// [`IngestSettings::ocr_wait_max_attempts`] waits the job fails for good
+    /// — a document must not wait forever.
+    async fn park_for_backend(&self, job: &JobRecord, reason: &str) -> JobOutcome {
+        let attempt = job.attempt.max(1) as u32;
+        if attempt >= self.settings.ocr_wait_max_attempts {
+            let reason = format!(
+                "{reason} (the backend was still unavailable after {attempt} tries)"
+            );
+            tracing::error!(job_id = %job.id, attempt, "giving up on an unavailable backend");
+            self.mark_failed(job, &reason, &crate::seats::SeatPriority::of_job(job))
+                .await;
+            return JobOutcome::Failed { reason };
+        }
+
+        let wait = self.wait_before_retry(attempt);
+        let resume_at = now_ms() + wait.as_millis() as i64;
+        tracing::warn!(
+            job_id = %job.id,
+            attempt,
+            wait_s = wait.as_secs(),
+            reason,
+            "a backend was unavailable: the job waits and is retried by itself"
+        );
+        if let Err(err) = self
+            .jobs
+            .park(job.id.as_str(), reason, resume_at)
+            .await
+        {
+            // The job could not be parked, so it is still `processing`: the
+            // stale reclaim will pick it up again. Say so, because the reason
+            // the job is stuck is then the reclaim's business.
+            tracing::error!(error = %err, job_id = %job.id, "could not park the job");
+            self.mark_failed(job, reason, &crate::seats::SeatPriority::of_job(job))
+                .await;
+            return JobOutcome::Failed {
+                reason: reason.to_string(),
+            };
+        }
+        JobOutcome::Waiting {
+            reason: reason.to_string(),
+        }
+    }
+
+    /// How long a job waits before it tries again: the base backoff, doubled
+    /// per attempt, capped at the maximum.
+    fn wait_before_retry(&self, attempt: u32) -> Duration {
+        let base = self.settings.ocr_wait_backoff;
+        let shift = attempt.saturating_sub(1).min(16);
+        let grown = base.saturating_mul(1u32 << shift);
+        grown.min(self.settings.ocr_wait_max_backoff)
     }
 
     /// Record progress. A failed progress write is logged and dropped: it must

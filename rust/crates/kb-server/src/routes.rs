@@ -339,6 +339,13 @@ pub struct HealthResponse {
     pub tier: Option<String>,
     /// Additive (R3): non-local model-endpoint hosts, sorted and de-duplicated.
     pub egress: Vec<String>,
+    /// Additive (`#36`): the state of the embedder, the reranker and the OCR
+    /// backend.
+    ///
+    /// `ready`, `starting` or `unavailable` each. A client that uploads
+    /// scanned documents can hold the upload until the OCR backend says
+    /// `ready` instead of discovering the outage in the job queue.
+    pub backends: crate::backends::BackendHealth,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -371,12 +378,17 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Response {
     let postgres = state.documents.health_check().await.is_ok();
     let vectors = state.index.health_check().await.is_ok();
     let ok = postgres && vectors;
+    // The model backends are reported separately (`#36`): they do not decide
+    // whether the service is alive, but a client has to know whether the OCR
+    // backend can serve a scanned document before it uploads one.
+    let backends = state.backends.health().await;
     let body = HealthResponse {
         ok,
         checks: HealthChecks { postgres, vectors },
         version: state.version.clone(),
         tier: state.tier.clone(),
         egress: state.egress.clone(),
+        backends,
     };
     let status = if ok {
         StatusCode::OK

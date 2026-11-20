@@ -18,9 +18,9 @@ use sqlx::Row;
 
 use crate::queries::{
     CLAIM_NEXT_PENDING, CLEAR_JOB_S3_KEY, FAIL_JOB_STALLED, FINISH_JOB_FAILURE, FINISH_JOB_SUCCESS,
-    INSERT_INGEST_JOB, REQUEUE_JOB, RESET_JOB_FOR_RETRY, SELECT_JOB_BY_ID_TENANT,
-    SELECT_JOB_FOR_RETRY, SELECT_REAPABLE_JOBS, SELECT_STALE_JOBS, SET_DOCUMENT_STATUS, TOUCH_JOB,
-    UPDATE_JOB_PROGRESS,
+    INSERT_INGEST_JOB, PARK_JOB, REQUEUE_JOB, RESET_JOB_FOR_RETRY, RESUME_PARKED_JOBS,
+    SELECT_JOB_BY_ID_TENANT, SELECT_JOB_FOR_RETRY, SELECT_REAPABLE_JOBS, SELECT_STALE_JOBS,
+    SET_DOCUMENT_STATUS, TOUCH_JOB, UPDATE_JOB_PROGRESS,
 };
 use crate::store::PgSettings;
 
@@ -170,6 +170,35 @@ impl JobStore for PgJobStore {
             .await
             .map_err(|e| PortError::Unavailable(format!("pg job touch: {e}")))?;
         Ok(())
+    }
+
+    async fn park(
+        &self,
+        job_id: &str,
+        reason: &str,
+        resume_at_ms: i64,
+    ) -> Result<(), PortError> {
+        let mut message: String = reason.chars().take(MAX_ERROR_LEN).collect();
+        if message.is_empty() {
+            message = "the backend was unavailable".to_string();
+        }
+        sqlx::query(PARK_JOB)
+            .bind(job_id)
+            .bind(&message)
+            .bind(resume_at_ms)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg job park: {e}")))?;
+        Ok(())
+    }
+
+    async fn resume_parked(&self, now_ms: i64) -> Result<u32, PortError> {
+        let rows = sqlx::query(RESUME_PARKED_JOBS)
+            .bind(now_ms)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg job resume: {e}")))?;
+        Ok(rows.len() as u32)
     }
 
     async fn reclaim_stale(

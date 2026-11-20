@@ -441,6 +441,26 @@ pub trait JobStore: Send + Sync {
     /// long emit-less step.
     async fn touch(&self, job_id: &str) -> Result<(), PortError>;
 
+    /// Park a job until a backend it needs comes back (`#36`).
+    ///
+    /// The job keeps its place in the queue: its status becomes
+    /// `waiting_for_ocr` and `resumeAt` says when it may be tried again. The
+    /// worker resumes it on its own, so a document whose OCR provider was down
+    /// for ten minutes is indexed when the provider is back — not lost, and
+    /// not retried in a hot loop.
+    ///
+    /// The attempt counter goes up, so a job that keeps meeting an
+    /// unavailable backend eventually fails for good instead of waiting
+    /// forever.
+    async fn park(&self, job_id: &str, reason: &str, resume_at_ms: i64)
+        -> Result<(), PortError>;
+
+    /// Move the parked jobs whose wait is over back to `pending`.
+    ///
+    /// Returns how many were resumed. The worker calls this before it claims
+    /// a job, so a parked job comes back without an operator's help.
+    async fn resume_parked(&self, now_ms: i64) -> Result<u32, PortError>;
+
     /// Crash recovery. Jobs left `processing` with no update for `stale_after`
     /// go back to `pending` with the attempt counter incremented, or to `failed`
     /// once `max_attempts` is reached. Returns how many were reclaimed.
