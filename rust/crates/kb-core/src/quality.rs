@@ -554,8 +554,11 @@ mod tests {
         assert_eq!(count_chars("a b\nc\t"), 3);
         assert_eq!(count_chars(""), 0);
         assert_eq!(count_chars("   "), 0);
-        // The gate's own measure: the same number `Counts::of` counts.
+        // The gate's own measure: the same number `Counts::of` counts. Every
+        // character that is not whitespace counts, punctuation included:
+        // "Bab"(3) + "ini"(3) + "membahas"(8) + "dasar-dasar"(11) +
+        // "geometri."(9) = 34.
         let text = "Bab ini membahas dasar-dasar geometri.";
-        assert_eq!(count_chars(text), 36);
+        assert_eq!(count_chars(text), 34);
     }
 }
