@@ -302,11 +302,7 @@ pub async fn serve_status(status: u16) -> String {
             let mut buf = [0u8; 2048];
             // Read the request head, so the client is not still writing when
             // the answer goes out.
-            loop {
-                let read = match socket.read(&mut buf).await {
-                    Ok(read) => read,
-                    Err(_) => break,
-                };
+            while let Ok(read) = socket.read(&mut buf).await {
                 if read == 0 || buf.windows(4).any(|window| window == b"\r\n\r\n") {
                     break;
                 }

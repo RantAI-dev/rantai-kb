@@ -262,7 +262,7 @@ impl BackendProbe {
 
     /// The state of every backend, probing the ones whose answer is stale.
     pub async fn health(&self) -> BackendHealth {
-        if let Some((taken, health)) = self.cached.lock().unwrap().clone() {
+        if let Some((taken, health)) = self.lock().clone() {
             if taken.elapsed() < PROBE_TTL {
                 return health;
             }
@@ -273,8 +273,19 @@ impl BackendProbe {
         if health.ocr.state == BackendState::Ready {
             close_ocr_breaker();
         }
-        *self.cached.lock().unwrap() = Some((Instant::now(), health.clone()));
+        *self.lock() = Some((Instant::now(), health.clone()));
         health
+    }
+
+    /// The cached answer, if there is one.
+    ///
+    /// A poisoned lock is not a reason to take the service down: the cache
+    /// holds a copy of a probe result, and a probe that panics must not stop
+    /// the health route from answering.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(Instant, BackendHealth)>> {
+        self.cached
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -346,11 +357,7 @@ mod tests {
                 let mut buf = [0u8; 2048];
                 // Read the request head, so the client is not still writing
                 // when the answer goes out.
-                loop {
-                    let read = match socket.read(&mut buf).await {
-                        Ok(read) => read,
-                        Err(_) => break,
-                    };
+                while let Ok(read) = socket.read(&mut buf).await {
                     if read == 0 || buf.windows(4).any(|window| window == b"\r\n\r\n") {
                         break;
                     }
