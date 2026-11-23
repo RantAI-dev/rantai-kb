@@ -1725,12 +1725,15 @@ name = "kb-engine"
 version = "0.7.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "futures",
+ "hex",
  "kb-core",
  "kb-ports",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "tokio",
  "tracing",

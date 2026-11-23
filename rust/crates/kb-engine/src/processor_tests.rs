@@ -1,0 +1,415 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use kb_core::tables::{Cell, TableGrid, TableSource};
+use kb_ports::{
+    Embedder, Entity, EntityExtractor, ExtractedFigure, ExtractionOptions, ExtractionResult,
+    Extractor, PageBlock, PageBlockKind, PageText, PortError, Relation,
+};
+
+use crate::processor::{
+    DocumentProcessor, EncodeMode, ProcessError, ProcessRequest, ProcessorSettings,
+};
+
+enum StubExtractOutcome {
+    Ok(Box<ExtractionResult>),
+    Unavailable(String),
+}
+
+struct StubExtractor {
+    outcome: StubExtractOutcome,
+}
+
+impl StubExtractor {
+    fn ok(result: ExtractionResult) -> Self {
+        Self {
+            outcome: StubExtractOutcome::Ok(Box::new(result)),
+        }
+    }
+
+    fn unavailable(reason: impl Into<String>) -> Self {
+        Self {
+            outcome: StubExtractOutcome::Unavailable(reason.into()),
+        }
+    }
+}
+
+#[async_trait]
+impl Extractor for StubExtractor {
+    async fn extract_with_options(
+        &self,
+        _file_name: &str,
+        _mime_type: &str,
+        _bytes: &[u8],
+        _options: ExtractionOptions,
+    ) -> Result<ExtractionResult, PortError> {
+        match &self.outcome {
+            StubExtractOutcome::Ok(r) => Ok((**r).clone()),
+            StubExtractOutcome::Unavailable(msg) => Err(PortError::Unavailable(msg.clone())),
+        }
+    }
+}
+
+struct StubEmbedder {
+    dim: usize,
+    unavailable: Option<String>,
+}
+
+#[async_trait]
+impl Embedder for StubEmbedder {
+    fn dimension(&self) -> u32 {
+        self.dim as u32
+    }
+
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, PortError> {
+        if let Some(msg) = &self.unavailable {
+            return Err(PortError::Unavailable(msg.clone()));
+        }
+        Ok(vec![text.len() as f32; self.dim])
+    }
+
+    async fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, PortError> {
+        if let Some(msg) = &self.unavailable {
+            return Err(PortError::Unavailable(msg.clone()));
+        }
+        Ok(texts
+            .iter()
+            .map(|t| vec![t.len() as f32; self.dim])
+            .collect())
+    }
+}
+
+struct StubEntityExtractor;
+
+#[async_trait]
+impl EntityExtractor for StubEntityExtractor {
+    async fn extract_entities(
+        &self,
+        _text: &str,
+        _doc_id: Option<&str>,
+        _user_id: Option<&str>,
+    ) -> Result<Vec<Entity>, PortError> {
+        Ok(vec![Entity {
+            name: "RantAI".into(),
+            entity_type: "ORG".into(),
+            confidence: 0.95,
+            chunk_id: None,
+            document_id: None,
+            metadata: None,
+        }])
+    }
+
+    async fn extract_entities_and_relations(
+        &self,
+        _text: &str,
+        _doc_id: Option<&str>,
+        _user_id: Option<&str>,
+    ) -> Result<(Vec<Entity>, Vec<Relation>), PortError> {
+        Ok((
+            vec![
+                Entity {
+                    name: "RantAI".into(),
+                    entity_type: "ORG".into(),
+                    confidence: 0.95,
+                    chunk_id: None,
+                    document_id: None,
+                    metadata: None,
+                },
+                Entity {
+                    name: "Qdrant".into(),
+                    entity_type: "PRODUCT".into(),
+                    confidence: 0.9,
+                    chunk_id: None,
+                    document_id: None,
+                    metadata: None,
+                },
+            ],
+            vec![Relation {
+                source_entity: "RantAI".into(),
+                target_entity: "Qdrant".into(),
+                relation_type: "USES".into(),
+                confidence: 0.9,
+                context: None,
+                metadata: None,
+            }],
+        ))
+    }
+}
+
+fn ok_extraction(content: &str) -> ExtractionResult {
+    ExtractionResult {
+        content: content.to_string(),
+        file_type: "markdown".to_string(),
+        used_ocr: false,
+        figures: Vec::new(),
+        pages_blocks: None,
+        page_map: None,
+        outline: None,
+        ocr: None,
+        tables: Vec::new(),
+        error: None,
+    }
+}
+
+#[tokio::test]
+async fn processes_markdown_without_embedder_and_emits_sparse_vectors() {
+    let processor = DocumentProcessor::new(
+        Arc::new(StubExtractor::ok(ok_extraction(
+            "# Handbook\n\nParental leave is twelve weeks of paid leave.",
+        ))),
+        ProcessorSettings::default(),
+    );
+
+    assert!(!processor.capabilities().embed);
+    assert!(processor.capabilities().sparse);
+
+    let out = processor
+        .process(ProcessRequest::new(
+            "handbook.md",
+            "text/markdown",
+            b"# Handbook\n\nParental leave is twelve weeks of paid leave.".to_vec(),
+        ))
+        .await
+        .expect("process");
+
+    assert_eq!(out.title, "Handbook");
+    assert_eq!(out.file_type, "markdown");
+    assert!(out.embedding_model.is_none());
+    assert!(!out.chunks.is_empty());
+    assert!(out.chunks[0].embedding.is_none());
+    let sparse = out.chunks[0]
+        .sparse_vector
+        .as_ref()
+        .expect("sparse vector present");
+    assert!(!sparse.indices.is_empty());
+    assert_eq!(sparse.indices.len(), sparse.values.len());
+}
+
+#[tokio::test]
+async fn requesting_embed_without_embedder_returns_bad_request() {
+    let processor = DocumentProcessor::new(
+        Arc::new(StubExtractor::ok(ok_extraction("hello world"))),
+        ProcessorSettings::default(),
+    );
+    let mut req = ProcessRequest::new("note.md", "text/markdown", b"hello world".to_vec());
+    req.embed = Some(true);
+
+    let err = processor.process(req).await.unwrap_err();
+    assert!(matches!(err, ProcessError::BadRequest(_)));
+}
+
+#[tokio::test]
+async fn processes_with_embedder_and_respects_embed_false_override() {
+    let settings = ProcessorSettings {
+        embedding_model: Some("test-embed-1b".into()),
+        ..ProcessorSettings::default()
+    };
+    let processor = DocumentProcessor::new(
+        Arc::new(StubExtractor::ok(ok_extraction(
+            "Paragraph one about Qdrant indexing.",
+        ))),
+        settings,
+    )
+    .with_embedder(Arc::new(StubEmbedder {
+        dim: 4,
+        unavailable: None,
+    }));
+
+    assert!(processor.capabilities().embed);
+
+    let out = processor
+        .process(ProcessRequest::new(
+            "doc.md",
+            "text/markdown",
+            b"Paragraph one about Qdrant indexing.".to_vec(),
+        ))
+        .await
+        .expect("process with embed");
+    assert_eq!(out.embedding_model.as_deref(), Some("test-embed-1b"));
+    assert_eq!(out.chunks[0].embedding.as_ref().map(Vec::len), Some(4));
+
+    let mut no_embed = ProcessRequest::new(
+        "doc.md",
+        "text/markdown",
+        b"Paragraph one about Qdrant indexing.".to_vec(),
+    );
+    no_embed.embed = Some(false);
+    let out_no_embed = processor
+        .process(no_embed)
+        .await
+        .expect("process without embed");
+    assert!(out_no_embed.embedding_model.is_none());
+    assert!(out_no_embed.chunks[0].embedding.is_none());
+}
+
+#[tokio::test]
+async fn emits_tables_and_figures_with_optional_base64_and_anchors() {
+    let mut ext = ok_extraction("Intro paragraph explaining the quarterly revenue chart.");
+    ext.page_map = Some(vec![PageText {
+        page: 0,
+        text: "Intro paragraph explaining the quarterly revenue chart.".into(),
+    }]);
+    ext.tables = vec![TableGrid {
+        source: Some(TableSource::Csv),
+        page_span: Some((0, 0)),
+        title: Some("Revenue".into()),
+        header: vec!["Region".into(), "USD".into()],
+        rows: vec![vec![Cell::Text("APAC".into()), Cell::Number(1200.0)]],
+        ..TableGrid::default()
+    }];
+    ext.figures = vec![ExtractedFigure {
+        id: Some("fig_1".into()),
+        page: 0,
+        kind: "chart".into(),
+        caption: Some("Quarterly Revenue".into()),
+        bbox: [0.0, 0.0, 100.0, 100.0],
+        image_bytes: vec![137, 80, 78, 71],
+    }];
+    ext.pages_blocks = Some(vec![vec![
+        PageBlock {
+            kind: PageBlockKind::Text,
+            id: None,
+            text: Some("Intro paragraph explaining the quarterly revenue chart.".into()),
+        },
+        PageBlock {
+            kind: PageBlockKind::Figure,
+            id: Some("fig_1".into()),
+            text: None,
+        },
+    ]]);
+
+    let processor = DocumentProcessor::new(
+        Arc::new(StubExtractor::ok(ext)),
+        ProcessorSettings::default(),
+    );
+
+    let mut req = ProcessRequest::new("report.pdf", "application/pdf", b"%PDF".to_vec());
+    req.include_figure_bytes = true;
+
+    let out = processor.process(req).await.expect("process");
+    assert_eq!(out.tables.len(), 1);
+    assert_eq!(out.tables[0].manifest.n_rows, 1);
+    assert_eq!(out.figures.len(), 1);
+    assert_eq!(out.figures[0].anchor_chunk_index, Some(0));
+    assert_eq!(out.figures[0].png_base64.as_deref(), Some("iVBORw=="));
+
+    assert!(
+        out.chunks
+            .iter()
+            .any(|c| c.chunk_type == "table_summary" && c.table_index == Some(0))
+    );
+    assert!(
+        out.chunks
+            .iter()
+            .any(|c| c.chunk_type == "table_row" && c.table_index == Some(0))
+    );
+    assert!(
+        out.chunks
+            .iter()
+            .any(|c| c.chunk_type == "figure" && c.figure_index == Some(0))
+    );
+
+    // Chunk indices must be contiguous 0..N
+    for (idx, chunk) in out.chunks.iter().enumerate() {
+        assert_eq!(chunk.chunk_index, idx as u32);
+    }
+}
+
+#[tokio::test]
+async fn entities_are_opt_in_and_use_configured_extractor() {
+    let processor = DocumentProcessor::new(
+        Arc::new(StubExtractor::ok(ok_extraction(
+            "RantAI uses Qdrant for vector retrieval.",
+        ))),
+        ProcessorSettings::default(),
+    )
+    .with_entity_extractor(Arc::new(StubEntityExtractor));
+
+    // Default: entities=false -> empty
+    let default_out = processor
+        .process(ProcessRequest::new(
+            "arch.md",
+            "text/markdown",
+            b"RantAI uses Qdrant for vector retrieval.".to_vec(),
+        ))
+        .await
+        .expect("default");
+    assert!(default_out.entities.is_empty());
+
+    // Opt-in: entities=true -> populated
+    let mut req = ProcessRequest::new(
+        "arch.md",
+        "text/markdown",
+        b"RantAI uses Qdrant for vector retrieval.".to_vec(),
+    );
+    req.entities = true;
+    let out = processor.process(req).await.expect("with entities");
+    assert_eq!(out.entities.len(), 2);
+    assert_eq!(out.relations.len(), 1);
+}
+
+#[tokio::test]
+async fn unavailable_backend_surfaces_as_unavailable_error() {
+    let processor = DocumentProcessor::new(
+        Arc::new(StubExtractor::unavailable("ocr server offline")),
+        ProcessorSettings::default(),
+    );
+    let err = processor
+        .process(ProcessRequest::new(
+            "scan.pdf",
+            "application/pdf",
+            b"%PDF".to_vec(),
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ProcessError::Unavailable(_)));
+}
+
+#[tokio::test]
+async fn encode_matches_kb_core_sparse_for_query_and_passage() {
+    let settings = ProcessorSettings {
+        embedding_model: Some("test-embed".into()),
+        ..ProcessorSettings::default()
+    };
+    let processor =
+        DocumentProcessor::new(Arc::new(StubExtractor::ok(ok_extraction(""))), settings)
+            .with_embedder(Arc::new(StubEmbedder {
+                dim: 3,
+                unavailable: None,
+            }));
+
+    let texts = vec!["Qdrant hybrid BM25 search".to_string()];
+    let q = processor
+        .encode(&texts, EncodeMode::Query, Some(true), true)
+        .await
+        .expect("encode query");
+    assert_eq!(q.mode, EncodeMode::Query);
+    assert_eq!(q.embedding_model.as_deref(), Some("test-embed"));
+    assert_eq!(q.embeddings.as_ref().map(|e| e[0].len()), Some(3));
+    let expected_q = kb_core::sparse::encode_query(&texts[0]);
+    assert_eq!(
+        q.sparse_vectors.as_ref().unwrap()[0].indices,
+        expected_q.indices
+    );
+    assert_eq!(
+        q.sparse_vectors.as_ref().unwrap()[0].values,
+        expected_q.values
+    );
+
+    let p = processor
+        .encode(&texts, EncodeMode::Passage, Some(false), true)
+        .await
+        .expect("encode passage");
+    assert!(p.embeddings.is_none());
+    let expected_p = kb_core::sparse::encode_document(&texts[0]);
+    assert_eq!(
+        p.sparse_vectors.as_ref().unwrap()[0].indices,
+        expected_p.indices
+    );
+    assert_eq!(
+        p.sparse_vectors.as_ref().unwrap()[0].values,
+        expected_p.values
+    );
+}
