@@ -51,6 +51,34 @@ numbers, upload/search examples, GPU notes and troubleshooting: [`deploy/README.
 
 ---
 
+## Stateless Processor Mode (Microservice)
+
+To run `kb-server` purely as a document-processing microservice — **zero Postgres, Qdrant,
+or S3** — start it with `--stateless` or `KB_MODE=stateless`:
+
+```bash
+KB_MODE=stateless \
+KB_STATELESS_API_KEY=change-me \
+kb-server serve
+# or:
+kb-server serve --stateless
+```
+
+| Env var | Purpose | Default |
+|---|---|---|
+| `KB_MODE` | `full` (default) or `stateless` (`processor` alias) | `full` |
+| `KB_STATELESS_API_KEY` | Comma-separated static API keys (`Authorization: Bearer` or `X-API-Key`) | unset |
+| `KB_STATELESS_ALLOW_UNAUTHENTICATED` | Explicit opt-in to disable auth on a private VPC / sidecar network | `false` |
+| `KB_STATELESS_EMBED` | Set to `false` to disable dense embeddings even when `OPENROUTER_API_KEY` is set for OCR | `true` (when embedder config is present) |
+
+Print the stateless OpenAPI 3.1 contract without booting:
+
+```bash
+kb-server openapi --stateless
+```
+
+---
+
 ## API reference
 
 The HTTP API is described by an OpenAPI 3.1 document that the server serves
