@@ -605,7 +605,7 @@ async fn build_page_arm(
 /// What a rerank score depends on: provider, model and (for a hosted
 /// endpoint) which service answers. Never an API key. `None` for a disabled
 /// reranker, which has nothing worth caching.
-fn reranker_fingerprint(cfg: &RerankerConfig) -> Option<String> {
+pub(crate) fn reranker_fingerprint(cfg: &RerankerConfig) -> Option<String> {
     match cfg {
         RerankerConfig::Disabled => None,
         RerankerConfig::Llm { model, .. } => Some(format!("llm|{model}")),
@@ -620,7 +620,7 @@ fn reranker_fingerprint(cfg: &RerankerConfig) -> Option<String> {
     }
 }
 
-fn embedder_settings_from(c: EmbedderConfig) -> EmbedderSettings {
+pub(crate) fn embedder_settings_from(c: EmbedderConfig) -> EmbedderSettings {
     EmbedderSettings {
         base_url: c.base_url,
         model: c.model,
@@ -636,7 +636,9 @@ fn embedder_settings_from(c: EmbedderConfig) -> EmbedderSettings {
     }
 }
 
-fn build_reranker(cfg: &RerankerConfig) -> anyhow::Result<std::sync::Arc<dyn kb_ports::Reranker>> {
+pub(crate) fn build_reranker(
+    cfg: &RerankerConfig,
+) -> anyhow::Result<std::sync::Arc<dyn kb_ports::Reranker>> {
     use kb_inference::{CohereReranker, LlmReranker, TeiReranker, VllmReranker};
     match cfg {
         RerankerConfig::Disabled => Ok(Arc::new(kb_inference::NoopReranker)),

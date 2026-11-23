@@ -92,3 +92,45 @@ the key's knowledge-base limit.
 narrower, `kb-server create-api-key` takes `--scopes kb:read,kb:write` and
 `--kb id,id`. The tenant string is the scope boundary: a key sees its own tenant's
 documents and nothing else.
+
+## Stateless processor mode
+
+When you own your own database and Qdrant server and want `rantai-kb` strictly as a
+document-processing microservice (zero Postgres, Qdrant, or S3 connections), start it
+with `kb-server serve --stateless` or `KB_MODE=stateless` (full integration & Qdrant
+setup guide: [`docs/modes/stateless/guidelines.md`](modes/stateless/guidelines.md);
+full-service guide: [`docs/modes/full/guidelines.md`](modes/full/guidelines.md)):
+
+```bash
+KB_MODE=stateless \
+KB_STATELESS_API_KEY=your-shared-secret \
+kb-server serve
+```
+
+For private VPC / sidecar deployments where another service terminates auth, explicitly
+opt out with `KB_STATELESS_ALLOW_UNAUTHENTICATED=true` (boot fails loudly if neither
+variable is set). Dense embeddings are optional: omit embedding env vars to run pure
+extraction + chunking + tables + figures + Qdrant-ready BM25 sparse vectors with zero
+external model dependencies, or set `KB_EMBEDDING_BASE_URL` / `KB_EMBEDDING_API_KEY` /
+`KB_TIER` to include dense embeddings.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/process` | Synchronously process a multipart `file` upload and return text, chunks, tables, figures, BM25 sparse vectors, optional dense embeddings, optional entities/relations, and stage timings. Guarded by `KB_SEATS` and `KB_STATELESS_MAX_INFLIGHT` (sheds bursts with `503` + `Retry-After` before buffering the body). |
+| `POST` | `/v1/encode` | Encode `{texts, mode?: "query"\|"passage", dense?, sparse?}` with the exact same FNV-1a BM25 sparse tokenizer and dense embedder/prefixes used by `/v1/process`. `mode: "query"` uses a fast lane and never queues behind bulk ingest seats. |
+| `POST` | `/v1/rerank` | Rerank `{query, documents, topK?, returnDocuments?}` through the configured local (TEI / vLLM / llama.cpp) or cloud (Cohere / Voyage / OpenRouter) reranker on the search fast lane. |
+| `GET` | `/v1/formats` | Accepted extensions and `maxFileBytes`. No auth. |
+| `GET` | `/health` · `/v1/health` | Liveness, `mode: "stateless"`, `capabilities`, `limits`, `backends`, `version`, `tier`, and `egress`. No auth. |
+| `GET` | `/openapi.json` · `/docs` | Stateless OpenAPI 3.1 contract and Swagger UI (also printable via `kb-server openapi --stateless`). No auth. |
+
+**Process options** (multipart fields on `POST /v1/process`): `title`, `category`,
+`subcategory`, `figures` (`auto`, `all`, `none`, `off`), `documentType`, `embed`
+(defaults to `true` when an embedder is configured), `sparse` (default `true`), `tables`
+(default `true`), `entities` (default `false`), `includeFigureBytes` (default `false`),
+`chunkSize`, and `chunkOverlap`.
+
+**Rerank options** (JSON body on `POST /v1/rerank`): `query` (required), `documents`
+(non-empty string array), `topK` (optional positive integer, defaults to all candidates),
+and `returnDocuments` (boolean, default `false`). Configured via `KB_RERANK_*` or
+`KB_TIER=cloud|desk|studio|station` (disable explicitly with `KB_STATELESS_RERANK=false`).
+

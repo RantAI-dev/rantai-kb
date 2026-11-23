@@ -136,9 +136,9 @@ impl JobError {
 /// operator can read, stored on the document so a caller sees why it is not
 /// searchable.
 #[derive(Debug, Clone)]
-struct DocumentQuality {
-    verdict: kb_core::quality::DocumentVerdict,
-    degrades: Vec<String>,
+pub(crate) struct DocumentQuality {
+    pub(crate) verdict: kb_core::quality::DocumentVerdict,
+    pub(crate) degrades: Vec<String>,
 }
 
 /// Tunables, one per `KB_INGEST_*` environment variable.
@@ -1099,61 +1099,7 @@ impl IngestWorker {
         content: &str,
         chunks: usize,
     ) -> DocumentQuality {
-        let opts = self.settings.quality.unwrap_or_default();
-        // The pages the document has. The OCR report knows the real count —
-        // a page map only holds the pages that carry text — and without a
-        // router the page map is the only count there is.
-        let pages = extraction
-            .ocr
-            .as_ref()
-            .map(|report| report.pages as usize)
-            .filter(|count| *count > 0)
-            .or_else(|| {
-                extraction
-                    .page_map
-                    .as_ref()
-                    .map(|map| map.len())
-                    .filter(|count| *count > 0)
-            })
-            .unwrap_or(0);
-
-        // The pages that carry text, checked one by one. The median of the
-        // document says what a page of it should hold, so a page far below the
-        // rest is caught even when what it holds looks like text.
-        let page_texts: Vec<String> = extraction
-            .page_map
-            .iter()
-            .flatten()
-            .map(|p| p.text.clone())
-            .collect();
-        let median = kb_core::quality::median_page_chars(
-            &page_texts
-                .iter()
-                .map(|text| kb_core::quality::count_chars(text))
-                .collect::<Vec<_>>(),
-        );
-        let verdicts: Vec<kb_core::quality::PageVerdict> = page_texts
-            .iter()
-            .map(|text| kb_core::quality::check_page_against_median(text, median, &opts))
-            .collect();
-
-        let chars = kb_core::quality::count_chars(content);
-        let verdict = kb_core::quality::assess_document(&verdicts, pages, chars, chunks, &opts);
-        // The reasons a reader can act on, one line each. With the gate on
-        // the finding is a decision — the document was refused — so it is
-        // named `needs_ocr`; with the gate off the same finding is a warning,
-        // because the document was indexed as it is.
-        let prefix = if self.settings.quality.is_some() {
-            "needs_ocr"
-        } else {
-            "quality"
-        };
-        let degrades = verdict
-            .reasons
-            .iter()
-            .map(|reason| format!("{prefix}: {reason}"))
-            .collect();
-        DocumentQuality { verdict, degrades }
+        assess_document_quality(self.settings.quality, extraction, content, chunks)
     }
 
     /// Store a document's tables and index their two retrieval units (`TBL-1`).
@@ -2412,9 +2358,63 @@ fn relation_name(relation: &kb_core::Relation, field: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// What the extraction quality gate made of a document.
+pub(crate) fn assess_document_quality(
+    gate: Option<kb_core::quality::QualityOptions>,
+    extraction: &kb_ports::ExtractionResult,
+    content: &str,
+    chunks: usize,
+) -> DocumentQuality {
+    let opts = gate.unwrap_or_default();
+    let pages = extraction
+        .ocr
+        .as_ref()
+        .map(|report| report.pages as usize)
+        .filter(|count| *count > 0)
+        .or_else(|| {
+            extraction
+                .page_map
+                .as_ref()
+                .map(|map| map.len())
+                .filter(|count| *count > 0)
+        })
+        .unwrap_or(0);
+
+    let page_texts: Vec<String> = extraction
+        .page_map
+        .iter()
+        .flatten()
+        .map(|p| p.text.clone())
+        .collect();
+    let median = kb_core::quality::median_page_chars(
+        &page_texts
+            .iter()
+            .map(|text| kb_core::quality::count_chars(text))
+            .collect::<Vec<_>>(),
+    );
+    let verdicts: Vec<kb_core::quality::PageVerdict> = page_texts
+        .iter()
+        .map(|text| kb_core::quality::check_page_against_median(text, median, &opts))
+        .collect();
+
+    let chars = kb_core::quality::count_chars(content);
+    let verdict = kb_core::quality::assess_document(&verdicts, pages, chars, chunks, &opts);
+    let prefix = if gate.is_some() {
+        "needs_ocr"
+    } else {
+        "quality"
+    };
+    let degrades = verdict
+        .reasons
+        .iter()
+        .map(|reason| format!("{prefix}: {reason}"))
+        .collect();
+    DocumentQuality { verdict, degrades }
+}
+
 /// Layout figure id → the text chunk it belongs to, from the layout parser's
 /// reading-order blocks; empty when there are none.
-fn figure_anchors(
+pub(crate) fn figure_anchors(
     pages_blocks: Option<&[Vec<kb_ports::PageBlock>]>,
     chunks: &[Chunk],
 ) -> HashMap<String, u32> {
@@ -2462,7 +2462,7 @@ fn job_title(params: &Value, filename: &str, content: &str, markdown: bool) -> S
 ///
 /// The extractors report `"markdown"` for `.md`, `.txt` and the other text
 /// formats, and `"pdf"`/`"image"` for the rest.
-fn is_markdown_text(file_type: &str) -> bool {
+pub(crate) fn is_markdown_text(file_type: &str) -> bool {
     file_type.eq_ignore_ascii_case("markdown")
 }
 

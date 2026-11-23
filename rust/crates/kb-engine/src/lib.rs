@@ -29,6 +29,7 @@ pub mod global_arm;
 pub mod graph_arm;
 pub mod ingest;
 pub mod page_arm;
+pub mod processor;
 pub mod retrieval;
 pub mod seats;
 pub mod timing;
@@ -71,6 +72,8 @@ mod ingest_tests;
 #[cfg(test)]
 mod page_arm_tests;
 #[cfg(test)]
+mod processor_tests;
+#[cfg(test)]
 mod seats_tests;
 #[cfg(test)]
 mod tests;
@@ -89,6 +92,11 @@ pub use page_arm::{
     MergeOutcome, PageArm, PageArmConfig, PageCaption, PageCaptionConfig, PageIngest, PageOutcome,
     PageRerankConfig, PageRerankContext, PageTextSemantics, PageVision, PageVisionContext,
     PageVisionRerankConfig, RankedPage,
+};
+pub use processor::{
+    DocumentProcessor, EncodeMode, EncodeOutput, ProcessError, ProcessOutput, ProcessRequest,
+    ProcessTimings, ProcessedChunk, ProcessedFigure, ProcessedTable, ProcessorCapabilities,
+    ProcessorSettings, RerankItem, RerankOutput, SparseVectorData,
 };
 pub use retrieval::{
     AdaptiveStats, BoostStats, FloorScoreKind, FloorStats, RetrievalOptions, RetrievalOutcome,

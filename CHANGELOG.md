@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.8.0 — 2026-11-23
+
+### Added
+
+- **Stateless processor-only microservice mode (`kb-server serve --stateless` / `KB_MODE=stateless`).**
+  Runs `rantai-kb` with **zero** Postgres, Qdrant, or S3 connections so external applications that
+  own their own database and Qdrant server can use `rantai-kb` purely for document processing and
+  inference:
+  - `POST /v1/process` — synchronously extracts text (55 formats, pdfium + optional OCR), splits
+    into table- and code-aware chunks, structures typed tables, anchors figures (with optional
+    base64 PNGs), computes Qdrant-compatible BM25 sparse vectors, and optionally computes dense
+    embeddings and entities/relations in one JSON response.
+  - `POST /v1/encode` — encodes query or passage texts using the exact same dense prefixes and
+    FNV-1a BM25 sparse tokenizer as `/v1/process` so external Qdrant retrieval matches indexing
+    bit-for-bit. `mode: "query"` runs on a search fast lane and never queues behind bulk document
+    ingestion holding `KB_SEATS` embed permits.
+  - `POST /v1/rerank` — reranks candidate passages against a query through any configured local
+    (TEI / vLLM / llama.cpp) or cloud (Cohere / Voyage / OpenRouter) reranker on the search fast
+    lane, reusing `KB_RERANK_*` and `KB_TIER` presets (disable explicitly with
+    `KB_STATELESS_RERANK=false`).
+  - `GET /health` & `GET /v1/health` — reports `mode: "stateless"`, `capabilities` (including
+    `embed` and `rerank`), active concurrency `limits` (`extractSeats`, `embedSeats`,
+    `maxInflightProcess`), `backends`, `tier`, and `egress`.
+  - `kb-server openapi --stateless` (and `GET /openapi.json` / `GET /docs` in stateless mode) —
+    dedicated OpenAPI 3.1 contract for stateless deployments, leaving the stateful contract
+    (`docs/openapi.json`) unchanged.
+- **In-flight backpressure for stateless uploads (`KB_STATELESS_MAX_INFLIGHT`).** Bounds concurrent
+  `POST /v1/process` uploads (default `max(extract_seats * 4, 4)`, `0` = unlimited) **before**
+  buffering multipart file bytes into RAM, shedding excess bursts cleanly with `503 Service
+  Unavailable` + `Retry-After: 2`.
+- **Static API key authentication for stateless mode.** Authenticates `Authorization: Bearer` and
+  `X-API-Key` against comma-separated keys in `KB_STATELESS_API_KEY` (constant-time SHA-256
+  comparison), or requires explicit opt-out via `KB_STATELESS_ALLOW_UNAUTHENTICATED=true` on
+  trusted private networks; refuses to boot if neither is set.
+- **Engine `DocumentProcessor` API (`kb-engine`).** Exposes the reusable, adapter-free stateless
+  processing, encoding, and reranking pipeline directly from `kb-engine`.
+
+### Changed
+
+- Cleaned up and reorganized `README.md` to clearly present both deployment modes (full service vs.
+  stateless processor microservice), concise tier/model tables, and updated quick-start examples.
+
 ## 0.7.0 — 2026-11-20
 
 ### Added
