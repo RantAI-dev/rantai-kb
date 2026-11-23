@@ -1407,7 +1407,7 @@ where
 /// Reads `KB_RERANK_*` as `src/lib/rag/rerankers/index.ts` does.
 /// `tei`, `vllm` and `cohere` select their adapters. `openrouter`, unset and
 /// unknown providers all use the LLM reranker, as in TypeScript.
-fn read_reranker<F>(lookup: &F) -> Result<RerankerConfig>
+pub(crate) fn read_reranker<F>(lookup: &F) -> Result<RerankerConfig>
 where
     F: Fn(&str) -> Option<String>,
 {

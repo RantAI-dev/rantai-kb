@@ -114,10 +114,11 @@ external model dependencies, or set `KB_EMBEDDING_BASE_URL` / `KB_EMBEDDING_API_
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/v1/process` | Synchronously process a multipart `file` upload and return text, chunks, tables, figures, BM25 sparse vectors, optional dense embeddings, optional entities/relations, and stage timings. |
-| `POST` | `/v1/encode` | Encode `{texts, mode?: "query"\|"passage", dense?, sparse?}` with the exact same FNV-1a BM25 sparse tokenizer and dense embedder/prefixes used by `/v1/process`. |
+| `POST` | `/v1/process` | Synchronously process a multipart `file` upload and return text, chunks, tables, figures, BM25 sparse vectors, optional dense embeddings, optional entities/relations, and stage timings. Guarded by `KB_SEATS` and `KB_STATELESS_MAX_INFLIGHT` (sheds bursts with `503` + `Retry-After` before buffering the body). |
+| `POST` | `/v1/encode` | Encode `{texts, mode?: "query"\|"passage", dense?, sparse?}` with the exact same FNV-1a BM25 sparse tokenizer and dense embedder/prefixes used by `/v1/process`. `mode: "query"` uses a fast lane and never queues behind bulk ingest seats. |
+| `POST` | `/v1/rerank` | Rerank `{query, documents, topK?, returnDocuments?}` through the configured local (TEI / vLLM / llama.cpp) or cloud (Cohere / Voyage / OpenRouter) reranker on the search fast lane. |
 | `GET` | `/v1/formats` | Accepted extensions and `maxFileBytes`. No auth. |
-| `GET` | `/health` · `/v1/health` | Liveness, `mode: "stateless"`, `capabilities`, `backends`, `version`, `tier`, and `egress`. No auth. |
+| `GET` | `/health` · `/v1/health` | Liveness, `mode: "stateless"`, `capabilities`, `limits`, `backends`, `version`, `tier`, and `egress`. No auth. |
 | `GET` | `/openapi.json` · `/docs` | Stateless OpenAPI 3.1 contract and Swagger UI (also printable via `kb-server openapi --stateless`). No auth. |
 
 **Process options** (multipart fields on `POST /v1/process`): `title`, `category`,
@@ -125,4 +126,9 @@ external model dependencies, or set `KB_EMBEDDING_BASE_URL` / `KB_EMBEDDING_API_
 (defaults to `true` when an embedder is configured), `sparse` (default `true`), `tables`
 (default `true`), `entities` (default `false`), `includeFigureBytes` (default `false`),
 `chunkSize`, and `chunkOverlap`.
+
+**Rerank options** (JSON body on `POST /v1/rerank`): `query` (required), `documents`
+(non-empty string array), `topK` (optional positive integer, defaults to all candidates),
+and `returnDocuments` (boolean, default `false`). Configured via `KB_RERANK_*` or
+`KB_TIER=cloud|desk|studio|station` (disable explicitly with `KB_STATELESS_RERANK=false`).
 

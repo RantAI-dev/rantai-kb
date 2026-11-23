@@ -214,10 +214,11 @@ THE STACK
 
 STATELESS PROCESSOR MODE
     `serve --stateless` (or `KB_MODE=stateless`) starts a processor-only HTTP
-    microservice (`POST /v1/process`, `POST /v1/encode`, `GET /v1/formats`,
-    `GET /health`) with zero Postgres, Qdrant, or S3 connections. Set
-    `KB_STATELESS_API_KEY=<secret>` (or `KB_STATELESS_ALLOW_UNAUTHENTICATED=true`
-    on a private network). Dense embeddings are optional.
+    microservice (`POST /v1/process`, `POST /v1/encode`, `POST /v1/rerank`,
+    `GET /v1/formats`, `GET /health`) with zero Postgres, Qdrant, or S3
+    connections. Set `KB_STATELESS_API_KEY=<secret>` (or
+    `KB_STATELESS_ALLOW_UNAUTHENTICATED=true` on a private network). Dense
+    embeddings and reranking are optional.
 
 REINDEX AND COST
     SurrealDB was removed in 2026-10-25; Qdrant is the only chunk store. Data

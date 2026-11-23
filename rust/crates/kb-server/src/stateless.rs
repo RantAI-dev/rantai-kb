@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use axum::extract::{DefaultBodyLimit, FromRequest, FromRequestParts, Multipart, Request, State};
+use axum::http::header::RETRY_AFTER;
 use axum::http::request::Parts;
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -32,13 +33,14 @@ use kb_extract::ExtractConfig;
 use kb_inference::ExtractorSettings;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tokio::sync::Semaphore;
 use utoipa::{OpenApi, ToSchema};
 
 use crate::auth::extract_raw_key;
 use crate::backends::{BackendHealth, BackendProbe, BackendTargets, Endpoint};
 use crate::config::{
-    CacheConfig, Config, EmbedderConfig, EntityExtractorChoice, bool_flag, extract_outbound_urls,
-    int_var, read_seats,
+    CacheConfig, Config, EmbedderConfig, EntityExtractorChoice, RerankerConfig, bool_flag,
+    extract_outbound_urls, int_var, read_reranker, read_seats,
 };
 use crate::error::{ApiError, ErrorBody};
 use crate::openapi::{SecurityAddon, VersionAddon};
@@ -46,7 +48,7 @@ use crate::routes::upload::is_accepted_extension;
 use crate::routes::{
     FormatsResponse, RouteSpec, cors, max_file_bytes, payload_too_large_message, upload_body_limit,
 };
-use crate::state::embedder_settings_from;
+use crate::state::{build_reranker, embedder_settings_from, reranker_fingerprint};
 
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
@@ -154,9 +156,13 @@ pub struct StatelessConfig {
     pub auth: StatelessAuth,
     pub extract: ExtractConfig,
     pub embedder: Option<EmbedderConfig>,
+    pub reranker: RerankerConfig,
     pub entity: ExtractorSettings,
     pub entity_extractor: EntityExtractorChoice,
     pub seats: kb_engine::SeatCapacity,
+    /// Max concurrent `/v1/process` requests admitted before shedding with 503.
+    /// `0` disables the cap. Defaults to `max(seats.extract * 4, 4)`.
+    pub max_inflight_process: usize,
     pub chunk_size: u32,
     pub chunk_overlap: u32,
     pub strip_page_furniture: bool,
@@ -231,6 +237,16 @@ impl StatelessConfig {
             None
         };
 
+        // Optional reranker. Mirrors stateful `KB_RERANK_*` and `KB_TIER` presets
+        // (including cloud Cohere/Voyage/OpenRouter and local TEI/vLLM/llama.cpp).
+        // Set `KB_STATELESS_RERANK=false` to disable even when a tier preset enables it.
+        let rerank_enabled = bool_flag(&lookup, "KB_STATELESS_RERANK", true);
+        let reranker = if rerank_enabled {
+            read_reranker(&lookup)?
+        } else {
+            RerankerConfig::Disabled
+        };
+
         let extract = ExtractConfig::from_lookup(&lookup);
         let entity = ExtractorSettings::from_lookup(&lookup);
         // Default to free local heuristic extractor in stateless mode so
@@ -249,6 +265,9 @@ impl StatelessConfig {
         };
 
         let seats = read_seats(&lookup)?;
+        let default_max_inflight = seats.extract.saturating_mul(4).max(4);
+        let max_inflight_process =
+            int_var(&lookup, "KB_STATELESS_MAX_INFLIGHT", default_max_inflight)?;
         let chunk_size = int_var(&lookup, "KB_CHUNK_SIZE", 800u32)?.max(100);
         let chunk_overlap = int_var(&lookup, "KB_CHUNK_OVERLAP", 200u32)?;
         let strip_page_furniture = bool_flag(&lookup, "KB_STRIP_PAGE_FURNITURE", false);
@@ -272,9 +291,11 @@ impl StatelessConfig {
             auth,
             extract,
             embedder,
+            reranker,
             entity,
             entity_extractor,
             seats,
+            max_inflight_process,
             chunk_size,
             chunk_overlap,
             strip_page_furniture,
@@ -300,6 +321,20 @@ impl StatelessConfig {
         if let Some(embedder) = &self.embedder {
             urls.push(embedder.base_url.clone());
         }
+        match &self.reranker {
+            RerankerConfig::Disabled => {}
+            RerankerConfig::Llm { .. } => {
+                urls.push(kb_inference::OPENROUTER_CHAT_URL.to_string());
+            }
+            RerankerConfig::Tei { base_url, .. } | RerankerConfig::Vllm { base_url, .. } => {
+                urls.push(base_url.clone());
+            }
+            RerankerConfig::Cohere { endpoint, .. } => urls.push(
+                endpoint
+                    .clone()
+                    .unwrap_or_else(|| kb_inference::DEFAULT_COHERE_ENDPOINT.to_string()),
+            ),
+        }
         urls.extend(extract_outbound_urls(&self.extract));
         if self.entity_extractor == EntityExtractorChoice::Llm
             && !self.entity.api_key.trim().is_empty()
@@ -322,6 +357,24 @@ impl StatelessConfig {
             .embedder
             .as_ref()
             .map(|e| Endpoint::with_key(e.base_url.clone(), e.api_key.clone().unwrap_or_default()));
+        let reranker = match &self.reranker {
+            RerankerConfig::Disabled => None,
+            RerankerConfig::Llm { api_key, .. } => Some(Endpoint::with_key(
+                kb_inference::OPENROUTER_CHAT_URL,
+                api_key.clone(),
+            )),
+            RerankerConfig::Tei { base_url, .. } | RerankerConfig::Vllm { base_url, .. } => Some(
+                Endpoint::anonymous(format!("{}/rerank", base_url.trim_end_matches('/'))),
+            ),
+            RerankerConfig::Cohere {
+                api_key, endpoint, ..
+            } => Some(Endpoint::with_key(
+                endpoint
+                    .as_deref()
+                    .unwrap_or(kb_inference::DEFAULT_COHERE_ENDPOINT),
+                api_key.clone(),
+            )),
+        };
         let ocr = if !self.extract.ocr_base_url.trim().is_empty() {
             Some(Endpoint::with_key(
                 self.extract.ocr_base_url.clone(),
@@ -340,9 +393,19 @@ impl StatelessConfig {
         };
         BackendTargets {
             embedder,
-            reranker: None,
+            reranker,
             ocr,
         }
+    }
+}
+
+fn reranker_model_name(cfg: &RerankerConfig) -> Option<String> {
+    match cfg {
+        RerankerConfig::Disabled => None,
+        RerankerConfig::Llm { model, .. }
+        | RerankerConfig::Tei { model, .. }
+        | RerankerConfig::Vllm { model, .. }
+        | RerankerConfig::Cohere { model, .. } => Some(model.clone()),
     }
 }
 
@@ -443,16 +506,18 @@ pub struct StatelessState {
     pub tier: Option<String>,
     pub egress: Vec<String>,
     pub backends: BackendProbe,
+    pub limits: StatelessLimitsDto,
+    inflight_process: Option<Arc<Semaphore>>,
 }
 
 impl StatelessState {
-    /// Wire the production extractor, optional embedder, optional disk caches,
-    /// and entity extractor from a [`StatelessConfig`].
+    /// Wire the production extractor, optional embedder, optional reranker,
+    /// optional disk caches, and entity extractor from a [`StatelessConfig`].
     ///
     /// # Errors
     ///
-    /// Fails if the extractor, configured embedder, or LLM entity extractor
-    /// cannot be initialised.
+    /// Fails if the extractor, configured embedder, reranker, or LLM entity
+    /// extractor cannot be initialised.
     pub fn from_config(config: StatelessConfig) -> Result<Self> {
         let tier = config
             .tier
@@ -460,6 +525,13 @@ impl StatelessState {
             .map(|plan| plan.tier.as_str().to_string());
         let egress = config.egress_hosts();
         let backends = BackendProbe::new(config.backend_targets());
+        let limits = StatelessLimitsDto {
+            extract_seats: config.seats.extract,
+            embed_seats: config.seats.embed,
+            max_inflight_process: config.max_inflight_process,
+        };
+        let inflight_process = (config.max_inflight_process > 0)
+            .then(|| Arc::new(Semaphore::new(config.max_inflight_process)));
 
         let mut extractor = kb_extract::build_production_extractor_with_cache(
             &config.extract,
@@ -517,6 +589,23 @@ impl StatelessState {
             processor = processor.with_embedder(embedder);
         }
 
+        if !matches!(config.reranker, RerankerConfig::Disabled) {
+            let mut reranker: Arc<dyn kb_ports::Reranker> =
+                build_reranker(&config.reranker).map_err(|e| anyhow::anyhow!("reranker: {e}"))?;
+            if let (Some(cache), Some(fingerprint)) = (
+                config.cache.as_ref(),
+                reranker_fingerprint(&config.reranker),
+            ) {
+                tracing::info!(dir = %cache.dir.display(), %fingerprint, "rerank disk cache on");
+                reranker = Arc::new(kb_cache::CachedReranker::new(
+                    reranker,
+                    kb_cache::DiskCache::new(&cache.dir),
+                    fingerprint,
+                ));
+            }
+            processor = processor.with_reranker(reranker, reranker_model_name(&config.reranker));
+        }
+
         let entity_extractor: Arc<dyn kb_ports::EntityExtractor> = match config.entity_extractor {
             EntityExtractorChoice::Heuristic => {
                 Arc::new(kb_inference::HeuristicExtractor::default())
@@ -535,12 +624,16 @@ impl StatelessState {
             tier,
             egress,
             backends,
+            limits,
+            inflight_process,
         })
     }
 
     /// Construct a stateless state from explicit components (used in tests).
     #[must_use]
     pub fn from_parts(processor: DocumentProcessor, auth: StatelessAuth, version: String) -> Self {
+        let seats = kb_engine::SeatCapacity::default();
+        let default_max_inflight = seats.extract.saturating_mul(4).max(4);
         Self {
             processor,
             auth,
@@ -548,7 +641,21 @@ impl StatelessState {
             tier: None,
             egress: Vec::new(),
             backends: BackendProbe::default(),
+            limits: StatelessLimitsDto {
+                extract_seats: seats.extract,
+                embed_seats: seats.embed,
+                max_inflight_process: default_max_inflight,
+            },
+            inflight_process: Some(Arc::new(Semaphore::new(default_max_inflight))),
         }
+    }
+
+    /// Override the maximum concurrent `/v1/process` admission cap (`0` = unlimited).
+    #[must_use]
+    pub fn with_max_inflight(mut self, max_inflight: usize) -> Self {
+        self.limits.max_inflight_process = max_inflight;
+        self.inflight_process = (max_inflight > 0).then(|| Arc::new(Semaphore::new(max_inflight)));
+        self
     }
 }
 
@@ -581,6 +688,11 @@ pub const STATELESS_ROUTES: &[RouteSpec] = &[
         path: "/v1/encode",
         tag: "encode",
     },
+    RouteSpec {
+        method: Method::POST,
+        path: "/v1/rerank",
+        tag: "rerank",
+    },
 ];
 
 /// Build the Axum router for stateless processor-only mode.
@@ -595,6 +707,7 @@ pub fn build_stateless_router(state: StatelessState) -> Router {
     let api = Router::new()
         .route("/v1/process", axum::routing::post(process_document))
         .route("/v1/encode", axum::routing::post(encode_texts))
+        .route("/v1/rerank", axum::routing::post(rerank_documents))
         .layer(DefaultBodyLimit::max(upload_body_limit()));
 
     public
@@ -613,6 +726,8 @@ pub fn build_stateless_router(state: StatelessState) -> Router {
 pub async fn run_stateless(config: StatelessConfig) -> Result<()> {
     let bind_addr: SocketAddr = config.bind_addr.parse().context("invalid bind address")?;
     let has_embedder = config.embedder.is_some();
+    let has_reranker = !matches!(config.reranker, RerankerConfig::Disabled);
+    let max_inflight = config.max_inflight_process;
     let unauth = config.auth == StatelessAuth::Unauthenticated;
     let state = StatelessState::from_config(config).context("stateless state")?;
     let listener = tokio::net::TcpListener::bind(bind_addr)
@@ -621,6 +736,8 @@ pub async fn run_stateless(config: StatelessConfig) -> Result<()> {
     tracing::info!(
         mode = "stateless",
         embedder = has_embedder,
+        reranker = has_reranker,
+        max_inflight_process = max_inflight,
         unauthenticated = unauth,
         "starting kb-server in stateless processor-only mode (no Postgres, Qdrant, or S3)"
     );
@@ -656,6 +773,7 @@ pub struct StatelessHealthChecks {
 #[derive(Debug, Serialize, ToSchema)]
 pub struct CapabilitiesDto {
     pub embed: bool,
+    pub rerank: bool,
     pub entities: bool,
     pub sparse: bool,
     pub tables: bool,
@@ -666,12 +784,25 @@ impl From<ProcessorCapabilities> for CapabilitiesDto {
     fn from(c: ProcessorCapabilities) -> Self {
         Self {
             embed: c.embed,
+            rerank: c.rerank,
             entities: c.entities,
             sparse: c.sparse,
             tables: c.tables,
             figures: c.figures,
         }
     }
+}
+
+/// Active concurrency seat and admission caps on this stateless instance.
+#[derive(Debug, Clone, Copy, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StatelessLimitsDto {
+    /// Max concurrent local extraction jobs (`KB_SEATS` extract).
+    pub extract_seats: usize,
+    /// Max concurrent bulk embedding jobs (`KB_SEATS` embed).
+    pub embed_seats: usize,
+    /// Max concurrent `/v1/process` uploads admitted before shedding with `503 Retry-After` (`KB_STATELESS_MAX_INFLIGHT`; `0` = unlimited).
+    pub max_inflight_process: usize,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -684,13 +815,15 @@ pub struct StatelessHealthResponse {
     pub checks: StatelessHealthChecks,
     /// Which processing stages are wired on this instance.
     pub capabilities: CapabilitiesDto,
+    /// Active seat and in-flight admission limits on this instance.
+    pub limits: StatelessLimitsDto,
     /// Server version (`KB_VERSION`).
     pub version: String,
     /// Active `KB_TIER` preset, if any.
     pub tier: Option<String>,
     /// Non-local model/OCR hosts configured on this instance.
     pub egress: Vec<String>,
-    /// Live status of optional remote/local model backends (embedder, OCR).
+    /// Live status of optional remote/local model backends (embedder, reranker, OCR).
     pub backends: BackendHealth,
 }
 
@@ -850,6 +983,44 @@ pub struct EncodeResponseSchema {
     pub sparse_vectors: Option<Vec<SparseVectorSchema>>,
 }
 
+/// JSON request body for `POST /v1/rerank`.
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RerankRequest {
+    /// Search query to score each candidate document against.
+    pub query: String,
+    /// Non-empty list of candidate passages to rerank.
+    pub documents: Vec<String>,
+    /// Maximum number of top results to return (defaults to all candidates).
+    #[serde(default)]
+    pub top_k: Option<u32>,
+    /// When `true`, echoes each candidate's text back on its result item (default `false`).
+    #[serde(default)]
+    pub return_documents: bool,
+}
+
+/// One scored document in a `POST /v1/rerank` response.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RerankItemSchema {
+    /// Zero-based index into the request's `documents` array.
+    pub index: u32,
+    /// Relevance score returned by the reranker (higher is better).
+    pub score: f32,
+    /// Zero-based rank in the returned ordering.
+    pub rank: u32,
+    /// Candidate text, present only when `returnDocuments` was `true`.
+    pub document: Option<String>,
+}
+
+/// Response schema of `POST /v1/rerank`.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RerankResponseSchema {
+    pub model: Option<String>,
+    pub results: Vec<RerankItemSchema>,
+}
+
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
 /// Liveness, readiness, and capability probe for stateless mode.
@@ -869,6 +1040,7 @@ pub async fn stateless_health(State(state): State<Arc<StatelessState>>) -> Respo
         mode: "stateless",
         checks: StatelessHealthChecks { extractor: true },
         capabilities: state.processor.capabilities().into(),
+        limits: state.limits,
         version: state.version.clone(),
         tier: state.tier.clone(),
         egress: state.egress.clone(),
@@ -922,7 +1094,7 @@ pub async fn stateless_formats() -> Json<FormatsResponse> {
         (status = 413, description = "Uploaded file exceeds KB_MAX_FILE_BYTES", body = ErrorBody),
         (status = 415, description = "Unsupported file extension", body = ErrorBody),
         (status = 422, description = "Extraction failed or quality gate flagged document for OCR", body = ErrorBody),
-        (status = 503, description = "Configured model or OCR backend is unavailable", body = ErrorBody),
+        (status = 503, description = "Processor at max in-flight capacity (Retry-After) or configured model/OCR backend unavailable", body = ErrorBody),
         (status = 500, description = "Unexpected internal processing failure", body = ErrorBody),
     ),
     security(("bearer_auth" = []), ("api_key_header" = [])),
@@ -932,6 +1104,29 @@ pub async fn process_document(
     _auth: StatelessAuthed,
     request: Request,
 ) -> Response {
+    // Admission gate BEFORE buffering multipart bytes into RAM so bursts shed
+    // cleanly with 503 + Retry-After instead of OOM-ing the VM.
+    let _inflight_permit = if let Some(sem) = &state.inflight_process {
+        match Arc::clone(sem).try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(RETRY_AFTER, "2")],
+                    Json(ErrorBody {
+                        error: format!(
+                            "Processor is at capacity ({} in-flight requests; KB_STATELESS_MAX_INFLIGHT). Retry shortly.",
+                            state.limits.max_inflight_process
+                        ),
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
     let upload = match read_stateless_upload(request, &state).await {
         Ok(u) => u,
         Err(err) => return err.into_response(),
@@ -969,7 +1164,8 @@ pub async fn process_document(
 ///
 /// Uses the exact same FNV-1a sparse tokenizer and dense embedder/prefixes as
 /// `POST /v1/process` so callers querying their own Qdrant server produce
-/// matching sparse and dense query vectors.
+/// matching sparse and dense query vectors. `mode: "query"` takes a fast lane
+/// and never queues behind bulk document ingestion.
 #[utoipa::path(
     post,
     path = "/v1/encode",
@@ -1004,6 +1200,51 @@ pub async fn encode_texts(
     match state
         .processor
         .encode(&payload.texts, mode, payload.dense, sparse)
+        .await
+    {
+        Ok(output) => (StatusCode::OK, Json(output)).into_response(),
+        Err(err) => process_error_response(err),
+    }
+}
+
+/// Rerank candidate passages against a search query.
+///
+/// Proxies through the configured local (TEI / vLLM / llama.cpp) or cloud
+/// (Cohere / Voyage / OpenRouter) reranker on the search fast lane without
+/// queuing behind bulk document ingestion.
+#[utoipa::path(
+    post,
+    path = "/v1/rerank",
+    tag = "rerank",
+    request_body = RerankRequest,
+    responses(
+        (status = 200, description = "Reranked candidate indices and relevance scores", body = RerankResponseSchema),
+        (status = 400, description = "Invalid input or no reranker configured", body = ErrorBody),
+        (status = 401, description = "Missing or invalid API key", body = ErrorBody),
+        (status = 503, description = "Configured reranker backend is unavailable", body = ErrorBody),
+        (status = 500, description = "Unexpected internal reranking failure", body = ErrorBody),
+    ),
+    security(("bearer_auth" = []), ("api_key_header" = [])),
+)]
+pub async fn rerank_documents(
+    State(state): State<Arc<StatelessState>>,
+    _auth: StatelessAuthed,
+    body: axum::body::Bytes,
+) -> Response {
+    let payload: RerankRequest = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(err) => {
+            return ApiError::BadRequest(format!("Invalid JSON body: {err}")).into_response();
+        }
+    };
+    match state
+        .processor
+        .rerank(
+            &payload.query,
+            &payload.documents,
+            payload.top_k,
+            payload.return_documents,
+        )
         .await
     {
         Ok(output) => (StatusCode::OK, Json(output)).into_response(),
@@ -1220,7 +1461,7 @@ fn parse_optional_u32(
         version = "0.0.0",
         description = "Stateless document-processing microservice mode (`kb-server serve --stateless` / `KB_MODE=stateless`).\n\n\
                        Runs extraction, OCR, smart chunking, table structuring, figure anchoring, Qdrant-ready BM25 sparse encoding, \
-                       optional dense embeddings, and optional entity extraction with zero Postgres, Qdrant, or S3 connections.\n\n\
+                       optional dense embeddings, optional reranking, and optional entity extraction with zero Postgres, Qdrant, or S3 connections.\n\n\
                        Authenticate with `Authorization: Bearer <key>` or `X-API-Key: <key>` matching `KB_STATELESS_API_KEY` \
                        (unless explicitly running with `KB_STATELESS_ALLOW_UNAUTHENTICATED=true`)."
     ),
@@ -1230,11 +1471,13 @@ fn parse_optional_u32(
         stateless_formats,
         process_document,
         encode_texts,
+        rerank_documents,
     ),
     tags(
         (name = "process", description = "Synchronously extract, chunk, parse tables, anchor figures, and encode documents."),
         (name = "encode", description = "Encode query or passage texts into matching dense and Qdrant-compatible BM25 sparse vectors."),
-        (name = "health", description = "Liveness, capabilities, backend status, and accepted upload formats. Public."),
+        (name = "rerank", description = "Rerank candidate passages against a query via configured local or cloud rerankers."),
+        (name = "health", description = "Liveness, capabilities, limits, backend status, and accepted upload formats. Public."),
     ),
     security(
         ("bearer_auth" = []),

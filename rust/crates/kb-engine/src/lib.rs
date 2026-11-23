@@ -96,7 +96,7 @@ pub use page_arm::{
 pub use processor::{
     DocumentProcessor, EncodeMode, EncodeOutput, ProcessError, ProcessOutput, ProcessRequest,
     ProcessTimings, ProcessedChunk, ProcessedFigure, ProcessedTable, ProcessorCapabilities,
-    ProcessorSettings, SparseVectorData,
+    ProcessorSettings, RerankItem, RerankOutput, SparseVectorData,
 };
 pub use retrieval::{
     AdaptiveStats, BoostStats, FloorScoreKind, FloorStats, RetrievalOptions, RetrievalOutcome,

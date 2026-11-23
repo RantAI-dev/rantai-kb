@@ -18,8 +18,8 @@ use kb_core::figure_assets::{
 };
 use kb_core::policy::{FigureMode, resolve_ingest_policy};
 use kb_ports::{
-    Embedder, Entity, EntityExtractor, ExtractionOptions, Extractor, OcrReport, PageText,
-    PortError, Relation, SeatRelease,
+    ChunkId, Embedder, Entity, EntityExtractor, ExtractionOptions, Extractor, OcrReport, PageText,
+    PortError, Relation, RerankCandidate, Reranker, SeatRelease,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -275,10 +275,35 @@ pub struct EncodeOutput {
     pub sparse_vectors: Option<Vec<SparseVectorData>>,
 }
 
+/// One scored document returned by [`DocumentProcessor::rerank`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RerankItem {
+    /// Zero-based index into the caller's input `documents` array.
+    pub index: u32,
+    /// Relevance score returned by the reranker (higher is more relevant).
+    pub score: f32,
+    /// Zero-based rank in the returned ordering.
+    pub rank: u32,
+    /// Document text, echoed back only when `return_documents` is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<String>,
+}
+
+/// Output of [`DocumentProcessor::rerank`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RerankOutput {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub results: Vec<RerankItem>,
+}
+
 /// Capabilities currently wired on a [`DocumentProcessor`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessorCapabilities {
     pub embed: bool,
+    pub rerank: bool,
     pub entities: bool,
     pub sparse: bool,
     pub tables: bool,
@@ -290,19 +315,23 @@ pub struct ProcessorCapabilities {
 pub struct DocumentProcessor {
     extractor: Arc<dyn Extractor>,
     embedder: Option<Arc<dyn Embedder>>,
+    reranker: Option<Arc<dyn Reranker>>,
+    rerank_model: Option<String>,
     entity_extractor: Option<Arc<dyn EntityExtractor>>,
     seats: StageSeats,
     settings: ProcessorSettings,
 }
 
 impl DocumentProcessor {
-    /// Build a processor backed only by an extractor (no embedder or entity extractor).
+    /// Build a processor backed only by an extractor (no embedder, reranker, or entity extractor).
     #[must_use]
     pub fn new(extractor: Arc<dyn Extractor>, settings: ProcessorSettings) -> Self {
         let seats = settings.seats.seats();
         Self {
             extractor,
             embedder: None,
+            reranker: None,
+            rerank_model: None,
             entity_extractor: None,
             seats,
             settings,
@@ -313,6 +342,14 @@ impl DocumentProcessor {
     #[must_use]
     pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
         self.embedder = Some(embedder);
+        self
+    }
+
+    /// Attach a reranker and optional model identifier echoed on responses.
+    #[must_use]
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>, model: Option<String>) -> Self {
+        self.reranker = Some(reranker);
+        self.rerank_model = model;
         self
     }
 
@@ -328,6 +365,7 @@ impl DocumentProcessor {
     pub fn capabilities(&self) -> ProcessorCapabilities {
         ProcessorCapabilities {
             embed: self.embedder.is_some(),
+            rerank: self.reranker.is_some(),
             entities: self.entity_extractor.is_some(),
             sparse: true,
             tables: true,
@@ -341,6 +379,12 @@ impl DocumentProcessor {
         self.embedder
             .as_ref()
             .and(self.settings.embedding_model.as_deref())
+    }
+
+    /// The configured reranker model name, when a reranker is wired.
+    #[must_use]
+    pub fn rerank_model(&self) -> Option<&str> {
+        self.reranker.as_ref().and(self.rerank_model.as_deref())
     }
 
     /// Process one uploaded document end-to-end in memory and return structured results.
@@ -884,9 +928,10 @@ impl DocumentProcessor {
                     "no embedder is configured".to_string(),
                 ));
             };
-            let priority = next_priority();
-            let _seat = self.seats.embed.acquire(priority).await;
             let vectors = match mode {
+                // Live search queries take a fast lane and do not wait behind bulk
+                // document ingestion holding `seats.embed` (same invariant as stateful
+                // `SearchService`).
                 EncodeMode::Query => {
                     let mut out = Vec::with_capacity(texts.len());
                     for text in texts {
@@ -906,17 +951,23 @@ impl DocumentProcessor {
                     }
                     out
                 }
-                EncodeMode::Passage => match embedder.embed_passages(texts).await {
-                    Ok(v) => v,
-                    Err(PortError::Unavailable(reason)) => {
-                        return Err(ProcessError::Unavailable(format!(
-                            "embedding failed: {reason}"
-                        )));
+                EncodeMode::Passage => {
+                    let priority = next_priority();
+                    let _seat = self.seats.embed.acquire(priority).await;
+                    match embedder.embed_passages(texts).await {
+                        Ok(v) => v,
+                        Err(PortError::Unavailable(reason)) => {
+                            return Err(ProcessError::Unavailable(format!(
+                                "embedding failed: {reason}"
+                            )));
+                        }
+                        Err(other) => {
+                            return Err(ProcessError::Internal(format!(
+                                "embedding failed: {other}"
+                            )));
+                        }
                     }
-                    Err(other) => {
-                        return Err(ProcessError::Internal(format!("embedding failed: {other}")));
-                    }
-                },
+                }
             };
             (Some(vectors), self.settings.embedding_model.clone())
         } else if should_dense {
@@ -930,6 +981,93 @@ impl DocumentProcessor {
             embedding_model,
             embeddings,
             sparse_vectors,
+        })
+    }
+
+    /// Rerank candidate passages against a query using the configured reranker
+    /// (local TEI/vLLM/llama.cpp or cloud Cohere/Voyage/OpenRouter).
+    ///
+    /// Runs on the search fast lane without waiting behind bulk ingest seats.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::BadRequest`] when no reranker is configured or inputs
+    /// are empty/invalid, [`ProcessError::Unavailable`] when the reranker backend is
+    /// unreachable, or [`ProcessError::Internal`] on unexpected reranker failures.
+    pub async fn rerank(
+        &self,
+        query: &str,
+        documents: &[String],
+        top_k: Option<u32>,
+        return_documents: bool,
+    ) -> Result<RerankOutput, ProcessError> {
+        let Some(reranker) = &self.reranker else {
+            return Err(ProcessError::BadRequest(
+                "no reranker is configured (set KB_RERANK_ENABLED=true and KB_RERANK_PROVIDER, \
+                 or KB_TIER=cloud/desk/studio/station)"
+                    .to_string(),
+            ));
+        };
+        if query.trim().is_empty() {
+            return Err(ProcessError::BadRequest(
+                "query must not be empty".to_string(),
+            ));
+        }
+        if documents.is_empty() {
+            return Err(ProcessError::BadRequest(
+                "documents must not be empty".to_string(),
+            ));
+        }
+        if matches!(top_k, Some(0)) {
+            return Err(ProcessError::BadRequest(
+                "topK must be at least 1".to_string(),
+            ));
+        }
+        let doc_count = u32::try_from(documents.len()).unwrap_or(u32::MAX);
+        let final_k = top_k.map_or(doc_count, |k| k.min(doc_count)).max(1);
+
+        let candidates: Vec<RerankCandidate> = documents
+            .iter()
+            .enumerate()
+            .map(|(idx, text)| RerankCandidate {
+                id: ChunkId(idx.to_string()),
+                text: text.clone(),
+                original_rank: u32::try_from(idx).unwrap_or(u32::MAX),
+                original_score: 0.0,
+            })
+            .collect();
+
+        let ranked = match reranker.rerank(query, candidates, final_k).await {
+            Ok(results) => results,
+            Err(PortError::Unavailable(reason)) => {
+                return Err(ProcessError::Unavailable(format!(
+                    "rerank failed: {reason}"
+                )));
+            }
+            Err(other) => {
+                return Err(ProcessError::Internal(format!("rerank failed: {other}")));
+            }
+        };
+
+        let mut results = Vec::with_capacity(ranked.len());
+        for (rank_idx, item) in ranked.into_iter().enumerate() {
+            let Ok(doc_idx) = item.id.as_str().parse::<usize>() else {
+                continue;
+            };
+            let Some(text) = documents.get(doc_idx) else {
+                continue;
+            };
+            results.push(RerankItem {
+                index: u32::try_from(doc_idx).unwrap_or(u32::MAX),
+                score: item.score,
+                rank: u32::try_from(rank_idx).unwrap_or(u32::MAX),
+                document: return_documents.then(|| text.clone()),
+            });
+        }
+
+        Ok(RerankOutput {
+            model: self.rerank_model.clone(),
+            results,
         })
     }
 }

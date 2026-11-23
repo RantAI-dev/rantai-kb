@@ -70,6 +70,8 @@ kb-server serve --stateless
 | `KB_STATELESS_API_KEY` | Comma-separated static API keys (`Authorization: Bearer` or `X-API-Key`) | unset |
 | `KB_STATELESS_ALLOW_UNAUTHENTICATED` | Explicit opt-in to disable auth on a private VPC / sidecar network | `false` |
 | `KB_STATELESS_EMBED` | Set to `false` to disable dense embeddings even when `OPENROUTER_API_KEY` is set for OCR | `true` (when embedder config is present) |
+| `KB_STATELESS_RERANK` | Set to `false` to disable `POST /v1/rerank` even when a tier preset enables reranking | `true` (when `KB_RERANK_*` or tier enables rerank) |
+| `KB_STATELESS_MAX_INFLIGHT` | Max concurrent `POST /v1/process` uploads admitted before shedding with `503` + `Retry-After` (`0` = unlimited) | `max(extract_seats * 4, 4)` |
 
 Print the stateless OpenAPI 3.1 contract without booting:
 

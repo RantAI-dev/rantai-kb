@@ -22,7 +22,11 @@ use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use kb_engine::{DocumentProcessor, ProcessorSettings};
-use kb_ports::{Embedder, PortError};
+use kb_ports::{
+    Embedder, ExtractionOptions, ExtractionResult, Extractor, PortError, RerankCandidate,
+    RerankResult, Reranker,
+};
+use kb_server::config::RerankerConfig;
 use kb_server::stateless::{
     STATELESS_ROUTES, StatelessApiDoc, StatelessAuth, StatelessConfig, StatelessState,
     build_stateless_router,
@@ -661,4 +665,252 @@ fn stateless_openapi_matches_route_table_in_both_directions() {
         }
     }
     assert_eq!(declared, STATELESS_ROUTES.len());
+}
+
+// ─── Rerank & Backpressure ───────────────────────────────────────────────────
+
+struct FakeReranker;
+
+#[async_trait]
+impl Reranker for FakeReranker {
+    async fn rerank(
+        &self,
+        query: &str,
+        candidates: Vec<RerankCandidate>,
+        final_k: u32,
+    ) -> Result<Vec<RerankResult>, PortError> {
+        let mut scored: Vec<(RerankCandidate, f32)> = candidates
+            .into_iter()
+            .map(|c| {
+                let s = if c.text.to_lowercase().contains(&query.to_lowercase()) {
+                    0.99
+                } else {
+                    0.05
+                };
+                (c, s)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        scored.truncate(final_k as usize);
+        Ok(scored
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (c, score))| RerankResult {
+                id: c.id,
+                final_rank: rank as u32,
+                score,
+            })
+            .collect())
+    }
+}
+
+#[test]
+fn config_cloud_tier_wires_reranker_and_respects_stateless_rerank_false() {
+    let mut env = HashMap::new();
+    env.insert("KB_STATELESS_API_KEY", "k");
+    env.insert("KB_TIER", "cloud");
+    env.insert("OPENROUTER_API_KEY", "or-test-key");
+
+    let cfg = StatelessConfig::from_lookup(|k| env.get(k).copied().map(str::to_string))
+        .expect("cloud stateless config");
+    assert!(cfg.embedder.is_some());
+    assert!(
+        matches!(cfg.reranker, RerankerConfig::Cohere { .. }),
+        "expected cloud tier Cohere-shaped reranker, got {:?}",
+        cfg.reranker
+    );
+    assert!(cfg.backend_targets().reranker.is_some());
+    assert!(cfg.egress_hosts().iter().any(|h| h.contains("openrouter")));
+
+    // Explicit opt-out disables reranker even on cloud tier.
+    env.insert("KB_STATELESS_RERANK", "false");
+    let cfg_off = StatelessConfig::from_lookup(|k| env.get(k).copied().map(str::to_string))
+        .expect("cloud without reranker");
+    assert!(matches!(cfg_off.reranker, RerankerConfig::Disabled));
+    assert!(cfg_off.backend_targets().reranker.is_none());
+}
+
+#[tokio::test]
+async fn rerank_endpoint_enforces_auth_validates_and_scores_candidates() {
+    // 1. Without a reranker -> /health reports rerank=false and /v1/rerank returns 400.
+    let no_rerank_app = real_stateless_app("secret-123");
+    let health_res = no_rerank_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let health = read_json(health_res).await;
+    assert_eq!(health["capabilities"]["rerank"], false);
+    assert!(health["limits"]["extractSeats"].as_u64().unwrap() >= 1);
+    assert!(health["limits"]["maxInflightProcess"].as_u64().unwrap() >= 4);
+
+    // Unauthenticated -> 401
+    let res = no_rerank_app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rerank")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":"qdrant","documents":["a"]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+    // Authenticated without reranker -> 400
+    let res = no_rerank_app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rerank")
+                .header("x-api-key", "secret-123")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"query":"qdrant","documents":["a"]}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // 2. With a wired reranker -> /health reports rerank=true and /v1/rerank returns ordered scores.
+    let extractor = kb_extract::build_production_extractor(&kb_extract::ExtractConfig::default())
+        .unwrap()
+        .shared();
+    let processor = DocumentProcessor::new(extractor, ProcessorSettings::default()).with_reranker(
+        Arc::new(FakeReranker),
+        Some("voyageai/rerank-2.5".to_string()),
+    );
+    let state = StatelessState::from_parts(
+        processor,
+        StatelessAuth::from_keys(["secret-123"]),
+        "test".into(),
+    );
+    let app = build_stateless_router(state);
+
+    let health_res = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let health = read_json(health_res).await;
+    assert_eq!(health["capabilities"]["rerank"], true);
+
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/rerank")
+                .header("authorization", "Bearer secret-123")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"query":"qdrant","documents":["unrelated memo","Qdrant hybrid search","other text"],"topK":2,"returnDocuments":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = read_json(res).await;
+    assert_eq!(body["model"], "voyageai/rerank-2.5");
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["index"], 1);
+    assert_eq!(results[0]["rank"], 0);
+    assert_eq!(results[0]["document"], "Qdrant hybrid search");
+}
+
+struct BlockingExtractor {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Extractor for BlockingExtractor {
+    async fn extract(
+        &self,
+        _filename: &str,
+        _mime_type: &str,
+        _bytes: &[u8],
+    ) -> Result<ExtractionResult, PortError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(ExtractionResult {
+            content: "Extracted content after gate.".into(),
+            file_type: "md".into(),
+            ..ExtractionResult::default()
+        })
+    }
+
+    async fn extract_with_options(
+        &self,
+        filename: &str,
+        mime_type: &str,
+        bytes: &[u8],
+        _options: ExtractionOptions,
+    ) -> Result<ExtractionResult, PortError> {
+        self.extract(filename, mime_type, bytes).await
+    }
+}
+
+#[tokio::test]
+async fn process_sheds_load_with_503_retry_after_when_max_inflight_is_reached() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let extractor = Arc::new(BlockingExtractor {
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+    });
+    let processor = DocumentProcessor::new(extractor, ProcessorSettings::default());
+    let state =
+        StatelessState::from_parts(processor, StatelessAuth::Unauthenticated, "test".into())
+            .with_max_inflight(1);
+    let app = build_stateless_router(state);
+
+    let make_req = || {
+        let boundary = "----kbInflightTest";
+        let body = build_multipart(
+            boundary,
+            Some(("doc.md", "text/markdown", b"# Hello\n\nWorld.")),
+            &[],
+        );
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/process")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::from(body))
+            .unwrap()
+    };
+
+    // Start first request; wait until it holds the single in-flight slot.
+    let app_first = app.clone();
+    let first = tokio::spawn(async move { app_first.oneshot(make_req()).await.unwrap() });
+    started.notified().await;
+
+    // Second concurrent request must be shed immediately with 503 + Retry-After.
+    let second = app.clone().oneshot(make_req()).await.unwrap();
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        second.headers().get("retry-after").is_some(),
+        "expected Retry-After header on 503"
+    );
+
+    // Release first request and verify it succeeds and frees the admission slot.
+    release.notify_one();
+    let first_res = first.await.unwrap();
+    assert_eq!(first_res.status(), StatusCode::OK);
 }

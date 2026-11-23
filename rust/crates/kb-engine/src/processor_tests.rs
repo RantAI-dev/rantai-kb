@@ -6,12 +6,14 @@ use async_trait::async_trait;
 use kb_core::tables::{Cell, TableGrid, TableSource};
 use kb_ports::{
     Embedder, Entity, EntityExtractor, ExtractedFigure, ExtractionOptions, ExtractionResult,
-    Extractor, PageBlock, PageBlockKind, PageText, PortError, Relation,
+    Extractor, PageBlock, PageBlockKind, PageText, PortError, Relation, RerankCandidate,
+    RerankResult, Reranker,
 };
 
 use crate::processor::{
     DocumentProcessor, EncodeMode, ProcessError, ProcessRequest, ProcessorSettings,
 };
+use crate::seats::SeatCapacity;
 
 enum StubExtractOutcome {
     Ok(Box<ExtractionResult>),
@@ -412,4 +414,178 @@ async fn encode_matches_kb_core_sparse_for_query_and_passage() {
         p.sparse_vectors.as_ref().unwrap()[0].values,
         expected_p.values
     );
+}
+
+struct BlockingPassageEmbedder {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Embedder for BlockingPassageEmbedder {
+    async fn embed_query(&self, _text: &str) -> Result<Vec<f32>, PortError> {
+        Ok(vec![0.5, 0.5])
+    }
+
+    async fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, PortError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(vec![vec![0.1, 0.2]; texts.len()])
+    }
+
+    fn dimension(&self) -> u32 {
+        2
+    }
+}
+
+#[tokio::test]
+async fn encode_query_bypasses_busy_ingest_embed_seats() {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let settings = ProcessorSettings {
+        seats: SeatCapacity {
+            extract: 1,
+            embed: 1,
+            store: 1,
+        },
+        embedding_model: Some("test-embed".into()),
+        ..ProcessorSettings::default()
+    };
+    let processor = DocumentProcessor::new(
+        Arc::new(StubExtractor::ok(ok_extraction("hello"))),
+        settings,
+    )
+    .with_embedder(Arc::new(BlockingPassageEmbedder {
+        started: Arc::clone(&started),
+        release: Arc::clone(&release),
+    }));
+
+    // Occupy the single ingest embed seat with a blocked passage batch.
+    let proc_bg = processor.clone();
+    let passage_task = tokio::spawn(async move {
+        proc_bg
+            .encode(
+                &["slow bulk chunk".to_string()],
+                EncodeMode::Passage,
+                Some(true),
+                false,
+            )
+            .await
+    });
+    started.notified().await;
+
+    // Live query encoding must complete immediately rather than stalling behind ingest.
+    let query_res = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        processor.encode(
+            &["live user query".to_string()],
+            EncodeMode::Query,
+            Some(true),
+            true,
+        ),
+    )
+    .await
+    .expect("query encode should not block on busy ingest embed seats")
+    .expect("query encode ok");
+    assert_eq!(query_res.embeddings.as_ref().map(|v| v.len()), Some(1));
+
+    release.notify_one();
+    passage_task.await.expect("join").expect("passage ok");
+}
+
+struct StubReranker;
+
+#[async_trait]
+impl Reranker for StubReranker {
+    async fn rerank(
+        &self,
+        query: &str,
+        candidates: Vec<RerankCandidate>,
+        final_k: u32,
+    ) -> Result<Vec<RerankResult>, PortError> {
+        let mut scored: Vec<(RerankCandidate, f32)> = candidates
+            .into_iter()
+            .map(|c| {
+                let score = if c.text.to_lowercase().contains(&query.to_lowercase()) {
+                    0.95
+                } else {
+                    0.15
+                };
+                (c, score)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        scored.truncate(final_k as usize);
+        Ok(scored
+            .into_iter()
+            .enumerate()
+            .map(|(rank, (c, score))| RerankResult {
+                id: c.id,
+                final_rank: rank as u32,
+                score,
+            })
+            .collect())
+    }
+}
+
+#[tokio::test]
+async fn rerank_scores_orders_and_validates_inputs() {
+    let base = DocumentProcessor::new(
+        Arc::new(StubExtractor::ok(ok_extraction(""))),
+        ProcessorSettings::default(),
+    );
+    assert!(!base.capabilities().rerank);
+    let err = base
+        .rerank("qdrant", &["doc".to_string()], None, false)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ProcessError::BadRequest(_)));
+
+    let processor = base.with_reranker(
+        Arc::new(StubReranker),
+        Some("voyageai/rerank-2.5".to_string()),
+    );
+    assert!(processor.capabilities().rerank);
+    assert_eq!(processor.rerank_model(), Some("voyageai/rerank-2.5"));
+
+    let docs = vec![
+        "Bananas are yellow fruit.".to_string(),
+        "Qdrant stores dense and BM25 sparse vectors.".to_string(),
+        "Weather forecast for tomorrow.".to_string(),
+    ];
+    let out = processor
+        .rerank("qdrant", &docs, Some(2), true)
+        .await
+        .expect("rerank");
+    assert_eq!(out.model.as_deref(), Some("voyageai/rerank-2.5"));
+    assert_eq!(out.results.len(), 2);
+    assert_eq!(out.results[0].index, 1);
+    assert_eq!(out.results[0].rank, 0);
+    assert!(out.results[0].score > out.results[1].score);
+    assert_eq!(
+        out.results[0].document.as_deref(),
+        Some("Qdrant stores dense and BM25 sparse vectors.")
+    );
+
+    // Without return_documents, document text is omitted.
+    let slim = processor
+        .rerank("qdrant", &docs, Some(1), false)
+        .await
+        .expect("rerank slim");
+    assert_eq!(slim.results.len(), 1);
+    assert!(slim.results[0].document.is_none());
+
+    // Validation errors.
+    assert!(matches!(
+        processor.rerank("   ", &docs, None, false).await,
+        Err(ProcessError::BadRequest(_))
+    ));
+    assert!(matches!(
+        processor.rerank("qdrant", &[], None, false).await,
+        Err(ProcessError::BadRequest(_))
+    ));
+    assert!(matches!(
+        processor.rerank("qdrant", &docs, Some(0), false).await,
+        Err(ProcessError::BadRequest(_))
+    ));
 }
