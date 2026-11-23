@@ -73,7 +73,7 @@ fn parse_upload_metadata(value: Option<&str>) -> Result<Option<serde_json::Value
 
 /// Accepted extension check, including the extensionless case: `slice(lastIndexOf("."))`
 /// returns the whole name when there is no dot, so "README" is tested as "readme".
-fn is_accepted_extension(file_name: &str) -> bool {
+pub(crate) fn is_accepted_extension(file_name: &str) -> bool {
     let ext = match file_name.rfind('.') {
         Some(idx) => &file_name[idx..],
         None => file_name,

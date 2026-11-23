@@ -620,7 +620,7 @@ fn reranker_fingerprint(cfg: &RerankerConfig) -> Option<String> {
     }
 }
 
-fn embedder_settings_from(c: EmbedderConfig) -> EmbedderSettings {
+pub(crate) fn embedder_settings_from(c: EmbedderConfig) -> EmbedderSettings {
     EmbedderSettings {
         base_url: c.base_url,
         model: c.model,

@@ -19,6 +19,7 @@ pub mod runtime;
 pub mod setup;
 pub mod stack;
 pub mod state;
+pub mod stateless;
 pub mod tier;
 
 pub use boundary::{ADAPTER_CRATES, INNER_CRATES};
@@ -27,6 +28,9 @@ pub use config::{Config, WorkerConfig};
 pub use dto::{ChunkDto, RetrievalDto, SearchRequestDto, SearchResponseDto, SourceDto};
 pub use events::EventBus;
 pub use state::AppState;
+pub use stateless::{
+    StatelessAuth, StatelessConfig, StatelessState, build_stateless_router, run_stateless,
+};
 
 use std::net::SocketAddr;
 use std::sync::Arc;

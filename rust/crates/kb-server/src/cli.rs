@@ -76,7 +76,7 @@ pub async fn dispatch(args: &[String]) -> Result<(), CliError> {
         Some("check-boundary") => check_boundary(),
         Some("eval") => eval(&args[1..]).await,
         Some("bench") => bench(&args[1..]).await,
-        Some("openapi") => openapi(),
+        Some("openapi") => openapi(&args[1..]),
         Some("-h" | "--help" | "help") => {
             print_help();
             Ok(())
@@ -167,6 +167,9 @@ USAGE
     {program} serve                            Same as above
     {program} serve --foreground               Always serve in this process, even when a
                                                deploy directory is configured
+    {program} serve --stateless                Run as a stateless document-processing
+                                               microservice (zero Postgres, Qdrant, or S3;
+                                               also enabled via KB_MODE=stateless)
     {program} setup [tier] [flags]             Detect the hardware, check the VRAM budget and
                                                model licences, write the deploy env file
     {program} up [tier] [--build]              Start the tier's compose stack, wait for /health
@@ -196,7 +199,7 @@ USAGE
                                                  the OCR router and write <out>/<name>.md
                                                  [--html] [--concurrency N]
     {program} bench search --base-url URL --queries F  Closed-loop load test for /v1/search
-    {program} openapi                           Print the OpenAPI 3.1 document to stdout (the same
+    {program} openapi [--stateless]            Print the OpenAPI 3.1 document to stdout (the same
                                                document GET /openapi.json serves and the Swagger UI
                                                at GET /docs renders)
     {program} check-boundary                   Fail if an inner crate depends on an adapter
@@ -208,6 +211,13 @@ THE STACK
     checkout, else ~/.rantai-kb/deploy. `setup` writes that directory's .env and
     .tier; `serve` runs the in-process server when DATABASE_URL is set (the
     container's CMD) and the stack otherwise.
+
+STATELESS PROCESSOR MODE
+    `serve --stateless` (or `KB_MODE=stateless`) starts a processor-only HTTP
+    microservice (`POST /v1/process`, `POST /v1/encode`, `GET /v1/formats`,
+    `GET /health`) with zero Postgres, Qdrant, or S3 connections. Set
+    `KB_STATELESS_API_KEY=<secret>` (or `KB_STATELESS_ALLOW_UNAUTHENTICATED=true`
+    on a private network). Dense embeddings are optional.
 
 REINDEX AND COST
     SurrealDB was removed in 2026-10-25; Qdrant is the only chunk store. Data
@@ -223,20 +233,46 @@ ENVIRONMENT
     );
 }
 
-/// `kb-server serve [--foreground]`.
+/// Whether `KB_MODE` asks for stateless mode.
+fn env_requests_stateless() -> Result<bool, CliError> {
+    match env_lookup("KB_MODE").map(|v| v.trim().to_ascii_lowercase()) {
+        None => Ok(false),
+        Some(v) if v.is_empty() || v == "full" || v == "stateful" => Ok(false),
+        Some(v) if v == "stateless" || v == "processor" => Ok(true),
+        Some(other) => Err(CliError::Failed(format!(
+            "KB_MODE={other:?} is not supported: expected \"full\" (default) or \"stateless\""
+        ))),
+    }
+}
+
+/// `kb-server serve [--foreground] [--stateless]`.
 ///
-/// With `DATABASE_URL` in the environment this process *is* the server: that is
-/// what the container's CMD runs, and it must keep working. Without it, a
-/// configured deploy directory means "serve the stack": bring the compose
-/// stack up and wait for it.
+/// With `--stateless` or `KB_MODE=stateless`, starts the stateless
+/// processor-only server with zero Postgres, Qdrant, or S3 connections.
+/// Otherwise, with `DATABASE_URL` in the environment this process *is* the
+/// server; without it, a configured deploy directory means "serve the stack".
 async fn serve(args: &[String]) -> Result<(), CliError> {
-    let foreground = args.iter().any(|arg| arg == "--foreground");
+    let mut foreground = false;
+    let mut stateless = false;
     for arg in args {
-        if arg != "--foreground" {
-            return Err(CliError::Usage(format!(
-                "serve: unknown argument {arg:?}; usage: serve [--foreground]"
-            )));
+        match arg.as_str() {
+            "--foreground" => foreground = true,
+            "--stateless" => stateless = true,
+            other => {
+                return Err(CliError::Usage(format!(
+                    "serve: unknown argument {other:?}; usage: serve [--foreground] [--stateless]"
+                )));
+            }
         }
+    }
+
+    if stateless || env_requests_stateless()? {
+        let config = crate::stateless::StatelessConfig::from_env()
+            .map_err(|e| CliError::Failed(e.to_string()))?;
+        config.log_tier();
+        return crate::stateless::run_stateless(config)
+            .await
+            .map_err(|e| CliError::Failed(e.to_string()));
     }
 
     if !foreground {
@@ -251,8 +287,9 @@ async fn serve(args: &[String]) -> Result<(), CliError> {
             crate::stack::ServeMode::Unconfigured => {
                 return Err(CliError::Failed(format!(
                     "nothing to serve: DATABASE_URL is not set and no deploy directory is \
-                     configured ({}). Run `{} setup <tier>` first, or set DATABASE_URL to \
-                     run the server in this process.",
+                     configured ({}). Run `{} setup <tier>` first, set DATABASE_URL to \
+                     run the full server, or pass `--stateless` (KB_MODE=stateless) to run \
+                     the processor-only microservice.",
                     stack.deploy.path.display(),
                     program_name()
                 )));
@@ -598,13 +635,29 @@ async fn bench(args: &[String]) -> Result<(), CliError> {
     })
 }
 
-/// `kb-server openapi` — print the OpenAPI document to stdout.
+/// `kb-server openapi [--stateless]` — print the OpenAPI document to stdout.
 ///
-/// The document is the same one `GET /openapi.json` serves and the same one
-/// `docs/openapi.json` holds, so an operator can diff the contract without
-/// starting the server.
-fn openapi() -> Result<(), CliError> {
-    let document = crate::openapi::spec_json().map_err(|err| CliError::Failed(err.to_string()))?;
+/// The document is the same one `GET /openapi.json` serves (and without
+/// `--stateless`, the same one `docs/openapi.json` holds), so an operator can
+/// diff the contract without starting the server.
+fn openapi(args: &[String]) -> Result<(), CliError> {
+    let mut stateless = false;
+    for arg in args {
+        match arg.as_str() {
+            "--stateless" => stateless = true,
+            other => {
+                return Err(CliError::Usage(format!(
+                    "openapi: unknown argument {other:?}; usage: openapi [--stateless]"
+                )));
+            }
+        }
+    }
+    let document = if stateless {
+        crate::stateless::stateless_spec_json()
+    } else {
+        crate::openapi::spec_json()
+    }
+    .map_err(|err| CliError::Failed(err.to_string()))?;
     let mut stdout = std::io::stdout().lock();
     write_document(&mut stdout, &document)
 }

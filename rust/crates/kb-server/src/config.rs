@@ -413,7 +413,7 @@ impl WorkerConfig {
 /// An unknown stage name or a count of `0` is a startup error, not a silent
 /// fallback: a stage with no seats never runs, and a mistyped stage name
 /// would leave the operator believing a limit is in place that is not.
-fn read_seats<F>(lookup: &F) -> Result<kb_engine::SeatCapacity>
+pub(crate) fn read_seats<F>(lookup: &F) -> Result<kb_engine::SeatCapacity>
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -1315,33 +1315,7 @@ impl Config {
         }
 
         if self.worker.enabled {
-            // Mirrors `kb_extract::build_production_extractor`: a layout parser
-            // exists only when its URL or key is present, and vision OCR only
-            // with an OpenRouter key.
-            let enabled = |name: &str| {
-                self.extract
-                    .layout_extractor_order
-                    .iter()
-                    .any(|n| n == name)
-            };
-            if enabled("sidecar") && !self.extract.mineru_base_url.trim().is_empty() {
-                urls.push(self.extract.mineru_base_url.clone());
-            }
-            if enabled("mineru-api") && !self.extract.mineru_api_key.trim().is_empty() {
-                urls.push(self.extract.mineru_api_base.clone());
-            }
-            if enabled("mistral") && !self.extract.mistral_ocr_key.trim().is_empty() {
-                urls.push(self.extract.mistral_ocr_base.clone());
-            }
-            // The local OCR adapter is not order-gated: when its URL is set it
-            // is also the chain's final fallback (see `build_page_ocr`), so a
-            // scanned page can reach it whatever the order says.
-            if !self.extract.ocr_base_url.trim().is_empty() {
-                urls.push(self.extract.ocr_base_url.clone());
-            }
-            if !self.extract.openrouter_api_key.trim().is_empty() {
-                urls.push(kb_extract::OPENROUTER_VISION_URL.to_string());
-            }
+            urls.extend(extract_outbound_urls(&self.extract));
             // The LLM entity extractor is built (and paid for) only when the
             // worker writes to a graph store, and only when it is switched on.
             if self.entity_extractor == EntityExtractorChoice::Llm
@@ -1364,7 +1338,30 @@ impl Config {
     }
 }
 
-fn bool_flag<F>(lookup: &F, name: &str, default: bool) -> bool
+/// Outbound URLs that the document extraction chain can contact for OCR or
+/// layout parsing. Shared between stateful and stateless health reporting.
+pub(crate) fn extract_outbound_urls(extract: &ExtractConfig) -> Vec<String> {
+    let mut urls = Vec::new();
+    let enabled = |name: &str| extract.layout_extractor_order.iter().any(|n| n == name);
+    if enabled("sidecar") && !extract.mineru_base_url.trim().is_empty() {
+        urls.push(extract.mineru_base_url.clone());
+    }
+    if enabled("mineru-api") && !extract.mineru_api_key.trim().is_empty() {
+        urls.push(extract.mineru_api_base.clone());
+    }
+    if enabled("mistral") && !extract.mistral_ocr_key.trim().is_empty() {
+        urls.push(extract.mistral_ocr_base.clone());
+    }
+    if !extract.ocr_base_url.trim().is_empty() {
+        urls.push(extract.ocr_base_url.clone());
+    }
+    if !extract.openrouter_api_key.trim().is_empty() {
+        urls.push(kb_extract::OPENROUTER_VISION_URL.to_string());
+    }
+    urls
+}
+
+pub(crate) fn bool_flag<F>(lookup: &F, name: &str, default: bool) -> bool
 where
     F: Fn(&str) -> Option<String>,
 {
@@ -1392,7 +1389,7 @@ where
     }
 }
 
-fn int_var<F, T>(lookup: &F, name: &str, default: T) -> Result<T>
+pub(crate) fn int_var<F, T>(lookup: &F, name: &str, default: T) -> Result<T>
 where
     F: Fn(&str) -> Option<String>,
     T: std::str::FromStr + Copy,
