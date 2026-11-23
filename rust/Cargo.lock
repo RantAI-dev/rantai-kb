@@ -1696,7 +1696,7 @@ dependencies = [
 
 [[package]]
 name = "kb-cache"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "hex",
@@ -1711,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "kb-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1722,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "kb-engine"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1741,7 +1741,7 @@ dependencies = [
 
 [[package]]
 name = "kb-eval"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "futures",
@@ -1757,7 +1757,7 @@ dependencies = [
 
 [[package]]
 name = "kb-extract"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "axum 0.7.9",
@@ -1791,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "kb-inference"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "axum 0.7.9",
@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "kb-ports"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "kb-core",
@@ -1820,7 +1820,7 @@ dependencies = [
 
 [[package]]
 name = "kb-server"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1855,7 +1855,7 @@ dependencies = [
 
 [[package]]
 name = "kb-store-blob"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1868,7 +1868,7 @@ dependencies = [
 
 [[package]]
 name = "kb-store-pg"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1888,7 +1888,7 @@ dependencies = [
 
 [[package]]
 name = "kb-store-qdrant"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "kb-core",
@@ -1906,7 +1906,7 @@ dependencies = [
 
 [[package]]
 name = "kb-store-tables"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "chrono",
