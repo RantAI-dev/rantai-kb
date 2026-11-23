@@ -24,6 +24,7 @@ Extracted from the RantAI Agents platform and packaged as an independent HTTP se
 | **Core endpoints** | `POST /v1/documents`, `GET /v1/jobs/:id`, `POST /v1/search`, `POST /v1/tables/:id/query` | `POST /v1/process`, `POST /v1/encode`, `POST /v1/rerank` |
 | **Auth** | Per-tenant scoped keys (`rantai-kb key`) | Static key(s) via `KB_STATELESS_API_KEY` (or explicit private-network opt-out) |
 | **Scaling & protection** | Async worker + stage seats (`KB_SEATS`) | Stage seats + query fast-lane + `KB_STATELESS_MAX_INFLIGHT` (`503 Retry-After`) |
+| **Integration guidelines** | [`docs/modes/full/guidelines.md`](docs/modes/full/guidelines.md) | [`docs/modes/stateless/guidelines.md`](docs/modes/stateless/guidelines.md) |
 
 ---
 
@@ -167,6 +168,8 @@ Full endpoint reference, options, and schemas: [`docs/api.md`](docs/api.md).
 
 | Document | Contents |
 |---|---|
+| [`docs/modes/full/guidelines.md`](docs/modes/full/guidelines.md) | Full service mode: deployment, multi-tenant keys, async ingest, retrieval, and ops checklist |
+| [`docs/modes/stateless/guidelines.md`](docs/modes/stateless/guidelines.md) | Stateless processor mode: external DB/Qdrant schema, hybrid search + rerank flow, backpressure & scaling |
 | [`docs/api.md`](docs/api.md) | Full & stateless routes, ingest/search/rerank options, typed tables, document structure, keys |
 | [`rust/README.md`](rust/README.md) | Every server environment variable and default (including `KB_MODE=stateless` & `KB_STATELESS_*`) |
 | [`docs/kb-tiers.md`](docs/kb-tiers.md) | Tier presets, VRAM budgets, OCR recipes, and ingest seats |

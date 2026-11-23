@@ -97,7 +97,9 @@ documents and nothing else.
 
 When you own your own database and Qdrant server and want `rantai-kb` strictly as a
 document-processing microservice (zero Postgres, Qdrant, or S3 connections), start it
-with `kb-server serve --stateless` or `KB_MODE=stateless`:
+with `kb-server serve --stateless` or `KB_MODE=stateless` (full integration & Qdrant
+setup guide: [`docs/modes/stateless/guidelines.md`](modes/stateless/guidelines.md);
+full-service guide: [`docs/modes/full/guidelines.md`](modes/full/guidelines.md)):
 
 ```bash
 KB_MODE=stateless \
