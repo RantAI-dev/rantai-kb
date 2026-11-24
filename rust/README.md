@@ -8,7 +8,8 @@
 | `KB_TREE_ARM` | Navigate a document's section outline for questions the classifier labels `structural` (DEC-4). Contributed chunks carry `retrieval.arms: ["tree"]` and `stats.treeArm` reports `{nodes, pages}`. Ingest always stores `Document.metadata.outline`; this switch gates only the search arm | `false` |
 | `KB_TREE_ARM_WEIGHT` | RRF weight of the tree arm's page list when it is fused with the text candidates | `0.5` |
 | `KB_TREE_ARM_NODES` | Outline nodes the tree arm keeps per query (the best-scoring sections) | `5` |
-| `KB_GLOBAL_ARM` | Global community-summary arm (`DEC-5`) for aggregative queries. **A measured loss in EVAL-3; off by default.** Needs `KB_GRAPH_STORE=pg` and communities built by `kb-server communities build` | `false` |
+| `KB_GLOBAL_ARM` | **Deprecated (DEC-6); enabling it logs a startup warning and it may be removed after v1.0.** Global community-summary arm (`DEC-5`) for aggregative queries. A measured loss in EVAL-3; off by default. Needs `KB_GRAPH_STORE=pg` and communities built by `kb-server communities build` | `false` |
+| `KB_GRAPH_ARM` | **Deprecated (DEC-6); enabling it logs a startup warning and it may be removed after v1.0.** Entity-graph retrieval arm, off by default; needs `KB_GRAPH_STORE=pg`. Behaviour is unchanged — warning only | `false` |
 | `KB_GLOBAL_ARM_COMMUNITIES` | Communities selected per aggregative query | `3` |
 | `KB_GLOBAL_ARM_WEIGHT` | RRF weight of the global arm's chunk list | `0.5` |
 | `KB_GLOBAL_ARM_CHUNKS` | Chunks the global arm may contribute per query | `200` |
