@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::error::PortError;
@@ -71,6 +72,11 @@ pub struct MetadataFilter {
 pub struct ScopeRequest {
     pub tenant: TenantId,
     pub filter: DocumentFilter,
+    /// Set by routes that will apply a RET-15 unit range. A page/chunk range is
+    /// meaningful only for an enumerated single document, so the adapter must
+    /// stay in Ids mode for those requests (SEC-2a).
+    #[serde(default)]
+    pub force_ids: bool,
 }
 
 /// Anchor for a neighbour lookup.
@@ -88,6 +94,18 @@ pub trait DocumentStore: Send + Sync {
     /// Build a [`DocumentScope`] for the given tenant + filter. This is the
     /// ONLY way to build one; the visibility rule is enforced at the type level.
     async fn build_scope(&self, req: &ScopeRequest) -> Result<DocumentScope, PortError>;
+
+    /// Authoritative visibility check for a predicate scope (SEC-2a).
+    ///
+    /// Runs the **same** filter as `build_scope`, restricted to `document_ids`,
+    /// and returns the subset that is still visible. A candidate whose document
+    /// is missing from this set must never reach the caller. An error fails the
+    /// search: an unverified hit is not an empty result, it is a broken scope.
+    async fn verify_visible(
+        &self,
+        req: &ScopeRequest,
+        document_ids: &[DocumentId],
+    ) -> Result<HashSet<DocumentId>, PortError>;
 
     /// Look up a single document by id within a scope.
     async fn find_by_id(

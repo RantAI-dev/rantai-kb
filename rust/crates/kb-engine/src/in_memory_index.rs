@@ -78,6 +78,47 @@ impl InMemoryIndex {
         self.read().len()
     }
 
+    /// The index-side half of a predicate scope: tenant, knowledge base and
+    /// category as the unit's stored payload says. In Ids mode the id list is
+    /// the whole filter. As in Qdrant, this is only a coarse optimisation: the
+    /// engine verifies every candidate against Postgres before returning it.
+    fn payload_allows(&self, scope: &DocumentScope, unit: &IndexUnit) -> bool {
+        if !scope.is_predicate() {
+            return true;
+        }
+        let Some(predicate) = scope.predicate() else {
+            return true;
+        };
+        let kb_ids: Vec<String> = unit
+            .metadata
+            .get("knowledgeBaseIds")
+            .and_then(serde_json::Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let kb_ids = if kb_ids.is_empty() {
+            unit.knowledge_base_id
+                .as_ref()
+                .map(|kb| vec![kb.0.clone()])
+                .unwrap_or_default()
+        } else {
+            kb_ids
+        };
+        predicate.kb_ids.as_ref().is_none_or(|wanted| {
+            wanted
+                .iter()
+                .any(|kb| kb_ids.iter().any(|id| id == &kb.0))
+        }) && predicate
+            .category
+            .as_ref()
+            .is_none_or(|cat| unit.category.as_ref() == Some(cat))
+    }
+
     /// Units matching a scope, as clones. The single place the scope filter —
     /// including the RET-15 unit range — is applied, so no arm can forget it.
     fn in_scope(&self, scope: &DocumentScope) -> Vec<StoredUnit> {
@@ -87,7 +128,8 @@ impl InMemoryIndex {
             .values()
             .filter(|s| {
                 s.unit.tenant == *scope.tenant()
-                    && scope.document_ids().contains(&s.unit.document_id)
+                    && scope.allows_document(&s.unit.document_id)
+                    && self.payload_allows(scope, &s.unit)
                     && range.is_none_or(|r| r.allows(s.unit.page, s.unit.chunk_index))
             })
             .cloned()
@@ -165,7 +207,7 @@ impl RetrievalIndex for InMemoryIndex {
     ) -> Result<Vec<Candidate>, PortError> {
         // An empty scope means "nothing is visible"; returning everything here
         // is the leak the port exists to prevent.
-        if scope.document_ids().is_empty() {
+        if scope.is_empty() {
             return Ok(Vec::new());
         }
         let units = self.in_scope(scope);
@@ -213,7 +255,7 @@ impl RetrievalIndex for InMemoryIndex {
         scope: &DocumentScope,
         ids: &[ChunkId],
     ) -> Result<Vec<Candidate>, PortError> {
-        if ids.is_empty() || scope.document_ids().is_empty() {
+        if ids.is_empty() || scope.is_empty() {
             return Ok(Vec::new());
         }
         let guard = self.read();
@@ -224,7 +266,9 @@ impl RetrievalIndex for InMemoryIndex {
             };
             // A unit in the caller's tenant but a document they cannot see is
             // still out of scope: returning it would leak across knowledge bases.
-            if !scope.document_ids().contains(&stored.unit.document_id) {
+            if !scope.allows_document(&stored.unit.document_id)
+                || !self.payload_allows(scope, &stored.unit)
+            {
                 continue;
             }
             if !scope
@@ -247,13 +291,16 @@ impl RetrievalIndex for InMemoryIndex {
         document_id: &DocumentId,
         chunk_indices: &[u32],
     ) -> Result<Vec<Candidate>, PortError> {
-        if chunk_indices.is_empty() || !scope.document_ids().contains(document_id) {
+        if chunk_indices.is_empty() || !scope.allows_document(document_id) {
             return Ok(Vec::new());
         }
         let guard = self.read();
         let mut out: Vec<Candidate> = Vec::new();
         for stored in guard.values() {
-            if stored.unit.tenant != *scope.tenant() || stored.unit.document_id != *document_id {
+            if stored.unit.tenant != *scope.tenant()
+                || stored.unit.document_id != *document_id
+                || !self.payload_allows(scope, &stored.unit)
+            {
                 continue;
             }
             // Adjacent = index ±1 of an anchor, and never an anchor itself. The
@@ -285,7 +332,7 @@ impl RetrievalIndex for InMemoryIndex {
         scope: &DocumentScope,
         document_ids: &[DocumentId],
     ) -> Result<Vec<Candidate>, PortError> {
-        if document_ids.is_empty() || scope.document_ids().is_empty() {
+        if document_ids.is_empty() || scope.is_empty() {
             return Ok(Vec::new());
         }
         let units = self.in_scope(scope);
@@ -324,14 +371,16 @@ impl RetrievalIndex for InMemoryIndex {
         scope: &DocumentScope,
         document: &DocumentId,
     ) -> Result<Vec<ChunkMeta>, PortError> {
-        if !scope.document_ids().contains(document) {
+        if !scope.allows_document(document) {
             return Ok(Vec::new());
         }
         let guard = self.read();
         let mut out: Vec<ChunkMeta> = guard
             .values()
             .filter(|stored| {
-                stored.unit.tenant == *scope.tenant() && stored.unit.document_id == *document
+                stored.unit.tenant == *scope.tenant()
+                    && stored.unit.document_id == *document
+                    && self.payload_allows(scope, &stored.unit)
             })
             .map(|stored| {
                 let unit = &stored.unit;
@@ -372,12 +421,12 @@ impl RetrievalIndex for InMemoryIndex {
         pages: &[(DocumentId, u32)],
         per_page: usize,
     ) -> Result<Vec<Candidate>, PortError> {
-        if pages.is_empty() || per_page == 0 || scope.document_ids().is_empty() {
+        if pages.is_empty() || per_page == 0 || scope.is_empty() {
             return Ok(Vec::new());
         }
         let wanted: std::collections::HashSet<(DocumentId, u32)> = pages
             .iter()
-            .filter(|(document, _)| scope.document_ids().contains(document))
+            .filter(|(document, _)| scope.allows_document(document))
             .cloned()
             .collect();
         let mut out: Vec<Candidate> = Vec::new();

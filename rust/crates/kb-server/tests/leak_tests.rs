@@ -35,8 +35,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use kb_engine::EngineSettings;
 use kb_engine::fakes::{
-    FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityStore, FakeJobStore,
-    FakeReranker, FakeTableStore,
+    FakeBlobStore, FakeChunkPayload, FakeChunkStore, FakeDocumentStore, FakeEmbedder,
+    FakeEntityStore, FakeJobStore, FakeReranker, FakeTableStore,
 };
 use kb_engine::{
     GlobalArm, GlobalArmConfig, InMemoryIndex, PageArm, PageArmConfig, TreeArm, TreeArmConfig,
@@ -264,18 +264,13 @@ impl CommunityStore for LeakCommunityStore {
         if self.leak {
             return Ok(all);
         }
-        let visible: std::collections::HashSet<&str> = scope
-            .document_ids()
-            .iter()
-            .map(DocumentId::as_str)
-            .collect();
         Ok(all
             .into_iter()
             .filter(|community| {
                 community
                     .document_ids
                     .iter()
-                    .any(|document| visible.contains(document.as_str()))
+                    .any(|document| scope.allows_document(document))
             })
             .collect())
     }
@@ -316,19 +311,32 @@ impl PageEmbedder for SameVectorPageEmbedder {
 /// hit at all, so a page-1 match has to be turned into a chunk by
 /// `RetrievalIndex::fetch` — the path a page-arm leak would take.
 fn page_units(tenant: &str, id: &str) -> Vec<IndexUnit> {
+    // The predicate filter needs the same coarse payload the text index has.
+    let kb = id
+        .split("-kb")
+        .nth(1)
+        .and_then(|rest| rest.split("-cat").next())
+        .map(|n| format!("{tenant}-kb{n}"));
+    let category = id
+        .split("-cat")
+        .nth(1)
+        .map(|n| format!("{tenant}-cat{n}"));
     (0..2u32)
         .map(|page| IndexUnit {
             id: kb_engine::page_arm::page_unit_id(&DocumentId(id.to_string()), page),
             document_id: DocumentId(id.to_string()),
             tenant: TenantId(tenant.to_string()),
-            knowledge_base_id: None,
-            category: None,
+            knowledge_base_id: kb.as_deref().map(kb_ports::KnowledgeBaseId::new_unchecked),
+            category: category.clone(),
             chunk_index: page,
             page: Some(page),
             chunk_type: ChunkType::Page,
             content: String::new(),
             contextual_prefix: None,
-            metadata: serde_json::json!({ "chunkIds": [format!("{id}_{page}")], "page": page }),
+            metadata: serde_json::json!({
+                "chunkIds": [format!("{id}_{page}")], "page": page,
+                "knowledgeBaseIds": kb, "category": category,
+            }),
             dense: vec![1.0, 1.0, 1.0],
             sparse: kb_core::sparse::SparseVector::default(),
         })
@@ -336,8 +344,14 @@ fn page_units(tenant: &str, id: &str) -> Vec<IndexUnit> {
 }
 
 /// Seed the fakes and serve them, with the scope hole `mode` names.
-async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
+async fn serve(mode: Mode, predicate: bool) -> (String, BTreeMap<String, String>) {
     let documents = FakeDocumentStore::default();
+    // SEC-2a: `KB_SCOPE_ID_LIMIT=1` in production; the fake takes the same
+    // limit explicitly because an integration test cannot mutate the process
+    // environment under edition 2024.
+    if predicate {
+        documents.scope_id_limit = Some(1);
+    }
     let chunks = FakeChunkStore::default();
     let blobs = FakeBlobStore::default();
     let jobs = FakeJobStore::default();
@@ -369,6 +383,16 @@ async fn serve(mode: Mode) -> (String, BTreeMap<String, String>) {
                         &format!("{tenant}-kb{kb}"),
                         &format!("{tenant}-cat{category}"),
                     ),
+                );
+                // The index payload the predicate filter matches on. The
+                // document store is the authority; a test can make these stale.
+                chunks.set_payload(
+                    &DocumentId(id.clone()),
+                    FakeChunkPayload {
+                        tenant: Some(tenant.to_string()),
+                        knowledge_base_ids: vec![format!("{tenant}-kb{kb}")],
+                        category: Some(format!("{tenant}-cat{category}")),
+                    },
                 );
                 // One vector hit, one BM25 hit, one neighbour and one figure
                 // per document: every arm has something it *could* return.
@@ -590,8 +614,8 @@ fn client() -> reqwest::Client {
         .unwrap()
 }
 
-async fn run_matrix(mode: Mode) -> (LeakMatrix, kb_eval::SeedPlan) {
-    let (base_url, keys) = serve(mode).await;
+async fn run_matrix(mode: Mode, predicate: bool) -> (LeakMatrix, kb_eval::SeedPlan) {
+    let (base_url, keys) = serve(mode, predicate).await;
     let plan = plan(seed_documents());
     let mut config = LeakConfig::new(&base_url, "leak-key-a");
     config.out_dir =
@@ -608,7 +632,7 @@ async fn run_matrix(mode: Mode) -> (LeakMatrix, kb_eval::SeedPlan) {
 
 #[tokio::test]
 async fn the_matrix_passes_against_a_server_that_scopes_every_arm() {
-    let (matrix, plan) = run_matrix(Mode::Honest).await;
+    let (matrix, plan) = run_matrix(Mode::Honest, false).await;
 
     assert!(
         !matrix.any_leak(),
@@ -726,7 +750,7 @@ async fn the_matrix_passes_against_a_server_that_scopes_every_arm() {
 /// would prove nothing.
 #[tokio::test]
 async fn the_global_arm_row_finds_its_target_and_leaks_nothing() {
-    let (matrix, _plan) = run_matrix(Mode::HonestGlobal).await;
+    let (matrix, _plan) = run_matrix(Mode::HonestGlobal, false).await;
     assert!(
         !matrix.any_leak(),
         "an honest community store must not leak: {matrix:?}"
@@ -770,7 +794,7 @@ async fn the_global_arm_row_finds_its_target_and_leaks_nothing() {
 /// those two fences stopped working.
 #[tokio::test]
 async fn a_community_store_that_ignores_scope_is_contained_by_the_arm() {
-    let (matrix, _plan) = run_matrix(Mode::LeakingGlobalStore).await;
+    let (matrix, _plan) = run_matrix(Mode::LeakingGlobalStore, false).await;
     let global = matrix
         .arms
         .iter()
@@ -789,7 +813,7 @@ async fn a_community_store_that_ignores_scope_is_contained_by_the_arm() {
 /// page of the other tenant matches the query perfectly and its chunk comes back.
 #[tokio::test]
 async fn a_page_arm_that_ignores_scope_is_reported_as_a_leak_in_the_page_row() {
-    let (matrix, plan) = run_matrix(Mode::LeakingPagePath).await;
+    let (matrix, plan) = run_matrix(Mode::LeakingPagePath, false).await;
     assert!(matrix.any_leak(), "{matrix:?}");
     let page = matrix.arms.iter().find(|a| a.arm == Arm::Page).unwrap();
     assert_eq!(page.status, Status::Leak, "{page:?}");
@@ -820,7 +844,7 @@ async fn a_page_arm_that_ignores_scope_is_reported_as_a_leak_in_the_page_row() {
 /// ever reports a leak, the fetch stopped being a second fence.
 #[tokio::test]
 async fn a_page_index_hole_alone_is_contained_by_the_scoped_chunk_fetch() {
-    let (matrix, _plan) = run_matrix(Mode::LeakingPageIndexOnly).await;
+    let (matrix, _plan) = run_matrix(Mode::LeakingPageIndexOnly, false).await;
     let page = matrix.arms.iter().find(|a| a.arm == Arm::Page).unwrap();
     assert_eq!(page.leaks, 0, "{:?}", page.leak_examples);
     assert!(!matrix.any_leak(), "{matrix:?}");
@@ -833,7 +857,7 @@ async fn a_page_index_hole_alone_is_contained_by_the_scoped_chunk_fetch() {
 /// scoped page read.
 #[tokio::test]
 async fn an_outline_read_that_ignores_scope_is_contained_by_the_scoped_page_fetch() {
-    let (matrix, _plan) = run_matrix(Mode::LeakingTreeOutlines).await;
+    let (matrix, _plan) = run_matrix(Mode::LeakingTreeOutlines, false).await;
     let tree = matrix.arms.iter().find(|a| a.arm == Arm::Tree).unwrap();
     assert_eq!(tree.leaks, 0, "{:?}", tree.leak_examples);
     assert!(
@@ -847,7 +871,7 @@ async fn an_outline_read_that_ignores_scope_is_contained_by_the_scoped_page_fetc
 async fn a_deliberately_leaking_store_is_reported_as_a_leak() {
     // The instrument must be able to fail. A store whose vector arm ignores
     // the scope is exactly the Bun BM25 bug this matrix exists to catch.
-    let (matrix, plan) = run_matrix(Mode::LeakingVector).await;
+    let (matrix, plan) = run_matrix(Mode::LeakingVector, false).await;
 
     assert!(
         matrix.any_leak(),
@@ -895,6 +919,28 @@ async fn a_deliberately_leaking_store_is_reported_as_a_leak() {
     assert!(md.contains("#### LEAK: vector"), "{md}");
     assert!(md.contains(leaked.as_str()), "{md}");
     assert!(md.contains("foreign documents returned"), "{md}");
+}
+
+/// SEC-2a: the whole matrix must come back with zero leaks when the scope is a
+/// predicate (`KB_SCOPE_ID_LIMIT=1`) instead of an id list. Every arm is probed
+/// by `plan`, and the page, tree, neighbour, figure and global arms all read
+/// through the same verified scope.
+#[tokio::test]
+async fn the_matrix_passes_with_predicate_scopes_and_no_leaks() {
+    for mode in [Mode::Honest, Mode::HonestGlobal] {
+        let (matrix, _plan) = run_matrix(mode, true).await;
+        assert!(!matrix.any_leak(), "{mode:?}: {matrix:?}");
+        assert_eq!(matrix.total_leaks(), 0, "{mode:?}");
+        assert!(matrix.total_probes() > 0, "{mode:?}: nothing was probed");
+        for arm in Arm::ALL {
+            let report = matrix
+                .arms
+                .iter()
+                .find(|a| a.arm == arm)
+                .unwrap_or_else(|| panic!("{arm:?} was never probed"));
+            assert_eq!(report.leaks, 0, "{mode:?} {arm:?}: {:?}", report.leak_examples);
+        }
+    }
 }
 
 /// A chunk store that reproduces the bug the matrix is built to catch: the

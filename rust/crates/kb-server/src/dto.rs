@@ -281,6 +281,14 @@ pub struct SearchStatsDto {
         default
     )]
     pub reranked_count: Option<usize>,
+    /// SEC-2a: candidates dropped because Postgres did not verify their
+    /// document. Absent in Ids mode, so an old client sees the earlier shape.
+    #[serde(
+        rename = "scopeVerifyDropped",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub scope_verify_dropped: Option<usize>,
 }
 
 /// `stats.treeArm`: outline nodes the query scored and the distinct pages the
@@ -614,6 +622,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             tree: outcome_tree,
             global_arm: outcome_global_arm,
             reranked_count: outcome_reranked_count,
+            scope_verify_dropped: outcome_scope_verify_dropped,
             timings: outcome_timings,
         } = outcome;
         let vector_results = outcome_chunks.iter().filter(|h| !h.is_bm25).count();
@@ -688,6 +697,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
                 chunks: stats.chunks,
             }),
             reranked_count: outcome_reranked_count,
+            scope_verify_dropped: outcome_scope_verify_dropped,
         };
         SearchResponseDto {
             chunks: Some(chunks),
@@ -1160,6 +1170,7 @@ mod tests {
             tree_arm: None,
             global_arm: None,
             reranked_count: None,
+            scope_verify_dropped: None,
         };
         let value = serde_json::to_value(&stats).unwrap();
         for key in [
@@ -1206,6 +1217,7 @@ mod tests {
             boost: None,
             tree_arm: None,
             global_arm: None,
+            scope_verify_dropped: None,
             reranked_count: None,
         };
         let off = serde_json::to_value(&stats).unwrap();
@@ -1247,6 +1259,7 @@ mod tests {
             skipped_arms: None,
             arm_plan_fallback: None,
             global_arm: None,
+            scope_verify_dropped: None,
             tree_arm: None,
             reranked_count: None,
         };
@@ -1288,6 +1301,7 @@ mod tests {
             query_class: None,
             skipped_arms: None,
             arm_plan_fallback: None,
+            scope_verify_dropped: None,
             global_arm: None,
             tree_arm: None,
             reranked_count: None,

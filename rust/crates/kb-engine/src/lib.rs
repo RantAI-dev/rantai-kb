@@ -402,6 +402,7 @@ impl Engine {
                 global_arm: None,
                 // An empty query never reaches the reranker.
                 reranked_count: None,
+                scope_verify_dropped: None,
                 timings: StageTimings::default(),
             });
         }

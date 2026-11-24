@@ -102,19 +102,17 @@ impl GlobalArm {
         query: &str,
     ) -> Result<GlobalRanking, PortError> {
         let mut communities = self.store.load_communities(scope).await?;
-        let visible: HashSet<&str> = scope
-            .document_ids()
-            .iter()
-            .map(kb_ports::DocumentId::as_str)
-            .collect();
         // Defence in depth: the port promises a narrowed record, but an adapter
         // that returned a wider one would otherwise let a summary written from
-        // an invisible document choose the caller's chunks.
+        // an invisible document choose the caller's chunks. In predicate mode
+        // the ids are not enumerated, so the (scoped) chunk fetch and the engine
+        // verify are the fences; here a member is allowed unless the scope was
+        // explicitly narrowed with `documentIds`.
         communities.retain(|community| {
             community
                 .document_ids
                 .iter()
-                .any(|document| visible.contains(document.as_str()))
+                .any(|document| scope.allows_document(document))
         });
         if communities.is_empty() {
             return Ok(GlobalRanking::default());
@@ -191,11 +189,6 @@ pub async fn fuse_global(
         return Ok((candidates.to_vec(), HashMap::new()));
     }
     let fetched = index.fetch(scope, chunk_ids).await?;
-    let visible: HashSet<&str> = scope
-        .document_ids()
-        .iter()
-        .map(kb_ports::DocumentId::as_str)
-        .collect();
     let position: HashMap<&str, u32> = chunk_ids
         .iter()
         .enumerate()
@@ -205,7 +198,7 @@ pub async fn fuse_global(
         .into_iter()
         .filter(|candidate| {
             position.contains_key(candidate.unit_id.as_str())
-                && visible.contains(candidate.document_id.as_str())
+                && scope.allows_document(&candidate.document_id)
         })
         .collect();
     global_list.sort_by_key(|candidate| position[candidate.unit_id.as_str()]);
@@ -315,11 +308,6 @@ mod tests {
             if *self.fail.lock().unwrap() {
                 return Err(PortError::Unavailable("community store is down".into()));
             }
-            let visible: HashSet<&str> = scope
-                .document_ids()
-                .iter()
-                .map(DocumentId::as_str)
-                .collect();
             Ok(self
                 .communities
                 .lock()
@@ -329,7 +317,7 @@ mod tests {
                     community
                         .document_ids
                         .iter()
-                        .any(|document| visible.contains(document.as_str()))
+                        .any(|document| scope.allows_document(document))
                 })
                 .cloned()
                 .collect())

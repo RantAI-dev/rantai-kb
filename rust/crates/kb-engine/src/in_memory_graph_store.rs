@@ -293,11 +293,25 @@ impl GraphStore for InMemoryGraphStore {
 
     async fn load_tenant_graph(&self, scope: &DocumentScope) -> Result<TenantGraph, PortError> {
         let tenant = scope.tenant();
-        let visible: BTreeSet<String> = scope
-            .document_ids()
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        // Predicate mode does not enumerate ids. The graph arm's chunk fetch is
+        // scoped and the engine verifies every candidate, so an unenumerated
+        // scope may use every mention; an explicitly narrowed one keeps the
+        // document-id fence here.
+        let visible: Option<BTreeSet<String>> = if scope.is_predicate() {
+            scope.restricted_ids().map(|ids| {
+                ids.iter()
+                    .map(ToString::to_string)
+                    .collect::<BTreeSet<String>>()
+            })
+        } else {
+            Some(
+                scope
+                    .document_ids()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+            )
+        };
         let data = self.read(tenant, |data| data.clone()).unwrap_or_default();
 
         // 1. Mentions inside the scope, per entity key. An entity whose every
@@ -307,7 +321,7 @@ impl GraphStore for InMemoryGraphStore {
         for (key, chunks) in &data.mentions {
             let in_scope: BTreeSet<String> = chunks
                 .iter()
-                .filter(|(_, owner)| visible.contains(&owner.0))
+                .filter(|(_, owner)| visible.as_ref().is_none_or(|ids| ids.contains(&owner.0)))
                 .map(|(chunk, _)| chunk.clone())
                 .collect();
             if !in_scope.is_empty() {
@@ -333,7 +347,7 @@ impl GraphStore for InMemoryGraphStore {
         //    needed for an out-of-scope relation not to become a path.
         let mut edges: Vec<Edge> = Vec::new();
         for relation in &data.relations {
-            if !visible.contains(&relation.document_id.0) {
+            if visible.as_ref().is_some_and(|ids| !ids.contains(&relation.document_id.0)) {
                 continue;
             }
             let (Some(src), Some(dst)) =

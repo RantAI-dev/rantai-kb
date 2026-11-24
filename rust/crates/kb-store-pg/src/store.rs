@@ -1,5 +1,6 @@
 //! Postgres implementation of `DocumentStore`.
 
+use std::collections::HashSet;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -7,7 +8,8 @@ use kb_ports::{
     AuthContext, CategoryRecord, CreateCategory, CreateKnowledgeBase, DocumentDownloadMeta,
     DocumentFilter, DocumentId, DocumentMeta, DocumentPage, DocumentScope, DocumentStore,
     KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary, NewDocument, PatchCategory,
-    PatchDocument, PatchKnowledgeBase, PortError, ScopeRequest, TenantId, adapter::ScopeToken,
+    PatchDocument, PatchKnowledgeBase, PortError, ScopeRequest, TenantId,
+    adapter::ScopeToken, predicate_spec_for, scope_id_limit_from_env,
 };
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
@@ -124,6 +126,49 @@ impl PgDocumentStore {
         &self.pool
     }
 
+    /// The tree arm's outline read under a predicate scope: the same SQL
+    /// visibility as `build_scope`, with the outline-presence condition added,
+    /// instead of an `ANY(ids)` list that no longer exists.
+    async fn outlines_for_predicate(
+        &self,
+        tenant: &TenantId,
+        verify: &kb_ports::VerifySpec,
+    ) -> Result<Vec<(DocumentId, kb_core::tree::Outline)>, PortError> {
+        let (sql, binds) = scope_sql_inner(
+            &verify.filter,
+            verify.restricted_ids.as_deref(),
+        );
+        let sql = format!("{sql} AND jsonb_typeof(d.metadata -> 'outline') = 'object'");
+        let mut query = sqlx::query(&sql).bind(tenant.as_str());
+        for bind in binds {
+            query = match bind {
+                ScopeBind::TextArray(values) => query.bind(values),
+                ScopeBind::Text(value) => query.bind(value),
+                ScopeBind::Metadata { key, values } => query.bind(key).bind(values),
+            };
+        }
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg predicate outlines: {e}")))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row
+                .try_get("id")
+                .map_err(|e| PortError::Unavailable(format!("pg outline id: {e}")))?;
+            let value: Option<serde_json::Value> = row
+                .try_get("outline")
+                .map_err(|e| PortError::Unavailable(format!("pg outline json: {e}")))?;
+            let Some(value) = value else {
+                continue;
+            };
+            let outline: kb_core::tree::Outline = serde_json::from_value(value)
+                .map_err(|e| PortError::Malformed(format!("document {id} metadata.outline: {e}")))?;
+            out.push((DocumentId(id), outline));
+        }
+        Ok(out)
+    }
+
     async fn resolve_filter(
         &self,
         tenant: &TenantId,
@@ -173,6 +218,16 @@ enum ScopeBind {
 /// statement is SQL structure, never caller input. Each metadata key contributes
 /// two parameters (key, values) and appears in the statement only as `$n`.
 fn scope_sql(filter: &DocumentFilter) -> (String, Vec<ScopeBind>) {
+    scope_sql_inner(filter, None)
+}
+
+/// The same statement as [`scope_sql`], optionally restricted to candidate ids.
+/// The verify uses the restricted form so it cannot return a document the index
+/// never proposed — and cannot omit one the filter excludes either.
+fn scope_sql_inner(
+    filter: &DocumentFilter,
+    restrict_ids: Option<&[DocumentId]>,
+) -> (String, Vec<ScopeBind>) {
     let mut query = String::from(
         r#"
             SELECT DISTINCT d.id
@@ -230,8 +285,23 @@ fn scope_sql(filter: &DocumentFilter) -> (String, Vec<ScopeBind>) {
         });
         next += 2;
     }
+    if let Some(ids) = restrict_ids {
+        query.push_str(&format!(" AND d.id = ANY(${next}::text[])"));
+        binds.push(ScopeBind::TextArray(
+            ids.iter().map(|id| id.0.clone()).collect(),
+        ));
+    }
 
     (query, binds)
+}
+
+/// RET-16 hook. The default `isLatest` filter needs an `is_latest` Qdrant
+/// payload key that does not exist. The safe rule chosen here is to force Ids
+/// mode unless the tenant has **zero** versioned documents; this schema has no
+/// `docKey` column yet, so zero is the only truthful answer today. When RET-16
+/// lands, replace this body with a `SELECT EXISTS(… "docKey" IS NOT NULL)`.
+fn tenant_has_versioned_documents(_tenant: &TenantId) -> bool {
+    false
 }
 
 #[async_trait]
@@ -239,7 +309,47 @@ impl DocumentStore for PgDocumentStore {
     async fn build_scope(&self, req: &ScopeRequest) -> Result<DocumentScope, PortError> {
         let ids = self.resolve_filter(&req.tenant, &req.filter).await?;
         let token = ScopeToken::new_for_adapter();
+        if let Some(spec) = predicate_spec_for(
+            req,
+            ids.len(),
+            scope_id_limit_from_env(),
+            tenant_has_versioned_documents(&req.tenant),
+        )
+        {
+            return Ok(DocumentScope::new_predicate(&token, req.tenant.clone(), spec));
+        }
         Ok(DocumentScope::new(&token, req.tenant.clone(), ids))
+    }
+
+    async fn verify_visible(
+        &self,
+        req: &ScopeRequest,
+        document_ids: &[DocumentId],
+    ) -> Result<HashSet<DocumentId>, PortError> {
+        if document_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let (sql, binds) = scope_sql_inner(&req.filter, Some(document_ids));
+        let mut query = sqlx::query(&sql).bind(req.tenant.0.as_str());
+        for bind in binds {
+            query = match bind {
+                ScopeBind::TextArray(values) => query.bind(values),
+                ScopeBind::Text(value) => query.bind(value),
+                ScopeBind::Metadata { key, values } => query.bind(key).bind(values),
+            };
+        }
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg scope verify: {e}")))?;
+        let mut visible = HashSet::with_capacity(rows.len());
+        for row in rows {
+            let id: String = row
+                .try_get("id")
+                .map_err(|e| PortError::Unavailable(format!("pg scope verify id: {e}")))?;
+            visible.insert(DocumentId(id));
+        }
+        Ok(visible)
     }
 
     async fn find_by_id(
@@ -247,8 +357,16 @@ impl DocumentStore for PgDocumentStore {
         scope: &DocumentScope,
         id: &DocumentId,
     ) -> Result<Option<DocumentMeta>, PortError> {
-        if !scope.document_ids().iter().any(|d| d == id) {
+        if !scope.allows_document(id) {
             return Ok(None);
+        }
+        if let Some(verify) = scope.verify_spec() {
+            // No id list to check: ask Postgres the same visibility question the
+            // verify asks, restricted to this one document.
+            let visible = self.verify_visible(&verify.request(), std::slice::from_ref(id)).await?;
+            if !visible.contains(id) {
+                return Ok(None);
+            }
         }
         let row = sqlx::query(SELECT_BY_ID)
             .bind(id.0.as_str())
@@ -359,8 +477,11 @@ impl DocumentStore for PgDocumentStore {
         &self,
         scope: &DocumentScope,
     ) -> Result<Vec<(DocumentId, kb_core::tree::Outline)>, PortError> {
-        if scope.document_ids().is_empty() {
+        if scope.is_empty() {
             return Ok(Vec::new());
+        }
+        if let Some(verify) = scope.verify_spec() {
+            return self.outlines_for_predicate(scope.tenant(), verify).await;
         }
         let ids: Vec<&str> = scope
             .document_ids()
@@ -1029,5 +1150,76 @@ mod tests {
         }
         // The metadata key is a placeholder, not an identifier.
         assert!(sql.contains("d.metadata ->> $"));
+    }
+
+    fn request(filter: DocumentFilter, force_ids: bool) -> ScopeRequest {
+        ScopeRequest {
+            tenant: TenantId::new_unchecked("tenant-a"),
+            filter,
+            force_ids,
+        }
+    }
+
+    #[test]
+    fn predicate_mode_is_chosen_only_above_the_limit() {
+        let req = request(DocumentFilter::default(), false);
+        assert!(predicate_spec_for(&req, 2000, 2000, false).is_none());
+        assert!(predicate_spec_for(&req, 2001, 2000, false).is_some());
+        // 0 disables predicate mode at any size.
+        assert!(predicate_spec_for(&req, 100_000, 0, false).is_none());
+    }
+
+    #[test]
+    fn a_filter_outside_tenant_kb_category_forces_ids_mode() {
+        let base = DocumentFilter {
+            knowledge_base_ids: vec![KnowledgeBaseId("kb-1".into())],
+            category: Some("cat-1".into()),
+            ..DocumentFilter::default()
+        };
+        let spec = predicate_spec_for(&request(base.clone(), false), 10, 1, false).unwrap();
+        assert_eq!(spec.kb_ids.unwrap().len(), 1);
+        assert_eq!(spec.category.as_deref(), Some("cat-1"));
+
+        for filter in [
+            DocumentFilter {
+                external_refs: Some(vec!["ref-1".into()]),
+                ..base.clone()
+            },
+            DocumentFilter {
+                language: Some("id".into()),
+                ..base.clone()
+            },
+            DocumentFilter {
+                metadata: vec![kb_ports::MetadataFilter {
+                    key: "year".into(),
+                    values: vec!["2024".into()],
+                }],
+                ..base.clone()
+            },
+        ] {
+            assert!(predicate_spec_for(&request(filter, false), 10, 1, false).is_none());
+        }
+        // A RET-15 range is signalled by the route before build_scope.
+        assert!(predicate_spec_for(&request(base, true), 10, 1, false).is_none());
+    }
+
+    #[test]
+    fn a_versioned_tenant_forces_ids_mode() {
+        let req = request(DocumentFilter::default(), false);
+        assert!(predicate_spec_for(&req, 10_000, 1, true).is_none());
+        assert!(!tenant_has_versioned_documents(&req.tenant));
+    }
+
+    #[test]
+    fn the_verify_statement_restricts_to_the_candidate_ids() {
+        let (sql, binds) = scope_sql_inner(
+            &DocumentFilter::default(),
+            Some(&[DocumentId::new_unchecked("doc-a")]),
+        );
+        assert!(sql.contains("d.id = ANY($2::text[])"), "{sql}");
+        assert_eq!(
+            binds,
+            vec![ScopeBind::TextArray(vec!["doc-a".to_string()])]
+        );
     }
 }

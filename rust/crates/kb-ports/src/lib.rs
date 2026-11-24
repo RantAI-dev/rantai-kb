@@ -42,7 +42,10 @@ pub use retrieval::{
 };
 #[cfg(feature = "scope-adapter")]
 pub use scope::adapter;
-pub use scope::{DocumentScope, UnitRange};
+pub use scope::{
+    DEFAULT_SCOPE_ID_LIMIT, DocumentScope, PredicateSpec, UnitRange, VerifySpec,
+    predicate_spec_for, scope_id_limit_from_env,
+};
 pub use tables::{TableId, TableQueryFailure, TableRecord, TableStore};
 pub use traits::{
     ChunkStore, DocumentFilter, DocumentStore, Embedder, EntityExtractor, EntityStore, Extractor,
