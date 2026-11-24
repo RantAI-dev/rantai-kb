@@ -5,7 +5,7 @@
 ### Added
 
 - **Predicate scope with a fail-closed Postgres verify (SEC-2a).** When a tenant has more
-  visible documents than `KB_SCOPE_ID_LIMIT` (default `2000`, `0` disables), the search no
+  visible documents than `KB_SCOPE_ID_LIMIT` (opt-in: default `0` = off until old chunks carry a `knowledge_base_id` payload; enable after `kb-server reindex`, e.g. `2000`), the search no
   longer sends every document id to Qdrant: the index filters on the `tenant_id`,
   `knowledge_base_id` and `category` payload, arms over-fetch 1.5×, and every candidate is
   verified against the same Postgres visibility rule before fusion. Unverified candidates are

@@ -33,8 +33,12 @@ use crate::traits::{DocumentFilter, ScopeRequest};
 
 /// Default maximum number of visible ids a scope may materialise before the
 /// adapter switches to predicate mode. `KB_SCOPE_ID_LIMIT=0` disables predicate
-/// mode entirely.
-pub const DEFAULT_SCOPE_ID_LIMIT: usize = 2000;
+/// mode entirely, and **0 is the default** until every stored chunk carries a
+/// `knowledge_base_id` payload: chunks ingested before SEC-2a have none, so a
+/// KB-limited predicate filter would silently miss them (no leak, but a quiet
+/// recall loss). Operators opt in (e.g. `KB_SCOPE_ID_LIMIT=2000`) after a
+/// `kb-server reindex` or the SEC-2b payload backfill.
+pub const DEFAULT_SCOPE_ID_LIMIT: usize = 0;
 
 /// Read `KB_SCOPE_ID_LIMIT`. An unset, blank or malformed value uses the
 /// default; `0` means "always Ids mode".
