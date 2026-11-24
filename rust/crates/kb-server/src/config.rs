@@ -793,6 +793,11 @@ impl Config {
         // head is the whole pool. It costs no extra rerank compute, because
         // those candidates were already sent and already scored.
         let rerank_max_k = int_var(&lookup, "KB_RERANK_MAX_K", 10u32)?.min(100);
+        // RET-17: default per-document diversity cap. Unset or 0 leaves the
+        // ranking unchanged; a request's `maxPerDocument` wins over this.
+        // Clamped to the request's accepted range so a typo cannot ask for a
+        // cap larger than any answer.
+        let max_per_document = int_var(&lookup, "KB_MAX_PER_DOCUMENT", 0u32)?.min(50);
         let figure_limit = int_var(&lookup, "KB_FIGURE_MAX_PER_ANSWER", 3)?;
         let query_expansion_enabled = bool_flag(&lookup, "KB_QUERY_EXPANSION_ENABLED", false);
         let query_expansion_model = lookup("KB_QUERY_EXPANSION_MODEL")
@@ -872,6 +877,7 @@ impl Config {
             rerank_final_k,
             rerank_max_k,
             max_chunks: default_max_chunks,
+            max_per_document,
             min_similarity,
             min_score,
             neighbour_window,
@@ -1594,6 +1600,27 @@ mod tests {
             100,
             "the cap is clamped, so a typo cannot ask for a thousand reranked hits"
         );
+    }
+
+    #[test]
+    fn test_max_per_document_is_off_unset_or_zero_and_clamped() {
+        let load = |value: Option<&'static str>| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            if let Some(v) = value {
+                map.insert("KB_MAX_PER_DOCUMENT", v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .engine
+                .max_per_document
+        };
+        assert_eq!(load(None), 0, "unset means the cap is off");
+        assert_eq!(load(Some("")), 0, "empty is the same as unset");
+        assert_eq!(load(Some("0")), 0, "zero means off");
+        assert_eq!(load(Some("3")), 3);
+        assert_eq!(load(Some("9999")), 50, "clamped to the request range");
     }
 
     #[test]

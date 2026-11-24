@@ -4129,6 +4129,15 @@
             "format": "int32",
             "minimum": 0
           },
+          "maxPerDocument": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Additive (`RET-17`): keep at most this many chunks per document. The\nroute answers 400 unless the value is in 1..=50; absent means the\nserver default `KB_MAX_PER_DOCUMENT` (off when unset or 0).",
+            "minimum": 0
+          },
           "metadata": {
             "description": "Additive (`RET-3`): top-level JSONB metadata predicates. Kept untyped\nso an invalid key or a non-scalar value is a 400 from validation rather\nthan a deserialiser 422."
           },
@@ -4294,6 +4303,14 @@
           "graphSearchTimeMs": {
             "type": "number",
             "format": "double"
+          },
+          "perDocumentCapped": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Additive (`RET-17`): how many hits the per-document diversity cap\ndropped. Present whenever the cap ran (even when it dropped nothing);\nabsent when it was off, so an old client's shape is unchanged.",
+            "minimum": 0
           },
           "queryClass": {
             "type": [

@@ -791,6 +791,20 @@ file per grid version; a hard delete removes the document's table rows and Parqu
 - **Status**: default `off` until the A/B (MIRACL-id-200 and ViDoRe HR, paired
   bootstrap 95% CI) shows a gain; `docs/core/specs/v1-roadmap.md` RET-12.
 
+### 23b. Additive: `maxPerDocument` (`KB_MAX_PER_DOCUMENT`, RET-17, 2026-11-24)
+- **Bun / earlier Rust**: nothing limited how many of an answer's chunks came from one
+  document; a single vendor proposal could occupy the whole top of the list.
+- **Rust (now)**: the search body accepts `maxPerDocument` (integer `1..=50`; out of range is a
+  `400`), and `KB_MAX_PER_DOCUMENT` supplies the server-wide default (`0`/unset = off). The
+  engine walks the reranked list after rerank and before the final `maxChunks` cut and keeps a
+  hit only while its document has fewer than N kept hits; surplus hits are dropped, not moved to
+  the end, so the survivors' order is unchanged. Figures are attached after the cap and are not
+  counted; neighbour chunks are counted against the same per-document budget so a capped document
+  cannot regain chunks through the neighbour weave.
+- **What it changes in the API**: additive. `stats.perDocumentCapped` reports the number of
+  dropped hits when the cap is on (including zero); it is absent when the cap is off, so a client
+  that has never heard of it sees exactly the earlier shape.
+
 ### 28. Additive: the `waiting_for_ocr` job state and the per-backend health (`#36`, 2026-11-20)
 
 A document whose OCR backend was not there used to fail on the first error: the job went to

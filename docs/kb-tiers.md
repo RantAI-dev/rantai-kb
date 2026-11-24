@@ -610,6 +610,7 @@ setting always wins.
 | `KB_RERANK_CANDIDATE_LIMIT` | — | 10 | 20 | 30 | 20 |
 | `KB_RERANK_MAX_K` | — | — (10) | — (10) | — (10) | — (10) |
 | `KB_RERANK_BREADCRUMBS` | — (`off`) | — (`off`) | — (`off`) | — (`off`) | — (`off`) |
+| `KB_MAX_PER_DOCUMENT` | — (off) | — (off) | — (off) | — (off) | — (off) |
 | `KB_OCR_BASE_URL` | `http://127.0.0.1:8083/v1/chat/completions` | same | same | same | — (Mistral OCR when `KB_MISTRAL_OCR_KEY` is set) |
 | `KB_OCR_MODEL` | `rantai-kb/ocr-cpu` | `xiaomi-research/Xiaomi-OCR-0` | same as desk | same as desk | — |
 | `KB_OCR_RECIPE` | — (`paddle`) | `xiaomi` | `xiaomi` | `xiaomi` | — |
@@ -655,6 +656,10 @@ answer size, so every returned chunk still carries a score. `KB_RERANK_MAX_K=0` 
 `"{document title} › {section} · p.{page}\n"` to what the reranker sees; no tier preset turns it
 on, and the char budget (when set) still caps only the content part. No re-index is needed. Default
 `off` until the A/B in `docs/core/specs/v1-roadmap.md` RET-12 is measured.
+
+`KB_MAX_PER_DOCUMENT` (default `0` = off) is the server-wide default for the additive search
+field `maxPerDocument`: at most this many chunks per document survive, after rerank and before
+the final `maxChunks` cut. A request field overrides it; no tier preset turns it on.
 
 **`lite-en`** is Lite for English-only deployments: the same settings, but text is embedded with
 `sentence-transformers/all-MiniLM-L6-v2` (384-d, no prefixes) and the dense vector sees only the

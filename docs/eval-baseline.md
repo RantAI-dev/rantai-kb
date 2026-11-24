@@ -1192,6 +1192,8 @@ and `baseline-rerank-on`) broke down latency across server stages:
      with no re-index. The A/B is pending; `docs/core/specs/v1-roadmap.md` RET-12.
    - `KB_RERANK_TIMEOUT_MS` (default 20000, the reranker client's own ceiling; a timeout is a
      visible `rerank_unavailable` degrade with the fused order kept)
+   - `KB_MAX_PER_DOCUMENT` (default `0` = off; `1..=50`) caps the chunks one document may
+     contribute after rerank and before the final answer cut (RET-17).
 
    *Reviewer note (2026-10-18):* the runner shipped 10 / 350 / 3000 as defaults, which would
    have cut every production rerank (GPU or hosted) to 10 candidates of 350 chars. The

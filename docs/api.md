@@ -35,8 +35,26 @@ because the contract has to be readable before the caller has one.
 `knowledgeBaseIds`, `externalRef`, `figures` — `auto` (default), `force` or `skip` — and
 `tablePrivacy` — `open` (default) or `aggregate-only`.
 
-**Search options** (JSON): `query` (required), `maxChunks`, `knowledgeBaseIds`,
+**Search options** (JSON): `query` (required), `maxChunks`, `maxPerDocument`, `knowledgeBaseIds`,
 `documentIds`, `category`, `hybrid`, `format`, `minScore`.
+
+`maxPerDocument` (additive, RET-17) caps how many chunks one document may contribute to an
+answer. It is an integer in `1..=50`; `0` or a value above `50` is a `400`. The cap is applied
+after rerank and before the final `maxChunks` cut: hits that exceed it are dropped (not moved
+to the end), so the survivors keep their rerank order. When the cap is on, the response's
+`stats.perDocumentCapped` reports how many hits it dropped; when it is off, that field is
+absent. Figures are attached after the cap and are not counted, and neighbour chunks are
+counted against the same cap so a capped document cannot regain chunks as context. The
+server default is `KB_MAX_PER_DOCUMENT` (unset or `0` = off).
+
+```json
+POST /v1/search
+{"query": "compare vendor proposals", "maxChunks": 8, "maxPerDocument": 2}
+```
+
+With ten chunks from vendor A and two from vendor B at the top, a cap of `2` and
+`maxChunks: 4` returns `A, A, B, B` — rather than four chunks from A — and reports
+`"perDocumentCapped": 8` in `stats`.
 
 `documentIds` restricts a search to the named documents using the full pipeline — BM25,
 reranker, page/tree/neighbour and figure arms all run — inside the caller's visible scope. It
@@ -177,4 +195,9 @@ and `returnDocuments` (boolean, default `false`). Configured via `KB_RERANK_*` o
 `KB_RERANK_BREADCRUMBS=off|on` (`false|true` also accepted, default `off`) prepends the
 document title, section and page to the text the search reranker sees; it does not change the
 response shape and needs no re-index (`docs/core/specs/v1-roadmap.md` RET-12).
+
+`KB_MAX_PER_DOCUMENT` (default `0` = off, clamped to `50`) is the server-wide default for the
+search field `maxPerDocument`: it caps the chunks one document may contribute, after rerank and
+before the `maxChunks` cut (`docs/core/specs/v1-roadmap.md` RET-17). A request field overrides
+it for that search.
 

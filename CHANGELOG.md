@@ -33,6 +33,14 @@
 
 ### Added
 
+- **`maxPerDocument` diversity cap on `/v1/search` (RET-17).** An additive body field (integer
+  `1..=50`, `400` outside that range) keeps at most N chunks from any one document: the engine
+  walks the reranked list after rerank and before the final `maxChunks` cut, drops surplus hits
+  instead of deferring them, and preserves the survivors' order. `KB_MAX_PER_DOCUMENT` supplies
+  the server default (unset or `0` = off); a request field wins. Figures are attached after the
+  cap and are not counted, and neighbour chunks are counted against the same budget so a capped
+  document cannot regain chunks as context. `stats.perDocumentCapped` reports the number dropped
+  when the cap is on and is absent when it is off.
 - **`KB_RERANK_BREADCRUMBS=off|on` (RET-12).** With the flag on, the reranker sees
   `"{document title} › {section path or section} · p.{page}\n"` before the chunk content, so a
   bare "berlaku 12 hari kerja" is judged with its "Kebijakan Cuti › Bab IV Cuti Tahunan · p.12"
