@@ -42,6 +42,16 @@
   document cannot regain chunks as context. `stats.perDocumentCapped` reports the number dropped
   when the cap is on and is absent when it is off.
 - **Stateless parity is pinned by tests (`API-5`).** `/v1/encode` query/passage dense vectors, BM25 sparse vectors and `/v1/rerank` order/scores are now tested bit-for-bit against full mode with the same fake embedding and reranking backend; no API shape changed. The stateless guide now states the guarantees and documents the one deliberate difference: with `KB_RERANK_BREADCRUMBS=on` full mode prepends a breadcrumb that `/v1/rerank` cannot know, so the client must prepend the same `kb_core::rerank::breadcrumb(...)` text for parity.
+- **Document versions and point-in-time search (`RET-16`).** Upload and PATCH accept
+  `docKey`, `version`, `effectiveFrom` and `effectiveTo`. Uploading a new version retires
+  the previous one in one transaction (`isLatest=false`, its `effectiveTo` closed at the
+  new `effectiveFrom` or now, and `supersedesDocumentId` set on the new row); deleting the
+  latest version does not promote an older one. `POST /v1/search` adds `includeHistory`
+  and `asOf` and defaults to current versions only, applied in the Postgres scope so every
+  retrieval arm inherits it; a bad `asOf` is a 400. Chunks, sources, and the document
+  read/list responses carry the version fields, and an answer mixing versions of one
+  `docKey` carries `multiVersionWarning`. All fields are additive and the migration is
+  nullable/defaulted: unversioned documents stay visible in every search mode.
 - **Additive `confidence` object on `/v1/search` (`RET-18`).** Every standard and
   `documentIds` answer now carries `{topScore, scoreKind, margin, band, calibrated}`:
   the top comparable score, the scale it came from (`rerank`, `dense`, `fused`), the

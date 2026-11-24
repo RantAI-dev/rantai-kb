@@ -30,6 +30,7 @@ pub mod sparse;
 pub mod tables;
 pub mod title;
 pub mod tree;
+pub mod versions;
 pub mod visuals;
 mod weave;
 pub mod xiaomi_ocr;

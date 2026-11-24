@@ -40,6 +40,12 @@ fn blob_key(n: u32) -> String {
 fn document(n: u32) -> DocumentMeta {
     DocumentMeta {
         sha256: None,
+        doc_key: None,
+        version: None,
+        supersedes_document_id: None,
+        effective_from: None,
+        effective_to: None,
+        is_latest: true,
         id: doc_id(n),
         title: format!("Document {n}"),
         categories: vec!["finance".to_string()],
