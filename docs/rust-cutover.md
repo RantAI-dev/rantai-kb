@@ -1063,3 +1063,16 @@ already there — that is the opt-in below.
 `KB_EMBED_PRECISION` is a new variable: unset or `bf16` is the old behaviour, `nvfp4` asks for the
 4-bit build. An unknown value is a startup error, not a fallback. `docs/kb-tiers.md` has the
 per-tier VRAM budgets per build.
+
+## 8. Passage prefixes on ingest (ING-9)
+
+The batch embedding path (stateful ingest and stateless `/v1/process`) now prefixes every passage
+with the model's `passage_prefix`, exactly as the single-text path already did, so
+`/v1/encode mode=passage` and ingest embed the same text into the same space. Prefixes are applied
+once; providers whose instruction is carried out of band (`input_type`, Voyage / OmniEmbed) still
+send no text prefix.
+
+**Re-index required for `lite` (multilingual-e5-small):** documents indexed before this fix were
+embedded without the `passage: ` prefix and live in a different vector space from new queries and
+from `/v1/encode mode=passage`. Run `kb-server reindex` to rebuild those corpora. Other tiers and
+all query prefixes are unaffected.

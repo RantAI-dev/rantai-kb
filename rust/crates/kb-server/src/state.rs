@@ -208,6 +208,7 @@ impl AppState {
         );
         if let Some(cache) = config.cache.as_ref() {
             let fingerprint = config.embedder.cache_fingerprint(&cache.embedding_tag);
+            let (query_prefix, passage_prefix) = config.embedder.effective_prefixes();
             tracing::info!(dir = %cache.dir.display(), %fingerprint, "embedding disk cache on");
             embedder = Arc::new(
                 kb_cache::CachedEmbedder::new(
@@ -215,10 +216,7 @@ impl AppState {
                     kb_cache::DiskCache::new(&cache.dir),
                     fingerprint,
                 )
-                .with_prefixes(
-                    &config.embedder.query_prefix,
-                    &config.embedder.passage_prefix,
-                ),
+                .with_prefixes(query_prefix, passage_prefix),
             );
         }
         let mut reranker: Arc<dyn kb_ports::Reranker> =
