@@ -3,12 +3,15 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use kb_core::chunk::SmartChunkingOptions;
+use kb_core::outline::{OutlineChunk, build_outline};
 use kb_core::tables::{Cell, TableGrid, TableSource};
 use kb_ports::{
     Embedder, Entity, EntityExtractor, ExtractedFigure, ExtractionOptions, ExtractionResult,
     Extractor, PageBlock, PageBlockKind, PageText, PortError, Relation, RerankCandidate,
     RerankResult, Reranker,
 };
+use sha2::{Digest, Sha256};
 
 use crate::processor::{
     DocumentProcessor, EncodeMode, ProcessError, ProcessRequest, ProcessorSettings,
@@ -600,6 +603,258 @@ impl Reranker for StubReranker {
             })
             .collect())
     }
+}
+
+/// ING-14: the stateless response carries the same spans as ingest, and the
+/// documented stitching rule (full first chunk, then skip the overlap prefix)
+/// rebuilds the chunker's own normalised source without duplicated overlap.
+#[tokio::test]
+async fn process_emits_chunk_spans_that_reconstruct_the_normalised_text() {
+    let text = "Paragraph one is deliberately long enough that the smart chunker has to \
+split it and repeat an overlap prefix into the next chunk. Paragraph two keeps the same \
+document going well past the budget so several chunks are emitted. Paragraph three adds \
+more material with a few Indonesian legal words: cuti tahunan, berlaku, danQdrant. \
+Paragraph four closes the document with yet another long stretch of ordinary prose that \
+ensures the overlap is present on at least one later chunk.\n\n";
+    let text = text.repeat(4);
+    let options = SmartChunkingOptions {
+        max_chunk_size: Some(220),
+        overlap_size: Some(40),
+        ..SmartChunkingOptions::default()
+    };
+    let settings = ProcessorSettings {
+        chunking: options,
+        ..ProcessorSettings::default()
+    };
+    let processor =
+        DocumentProcessor::new(Arc::new(StubExtractor::ok(ok_extraction(&text))), settings);
+    let out = processor
+        .process(ProcessRequest::new(
+            "spans.md",
+            "text/markdown",
+            text.as_bytes().to_vec(),
+        ))
+        .await
+        .expect("process");
+
+    assert!(out.chunks.len() > 1, "fixture must produce multiple chunks");
+    for chunk in &out.chunks {
+        assert!(chunk.char_start.is_some(), "chunk has charStart");
+        assert!(chunk.char_end.is_some(), "chunk has charEnd");
+        assert!(
+            chunk.overlap_prefix_len.is_some(),
+            "chunk has overlapPrefixLen"
+        );
+    }
+    assert!(
+        out.chunks
+            .iter()
+            .any(|c| c.overlap_prefix_len.unwrap_or(0) > 0),
+        "fixture must produce at least one overlapping chunk"
+    );
+
+    // RET-14 stitching rule: full text for the first chunk; then skip the
+    // overlap prefix when there is one, otherwise join with a blank line.
+    let mut stitched = String::new();
+    for (i, chunk) in out.chunks.iter().enumerate() {
+        if i == 0 {
+            stitched.push_str(&chunk.content);
+        } else if chunk.overlap_prefix_len.unwrap_or(0) > 0 {
+            let skip = usize::try_from(chunk.overlap_prefix_len.unwrap()).unwrap();
+            stitched.extend(chunk.content.chars().skip(skip));
+        } else {
+            stitched.push_str("\n\n");
+            stitched.push_str(&chunk.content);
+        }
+    }
+    let title = kb_core::title::document_title(None, "spans.md", &text, true);
+    let core_chunks = kb_core::chunk::smart_chunk_document(&text, &title, "", None, options);
+    let expected: String = core_chunks
+        .iter()
+        .flat_map(|c| {
+            c.content
+                .chars()
+                .skip(c.metadata.overlap_prefix_len.unwrap_or(0) as usize)
+        })
+        .collect();
+    assert_eq!(
+        stitched, expected,
+        "stitched /v1/process chunks equal the ING-13 reconstruction"
+    );
+    for (i, (processed, core)) in out.chunks.iter().zip(&core_chunks).enumerate() {
+        assert_eq!(processed.char_start, core.metadata.char_start, "chunk {i}");
+        assert_eq!(processed.char_end, core.metadata.char_end, "chunk {i}");
+        assert_eq!(
+            processed.overlap_prefix_len, core.metadata.overlap_prefix_len,
+            "chunk {i}"
+        );
+    }
+}
+
+/// ING-14: the stateless outline is the same `kb_core` build as `/structure`
+/// and a BAB keeps both of its Pasal in its chunk range.
+#[tokio::test]
+async fn process_emits_outline_v2_sections_for_regulation_markdown() {
+    let body = " Ketentuan ini mengatur pelaksanaan kerja dan berlaku secara nasional di \
+seluruh unit kerja tanpa pengecualian, termasuk cabang daerah."
+        .repeat(3);
+    let pages: Vec<(u32, String)> = vec![
+        (0, format!("BAB I KETENTUAN UMUM\n\n{body}")),
+        (1, format!("Pasal 1\n\n{body}")),
+        (2, format!("Pasal 2\n\n{body}")),
+        (3, format!("BAB II PELAKSANAAN\n\n{body}")),
+        (4, format!("Bagian Kesatu\n\n{body}")),
+        (5, format!("Pasal 3\n\n{body}")),
+    ];
+    let content = pages
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let mut extraction = ok_extraction(&content);
+    extraction.page_map = Some(
+        pages
+            .iter()
+            .map(|(page, text)| PageText {
+                page: *page,
+                text: text.clone(),
+            })
+            .collect(),
+    );
+    let processor = DocumentProcessor::new(
+        Arc::new(StubExtractor::ok(extraction)),
+        ProcessorSettings {
+            chunking: SmartChunkingOptions {
+                max_chunk_size: Some(180),
+                overlap_size: Some(0),
+                ..SmartChunkingOptions::default()
+            },
+            ..ProcessorSettings::default()
+        },
+    );
+    let out = processor
+        .process(ProcessRequest::new(
+            "regulation.md",
+            "text/markdown",
+            content.as_bytes().to_vec(),
+        ))
+        .await
+        .expect("process");
+
+    assert_eq!(out.outline_version, 2);
+    assert!(!out.sections.is_empty());
+
+    let outline_chunks: Vec<OutlineChunk> = out
+        .chunks
+        .iter()
+        .map(|c| OutlineChunk {
+            chunk_index: c.chunk_index,
+            page: c.page,
+            section: c.section.clone(),
+            content: c.content.clone(),
+            char_start: c.char_start,
+            char_end: c.char_end,
+            overlap_prefix_len: c.overlap_prefix_len,
+        })
+        .collect();
+    assert_eq!(
+        out.sections,
+        build_outline(&outline_chunks, out.outline.as_ref()),
+        "sections are exactly what build_outline gives for the same chunks"
+    );
+
+    let bab = out
+        .sections
+        .iter()
+        .find(|s| s.title.starts_with("BAB I"))
+        .expect("BAB I section");
+    let pasal1 = out
+        .sections
+        .iter()
+        .find(|s| s.title == "Pasal 1")
+        .expect("Pasal 1 section");
+    let pasal2 = out
+        .sections
+        .iter()
+        .find(|s| s.title == "Pasal 2")
+        .expect("Pasal 2 section");
+    assert!(
+        bab.chunk_start <= pasal1.chunk_start && bab.chunk_end >= pasal2.chunk_end,
+        "BAB I ({:?}) must cover Pasal 1 ({:?}) and Pasal 2 ({:?})",
+        bab,
+        pasal1,
+        pasal2
+    );
+}
+
+/// ING-14: per-page digests are lowercase hex SHA-256 of the page text that is
+/// returned in `pageMap`, stable for the same input and changed when one page
+/// changes. Existing fields stay present.
+#[tokio::test]
+async fn process_emits_stable_page_sha256_and_keeps_existing_fields() {
+    let first = "Halaman satu berisi ketentuan awal yang tidak berubah.";
+    let second = "Halaman dua berisi ketentuan lanjutan.";
+    let content = format!("{first}\n\n{second}");
+    let extraction = |second_text: &str| {
+        let mut ext = ok_extraction(&content);
+        ext.page_map = Some(vec![
+            PageText {
+                page: 0,
+                text: first.to_string(),
+            },
+            PageText {
+                page: 1,
+                text: second_text.to_string(),
+            },
+        ]);
+        ext
+    };
+    let run = |second_text: &str| {
+        let processor = DocumentProcessor::new(
+            Arc::new(StubExtractor::ok(extraction(second_text))),
+            ProcessorSettings::default(),
+        );
+        let bytes = content.clone().into_bytes();
+        async move {
+            processor
+                .process(ProcessRequest::new("pages.md", "text/markdown", bytes))
+                .await
+                .expect("process")
+        }
+    };
+
+    let a = run(second).await;
+    let b = run(second).await;
+    let changed = run("Halaman dua berisi ketentuan lanjutan yang sudah direvisi.").await;
+
+    assert_eq!(a.pages.len(), 2);
+    assert_eq!(a.pages, b.pages, "pageSha256 is stable for the same input");
+    for (page, expected_text) in a.pages.iter().zip([first, second]) {
+        assert_eq!(
+            page.page_sha256,
+            hex::encode(Sha256::digest(expected_text.as_bytes()))
+        );
+        assert_eq!(page.page_sha256.len(), 64);
+        assert!(
+            page.page_sha256
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+            "lowercase hex"
+        );
+    }
+    assert_eq!(a.pages[0].page_sha256, changed.pages[0].page_sha256);
+    assert_ne!(a.pages[1].page_sha256, changed.pages[1].page_sha256);
+
+    // The old response fields are unchanged by the additive fields.
+    assert_eq!(a.title, "pages");
+    assert_eq!(a.sha256.len(), 64);
+    assert_eq!(a.content, content);
+    assert_eq!(a.page_map.len(), 2);
+    assert!(!a.chunks.is_empty());
+    assert!(a.tables.is_empty());
+    assert!(a.figures.is_empty());
+    assert!(a.entities.is_empty());
+    assert!(a.timings.total_ms < u64::MAX);
 }
 
 #[tokio::test]

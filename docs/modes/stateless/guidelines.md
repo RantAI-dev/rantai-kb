@@ -154,6 +154,98 @@ PUT /collections/kb_chunks
 
 ---
 
+## Progressive disclosure in stateless mode
+
+`POST /v1/process` now returns everything needed to rebuild the full-service
+document map and byte-exact reading experience in your own stack, additively:
+`outlineVersion: 2` and `sections[]` (the same shape as
+`GET /v1/documents/:id/structure`), per-chunk `charStart` / `charEnd` /
+`overlapPrefixLen` (absent, not `0`, on chunks without spans), and `pages[]`
+with a `pageSha256` per page.
+
+### Qdrant payload recipe
+
+Store the span fields on every point payload next to `document_id` and
+`tenant_id`, and create **integer** payload indexes for `page` and
+`chunkIndex` so section/page/chunk-range reads use range filters, not scans:
+
+```json
+PUT /collections/kb_chunks/index
+{ "field_name": "page",       "field_schema": "integer" }
+
+PUT /collections/kb_chunks/index
+{ "field_name": "chunkIndex", "field_schema": "integer" }
+```
+
+```python
+payload = {
+    "tenant_id": tenant_id,
+    "document_id": document_id,
+    "chunkIndex": chunk["chunkIndex"],   # INTEGER index
+    "page": chunk.get("page"),           # INTEGER index (null when pageless)
+    "text": chunk["content"],
+}
+if "charStart" in chunk:
+    payload["charStart"] = chunk["charStart"]        # INTEGER
+    payload["charEnd"] = chunk["charEnd"]            # INTEGER
+    payload["overlapPrefixLen"] = chunk["overlapPrefixLen"]  # INTEGER
+# ... plus the dense/sparse vectors and any keyword-index fields above
+```
+
+### Client-side stitching (byte-exact reading)
+
+The chunks' `content` fields already contain the overlap prefix, so skip it.
+When a chunk carries no span (`overlapPrefixLen` absent), keep it whole and
+join with a blank line instead of guessing an overlap. Read chunks in
+`chunkIndex` order:
+
+```python
+def stitch(chunks, from_document_start=True):
+    out = []
+    for i, chunk in enumerate(chunks):
+        text = chunk["content"]
+        overlap = chunk.get("overlapPrefixLen")
+        if i == 0:
+            # A window that starts mid-document (a section, a page range)
+            # drops the first chunk's overlap: it repeats a chunk outside
+            # the window.
+            if not from_document_start and overlap:
+                text = "".join(list(text)[overlap:])
+            out.append(text)
+        elif overlap is not None and overlap > 0:
+            out.append("".join(list(text)[overlap:]))  # skip repeated prefix
+        else:
+            out.append("\n\n" + text)              # no span: keep whole
+    return "".join(out)
+```
+
+This is the same rule as `GET /v1/documents/:id/content`: a section from
+`sections[]` is the inclusive chunk range `chunkStart..chunkEnd`, so
+`/content`-equivalent text is
+`stitch(chunks[chunkStart:chunkEnd + 1], from_document_start=(chunkStart == 0))`.
+
+### Cheap change detection with `pageSha256`
+
+`pages[i].pageSha256` is the lowercase hex SHA-256 of the **UTF-8 bytes of
+`pageMap[i].text`** — the page's extracted text exactly as returned in the
+response. Store it beside the page in your DB and, on a re-process, only
+re-embed/re-index pages whose digest changed:
+
+```python
+new = {p["page"]: p["pageSha256"] for p in output["pages"]}
+for page, digest in new.items():
+    if stored.get(page) == digest:
+        continue  # unchanged: keep existing points, embeddings and captions
+    reindex_page(page, output)  # only this page's chunks need new vectors
+    stored[page] = digest
+```
+
+A changed file-level `sha256` is not enough to localise the edit; the per-page
+digest is. Pages are matched by their zero-based `page` number, the same
+numbering used in chunk payloads and the integer `page` index.
+
+---
+
 ## 5. Concurrency, Backpressure & Scaling
 
 Stateless `rantai-kb` protects its VM and downstream model servers automatically at three layers:
