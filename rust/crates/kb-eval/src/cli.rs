@@ -52,6 +52,7 @@ pub async fn run(args: &[String]) -> Result<(), EvalError> {
         Some("score") => score(&args[1..]),
         Some("leak") => leak(&args[1..]).await,
         Some("compare") => compare(&args[1..]),
+        Some("calibrate-confidence") => crate::calibrate_confidence::run(&args[1..]).await,
         _ => eval(args).await,
     }
 }
@@ -65,6 +66,8 @@ USAGE
     kb-server eval score --qrels FILE --run FILE [--k N] [--gain G]
     kb-server eval leak --base-url URL [--api-key KEY] [--peer-key KEY]
     kb-server eval compare --baseline FILE --current FILE [--max-drop 0.02] [--metric ndcg,hit1,recall]
+    kb-server eval calibrate-confidence --base-url URL --answerable FILE --offtopic FILE
+        --out DIR [--api-key KEY] [--holdout 0.5] [--seed 42] [--model-id ID]
 
 RUN FLAGS
     --base-url URL      kb-server to measure against (required)
@@ -127,7 +130,23 @@ COMPARE FLAGS
     --baseline FILE     baseline metrics.json to compare against (required)
     --current FILE      current metrics.json to compare against (required)
     --max-drop DROP     maximum allowed absolute drop for strict means (default 0.02)
-    --metric LIST       comma-separated metric list (default ndcg,hit1,recall)"
+    --metric LIST       comma-separated metric list (default ndcg,hit1,recall)
+
+CALIBRATE-CONFIDENCE FLAGS
+    --base-url URL      kb-server to measure against (required)
+    --answerable FILE   queries.jsonl of answerable questions (required)
+    --offtopic FILE     queries.jsonl of unanswerable questions (required)
+    --out DIR           output directory (default eval-out/confidence)
+    --api-key KEY       defaults to $KB_EVAL_API_KEY
+    --holdout FRACTION  fraction kept out of the fit (default 0.5)
+    --seed N            deterministic split seed (default 42)
+    --model-id ID       model to name in calibration.json; defaults to
+                        KB_RERANK_MODEL or KB_EMBEDDING_MODEL from the tool's env
+
+CALIBRATE OUTPUTS (in --out)
+    calibration.json  one entry in the KB_CONFIDENCE_CALIBRATION format
+    report.md         fitted thresholds and hold-out rates against the targets
+    scores.jsonl      per-query top score, score kind, model and split"
     );
 }
 

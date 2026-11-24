@@ -2,7 +2,7 @@
 //!
 //! Explicit domain-to-wire conversions matching the TypeScript service's JSON shape.
 
-use kb_core::SourceEntry;
+use kb_core::{CalibrationTable, Confidence, SourceEntry};
 use kb_engine::{RetrievalOutcome, timing::StageTimings};
 use kb_ports::{ProvenanceArm, RetrievalProvenance, SearchHit};
 use serde::de::DeserializeOwned;
@@ -155,6 +155,40 @@ pub struct SearchResponseDto {
     /// without a second lookup. Omitted when there are none.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tables: Vec<TableRefDto>,
+    /// Additive (`RET-18`): an actionable band computed from the top score and
+    /// the active scoring model's calibration. Always present on a standard
+    /// or `documentIds` search; absent on the `hybrid: true` stub, which runs
+    /// no search at all.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub confidence: Option<ConfidenceDto>,
+}
+
+/// The `confidence` object of a search answer (`RET-18`). Additive.
+///
+/// `band` is `high`/`medium`/`low` when the active model has a fitted entry,
+/// `none` when nothing passed the floor, and `unknown` when there is no entry
+/// and no `minScore` to fall back on. `calibrated=false` means the band is a
+/// hint only — answer on `high`/`medium` only when it is true.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfidenceDto {
+    pub top_score: Option<f32>,
+    pub score_kind: String,
+    pub margin: Option<f32>,
+    pub band: String,
+    pub calibrated: bool,
+}
+
+impl From<kb_core::Confidence> for ConfidenceDto {
+    fn from(value: kb_core::Confidence) -> Self {
+        Self {
+            top_score: value.top_score,
+            score_kind: value.score_kind.as_str().to_string(),
+            margin: value.margin,
+            band: value.band.as_str().to_string(),
+            calibrated: value.calibrated,
+        }
+    }
 }
 
 /// One table named by a search answer (`TBL-1`). Additive.
@@ -596,7 +630,16 @@ impl SearchResponseDto {
             note: None,
             degrades: Vec::new(),
             tables: Vec::new(),
+            confidence: None,
         }
+    }
+
+    /// Attach the calibrated band the HTTP route computed with the active
+    /// model and table in hand.
+    #[must_use]
+    pub fn with_confidence(mut self, confidence: Confidence) -> Self {
+        self.confidence = Some(confidence.into());
+        self
     }
 }
 
@@ -614,6 +657,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             tree: outcome_tree,
             global_arm: outcome_global_arm,
             reranked_count: outcome_reranked_count,
+            confidence_scores: outcome_confidence,
             timings: outcome_timings,
         } = outcome;
         let vector_results = outcome_chunks.iter().filter(|h| !h.is_bm25).count();
@@ -698,6 +742,19 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             note: outcome_note,
             degrades,
             tables: Vec::new(),
+            // A direct conversion has no model or override table to consult,
+            // so it reports an uncalibrated hint. The HTTP route replaces this
+            // with the fitted band before sending the response.
+            confidence: Some(
+                kb_core::confidence(
+                    outcome_confidence.top,
+                    outcome_confidence.second,
+                    outcome_confidence.score_kind,
+                    "",
+                    &CalibrationTable::default(),
+                )
+                .into(),
+            ),
         }
     }
 }
