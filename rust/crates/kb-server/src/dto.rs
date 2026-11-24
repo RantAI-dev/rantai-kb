@@ -1513,6 +1513,7 @@ mod tests {
             tree_arm: None,
             reranked_count: None,
             per_document_capped: None,
+            scope_verify_dropped: None,
         };
         let off = serde_json::to_value(&stats).unwrap();
         assert!(off.get("perDocumentCapped").is_none());

@@ -201,7 +201,8 @@ enum ScopeMode {
     /// Every visible id, materialised by `build_scope`.
     Ids(Vec<DocumentId>),
     /// Coarse index conditions plus the Postgres verify.
-    Predicate(PredicateSpec),
+    /// Boxed: the spec carries a whole `DocumentFilter`.
+    Predicate(Box<PredicateSpec>),
 }
 
 /// Tenant + visibility scope. Built by `DocumentStore` adapters.
@@ -243,7 +244,7 @@ impl DocumentScope {
     ) -> Self {
         Self {
             tenant,
-            mode: ScopeMode::Predicate(spec),
+            mode: ScopeMode::Predicate(Box::new(spec)),
             unit_range: None,
         }
     }
@@ -279,10 +280,10 @@ impl DocumentScope {
                 verify.restricted_ids = Some(narrowed);
                 Self {
                     tenant: self.tenant.clone(),
-                    mode: ScopeMode::Predicate(PredicateSpec {
+                    mode: ScopeMode::Predicate(Box::new(PredicateSpec {
                         verify,
-                        ..(*spec).clone()
-                    }),
+                        ..(**spec).clone()
+                    })),
                     unit_range: self.unit_range,
                 }
             }
