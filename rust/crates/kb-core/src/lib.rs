@@ -22,6 +22,7 @@ pub mod policy;
 mod progress;
 pub mod quality;
 pub mod query_class;
+pub mod rerank;
 pub mod signals;
 pub mod sparse;
 pub mod tables;
@@ -78,6 +79,7 @@ pub use quality::{
     check_page_against_median, median_page_chars,
 };
 pub use query_class::{Arm, ArmPlan, QueryClass, QuerySignature, SkippedArm, classify_query};
+pub use rerank::breadcrumb;
 pub use signals::{RouterOpts, has_columnar_lines, has_dense_currency, is_unpdf_sufficient};
 pub use sparse::{
     BM25_AVGDL, BM25_B, BM25_K1, SparseVector, encode_document, encode_document_avgdl,

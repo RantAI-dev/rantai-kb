@@ -59,6 +59,7 @@ fn engine_settings() -> EngineSettings {
         rrf_k: 60,
         rerank_candidate_limit: 10,
         rerank_char_budget: 350,
+        rerank_breadcrumbs: false,
         rerank_timeout_ms: 3000,
         rerank_final_k: 10,
         rerank_max_k: 10,
@@ -667,40 +668,41 @@ async fn the_matrix_passes_against_a_server_that_scopes_every_arm() {
     assert!(!md.contains("#### LEAK"), "{md}");
     assert!(md.contains("PASS"), "{md}");
 
-    // A finding, not a failure: `POST /v1/search` with `documentIds` takes the
-    // documentIds branch, which answers from the vector arm alone. The bm25 and
-    // figure arms therefore cannot be exercised inside a documentIds scope, and
-    // the instrument says so instead of passing the cell on a positive control
-    // it never got. If hybrid retrieval is ever routed through that branch,
-    // this assertion is what will change.
-    for arm in [Arm::Bm25, Arm::Figure] {
+    // RET-11: a `documentIds` search now runs the full pipeline. The bm25 row
+    // that used to be UNTESTED is a real leak probe: its positive control must
+    // hit inside the requested document, and a sibling's keyword must never
+    // come back. The figure, page and tree arms are checked the same way.
+    for arm in [Arm::Bm25, Arm::Figure, Arm::Page, Arm::Tree] {
         let report = matrix.arms.iter().find(|a| a.arm == arm).unwrap();
         let cell = report
             .cells
             .iter()
             .find(|c| c.scope == ScopeKind::DocumentIds)
             .unwrap();
-        assert_eq!(cell.status, Status::Untested, "{arm:?} in documentIds");
-        assert_eq!(cell.leaks, 0);
+        assert_eq!(
+            cell.status,
+            Status::Pass,
+            "{arm:?} in documentIds: {cell:?}"
+        );
+        assert_eq!(cell.leaks, 0, "{arm:?}: {:?}", report.leak_examples);
+        assert_eq!(
+            cell.positive_hits, cell.positive_probes,
+            "{arm:?} positive control: {cell:?}"
+        );
         assert!(
-            cell.reason
-                .as_deref()
-                .is_some_and(|r| r.contains(if arm == Arm::Bm25 {
-                    "runs no keyword arm"
-                } else {
-                    "positive control missed"
-                })),
-            "{arm:?}: {:?}",
-            cell.reason
+            cell.probes > cell.positive_probes,
+            "{arm:?} had no out-of-scope probe: {cell:?}"
         );
     }
-    // And the report has to name that hole rather than bury it.
-    assert!(md.contains("`bm25` × `document_ids`"), "{md}");
-    assert!(md.contains("`figure` × `document_ids`"), "{md}");
+    // The report no longer lists those cells as holes in the evidence.
+    for name in ["bm25", "figure", "page"] {
+        assert!(
+            !md.contains(&format!("`{name}` × `document_ids`")),
+            "{name} is still reported UNTESTED: {md}"
+        );
+    }
 
-    // The page row: on, positive control hitting in every scope the page arm
-    // can be reached from, and zero leaks. `documentIds` is answered by one
-    // dense search that never runs the page arm, and the cell says so.
+    // The page row: on, positive control hitting in every scope, and zero leaks.
     let page = matrix.arms.iter().find(|a| a.arm == Arm::Page).unwrap();
     assert_eq!(page.leaks, 0, "{:?}", page.leak_examples);
     for kind in [
@@ -717,21 +719,6 @@ async fn the_matrix_passes_against_a_server_that_scopes_every_arm() {
             "page × {kind:?} had no leak probe"
         );
     }
-    let by_ids = page
-        .cells
-        .iter()
-        .find(|c| c.scope == ScopeKind::DocumentIds)
-        .unwrap();
-    assert_eq!(by_ids.status, Status::Untested);
-    assert!(
-        by_ids
-            .reason
-            .as_deref()
-            .is_some_and(|r| r.contains("never reaches the page-image arm")),
-        "{:?}",
-        by_ids.reason
-    );
-    assert!(md.contains("`page` × `document_ids`"), "{md}");
 }
 
 /// The global (community) row must be able to find its own target, and must not
@@ -772,15 +759,9 @@ async fn the_global_arm_row_finds_its_target_and_leaks_nothing() {
         .iter()
         .find(|c| c.scope == ScopeKind::DocumentIds)
         .unwrap();
-    assert_eq!(by_ids.status, Status::Untested);
-    assert!(
-        by_ids
-            .reason
-            .as_deref()
-            .is_some_and(|r| r.contains("never reaches the global")),
-        "{:?}",
-        by_ids.reason
-    );
+    assert_eq!(by_ids.status, Status::Pass, "{by_ids:?}");
+    assert_eq!(by_ids.positive_hits, by_ids.positive_probes, "{by_ids:?}");
+    assert_eq!(by_ids.leaks, 0, "{:?}", global.leak_examples);
 }
 
 /// A community store that ignores the scope is contained by the arm, not by the
