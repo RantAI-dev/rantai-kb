@@ -64,6 +64,7 @@ fn engine_settings() -> EngineSettings {
         rerank_final_k: 10,
         rerank_max_k: 10,
         max_chunks: 10,
+        max_per_document: 0,
         min_similarity: 0.30,
         min_score: None,
         // Both weave and figures on, so those arms have something to return.

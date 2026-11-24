@@ -105,7 +105,10 @@ x-kb-local-env: &kb-local-env
   KB_ENTITY_EXTRACTION_ENABLED: ${KB_ENTITY_EXTRACTION_ENABLED:-false}
   KB_ENTITY_EXTRACTOR: ${KB_ENTITY_EXTRACTOR:-heuristic}
   KB_GRAPH_STORE: ${KB_GRAPH_STORE:-none}
+  # DEPRECATED (DEC-6): KB_GRAPH_ARM and KB_GLOBAL_ARM stay off; enabling either logs a
+  # startup warning and may be removed after v1.0. Behaviour is unchanged (warning only).
   KB_GRAPH_ARM: ${KB_GRAPH_ARM:-false}
+  KB_GLOBAL_ARM: ${KB_GLOBAL_ARM:-false}
   # Only spent if the two settings above are turned on (or the reranker is
   # switched to the LLM provider). Empty means "no paid key in this container".
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}

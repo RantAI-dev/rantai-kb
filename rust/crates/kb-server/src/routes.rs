@@ -567,6 +567,16 @@ pub async fn search(
     }
     let requested_kbs = restrict_kbs(&auth, body.knowledge_base_ids.as_deref());
     let max_chunks = body.max_chunks.unwrap_or(8).clamp(1, 50);
+    // RET-17: unlike `maxChunks`, a bad `maxPerDocument` is a 400 rather than
+    // a clamp — a caller asking for a cap of 0 or 51 has a broken request, and
+    // silently capping (or not) would hide it.
+    if let Some(n) = body.max_per_document
+        && !(1..=50).contains(&n)
+    {
+        return Err(ApiError::BadRequest(
+            "'maxPerDocument' must be an integer between 1 and 50".to_string(),
+        ));
+    }
     let metadata_filter = parse_metadata_filter(body.metadata.as_ref())?;
     let boost = parse_boost(body.boost.as_ref())?;
 
@@ -682,6 +692,7 @@ pub async fn search(
             scope: &scope,
             scope_build_ms,
             max_chunks,
+            max_per_document: body.max_per_document,
             body: &body,
             boost,
             route_sw,
@@ -744,6 +755,7 @@ pub async fn search(
         scope: &scope,
         scope_build_ms,
         max_chunks,
+        max_per_document: body.max_per_document,
         body: &body,
         boost,
         route_sw,
@@ -805,6 +817,7 @@ struct SearchTail<'a> {
     scope: &'a kb_ports::DocumentScope,
     scope_build_ms: f64,
     max_chunks: u32,
+    max_per_document: Option<u32>,
     body: &'a SearchRequestDto,
     boost: Option<kb_core::BoostConfig>,
     route_sw: Stopwatch<'a>,
@@ -826,6 +839,7 @@ async fn retrieve_and_finish(tail: SearchTail<'_>) -> Result<Response, ApiError>
         scope,
         scope_build_ms,
         max_chunks,
+        max_per_document,
         body,
         boost,
         route_sw,
@@ -839,6 +853,7 @@ async fn retrieve_and_finish(tail: SearchTail<'_>) -> Result<Response, ApiError>
             body.min_score,
             boost,
             body.adaptive_arms,
+            max_per_document,
         )
         .await
         .map_err(ApiError::from)?;
@@ -914,6 +929,7 @@ fn search_stats(
         // Only the standard branch runs a reranker, and it builds its stats
         // from the engine's outcome, which carries the count.
         reranked_count: None,
+        per_document_capped: None,
     }
 }
 
@@ -972,6 +988,7 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
         tree_arm,
         global_arm,
         reranked_count,
+        per_document_capped,
         ..
     } = stats;
     let stats = SearchStatsDto {
@@ -981,6 +998,7 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
         tree_arm,
         global_arm,
         reranked_count,
+        per_document_capped,
         ..search_stats(
             stages,
             vector_results,

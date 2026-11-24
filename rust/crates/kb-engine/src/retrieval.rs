@@ -67,6 +67,11 @@ pub struct RetrievalOptions {
     /// LLM one — keeps its head at `rerank_final_k`, because it returns ranks
     /// rather than relevance scores.
     pub rerank_max_k: u32,
+    /// Deterministic per-document diversity cap (`KB_MAX_PER_DOCUMENT`, RET-17).
+    /// `0` means off, so a request that never sent `maxPerDocument` keeps the
+    /// exact ranking it had before. Applied after rerank and before the final
+    /// cut to `max_chunks`; skipped hits are dropped, not moved to the end.
+    pub max_per_document: u32,
     pub neighbour_window: u32,
     pub figure_limit: u32,
     /// Whether to ask the expander for paraphrases.
@@ -119,6 +124,7 @@ impl fmt::Debug for RetrievalOptions {
             .field("rerank_timeout_ms", &self.rerank_timeout_ms)
             .field("rerank_final_k", &self.rerank_final_k)
             .field("rerank_max_k", &self.rerank_max_k)
+            .field("max_per_document", &self.max_per_document)
             .field("neighbour_window", &self.neighbour_window)
             .field("figure_limit", &self.figure_limit)
             .field("expansion_enabled", &self.expansion_enabled)
@@ -152,6 +158,7 @@ impl Default for RetrievalOptions {
             rerank_timeout_ms: 20_000,
             rerank_final_k: 5,
             rerank_max_k: 10,
+            max_per_document: 0,
             neighbour_window: 0,
             figure_limit: 0,
             expansion_enabled: false,
@@ -289,6 +296,11 @@ pub struct RetrievalOutcome {
     /// which model produced it and which calibration table is in force. Only
     /// the top two are kept: a margin needs a second score, nothing else does.
     pub confidence_scores: ScoreEvidence,
+    /// How many hits the per-document diversity cap dropped (`stats.perDocumentCapped`).
+    /// `None` when the cap was off, so a search that never asked for one keeps
+    /// exactly the earlier response shape; `Some(0)` when it ran but dropped
+    /// nothing.
+    pub per_document_capped: Option<usize>,
     /// What each stage cost. Always present: a request nobody times is a
     /// request nobody can make faster, and the numbers are the only evidence
     /// a retrieval change can be judged by.
@@ -1655,6 +1667,8 @@ async fn execute_pipeline_with_plan(
                     // hit carries a score, because there is no returned hit.
                     reranked_count: rerank_ran.then_some(0),
                     confidence_scores,
+                    // The diversity cap runs after the floor, so it never ran here.
+                    per_document_capped: None,
                     timings,
                 });
             }
@@ -1784,6 +1798,16 @@ async fn execute_pipeline_with_plan(
             apply_boosts(&mut reranked_hits, &meta_cache, config, now)
         });
 
+    // 5e. Per-document diversity cap (`RET-17`). After the rerank and boost,
+    // before the final cut: a skipped hit is dropped, not moved to the end, so
+    // the survivors keep their relative order. Figures are attached in step 8
+    // and are deliberately not counted here.
+    let (reranked_capped, capped_dropped) =
+        apply_max_per_document(reranked_hits, opts.max_per_document);
+    // Absent when the cap was off; present (even as zero) when it ran.
+    let per_document_capped = (opts.max_per_document > 0).then_some(capped_dropped);
+    reranked_hits = reranked_capped;
+
     // 6. Cut to max_chunks (1..=50)
     reranked_hits.truncate(max_chunks);
     // The ranking, before neighbours and figures are woven in for context.
@@ -1823,6 +1847,27 @@ async fn execute_pipeline_with_plan(
         }
         if neighbour_failed {
             degrades.push(RetrievalDegrade::NeighboursPartial);
+        }
+        // The neighbour weave runs after the cut and its chunks appear in the
+        // `chunks` list as reading context. With a cap on, they must not let a
+        // document regain the chunks the cap just removed: count them against
+        // the same per-document budget before weaving. Documents still below
+        // the budget may take neighbours up to their remaining room.
+        if opts.max_per_document > 0 {
+            let mut per_doc: HashMap<DocumentId, usize> = HashMap::new();
+            for hit in &reranked_hits {
+                *per_doc.entry(hit.chunk.document_id.clone()).or_default() += 1;
+            }
+            let limit = opts.max_per_document as usize;
+            all_neighbours.retain(|hit| {
+                let count = per_doc.entry(hit.chunk.document_id.clone()).or_default();
+                if *count < limit {
+                    *count += 1;
+                    true
+                } else {
+                    false
+                }
+            });
         }
         if !all_neighbours.is_empty() {
             enrich_titles_cached(
@@ -1968,8 +2013,40 @@ async fn execute_pipeline_with_plan(
         global_arm: global_stats,
         reranked_count,
         confidence_scores,
+        per_document_capped,
         timings,
     })
+}
+
+/// Keep at most `limit` hits per document, in the order given.
+///
+/// `limit == 0` means off: the input is returned unchanged and no stat is
+/// recorded. Otherwise a hit whose document already has `limit` kept hits is
+/// dropped on the spot (never deferred to the end), so the survivors' relative
+/// order is exactly the reranked order. Returns the kept hits and the number
+/// dropped.
+#[must_use]
+pub fn apply_max_per_document(hits: Vec<SearchHit>, limit: u32) -> (Vec<SearchHit>, usize) {
+    if limit == 0 {
+        return (hits, 0);
+    }
+    let limit = limit as usize;
+    let mut kept: HashMap<DocumentId, usize> = HashMap::new();
+    let mut dropped = 0;
+    let kept_hits: Vec<SearchHit> = hits
+        .into_iter()
+        .filter(|hit| {
+            let count = kept.entry(hit.chunk.document_id.clone()).or_default();
+            if *count < limit {
+                *count += 1;
+                true
+            } else {
+                dropped += 1;
+                false
+            }
+        })
+        .collect();
+    (kept_hits, dropped)
 }
 
 /// How many of the hits carry a rerank score.

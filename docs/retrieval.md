@@ -62,7 +62,10 @@ for the exact values each tier fills.
 Default-off, because each adds a model call to the answer path: query expansion
 (`KB_QUERY_EXPANSION_*`), contextual retrieval, reranking (on for Desk and up), citation
 grounding, the vision figure gate, the relevance floor, the tree arm (`KB_TREE_ARM`) and
-the global community arm (`KB_GLOBAL_ARM`, a measured loss).
+the global community arm (`KB_GLOBAL_ARM`, a measured loss). Both `KB_GLOBAL_ARM` and
+`KB_GRAPH_ARM` are **deprecated (DEC-6)**: enabling either logs a startup warning naming the
+HotpotQA −8.5 pp R@5 / +400 ms p95 evidence (`docs/eval-baseline.md`, `EVAL-3`), and they may be
+removed after v1.0. Behaviour is unchanged — warning only.
 
 ## What a result carries
 
