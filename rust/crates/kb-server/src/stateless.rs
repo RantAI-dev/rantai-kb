@@ -576,6 +576,7 @@ impl StatelessState {
             );
             if let Some(cache) = config.cache.as_ref() {
                 let fingerprint = embed_cfg.cache_fingerprint(&cache.embedding_tag);
+                let (query_prefix, passage_prefix) = embed_cfg.effective_prefixes();
                 tracing::info!(dir = %cache.dir.display(), %fingerprint, "embedding disk cache on");
                 embedder = Arc::new(
                     kb_cache::CachedEmbedder::new(
@@ -583,7 +584,7 @@ impl StatelessState {
                         kb_cache::DiskCache::new(&cache.dir),
                         fingerprint,
                     )
-                    .with_prefixes(&embed_cfg.query_prefix, &embed_cfg.passage_prefix),
+                    .with_prefixes(query_prefix, passage_prefix),
                 );
             }
             processor = processor.with_embedder(embedder);

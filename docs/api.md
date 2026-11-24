@@ -39,6 +39,12 @@ because the contract has to be readable before the caller has one.
 **Search options** (JSON): `query` (required), `maxChunks`, `knowledgeBaseIds`,
 `documentIds`, `category`, `hybrid`, `format`, `minScore`.
 
+`documentIds` restricts a search to the named documents using the full pipeline — BM25,
+reranker, page/tree/neighbour and figure arms all run — inside the caller's visible scope. It
+only narrows that scope: a document from another tenant or outside the key's knowledge bases
+is never searched. Such an answer carries `sources` and `context` in the standard format, just
+like any other search.
+
 `chunks[].content`, `documentTitle`, `page` and `similarity` carry the results; `degrades`
 is non-empty when an arm failed, because a failed arm is reported rather than silently
 dropped.
@@ -207,4 +213,7 @@ external model dependencies, or set `KB_EMBEDDING_BASE_URL` / `KB_EMBEDDING_API_
 (non-empty string array), `topK` (optional positive integer, defaults to all candidates),
 and `returnDocuments` (boolean, default `false`). Configured via `KB_RERANK_*` or
 `KB_TIER=cloud|desk|studio|station` (disable explicitly with `KB_STATELESS_RERANK=false`).
+`KB_RERANK_BREADCRUMBS=off|on` (`false|true` also accepted, default `off`) prepends the
+document title, section and page to the text the search reranker sees; it does not change the
+response shape and needs no re-index (`docs/core/specs/v1-roadmap.md` RET-12).
 

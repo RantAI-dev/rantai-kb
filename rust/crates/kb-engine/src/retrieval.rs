@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use kb_core::{
     ArmPlan, BoostConfig, ContextItem, QueryClass, RecencyField, RrfOptions, SkippedArm,
     SourceEntry, authority_factor, authority_value, base_from_rank, base_from_rerank_in,
-    build_context_and_sources, classify_query, date_value, normalise_authority, parse_date,
-    recency_factor, reciprocal_rank_fusion_with, rerank_scores_are_probabilities,
+    breadcrumb, build_context_and_sources, classify_query, date_value, normalise_authority,
+    parse_date, recency_factor, reciprocal_rank_fusion_with, rerank_scores_are_probabilities,
     weave_neighbours_with,
 };
 use kb_ports::{
@@ -44,6 +44,9 @@ pub struct RetrievalOptions {
     pub rrf_k: u32,
     pub rerank_candidate_limit: u32,
     pub rerank_char_budget: usize,
+    /// Prepend `"{title} › {section} · p.{page}\n"` to the rerank text (RET-12).
+    /// The budget caps only the content part. Off leaves the input byte-identical.
+    pub rerank_breadcrumbs: bool,
     pub rerank_timeout_ms: u64,
     /// The **floor** on the reranked head (`KB_RERANK_FINAL_K`).
     ///
@@ -112,6 +115,7 @@ impl fmt::Debug for RetrievalOptions {
             .field("rrf_k", &self.rrf_k)
             .field("rerank_candidate_limit", &self.rerank_candidate_limit)
             .field("rerank_char_budget", &self.rerank_char_budget)
+            .field("rerank_breadcrumbs", &self.rerank_breadcrumbs)
             .field("rerank_timeout_ms", &self.rerank_timeout_ms)
             .field("rerank_final_k", &self.rerank_final_k)
             .field("rerank_max_k", &self.rerank_max_k)
@@ -144,6 +148,7 @@ impl Default for RetrievalOptions {
             rrf_k: 60,
             rerank_candidate_limit: 0,
             rerank_char_budget: 0,
+            rerank_breadcrumbs: false,
             rerank_timeout_ms: 20_000,
             rerank_final_k: 5,
             rerank_max_k: 10,
@@ -1405,7 +1410,10 @@ async fn execute_pipeline_with_plan(
             let candidates: Vec<RerankCandidate> = to_rerank
                 .iter()
                 .map(|h| {
-                    let text = if opts.rerank_char_budget > 0
+                    // The budget caps only the content part, at a UTF-8
+                    // boundary as before. RET-12's breadcrumb is added after
+                    // the cut so a narrow budget can never clip it.
+                    let content = if opts.rerank_char_budget > 0
                         && h.chunk.content.len() > opts.rerank_char_budget
                     {
                         match h
@@ -1421,9 +1429,21 @@ async fn execute_pipeline_with_plan(
                     } else {
                         &h.chunk.content
                     };
+                    // Off is byte-identical to every earlier release: the
+                    // reranker sees the (possibly truncated) content alone.
+                    let text = if opts.rerank_breadcrumbs {
+                        let crumb = breadcrumb(
+                            &h.chunk.document_title,
+                            h.chunk.metadata.section.as_deref(),
+                            h.chunk.metadata.page,
+                        );
+                        format!("{crumb}\n{content}")
+                    } else {
+                        content.to_string()
+                    };
                     RerankCandidate {
                         id: h.chunk.id.clone(),
-                        text: text.to_string(),
+                        text,
                         original_rank: h.rank,
                         original_score: h.similarity,
                     }

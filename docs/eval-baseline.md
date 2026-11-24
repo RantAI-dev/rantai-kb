@@ -1187,6 +1187,9 @@ and `baseline-rerank-on`) broke down latency across server stages:
    Introduced configuration knobs:
    - `KB_RERANK_CANDIDATE_LIMIT` (default 0 = every candidate; 5 on this CPU box)
    - `KB_RERANK_CHAR_BUDGET` (default 0 = full text; 200 chars on this CPU box, cut at a UTF-8 boundary)
+   - `KB_RERANK_BREADCRUMBS` (`off` | `on`, also `false` | `true`; default `off`). When on, the
+     reranker sees `"{document title} › {section} · p.{page}\n"` before the (budgeted) content,
+     with no re-index. The A/B is pending; `docs/core/specs/v1-roadmap.md` RET-12.
    - `KB_RERANK_TIMEOUT_MS` (default 20000, the reranker client's own ceiling; a timeout is a
      visible `rerank_unavailable` degrade with the fused order kept)
 

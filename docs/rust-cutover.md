@@ -522,6 +522,7 @@ the tenant, soft-delete, knowledge-base and category predicates
 figure, neighbour, graph, entity — inherits the narrowed scope before ranking. Bun has no
 equivalent; a client that filters after the fact spends top-k on documents it then drops.
 The fields are additive and Bun ignores them.
+
 ### 18. Additive: `GET /v1/documents/:id/structure` (2026-11-04)
 
 A new read-only route returns a document's `pages`, `figures` and chunk → page map, with
@@ -610,6 +611,7 @@ sidecars in `metadata/<doc-key>.json` are uploaded with the corpus, so off/on sh
 ingest. MRR@10 comes from `rust/crates/kb-eval/scripts/score_deltas.py`, which already
 reported it. The set is synthetic and measures ranking, not answer correctness; the
 live MRR measurement for `RET-4` has **not** been run yet.
+
 ### 20. Additive: adaptive arm choice (`RET-5`, 2026-11-04)
 
 `POST /v1/search` accepts an optional `adaptiveArms: boolean`, and the server accepts a
@@ -773,6 +775,21 @@ file per grid version; a hard delete removes the document's table rows and Parqu
   at `KB_RERANK_FINAL_K`.
 - **Evidence**: `docs/eval-ab/rerank-max-k/README.md` (200 MIRACL-id queries,
   paired bootstrap over cached rerank scores, 10,000 resamples).
+
+### 23a. Additive: breadcrumb in the rerank input (`KB_RERANK_BREADCRUMBS`, RET-12, 2026-11-24)
+- **Bun / earlier Rust**: the reranker saw the bare `h.chunk.content`, so a chunk
+  like "berlaku 12 hari kerja" carried no document-title or section context.
+- **Rust (now)**: with `KB_RERANK_BREADCRUMBS=on` (`off` by default; `true` /
+  `false` are also accepted) the reranker sees
+  `"{document title} › {section path or section} · p.{page}\n" + content`. The
+  char budget from `KB_RERANK_CHAR_BUDGET` still truncates only the content at a
+  UTF-8 boundary; the breadcrumb is never clipped.
+- **What it changes in the API**: nothing. The response chunk content, sources,
+  context and scores keep their existing shapes — only the text sent to the
+  reranker changes, so no re-index is required. An unknown value is a startup
+  error.
+- **Status**: default `off` until the A/B (MIRACL-id-200 and ViDoRe HR, paired
+  bootstrap 95% CI) shows a gain; `docs/core/specs/v1-roadmap.md` RET-12.
 
 ### 28. Additive: the `waiting_for_ocr` job state and the per-backend health (`#36`, 2026-11-20)
 
@@ -1063,3 +1080,31 @@ already there — that is the opt-in below.
 `KB_EMBED_PRECISION` is a new variable: unset or `bf16` is the old behaviour, `nvfp4` asks for the
 4-bit build. An unknown value is a startup error, not a fallback. `docs/kb-tiers.md` has the
 per-tier VRAM budgets per build.
+
+## 8. Passage prefixes on ingest (ING-9)
+
+The batch embedding path (stateful ingest and stateless `/v1/process`) now prefixes every passage
+with the model's `passage_prefix`, exactly as the single-text path already did, so
+`/v1/encode mode=passage` and ingest embed the same text into the same space. Prefixes are applied
+once; providers whose instruction is carried out of band (`input_type`, Voyage / OmniEmbed) still
+send no text prefix.
+
+**Re-index required for `lite` (multilingual-e5-small):** documents indexed before this fix were
+embedded without the `passage: ` prefix and live in a different vector space from new queries and
+from `/v1/encode mode=passage`. Run `kb-server reindex` to rebuild those corpora. Other tiers and
+all query prefixes are unaffected.
+
+## 9. documentIds searches use the full pipeline (RET-11)
+
+`POST /v1/search` with `documentIds` used to take a private dense-only path: the BM25, reranker,
+page, tree, neighbour and figure arms never ran, so searching inside chosen documents was worse
+than searching everything. It now passes the same narrowed scope into the standard retrieval
+pipeline as every other search. The scope is still the intersection of the requested document ids
+and the documents the key may see (tenant, knowledge-base and metadata filters all still apply);
+`documentIds` cannot widen it, and a document from another tenant or another KB is never searched.
+
+This is additive to the response: `chunks` is still there, and the answer now also carries
+`sources` and `context` as a normal search does. Previously `sources` was omitted and `context`
+was only built for `format: "context"`, as a plain `"[i] content"` list; `context` now follows the
+standard format with numbered sources, with or without that request field. Clients that read only
+`chunks` need no change. `hybrid: true` is still the legacy Bun stub and is unchanged.
