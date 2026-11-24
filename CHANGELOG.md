@@ -4,6 +4,11 @@
 
 ### Added
 
+- **`kb-server eval disclosure` (`EVAL-7`).** A deterministic, no-LLM reader that walks
+  `search → structure → content` over page-level qrels under a 1.5× gold-char budget and writes
+  coverage with a 95% bootstrap CI, chars-read/gold-chars, per-endpoint latency and PASS/MISS
+  targets to `results.json`, `per_question.jsonl` and `report.md`. No live number is claimed yet;
+  the run procedure is in `docs/eval-ab/disclosure-v1/README.md`.
 - **`GET /v1/documents/:id/content` (`RET-14`).** Bounded, byte-exact reading of one
   document by section, page range, chunk range or an opaque continuation cursor, without
   re-searching. `maxChars` defaults to 8000 (clamped 500..50000); text is stitched from
