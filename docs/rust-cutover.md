@@ -522,6 +522,7 @@ the tenant, soft-delete, knowledge-base and category predicates
 figure, neighbour, graph, entity — inherits the narrowed scope before ranking. Bun has no
 equivalent; a client that filters after the fact spends top-k on documents it then drops.
 The fields are additive and Bun ignores them.
+
 ### 18. Additive: `GET /v1/documents/:id/structure` (2026-11-04)
 
 A new read-only route returns a document's `pages`, `figures` and chunk → page map, with
@@ -610,6 +611,7 @@ sidecars in `metadata/<doc-key>.json` are uploaded with the corpus, so off/on sh
 ingest. MRR@10 comes from `rust/crates/kb-eval/scripts/score_deltas.py`, which already
 reported it. The set is synthetic and measures ranking, not answer correctness; the
 live MRR measurement for `RET-4` has **not** been run yet.
+
 ### 20. Additive: adaptive arm choice (`RET-5`, 2026-11-04)
 
 `POST /v1/search` accepts an optional `adaptiveArms: boolean`, and the server accepts a
@@ -1076,6 +1078,7 @@ send no text prefix.
 embedded without the `passage: ` prefix and live in a different vector space from new queries and
 from `/v1/encode mode=passage`. Run `kb-server reindex` to rebuild those corpora. Other tiers and
 all query prefixes are unaffected.
+
 ## 9. documentIds searches use the full pipeline (RET-11)
 
 `POST /v1/search` with `documentIds` used to take a private dense-only path: the BM25, reranker,

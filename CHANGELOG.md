@@ -17,6 +17,7 @@
   One query-side change: a custom config that sets `KB_EMBEDDING_QUERY_PREFIX` **and** sends the
   instruction out of band (`KB_EMBEDDING_INPUT_TYPE=true` or `KB_EMBEDDING_FORMAT=omniembed`) no
   longer prefixes queries either. No shipped tier preset combines the two.
+
 ### Changed
 
 - **`documentIds` searches now run the full retrieval pipeline (RET-11).** A search that names
