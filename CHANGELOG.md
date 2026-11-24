@@ -12,6 +12,11 @@
   prefix; the embedding disk cache keys only the prefixes actually applied.
   **Corpora indexed with `lite` (e5-small) before this fix are missing the prefix and must be
   re-indexed with `kb-server reindex`** to get the fix. Queries and other tiers are unaffected.
+  The embedding disk cache (`KB_CACHE_DIR`) no longer reuses passage vectors cached under a
+  non-empty passage prefix (they were stored unprefixed), so that re-index really re-embeds.
+  One query-side change: a custom config that sets `KB_EMBEDDING_QUERY_PREFIX` **and** sends the
+  instruction out of band (`KB_EMBEDDING_INPUT_TYPE=true` or `KB_EMBEDDING_FORMAT=omniembed`) no
+  longer prefixes queries either. No shipped tier preset combines the two.
 
 ## 0.8.0 — 2026-11-23
 
