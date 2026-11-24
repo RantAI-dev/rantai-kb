@@ -1108,3 +1108,21 @@ This is additive to the response: `chunks` is still there, and the answer now al
 was only built for `format: "context"`, as a plain `"[i] content"` list; `context` now follows the
 standard format with numbered sources, with or without that request field. Clients that read only
 `chunks` need no change. `hybrid: true` is still the legacy Bun stub and is unchanged.
+
+## 10. Document versions (RET-16)
+
+Documents may now carry `docKey`, `version`, `supersedesDocumentId`, `effectiveFrom`,
+`effectiveTo` and `isLatest`. Uploading a new version under an existing `docKey` retires the
+previous latest row and closes its effective interval in the same transaction. `POST
+/v1/search` gains `includeHistory` (default false) and `asOf`; by default only current
+versions are searched, so an answer can no longer cite a stale policy. Chunks, sources and
+the document read/list routes report the version fields additively, and an answer that mixes
+versions carries `multiVersionWarning`.
+
+**The migration is additive.** `prisma/migrations/20261124120000_document_versions/migration.sql`
+adds five nullable columns and one `NOT NULL DEFAULT true` column plus a
+`(tenantId, docKey)` index; no existing row is backfilled or rewritten. **`kb-server migrate`
+applies it** (the same `_prisma_migrations` bookkeeping the Bun release used), so an operator
+running both binaries during cutover does not need a separate Prisma step. Old clients keep
+working: every new request/response field is optional, and every unversioned document stays
+visible in all three search modes.

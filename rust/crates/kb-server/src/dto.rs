@@ -11,6 +11,15 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+/// The four version fields copied from a document's meta onto its chunks
+/// (RET-16), in wire order: docKey, version, effectiveFrom, effectiveTo.
+type VersionFields = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 /// Parse a request body the way the TypeScript routes do: `request.json()`
 /// wrapped in `.catch(() => ({}))`, so a malformed body becomes an empty object
 /// and the route answers with its own field-level error instead of a parser
@@ -677,15 +686,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
         // RET-16: version fields were filled from the DocumentMeta alongside
         // each chunk's title. Index them by document id so the deduplicated
         // source cards can carry the same version as their chunks.
-        let mut version_by_doc: HashMap<
-            String,
-            (
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            ),
-        > = HashMap::new();
+        let mut version_by_doc: HashMap<String, VersionFields> = HashMap::new();
         for hit in &outcome_chunks {
             version_by_doc
                 .entry(hit.chunk.document_id.0.clone())

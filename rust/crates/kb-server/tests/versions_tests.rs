@@ -347,5 +347,12 @@ async fn a_bad_upload_date_is_a_400_and_leaves_no_document() {
         )
         .await;
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(h.documents.docs.read().unwrap()[&TenantId(TENANT.to_string())].is_empty());
+    assert!(
+        h.documents
+            .docs
+            .read()
+            .unwrap()
+            .get(&TenantId(TENANT.to_string()))
+            .is_none_or(Vec::is_empty)
+    );
 }

@@ -33,6 +33,16 @@
 
 ### Added
 
+- **Document versions and point-in-time search (`RET-16`).** Upload and PATCH accept
+  `docKey`, `version`, `effectiveFrom` and `effectiveTo`. Uploading a new version retires
+  the previous one in one transaction (`isLatest=false`, its `effectiveTo` closed at the
+  new `effectiveFrom` or now, and `supersedesDocumentId` set on the new row); deleting the
+  latest version does not promote an older one. `POST /v1/search` adds `includeHistory`
+  and `asOf` and defaults to current versions only, applied in the Postgres scope so every
+  retrieval arm inherits it; a bad `asOf` is a 400. Chunks, sources, and the document
+  read/list responses carry the version fields, and an answer mixing versions of one
+  `docKey` carries `multiVersionWarning`. All fields are additive and the migration is
+  nullable/defaulted: unversioned documents stay visible in every search mode.
 - **`KB_RERANK_BREADCRUMBS=off|on` (RET-12).** With the flag on, the reranker sees
   `"{document title} › {section path or section} · p.{page}\n"` before the chunk content, so a
   bare "berlaku 12 hari kerja" is judged with its "Kebijakan Cuti › Bab IV Cuti Tahunan · p.12"

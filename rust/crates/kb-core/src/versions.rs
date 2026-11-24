@@ -71,8 +71,9 @@ mod tests {
 
     #[test]
     fn normalised_timestamps_sort_in_time_order() {
-        let a = normalise_timestamp("2024-01-01").unwrap();
-        let b = normalise_timestamp("2025-01-01T00:00:00+00:00").unwrap();
-        assert!(a < b);
+        let a = normalise_timestamp("2024-01-01");
+        let b = normalise_timestamp("2025-01-01T00:00:00+00:00");
+        assert!(a.is_some() && b.is_some());
+        assert!(a < b, "{a:?} should sort before {b:?}");
     }
 }

@@ -2333,11 +2333,30 @@
               "null"
             ]
           },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Version metadata of the chunk's document (`RET-16`). Absent when the\ndocument predates versioning or carries no version fields."
+          },
           "documentId": {
             "type": "string"
           },
           "documentTitle": {
             "type": "string"
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "externalRef": {
             "type": [
@@ -2397,6 +2416,12 @@
               "null"
             ],
             "description": "Additive (`TBL-1`): that table's title, when the answer could resolve it."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2565,7 +2590,8 @@
           "knowledgeBaseIds",
           "chunkCount",
           "figures",
-          "degrades"
+          "degrades",
+          "isLatest"
         ],
         "properties": {
           "categories": {
@@ -2601,6 +2627,25 @@
             },
             "description": "What kept the document from being fully searchable, one line each\n(`#29`)."
           },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Version metadata (`RET-16`). Absent on documents created before the\nversion columns existed."
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "figures": {
             "type": "array",
             "items": {
@@ -2626,6 +2671,10 @@
           "id": {
             "type": "string",
             "description": "The document's id."
+          },
+          "isLatest": {
+            "type": "boolean",
+            "description": "True for the current version; unversioned documents are current too."
           },
           "knowledgeBaseIds": {
             "type": "array",
@@ -2668,6 +2717,12 @@
             ],
             "description": "The subcategory, when it has one."
           },
+          "supersedesDocumentId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "title": {
             "type": "string",
             "description": "The document's title."
@@ -2675,6 +2730,12 @@
           "updatedAt": {
             "type": "string",
             "description": "When the document was last changed."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2830,7 +2891,8 @@
           "status",
           "createdAt",
           "knowledgeBaseIds",
-          "degrades"
+          "degrades",
+          "isLatest"
         ],
         "properties": {
           "categories": {
@@ -2860,6 +2922,25 @@
             },
             "description": "What kept the document from being fully searchable, one line each\n(`#29`)."
           },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Version metadata (`RET-16`). Absent on documents created before the\nversion columns existed."
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "externalRef": {
             "type": [
               "string",
@@ -2885,6 +2966,10 @@
           "id": {
             "type": "string",
             "description": "The document's id."
+          },
+          "isLatest": {
+            "type": "boolean",
+            "description": "True for the current version; unversioned documents are current too."
           },
           "knowledgeBaseIds": {
             "type": "array",
@@ -2920,9 +3005,21 @@
             ],
             "description": "The subcategory, when it has one."
           },
+          "supersedesDocumentId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "title": {
             "type": "string",
             "description": "The document's title."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -3546,6 +3643,35 @@
           }
         }
       },
+      "MultiVersionWarningDto": {
+        "type": "object",
+        "description": "One `docKey` whose versions were mixed in a single answer (`RET-16`).",
+        "required": [
+          "docKey",
+          "documentIds",
+          "versions"
+        ],
+        "properties": {
+          "docKey": {
+            "type": "string",
+            "description": "The stable document key the versions share."
+          },
+          "documentIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The returned documents holding that key, in first-appearance order."
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Their version labels, in the same order. `None` labels are omitted."
+          }
+        }
+      },
       "OkResponse": {
         "type": "object",
         "description": "The body every delete answers with.\n\nOne shape for every route that removes something: `{\"ok\": true}`. A delete\nthat removed nothing answers `404` instead, so `ok` is always `true` when\nit is there at all.",
@@ -3626,6 +3752,25 @@
             },
             "description": "The document's new categories."
           },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Version metadata (`RET-16`). Absent leaves the column alone; a bad date\nis a 400. Dates accept `YYYY-MM-DD` or a full ISO timestamp."
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "knowledgeBaseIds": {
             "type": [
               "array",
@@ -3649,6 +3794,12 @@
               "null"
             ],
             "description": "The document's new title."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -3661,7 +3812,8 @@
           "status",
           "createdAt",
           "updatedAt",
-          "knowledgeBaseIds"
+          "knowledgeBaseIds",
+          "isLatest"
         ],
         "properties": {
           "categories": {
@@ -3674,6 +3826,25 @@
           "createdAt": {
             "type": "string",
             "description": "When the document was created."
+          },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Version metadata after the patch (`RET-16`)."
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "fileSize": {
             "type": [
@@ -3693,6 +3864,10 @@
           "id": {
             "type": "string",
             "description": "The document's id."
+          },
+          "isLatest": {
+            "type": "boolean",
+            "description": "True for the current version; unversioned documents are current too."
           },
           "knowledgeBaseIds": {
             "type": "array",
@@ -3719,6 +3894,12 @@
             ],
             "description": "The subcategory, when it has one."
           },
+          "supersedesDocumentId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "title": {
             "type": "string",
             "description": "The document's title."
@@ -3726,6 +3907,12 @@
           "updatedAt": {
             "type": "string",
             "description": "When the document was last changed."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -4065,6 +4252,9 @@
             ],
             "description": "Per-request adaptive arm choice (RET-5). `Some(true)`/`Some(false)`\noverrides the server's `KB_ADAPTIVE_ARMS`; absent means \"use the server\ndefault\", which is off."
           },
+          "asOf": {
+            "description": "Additive (`RET-16`): point-in-time search. Accepts `YYYY-MM-DD` or a full\nISO timestamp. Kept untyped so a bad value is a field-level 400 rather\nthan a deserialiser error the route cannot explain."
+          },
           "boost": {
             "description": "Additive (`RET-4`): optional recency/authority boosts. Kept untyped so\na malformed value is this route's 400, not a deserialiser 422."
           },
@@ -4104,6 +4294,9 @@
               "boolean",
               "null"
             ]
+          },
+          "includeHistory": {
+            "description": "Additive (`RET-16`): search every version of a `docKey`, not only the\nlatest. Default false. Kept untyped so a non-boolean is this route's 400."
           },
           "knowledgeBaseIds": {
             "type": [
@@ -4168,6 +4361,13 @@
             "items": {
               "type": "string"
             }
+          },
+          "multiVersionWarning": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MultiVersionWarningDto"
+            },
+            "description": "Additive (`RET-16`): when the answer mixes versions of one `docKey`, the\ncaller is told which documents and versions it is reading. Absent when\nthere is no mix (the default current-version search can never mix)."
           },
           "note": {
             "type": [
@@ -4531,6 +4731,13 @@
               "null"
             ]
           },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Version metadata of the source's document (`RET-16`). Filled from the\nsame DocumentMeta that supplies `documentTitle`; absent for old rows."
+          },
           "documentId": {
             "type": [
               "string",
@@ -4539,6 +4746,18 @@
           },
           "documentTitle": {
             "type": "string"
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "page": {
             "type": [
@@ -4549,6 +4768,12 @@
             "minimum": 0
           },
           "section": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
             "type": [
               "string",
               "null"
@@ -4977,12 +5202,33 @@
             ],
             "description": "The categories the document is filed under, as a JSON array or a\ncomma-separated list."
           },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`RET-16`): stable key shared by all versions of one document.\nUploading a new version with an existing `docKey` retires the current\none in the same transaction."
+          },
           "documentType": {
             "type": [
               "string",
               "null"
             ],
             "description": "The kind of document, as the extractor should read it."
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`RET-16`): when this version comes into force. Accepts\n`YYYY-MM-DD` or a full ISO timestamp; a bad date is a 400."
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`RET-16`): when this version stops being in force (exclusive)."
           },
           "externalRef": {
             "type": [
@@ -5037,6 +5283,13 @@
               "null"
             ],
             "description": "The document's title. Defaults to the file name without its extension."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`RET-16`): the caller's version label, e.g. `\"2025\"`."
           }
         }
       }
