@@ -47,6 +47,13 @@
   use range filters instead of scanning. Index creation is idempotent on an existing collection.
 - Old chunks get spans on `kb-server reindex` (rebuild from the originals); no store migration is
   needed.
+- **Progressive-disclosure parity in stateless `/v1/process` (`ING-14`).** The response additively
+  carries `outlineVersion: 2` and `sections[]` built by the same `kb-core` outline v2 builder as
+  `/structure`, per-chunk `charStart` / `charEnd` / `overlapPrefixLen` (absent, not zero, when a
+  chunk has no span), and `pages[]` with a lowercase hex `pageSha256` of each page's returned
+  `pageMap[].text` (UTF-8 bytes) for cheap change detection. No existing field changed; the
+  stateless integration guide now documents the Qdrant integer-index payload recipe, the
+  client-side stitching rule and the per-page re-process loop.
 - **Outline v2 on `GET /v1/documents/:id/structure` (`RET-13`).** The response additively carries
   `outlineVersion: 2`, `sections` (each with an id, title, level, path, page/chunk ranges and a
   detected marker), document-level `estimatedChars` and `hasSpans`. Section sources are the stored
