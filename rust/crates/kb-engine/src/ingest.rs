@@ -1181,6 +1181,7 @@ impl IngestWorker {
                     asset_key: None,
                     anchor_chunk_index: None,
                     table_id: Some(record.id.to_string()),
+                    ..ChunkMetadata::default()
                 },
             });
             next_index = next_index.saturating_add(1);
@@ -1208,6 +1209,7 @@ impl IngestWorker {
                         asset_key: None,
                         anchor_chunk_index: None,
                         table_id: Some(record.id.to_string()),
+                        ..ChunkMetadata::default()
                     },
                 });
                 next_index = next_index.saturating_add(1);
@@ -1482,6 +1484,7 @@ impl IngestWorker {
                     anchor_chunk_index: None,
                     contextual_prefix: None,
                     table_id: None,
+                    ..ChunkMetadata::default()
                 };
                 IndexUnit {
                     id: ChunkId(format!("{}_{}", document_id.0, chunk_index)),
@@ -1850,6 +1853,7 @@ impl IngestWorker {
                     anchor_chunk_index,
                     contextual_prefix: None,
                     table_id: None,
+                    ..ChunkMetadata::default()
                 },
             });
         }
@@ -2635,6 +2639,18 @@ fn storage_metadata(meta: &ChunkMetadata) -> Value {
         // `TBL-1`: the table a search hit can be queried through.
         map.insert("tableId".to_string(), json!(table_id));
     }
+    // `ING-13`: spans let the future document-content route rebuild the text
+    // in order without duplicating overlap. Absent means "unknown" (old
+    // chunks, figures, table summaries), never a misleading zero.
+    if let Some(start) = meta.char_start {
+        map.insert("charStart".to_string(), json!(start));
+    }
+    if let Some(end) = meta.char_end {
+        map.insert("charEnd".to_string(), json!(end));
+    }
+    if let Some(overlap) = meta.overlap_prefix_len {
+        map.insert("overlapPrefixLen".to_string(), json!(overlap));
+    }
     Value::Object(map)
 }
 
@@ -2657,6 +2673,7 @@ mod tests {
             asset_key: None,
             anchor_chunk_index: None,
             table_id: None,
+            ..ChunkMetadata::default()
         }
     }
 
@@ -2800,6 +2817,21 @@ mod tests {
         assert!(stored.get("page").is_none());
         assert!(stored.get("assetKey").is_none());
         assert!(stored.get("anchorChunkIndex").is_none());
+        assert!(stored.get("charStart").is_none());
+        assert!(stored.get("charEnd").is_none());
+        assert!(stored.get("overlapPrefixLen").is_none());
+    }
+
+    #[test]
+    fn stored_metadata_includes_chunk_spans_when_present() {
+        let mut m = meta();
+        m.char_start = Some(120);
+        m.char_end = Some(400);
+        m.overlap_prefix_len = Some(24);
+        let stored = storage_metadata(&m);
+        assert_eq!(stored["charStart"], json!(120));
+        assert_eq!(stored["charEnd"], json!(400));
+        assert_eq!(stored["overlapPrefixLen"], json!(24));
     }
 
     #[test]

@@ -344,6 +344,7 @@ pub async fn index_visuals(
                     .and_then(|id| input.anchors.get(id).copied()),
                 contextual_prefix: None,
                 table_id: None,
+                ..ChunkMetadata::default()
             },
         });
     }

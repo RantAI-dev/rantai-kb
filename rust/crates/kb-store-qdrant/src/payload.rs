@@ -45,6 +45,48 @@ pub const KEY_CONTENT: &str = "content";
 pub const KEY_CONTEXTUAL_PREFIX: &str = "contextual_prefix";
 /// The caller's opaque metadata JSON.
 pub const KEY_METADATA: &str = "metadata";
+/// Character span fields, written on chunks ingested with `ING-13`. They are
+/// also mirrored inside [`KEY_METADATA`]; old chunks carry neither.
+pub const KEY_CHAR_START: &str = "charStart";
+pub const KEY_CHAR_END: &str = "charEnd";
+pub const KEY_OVERLAP_PREFIX_LEN: &str = "overlapPrefixLen";
+
+/// Where a chunk sits in the chunker's normalised source. Every field is
+/// `None` for chunks written before spans existed, never a misleading `0`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChunkSpans {
+    pub char_start: Option<u32>,
+    pub char_end: Option<u32>,
+    pub overlap_prefix_len: Option<u32>,
+}
+
+/// Read spans from the opaque metadata JSON the engine writes.
+#[must_use]
+pub fn spans_from_metadata(metadata: &serde_json::Value) -> ChunkSpans {
+    let u32_at = |key: &str| {
+        metadata
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+    };
+    ChunkSpans {
+        char_start: u32_at(KEY_CHAR_START),
+        char_end: u32_at(KEY_CHAR_END),
+        overlap_prefix_len: u32_at(KEY_OVERLAP_PREFIX_LEN),
+    }
+}
+
+/// Read the mirrored span fields from a Qdrant payload. Missing keys (and
+/// values that are not unsigned 32-bit integers) read as `None`.
+#[must_use]
+pub fn spans_from_payload(payload: &std::collections::HashMap<String, Value>) -> ChunkSpans {
+    let u32_at = |key: &str| integer(payload, key).and_then(|n| u32::try_from(n).ok());
+    ChunkSpans {
+        char_start: u32_at(KEY_CHAR_START),
+        char_end: u32_at(KEY_CHAR_END),
+        overlap_prefix_len: u32_at(KEY_OVERLAP_PREFIX_LEN),
+    }
+}
 
 /// Every payload key, for the payload-index pass and for documentation.
 pub const PAYLOAD_KEYS: &[&str] = &[
@@ -59,6 +101,9 @@ pub const PAYLOAD_KEYS: &[&str] = &[
     KEY_CONTENT,
     KEY_CONTEXTUAL_PREFIX,
     KEY_METADATA,
+    KEY_CHAR_START,
+    KEY_CHAR_END,
+    KEY_OVERLAP_PREFIX_LEN,
 ];
 
 /// The scope filter: this tenant **and** one of these documents.
@@ -227,6 +272,19 @@ pub fn unit_payload(unit: &IndexUnit) -> Payload {
     if let Some(prefix) = &unit.contextual_prefix {
         payload.insert(KEY_CONTEXTUAL_PREFIX, prefix.clone());
     }
+    // `ING-13`: mirror the engine's metadata spans as first-class payload
+    // values, just like `page` and `chunkIndex`, so a reader can ask for them
+    // without walking the opaque metadata object. Absent stays absent.
+    let spans = spans_from_metadata(&unit.metadata);
+    if let Some(start) = spans.char_start {
+        payload.insert(KEY_CHAR_START, i64::from(start));
+    }
+    if let Some(end) = spans.char_end {
+        payload.insert(KEY_CHAR_END, i64::from(end));
+    }
+    if let Some(overlap) = spans.overlap_prefix_len {
+        payload.insert(KEY_OVERLAP_PREFIX_LEN, i64::from(overlap));
+    }
     payload.insert(KEY_METADATA, unit.metadata.clone());
     payload
 }
@@ -359,6 +417,41 @@ mod tests {
     }
 
     #[test]
+    fn chunk_spans_round_trip_through_the_payload() {
+        let mut stored = unit("tenant-a", "doc-a1", 2);
+        stored.metadata = serde_json::json!({"documentTitle": "d", "charStart": 120, "charEnd": 400, "overlapPrefixLen": 24});
+        let payload = unit_payload(&stored);
+        let map: std::collections::HashMap<String, Value> = payload.clone().into();
+        assert_eq!(integer(&map, KEY_CHAR_START), Some(120));
+        assert_eq!(integer(&map, KEY_CHAR_END), Some(400));
+        assert_eq!(integer(&map, KEY_OVERLAP_PREFIX_LEN), Some(24));
+        let spans = spans_from_payload(&map);
+        assert_eq!(spans.char_start, Some(120));
+        assert_eq!(spans.char_end, Some(400));
+        assert_eq!(spans.overlap_prefix_len, Some(24));
+        let back = candidate_from(&map, ArmScores::default(), ArmRanks::default())
+            .expect("payload round-trip");
+        assert_eq!(spans_from_metadata(&back.metadata), spans);
+        assert_eq!(back.metadata, stored.metadata);
+    }
+
+    #[test]
+    fn old_chunks_have_no_spans_not_zero() {
+        // Chunks written before ING-13 carry no span keys: they must read as
+        // absent, never as a span of 0 that would claim to be a real offset.
+        let stored = unit("tenant-a", "doc-a1", 2);
+        let payload = unit_payload(&stored);
+        let map: std::collections::HashMap<String, Value> = payload.clone().into();
+        assert!(!map.contains_key(KEY_CHAR_START));
+        assert!(!map.contains_key(KEY_CHAR_END));
+        assert!(!map.contains_key(KEY_OVERLAP_PREFIX_LEN));
+        assert_eq!(spans_from_payload(&map), ChunkSpans::default());
+        let back = candidate_from(&map, ArmScores::default(), ArmRanks::default())
+            .expect("payload round-trip");
+        assert_eq!(spans_from_metadata(&back.metadata), ChunkSpans::default());
+    }
+
+    #[test]
     fn a_payload_without_a_unit_id_is_not_one_of_ours() {
         let map =
             std::collections::HashMap::from([(KEY_DOCUMENT_ID.to_string(), Value::from("doc"))]);
@@ -378,6 +471,9 @@ mod tests {
         assert!(!map.contains_key(KEY_CONTEXTUAL_PREFIX));
         assert!(!map.contains_key(KEY_CATEGORY));
         assert!(!map.contains_key(KEY_KNOWLEDGE_BASE_ID));
+        assert!(!map.contains_key(KEY_CHAR_START));
+        assert!(!map.contains_key(KEY_CHAR_END));
+        assert!(!map.contains_key(KEY_OVERLAP_PREFIX_LEN));
         let back = candidate_from(&map, ArmScores::default(), ArmRanks::default());
         let back = back.expect("payload round-trip");
         assert_eq!(back.page, None);
@@ -419,6 +515,10 @@ mod tests {
             KEY_KNOWLEDGE_BASE_ID,
             KEY_CATEGORY,
             KEY_CHUNK_INDEX,
+            KEY_PAGE,
+            KEY_CHAR_START,
+            KEY_CHAR_END,
+            KEY_OVERLAP_PREFIX_LEN,
         ] {
             assert!(PAYLOAD_KEYS.contains(&key), "{key}");
         }

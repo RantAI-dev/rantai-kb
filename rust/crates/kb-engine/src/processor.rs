@@ -595,6 +595,7 @@ impl DocumentProcessor {
                         asset_key: None,
                         anchor_chunk_index: None,
                         table_id: None,
+                        ..ChunkMetadata::default()
                     },
                 });
                 chunk_table_indices.push(Some(table_idx));
@@ -622,6 +623,7 @@ impl DocumentProcessor {
                                 asset_key: None,
                                 anchor_chunk_index: None,
                                 table_id: None,
+                                ..ChunkMetadata::default()
                             },
                         });
                         chunk_table_indices.push(Some(table_idx));
@@ -713,6 +715,7 @@ impl DocumentProcessor {
                         anchor_chunk_index,
                         contextual_prefix: None,
                         table_id: None,
+                        ..ChunkMetadata::default()
                     },
                 });
                 chunk_table_indices.push(None);

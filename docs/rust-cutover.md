@@ -776,6 +776,21 @@ file per grid version; a hard delete removes the document's table rows and Parqu
 - **Evidence**: `docs/eval-ab/rerank-max-k/README.md` (200 MIRACL-id queries,
   paired bootstrap over cached rerank scores, 10,000 resamples).
 
+### 23a. Additive: breadcrumb in the rerank input (`KB_RERANK_BREADCRUMBS`, RET-12, 2026-11-24)
+- **Bun / earlier Rust**: the reranker saw the bare `h.chunk.content`, so a chunk
+  like "berlaku 12 hari kerja" carried no document-title or section context.
+- **Rust (now)**: with `KB_RERANK_BREADCRUMBS=on` (`off` by default; `true` /
+  `false` are also accepted) the reranker sees
+  `"{document title} › {section path or section} · p.{page}\n" + content`. The
+  char budget from `KB_RERANK_CHAR_BUDGET` still truncates only the content at a
+  UTF-8 boundary; the breadcrumb is never clipped.
+- **What it changes in the API**: nothing. The response chunk content, sources,
+  context and scores keep their existing shapes — only the text sent to the
+  reranker changes, so no re-index is required. An unknown value is a startup
+  error.
+- **Status**: default `off` until the A/B (MIRACL-id-200 and ViDoRe HR, paired
+  bootstrap 95% CI) shows a gain; `docs/core/specs/v1-roadmap.md` RET-12.
+
 ### 28. Additive: the `waiting_for_ocr` job state and the per-backend health (`#36`, 2026-11-20)
 
 A document whose OCR backend was not there used to fail on the first error: the job went to
