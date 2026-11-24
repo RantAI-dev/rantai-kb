@@ -16,6 +16,7 @@ because the contract has to be readable before the caller has one.
 | `GET` | `/v1/documents/:id/raw` | Download the stored original. |
 | `GET` | `/v1/documents/:id/assets` | Fetch a document figure or page image. |
 | `GET` | `/v1/documents/:id/structure` | Pages, figures and the chunk → page map. |
+| `GET` | `/v1/documents/:id/content` | Bounded, byte-exact text for a section, page or chunk range, with a cursor. |
 | `GET` | `/v1/documents/:id/intelligence` | Extracted entities and relations. |
 | `POST` | `/v1/search` | Retrieve chunks for a query. The reason this service exists. |
 | `GET` | `/v1/tables` | A document's stored tables (`?documentId=…`), or the tenant's. |
@@ -125,6 +126,44 @@ section's chunk range from `/content`.
   "estimatedChars": 450,
   "hasSpans": true
 }
+```
+
+## Reading on without re-searching
+
+`GET /v1/documents/:id/content` returns the text of one document in order, stitched
+from its stored chunks with overlap removed, under a character budget. It is for
+an agent that already found a chunk and wants the surrounding section or pages;
+it never searches again and never re-parses the file. Exactly one selector is
+allowed:
+
+- `?section=s3` — a section id from `/structure`'s outline v2;
+- `?pageStart=12&pageEnd=13` — inclusive zero-based pages;
+- `?chunkStart=40&chunkEnd=57` — inclusive chunk indices;
+- `?cursor=<opaque>` — continue a previous read.
+
+No selector reads the whole document from chunk 0. `?maxChars=` defaults to 8000
+and is clamped to 500..50000. The response is
+`{documentId, text, range:{chunkStart, chunkEnd, pageStart, pageEnd}, truncated,
+nextCursor, refs, degrades}`. `refs` names tables on the returned pages
+(`kind:"table", tableId, page`) and figures on the returned chunks
+(`kind:"figure", assetKey, page`), ids and pages only.
+
+When `truncated` is true, send `nextCursor` with the same `maxChars` to get the
+next slice. Concatenating all slices is byte-identical to one unbounded read:
+page boundaries are not printed and overlap is never duplicated. The cursor is
+bound to the document id and to the document's content hash (`sha256`, or
+`updatedAt` when there is no hash): using it on another document answers `400`,
+and a changed document answers `409 {"error":"document changed since cursor was issued"}`.
+Old chunks without spans are emitted whole and the answer carries a `degrades`
+entry rather than silently losing text.
+
+### Agent reading loop
+
+```text
+POST /v1/search  ->  a hit with documentId, section and page
+GET  /v1/documents/:id/structure  ->  sections (s1, s2, s3, …) with chunk ranges
+GET  /v1/documents/:id/content?section=s3&maxChars=8000
+GET  /v1/documents/:id/content?cursor=<nextCursor>&maxChars=8000  ->  repeat until truncated=false
 ```
 
 ## Keys
