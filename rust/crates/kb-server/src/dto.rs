@@ -139,6 +139,19 @@ pub struct SearchRequestDto {
     /// than a deserialiser error the route cannot explain.
     #[serde(rename = "asOf", default)]
     pub as_of: Option<serde_json::Value>,
+    /// Additive (`RET-15`): an inclusive page window inside one document.
+    #[serde(rename = "pageRange", default)]
+    pub page_range: Option<PageRangeDto>,
+    /// Additive (`RET-15`): an outline v2 section id inside one document.
+    #[serde(default)]
+    pub section: Option<String>,
+}
+
+/// An inclusive page window. Valid only with exactly one `documentIds` entry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
+pub struct PageRangeDto {
+    pub start: u32,
+    pub end: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
