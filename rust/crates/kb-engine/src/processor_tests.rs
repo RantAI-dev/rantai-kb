@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use kb_core::tables::{Cell, TableGrid, TableSource};
@@ -413,6 +413,80 @@ async fn encode_matches_kb_core_sparse_for_query_and_passage() {
     assert_eq!(
         p.sparse_vectors.as_ref().unwrap()[0].values,
         expected_p.values
+    );
+}
+
+/// Records the text sent through `embed_passages`, so a parity test can prove
+/// that ingest and `/v1/encode mode=passage` take the same batch route.
+#[derive(Default)]
+struct RecordingEmbedder {
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Embedder for RecordingEmbedder {
+    fn dimension(&self) -> u32 {
+        4
+    }
+
+    async fn embed_query(&self, text: &str) -> Result<Vec<f32>, PortError> {
+        Ok(vec![text.len() as f32; 4])
+    }
+
+    async fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, PortError> {
+        self.seen
+            .lock()
+            .expect("mutex")
+            .extend(texts.iter().cloned());
+        Ok(texts.iter().map(|t| vec![t.len() as f32; 4]).collect())
+    }
+}
+
+/// The stateless pipeline must embed a processed chunk through exactly the
+/// same `embed_passages` route as `/v1/encode mode=passage`; otherwise a caller
+/// that encodes its own chunks indexes vectors in a different space (ING-9).
+#[tokio::test]
+async fn process_and_encode_passage_embed_the_same_text() {
+    let text = "Cuti tahunan selama dua belas hari.";
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let processor = DocumentProcessor::new(
+        Arc::new(StubExtractor::ok(ok_extraction(text))),
+        ProcessorSettings {
+            embedding_model: Some("test-embed".into()),
+            ..ProcessorSettings::default()
+        },
+    )
+    .with_embedder(Arc::new(RecordingEmbedder {
+        seen: Arc::clone(&seen),
+    }));
+
+    let out = processor
+        .process(ProcessRequest::new(
+            "",
+            "text/markdown",
+            text.as_bytes().to_vec(),
+        ))
+        .await
+        .expect("process");
+    let processed_text = seen.lock().expect("mutex")[0].clone();
+    let processed_vector = out.chunks[0].embedding.clone().expect("embedding");
+
+    let encoded = processor
+        .encode(
+            std::slice::from_ref(&processed_text),
+            EncodeMode::Passage,
+            Some(true),
+            false,
+        )
+        .await
+        .expect("encode passage");
+    assert_eq!(encoded.embeddings.expect("embeddings")[0], processed_vector);
+
+    let seen = seen.lock().expect("mutex");
+    assert_eq!(seen.len(), 2);
+    assert_eq!(
+        seen[0], seen[1],
+        "process and /v1/encode mode=passage send the same text to the embedder"
     );
 }
 

@@ -314,9 +314,8 @@ impl EmbedderImpl {
         inputs: &[String],
         kind: EmbedKind,
     ) -> Result<Vec<Vec<f32>>, PortError> {
-        // No prefixing here: `embed_one` has already prefixed a query and the
-        // batch path never prefixes (the same asymmetry the OpenAI shape has,
-        // `ING-9`). The instruction this model needs travels in `input_type`.
+        // No prefixing here: the instruction this model needs travels in
+        // `input_type`, so `prefixed_text` leaves every text untouched (`ING-9`).
         let texts: Vec<String> = inputs.to_vec();
         let r = OmniEmbedReq {
             model: &self.settings.model,
@@ -347,6 +346,23 @@ impl EmbedderImpl {
         Ok(parsed.embeddings.float)
     }
 
+    /// The text that actually goes to the provider.
+    ///
+    /// Models with an asymmetric instruction either need it in the text
+    /// (`query: ` / `passage: ` for E5) or out of band (`input_type` for Voyage,
+    /// every OmniEmbed request). When it is out of band the text is left alone.
+    /// Both the single and the batch path use this one function, so a text gets
+    /// exactly one prefix whichever path embeds it (`ING-9`).
+    fn prefixed_text(&self, text: &str, kind: EmbedKind) -> String {
+        if self.settings.send_input_type || self.settings.format == EmbedFormat::OmniEmbed {
+            return text.to_string();
+        }
+        match kind {
+            EmbedKind::Query => format!("{}{}", self.settings.query_prefix, text),
+            EmbedKind::Passage => format!("{}{}", self.settings.passage_prefix, text),
+        }
+    }
+
     /// Embed a single text. Caches query-side calls.
     async fn embed_one(&self, text: &str, kind: EmbedKind) -> Result<Vec<f32>, PortError> {
         let cache_key = self.cache_key(text);
@@ -356,10 +372,7 @@ impl EmbedderImpl {
                 return Ok(v);
             }
         }
-        let prefixed = match kind {
-            EmbedKind::Query => format!("{}{}", self.settings.query_prefix, text),
-            EmbedKind::Passage => format!("{}{}", self.settings.passage_prefix, text),
-        };
+        let prefixed = self.prefixed_text(text, kind);
 
         let v = if self.is_minimax() {
             let r = MiniMaxReqOne {
@@ -412,10 +425,16 @@ impl EmbedderImpl {
             }
             return Ok(out);
         }
+        // `kb_cache` keys a vector by prefix + unprefixed text and hands the
+        // unprefixed text to this embedder, so prefixing happens exactly once,
+        // here — the same rule `embed_one` applies (`ING-9`). Prefixing after
+        // the cache layer keeps both ingest and `/v1/encode mode=passage` in
+        // the same vector space as the single-text path.
+        let prefixed: Vec<String> = texts.iter().map(|t| self.prefixed_text(t, kind)).collect();
         // `embed_concurrency` requests in flight, results kept in input order.
         // Sequential batches made text embedding the slowest ingest step: 118
         // batches of a 943-page PDF took 211 s at ~1.8 s each.
-        let requests: Vec<_> = texts
+        let requests: Vec<_> = prefixed
             .chunks(size)
             .map(|batch| self.embed_openai_batch(batch, kind))
             .collect();
@@ -938,6 +957,111 @@ mod tests {
         assert_eq!(seen[0], vec!["Instruct: q\napa kabar".to_string()]);
     }
 
+    /// `ING-9`: the batch path is the ingest path, so e5-small (`lite`) has to
+    /// see the same `passage: ` as the single-text path.
+    #[tokio::test]
+    async fn batch_sends_one_passage_prefix_on_every_text() {
+        let (url, seen) = fake_server(Mode::InOrder).await;
+        let mut s = settings();
+        s.base_url = url;
+        s.passage_prefix = "passage: ".into();
+        let embedder = EmbedderImpl::new(s).expect("embedder");
+
+        let out = embedder
+            .embed_many(&["a".into(), "b".into()], EmbedKind::Passage)
+            .await
+            .expect("batch");
+
+        assert_eq!(
+            out,
+            vec![vector_for("passage: a"), vector_for("passage: b")]
+        );
+        let seen = seen.lock().await;
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], vec!["passage: a", "passage: b"]);
+    }
+
+    /// The single-text path is the reference behaviour the batch path must
+    /// match. It already prefixes; this pins it before the batch fix.
+    #[tokio::test]
+    async fn single_passage_sends_the_passage_prefix() {
+        let (url, seen) = fake_server(Mode::NoIndex).await;
+        let mut s = settings();
+        s.base_url = url;
+        s.passage_prefix = "passage: ".into();
+        let embedder = EmbedderImpl::new(s).expect("embedder");
+
+        let v = embedder
+            .embed_one("a", EmbedKind::Passage)
+            .await
+            .expect("single passage");
+
+        assert_eq!(v, vector_for("passage: a"));
+        assert_eq!(seen.lock().await[0], vec!["passage: a"]);
+    }
+
+    /// When the instruction goes out of band (`input_type`), neither path may
+    /// add a text prefix — even if prefixes happen to be configured.
+    #[tokio::test]
+    async fn input_type_provider_sends_no_text_prefix_on_either_path() {
+        let (url, seen) = fake_server(Mode::InOrder).await;
+        let mut s = settings();
+        s.base_url = url;
+        s.query_prefix = "query: ".into();
+        s.passage_prefix = "passage: ".into();
+        s.send_input_type = true;
+        let embedder = EmbedderImpl::new(s).expect("embedder");
+
+        embedder.embed_query("a").await.expect("query");
+        embedder
+            .embed_many(&["a".into(), "b".into()], EmbedKind::Passage)
+            .await
+            .expect("batch");
+
+        let seen = seen.lock().await;
+        assert_eq!(
+            *seen,
+            vec![
+                vec!["a".to_string()],
+                vec!["a".to_string(), "b".to_string()]
+            ],
+            "the model reads its instruction from input_type, not the text"
+        );
+    }
+
+    /// Prefixing happens once, in the adapter, on both paths. `kb_cache` keys
+    /// the vector by prefix + text and hands the *unprefixed* text to the inner
+    /// embedder, so a second prefix here would give the same cache key two
+    /// different vectors.
+    #[tokio::test]
+    async fn provider_sees_each_prefix_exactly_once() {
+        let (url, seen) = fake_server(Mode::NoIndex).await;
+        let mut s = settings();
+        s.base_url = url;
+        s.passage_prefix = "passage: ".into();
+        let embedder = EmbedderImpl::new(s).expect("embedder");
+
+        let single = embedder
+            .embed_one("a", EmbedKind::Passage)
+            .await
+            .expect("single");
+        let batched = embedder
+            .embed_passages(&["a".into()])
+            .await
+            .expect("batch through the trait");
+        assert_eq!(vec![single], batched);
+
+        let seen = seen.lock().await;
+        assert_eq!(
+            *seen,
+            vec![
+                vec!["passage: a".to_string()],
+                vec!["passage: a".to_string()]
+            ],
+            "no double prefix, and the trait path matches the direct one"
+        );
+    }
+
     #[test]
     fn input_type_is_sent_only_when_enabled() {
         let req = |input_type| {
@@ -1099,10 +1223,11 @@ mod dispatch_tests {
 
     /// The wire shape is what an OmniEmbed-style model needs: `inputs` as
     /// message content, the query/document instruction selected by
-    /// `input_type` in the checkpoint, the client's prefixes applied, and the
-    /// vectors read out of `embeddings.float`.
+    /// `input_type` in the checkpoint, and the vectors read out of
+    /// `embeddings.float`. The instruction is out of band, so no text prefix
+    /// is sent on either path, query or passage (`ING-9`).
     #[tokio::test]
-    async fn omniembed_sends_input_type_and_prefixes() {
+    async fn omniembed_sends_input_type_without_text_prefixes() {
         let (url, seen) = omni_server().await;
         let mut s = settings();
         s.base_url = url;
@@ -1113,9 +1238,8 @@ mod dispatch_tests {
         let embedder = EmbedderImpl::new(s).expect("embedder");
 
         let q = embedder.embed_query("what is X").await.unwrap();
-        assert_eq!(q, vector_for("query: what is X"));
+        assert_eq!(q, vector_for("what is X"));
 
-        // Batched passages are not prefixed (`ING-9`), exactly like the OpenAI path.
         let passages = vec!["first".to_string(), "second".to_string()];
         let p = embedder.embed_passages(&passages).await.unwrap();
         assert_eq!(p, vec![vector_for("first"), vector_for("second")]);
@@ -1123,7 +1247,7 @@ mod dispatch_tests {
         let seen = seen.lock().await;
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].0, "query", "queries are tagged `query`");
-        assert_eq!(seen[0].1, vec!["query: what is X".to_string()]);
+        assert_eq!(seen[0].1, vec!["what is X".to_string()]);
         assert_eq!(seen[1].0, "document", "passages are tagged `document`");
         assert_eq!(seen[1].1, vec!["first".to_string(), "second".to_string()]);
     }
