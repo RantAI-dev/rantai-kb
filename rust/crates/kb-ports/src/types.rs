@@ -9,9 +9,10 @@ use crate::ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 /// Chunk type as understood by retrieval, rendering and the policy in
 /// `kb-core`. Stored as a string field (`metadata.chunkType`) and carried on
 /// the wire as an enum so the boundary is explicit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChunkType {
+    #[default]
     Text,
     Table,
     List,

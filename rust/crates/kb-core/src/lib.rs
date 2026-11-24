@@ -7,6 +7,7 @@
 pub mod boost;
 pub mod chunk;
 pub mod community;
+pub mod content;
 mod context;
 pub mod figure_assets;
 pub mod figure_gate;
@@ -46,6 +47,7 @@ pub use community::{
     Community, DetectOptions, assign_chunks, bm25_scores, cooccurrence, detect, hub_entities,
     louvain, rank_summaries, summary_prompt,
 };
+pub use content::{ContentCursor, StitchChunk, Stitched, WindowStart, stitch, stitch_from};
 pub use context::{
     ContextItem, NumberedSource, SourceDedupKey, SourceEntry, build_context_and_sources,
     numbered_source_list, source_dedupe_key,

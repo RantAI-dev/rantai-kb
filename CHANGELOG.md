@@ -4,6 +4,16 @@
 
 ### Added
 
+- **`GET /v1/documents/:id/content` (`RET-14`).** Bounded, byte-exact reading of one
+  document by section, page range, chunk range or an opaque continuation cursor, without
+  re-searching. `maxChars` defaults to 8000 (clamped 500..50000); text is stitched from
+  the vector-free chunk metadata with overlap removed and hard-boundary paragraph
+  separators restored. The response adds `range`, `truncated`, `nextCursor`, `refs`
+  (table ids from the table store and figure asset keys from the chunks in range) and
+  visible `degrades`. The cursor is bound to the path document and to `Document.sha256`
+  (falling back to `updatedAt`): another document's cursor is a 400 and a changed
+  document is a 409. Visibility is the same tenant + knowledge-base + soft-delete check
+  as `/structure`. No existing response field changed.
 - New chunk metadata `charStart` / `charEnd` / `overlapPrefixLen` on newly ingested chunks,
   carrying each chunk's character span and the length of the overlap prefix it repeats. Chunks
   ingested before this change (and non-prose units such as figures and table summaries) have no
