@@ -39,9 +39,6 @@
   breadcrumb is never clipped. `false`/`true` are accepted too, an unknown value is a startup
   error, and the **default is `off`** until the A/B (`docs/core/specs/v1-roadmap.md` RET-12).
   additive: the response shapes and chunk content are unchanged and no re-index is needed.
-
-### Added
-
 - New chunk metadata `charStart` / `charEnd` / `overlapPrefixLen` on newly ingested chunks,
   carrying each chunk's character span and the length of the overlap prefix it repeats. Chunks
   ingested before this change (and non-prose units such as figures and table summaries) have no
