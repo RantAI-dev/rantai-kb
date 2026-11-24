@@ -10,9 +10,10 @@ If your application already owns Postgres and Qdrant and only wants a stateless 
 
 | Component | Owned by | Purpose |
 |---|---|---|
-| **Postgres** (`DATABASE_URL`) | `rantai-kb` | Tenants, scoped API keys, documents, ingest jobs, knowledge bases, categories, typed table metadata, optional knowledge graph |
+| **Postgres** (`DATABASE_URL`) | `rantai-kb` | Tenants, scoped API keys, documents, ingest jobs, knowledge bases, categories, typed table records & manifests, optional knowledge graph |
 | **Qdrant** (`QDRANT_GRPC_URL`) | `rantai-kb` | Dense + BM25 sparse (`modifier: idf`) chunk vectors and optional page-image vectors |
-| **Object store** (`S3_*` / local blob) | `rantai-kb` | Raw uploaded originals, extracted figure PNGs, page JPEGs, and structured table Parquet files |
+| **Object store** (`S3_*` / local blob) | `rantai-kb` | Raw uploaded originals, extracted figure PNGs, page JPEGs, and versioned structured table Parquet files |
+| **Embedded DuckDB** (`kb-store-tables`) | `rantai-kb` (in-process) | Writes extracted tables to Parquet and executes typed `POST /v1/tables/:id/query` aggregations locally — **no separate DuckDB server or container required** |
 | **Model backends** | Tier compose or external | Embedder, optional reranker, optional OCR, optional vision captioner |
 | **Your application** | Caller | End-user auth/UX, mapping app users/workspaces to `tenant` + `knowledgeBaseIds`, calling `/v1/*` |
 
@@ -26,7 +27,7 @@ If your application already owns Postgres and Qdrant and only wants a stateless 
    - `desk` / `studio` / `station` — NVIDIA GPU tiers (`Nemotron-3.5-Embed-1B` unified text+page space, `Qwen3-Reranker-0.6B`, `Xiaomi-OCR-0`).
    - `cloud` — CPU box + hosted APIs (`voyage-multimodal-3.5`, `voyageai/rerank-2.5`, Mistral OCR, `nemotron-3.5-super-vl`).
 2. **Share GPUs safely:** `setup` budgets VRAM assuming your chat LLM shares the card. If a larger chat model needs more VRAM, move one role off-box (`--ocr mistral`, `--ocr <url>`, `--vision off|<url>`, or external `KB_EMBEDDING_BASE_URL` / `KB_RERANK_BASE_URL`).
-3. **Always mount a persistent `KB_CACHE_DIR`** in production — re-indexing after changing chunking or Qdrant settings reuses cached OCR pages and embeddings without re-paying model/API costs.
+3. **Always mount a persistent `KB_CACHE_DIR`** in production — re-indexing after changing chunking or Qdrant settings reuses cached OCR pages and embeddings without re-paying model/API costs, and `kb-store-tables` caches downloaded table Parquet files there (falling back to `<temp>/rantai-kb-tables` if unset) so repeated DuckDB queries avoid re-downloading from object storage.
 4. **Separate external DB/Qdrant in production:** Point `DATABASE_URL`, `QDRANT_GRPC_URL`, and `S3_*` at managed or dedicated hosts; run `kb-server serve --foreground` behind your load balancer.
 
 ---
@@ -71,7 +72,10 @@ If your application already owns Postgres and Qdrant and only wants a stateless 
 
 1. **Always inspect `degrades` on `POST /v1/search`:** `rantai-kb` degrades gracefully rather than failing the whole search if a secondary arm (e.g., reranker or page arm) times out, and lists what degraded in `degrades[]`. Log non-empty `degrades` in your app telemetry.
 2. **Scope every query:** Pass `knowledgeBaseIds` or `documentIds` whenever the user is inside a project/workspace rather than searching the entire tenant.
-3. **Use typed table queries for numbers:** When search results include `tables: [{tableId, title, documentId}]` (or `table_summary` / `table_row` chunks), run `POST /v1/tables/:id/query` for exact sums, filters, and group-bys instead of asking an LLM to sum prose snippets.
+3. **Use typed table queries (Parquet + embedded DuckDB) for numbers:**
+   - During ingest, extracted tables are typed against their inferred manifest (`DOUBLE`, `BOOLEAN`, `VARCHAR`), written as versioned **Parquet** files to your object/blob store via in-process DuckDB, and indexed as `KbTable` records in Postgres.
+   - When search results include `tables: [{tableId, title, documentId}]` (or `table_summary` / `table_row` chunks), call `POST /v1/tables/:id/query` for exact sums, filters, and group-bys instead of asking an LLM to sum prose snippets.
+   - `kb-server` validates the typed query against the Postgres manifest, downloads the Parquet file once into `KB_CACHE_DIR` (or `<temp>/rantai-kb-tables`), executes it in **embedded in-process DuckDB** with a wall-clock timeout, and enforces `tablePrivacy=aggregate-only` suppression where configured. No separate DuckDB container is needed.
 4. **Inspect `GET /health` before bulk uploads:** Check `backends.ocr.state`, `backends.embedder.state`, and `backends.reranker.state` (`ready` / `starting` / `unavailable`) before kicking off large batch backfills.
 5. **Tune retrieval systematically:** See [`docs/retrieval.md`](../../retrieval.md) for `KB_RRF_K`, `KB_RERANK_MAX_K` (default `10`), and score floors before tweaking prompts.
 

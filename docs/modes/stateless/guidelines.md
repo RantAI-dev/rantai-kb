@@ -96,7 +96,10 @@ CREATE TABLE documents (
 ```
 
 Optional tables only if your UI/product needs them:
-- **Tables:** Store `ProcessOutput.tables[]` (`header`, `rows`, `manifest`) if you display or query structured grids.
+- **Tables (no Parquet/DuckDB in stateless mode):** `POST /v1/process` extracts every detected table into `ProcessOutput.tables[]` (typed `header`, typed `rows`, and inferred `manifest`) plus `table_summary` and `table_row` chunks in `ProcessOutput.chunks[]`, without writing Parquet files or running DuckDB. Choose the storage/query pattern that fits your app:
+  1. **Qdrant only (simplest):** Index the returned `table_summary` / `table_row` chunks alongside prose chunks for semantic + BM25 search over table text.
+  2. **App DB (`JSONB`):** Persist `ProcessOutput.tables[]` (`header`, `rows`, `manifest`) in Postgres/MySQL/SQLite for UI grid rendering and lightweight filtering.
+  3. **Parquet + DuckDB on your side:** Write `ProcessOutput.tables[]` to Parquet in your own S3/R2 bucket and query them with embedded DuckDB (or Polars/Arrow) if you need exact SQL aggregations over large spreadsheets. *(If you want `rantai-kb` to manage Parquet + embedded DuckDB + `POST /v1/tables/:id/query` automatically, use [Full service mode](../full/guidelines.md).)*
 - **Figures:** Pass `includeFigureBytes=true`, decode each `figures[].pngBase64` to S3/R2, and store `{document_id, figure_index, page, kind, caption, bbox, anchor_chunk_index, image_key}`.
 - **Entities & relations:** Pass `entities=true` (uses free local heuristic extractor by default; set `KB_ENTITY_EXTRACTOR=llm` only if you want LLM extraction) and store `entities[]` / `relations[]`.
 
