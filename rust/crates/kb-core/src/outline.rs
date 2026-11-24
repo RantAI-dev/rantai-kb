@@ -408,8 +408,13 @@ fn sections_from_boundaries(
         .iter()
         .enumerate()
         .map(|(i, boundary)| {
+            // A section runs until the next boundary at its own level or
+            // above, so `BAB I` covers every `Pasal` under it and a reader
+            // asking `/content?section=` for a chapter gets the whole chapter.
             let next_start = boundaries
-                .get(i + 1)
+                .iter()
+                .skip(i + 1)
+                .find(|next| next.level <= boundary.level)
                 .map_or(last_index.saturating_add(1), |next| next.chunk_index);
             let chunk_end = next_start
                 .saturating_sub(1)
@@ -588,7 +593,13 @@ mod tests {
         assert_eq!(bab.level, 1);
         assert_eq!(bab.path, vec!["BAB I KETENTUAN UMUM"]);
         assert_eq!(bab.chunk_start, 0);
-        assert_eq!(bab.chunk_end, 0);
+        // The chapter covers both of its articles (chunks 0 and 1).
+        assert_eq!(bab.chunk_end, 1);
+        let bagian = &sections[4];
+        assert_eq!(bagian.title, "Bagian Kesatu");
+        assert_eq!((bagian.chunk_start, bagian.chunk_end), (2, 3));
+        let pasal_one = &sections[1];
+        assert_eq!((pasal_one.chunk_start, pasal_one.chunk_end), (0, 0));
         assert_eq!(bab.page_start, Some(0));
 
         let pasal_two = &sections[2];
