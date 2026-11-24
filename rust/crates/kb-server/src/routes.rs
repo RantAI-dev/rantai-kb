@@ -10,7 +10,7 @@
 //! * Anything unmatched authenticates first and then 404s, so an unknown path
 //!   cannot be used to probe which tenants exist.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -26,16 +26,15 @@ use axum::{Json, Router};
 use kb_core::policy::MimeRegistry;
 use kb_engine::timing::{Stopwatch, SystemClock};
 use kb_ports::{
-    AuthContext, DocumentFilter, DocumentId, DocumentMeta, KnowledgeBaseId, MetadataFilter,
-    ScopeRequest, SearchHit,
+    AuthContext, DocumentFilter, DocumentId, KnowledgeBaseId, MetadataFilter, ScopeRequest,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::auth::Authed;
 use crate::dto::{
-    BoostStatsDto, ChunkDto, SearchRequestDto, SearchResponseDto, SearchStatsDto, StageDetailDto,
-    StageTimingsDto, splice_json_member,
+    BoostStatsDto, SearchRequestDto, SearchResponseDto, SearchStatsDto, StageTimingsDto,
+    splice_json_member,
 };
 use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
@@ -615,8 +614,6 @@ pub async fn search(
             }))
             .into_response());
         }
-        let alive_map: HashMap<DocumentId, DocumentMeta> =
-            alive.iter().map(|m| (m.id.clone(), m.clone())).collect();
         // Narrow the *filtered* scope, not the whole tenant: the key's
         // knowledge-base limit and every metadata filter still apply, so
         // `documentIds` can only intersect them, never widen them.
@@ -630,115 +627,21 @@ pub async fn search(
             .map_err(ApiError::from)?;
         let scope = filtered_scope.narrowed_to(&requested);
         let scope_build_ms = scope_sw.elapsed_ms();
-        let embed_sw = Stopwatch::start(&SystemClock);
-        let embedded = state
-            .embedder
-            .embed_query_detailed(&query)
-            .await
-            .map_err(|e| ApiError::Internal(format!("embed: {e}")))?;
-        let query_vec = embedded.vector;
-        let query_embed_ms = embed_sw.elapsed_ms();
-        let vector_sw = Stopwatch::start(&SystemClock);
-        let query_hybrid = kb_ports::HybridQuery {
-            dense: Some(query_vec),
-            sparse: None,
-            per_arm_k: max_chunks as usize,
-            k: max_chunks as usize,
-            fusion: kb_ports::Fusion::None,
-        };
-        let cands = state
-            .index
-            .search(&query_hybrid, &scope)
-            .await
-            .map_err(ApiError::from)?;
-        let mut hits: Vec<SearchHit> = cands
-            .into_iter()
-            .map(kb_engine::retrieval::candidate_to_hit)
-            .collect();
-        let vector_arm_ms = vector_sw.elapsed_ms();
-        hits.retain(|h| h.similarity >= 0.30);
-        // This branch has no keyword arm, so the floor can only be dense and
-        // there is no exact-match exemption to grant (RET-2).
-        let (floor_score_kind, floor_dropped) =
-            if let Some(threshold) = body.min_score.or(state.engine.settings.min_score) {
-                let before = hits.len();
-                hits.retain(|h| h.similarity >= threshold);
-                (Some("dense".to_string()), Some(before - hits.len()))
-            } else {
-                (None, None)
-            };
-        // RET-4: the by-id branch has the same document rows it is about to use
-        // for titles, so the boost is applied here too rather than silently
-        // ignored. It runs before the cut so a promoted hit is not lost.
-        let boost_stats = boost
-            .as_ref()
-            .filter(|config| !config.is_off())
-            .map(|config| kb_engine::apply_boosts_now(&mut hits, &alive_map, config));
-        hits.truncate(max_chunks as usize);
-        for h in hits.iter_mut() {
-            if let Some(meta) = alive_map.get(&h.chunk.document_id) {
-                h.chunk.document_title = meta.title.clone();
-                h.chunk.categories = meta.categories.clone();
-                h.chunk.subcategory = meta.subcategory.clone();
-                h.chunk.external_ref = meta.external_ref.clone();
-            }
-        }
-        let vector_results = hits.len();
-        let chunk_dtos: Vec<ChunkDto> = hits.into_iter().map(ChunkDto::from).collect();
-        let context = if body.format.as_deref() == Some("context") {
-            Some(
-                chunk_dtos
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| format!("[{}] {}", i + 1, c.content))
-                    .collect::<Vec<_>>()
-                    .join("\n\n"),
-            )
-        } else {
-            None
-        };
-        let total_results = chunk_dtos.len();
-        let floor_note = (floor_dropped.unwrap_or(0) > 0 && total_results == 0).then(|| {
-            format!(
-                "No result passed the relevance floor (minScore={}, score=dense): {} \
-                 candidate(s) were dropped",
-                body.min_score
-                    .or(state.engine.settings.min_score)
-                    .unwrap_or_default(),
-                floor_dropped.unwrap_or(0)
-            )
-        });
-        let stats = StageTimingsDto {
-            scope_build: scope_build_ms,
-            arms: query_embed_ms + vector_arm_ms,
-            detail: StageDetailDto {
-                engine_total: query_embed_ms + vector_arm_ms,
-                query_embed: query_embed_ms,
-                query_embed_cached: embedded.cached,
-                vector_arm: vector_arm_ms,
-                ..StageDetailDto::default()
-            },
-            ..StageTimingsDto::default()
-        };
-        let mut response = SearchResponseDto {
-            chunks: Some(chunk_dtos),
-            sources: None,
-            context,
-            results: None,
-            stats: Some(search_stats(
-                stats,
-                vector_results,
-                total_results,
-                floor_score_kind,
-                floor_dropped,
-                boost_stats.map(BoostStatsDto::from),
-            )),
-            note: floor_note,
-            degrades: Vec::new(),
-            tables: Vec::new(),
-        };
-        tables::attach_tables(&state, &auth.tenant_id, &mut response).await;
-        return Ok(finish_search(response, route_sw));
+        // RET-11: the narrowed scope is the security-relevant part of this
+        // branch. Once it is built, the search is the same one Branch 3 runs —
+        // BM25, reranker, page/tree/neighbour and figure arms included.
+        return retrieve_and_finish(SearchTail {
+            state: &state,
+            auth: &auth,
+            query: &query,
+            scope: &scope,
+            scope_build_ms,
+            max_chunks,
+            body: &body,
+            boost,
+            route_sw,
+        })
+        .await;
     }
 
     // Branch 2: hybrid retrieval (TypeScript api.ts:151)
@@ -786,12 +689,58 @@ pub async fn search(
         .await
         .map_err(ApiError::from)?;
     let scope_build_ms = scope_sw.elapsed_ms();
+    retrieve_and_finish(SearchTail {
+        state: &state,
+        auth: &auth,
+        query: &query,
+        scope: &scope,
+        scope_build_ms,
+        max_chunks,
+        body: &body,
+        boost,
+        route_sw,
+    })
+    .await
+}
 
+/// The inputs the two search branches share once their scope is resolved.
+struct SearchTail<'a> {
+    state: &'a Arc<AppState>,
+    auth: &'a AuthContext,
+    query: &'a str,
+    scope: &'a kb_ports::DocumentScope,
+    scope_build_ms: f64,
+    max_chunks: u32,
+    body: &'a SearchRequestDto,
+    boost: Option<kb_core::BoostConfig>,
+    route_sw: Stopwatch<'a>,
+}
+
+/// Run the standard retrieval pipeline over an already resolved scope and
+/// finish the response.
+///
+/// The `documentIds` branch and the standard branch differ only in how they
+/// build the scope. Sharing the tail here keeps them on the same arms, the same
+/// floor and boost handling, and the same response shape — so a caller that
+/// narrows a search to chosen documents gets the same answer quality, and a
+/// leak fixed in one path is fixed in the other.
+async fn retrieve_and_finish(tail: SearchTail<'_>) -> Result<Response, ApiError> {
+    let SearchTail {
+        state,
+        auth,
+        query,
+        scope,
+        scope_build_ms,
+        max_chunks,
+        body,
+        boost,
+        route_sw,
+    } = tail;
     let outcome = state
         .engine
         .retrieve_inner(
-            &query,
-            &scope,
+            query,
+            scope,
             Some(max_chunks),
             body.min_score,
             boost,
@@ -805,7 +754,7 @@ pub async fn search(
         // and everything above it in the handler.
         stats.stage_timings_ms.scope_build = scope_build_ms;
     }
-    tables::attach_tables(&state, &auth.tenant_id, &mut response).await;
+    tables::attach_tables(state, &auth.tenant_id, &mut response).await;
     Ok(finish_search(response, route_sw))
 }
 
