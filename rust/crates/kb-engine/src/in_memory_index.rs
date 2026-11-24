@@ -78,15 +78,17 @@ impl InMemoryIndex {
         self.read().len()
     }
 
-    /// Units matching a scope, as clones. The single place the scope filter is
-    /// applied, so no arm can forget it.
+    /// Units matching a scope, as clones. The single place the scope filter —
+    /// including the RET-15 unit range — is applied, so no arm can forget it.
     fn in_scope(&self, scope: &DocumentScope) -> Vec<StoredUnit> {
         let guard = self.read();
+        let range = scope.unit_range();
         let mut out: Vec<StoredUnit> = guard
             .values()
             .filter(|s| {
                 s.unit.tenant == *scope.tenant()
                     && scope.document_ids().contains(&s.unit.document_id)
+                    && range.is_none_or(|r| r.allows(s.unit.page, s.unit.chunk_index))
             })
             .cloned()
             .collect();
@@ -225,6 +227,12 @@ impl RetrievalIndex for InMemoryIndex {
             if !scope.document_ids().contains(&stored.unit.document_id) {
                 continue;
             }
+            if !scope
+                .unit_range()
+                .is_none_or(|r| r.allows(stored.unit.page, stored.unit.chunk_index))
+            {
+                continue;
+            }
             out.push(candidate_of(
                 &stored.unit,
                 (ArmScores::default(), ArmRanks::default()),
@@ -255,7 +263,11 @@ impl RetrievalIndex for InMemoryIndex {
                 let d = i64::from(stored.unit.chunk_index) - i64::from(*a);
                 d == 1 || d == -1
             });
-            if !adjacent {
+            if !adjacent
+                || !scope
+                    .unit_range()
+                    .is_none_or(|r| r.allows(stored.unit.page, stored.unit.chunk_index))
+            {
                 continue;
             }
             out.push(candidate_of(

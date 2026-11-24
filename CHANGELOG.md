@@ -53,6 +53,13 @@
   outline, chunk headings, Indonesian legal markers (`BAB` / `Bagian` / `Pasal` / `Paragraf`) and
   a per-page fallback. A new scoped, vector-free `RetrievalIndex::list_chunk_meta` port method
   backs this and the upcoming content route. No existing response field changed.
+- **Search inside part of a document (`RET-15`).** `POST /v1/search` additively accepts
+  `pageRange: {start, end}` (inclusive) and `section: "s3"`. Each requires exactly one
+  `documentIds` entry, and the two cannot be combined. The range is carried on the tenant- and
+  document-scoped `DocumentScope` and applied as an integer range condition inside every index
+  query — dense, BM25, page-image, figure, neighbour and tree — so no arm spends top-k on, or
+  returns, a unit outside the part. A section resolves through the outline v2 from
+  `list_chunk_meta` + `build_outline`; an unknown section id is a `400`.
 
 ## 0.8.0 — 2026-11-23
 

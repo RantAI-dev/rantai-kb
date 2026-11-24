@@ -16,7 +16,7 @@
 
 use kb_ports::{
     ArmRanks, ArmScores, Candidate, ChunkId, ChunkMeta, ChunkType, DocumentId, DocumentScope,
-    IndexUnit, TenantId,
+    IndexUnit, TenantId, UnitRange,
 };
 use qdrant_client::Payload;
 use qdrant_client::qdrant::{
@@ -124,16 +124,50 @@ pub fn scope_filter(scope: &DocumentScope) -> Filter {
         .iter()
         .map(|d| d.as_str().to_string())
         .collect();
-    document_filter(scope.tenant(), &documents)
+    let mut filter = document_filter(scope.tenant(), &documents);
+    append_unit_range(&mut filter, scope.unit_range());
+    filter
 }
 
-/// `tenant == t AND document_id in documents AND chunk_type == "figure"`.
+/// Add the RET-15 range as index conditions, not as a post-filter.
+///
+/// Both halves are added when both are set, so top-k is spent only on units
+/// inside the requested part. The integer `page` and `chunkIndex` payload
+/// indexes (ING-13) make these ranges index lookups.
+fn append_unit_range(filter: &mut Filter, range: Option<UnitRange>) {
+    let Some(range) = range else {
+        return;
+    };
+    if let Some((lo, hi)) = range.pages {
+        filter.must.push(Condition::range(
+            KEY_PAGE,
+            Range {
+                gte: Some(f64::from(lo)),
+                lte: Some(f64::from(hi)),
+                ..Default::default()
+            },
+        ));
+    }
+    if let Some((lo, hi)) = range.chunks {
+        filter.must.push(Condition::range(
+            KEY_CHUNK_INDEX,
+            Range {
+                gte: Some(f64::from(lo)),
+                lte: Some(f64::from(hi)),
+                ..Default::default()
+            },
+        ));
+    }
+}
+
+/// `tenant == t AND document_id in documents AND chunk_type == "figure"`, plus
+/// the caller's unit range when one is set.
 #[must_use]
-pub fn figures_filter(tenant: &TenantId, documents: &[String]) -> Filter {
-    Filter::must([
+pub fn figures_filter(scope: &DocumentScope, documents: &[String]) -> Filter {
+    let mut filter = Filter::must([
         Condition::matches(
             KEY_TENANT_ID,
-            MatchValue::Keyword(tenant.as_str().to_string()),
+            MatchValue::Keyword(scope.tenant().as_str().to_string()),
         ),
         Condition::matches(
             KEY_DOCUMENT_ID,
@@ -142,7 +176,9 @@ pub fn figures_filter(tenant: &TenantId, documents: &[String]) -> Filter {
             }),
         ),
         Condition::matches(KEY_CHUNK_TYPE, MatchValue::Keyword("figure".to_string())),
-    ])
+    ]);
+    append_unit_range(&mut filter, scope.unit_range());
+    filter
 }
 
 /// `tenant == t AND document_id in documents`.
@@ -185,11 +221,16 @@ pub fn one_document_filter(tenant: &TenantId, document: &DocumentId) -> Filter {
 /// answer from the `chunk_index` index without touching the rest of the
 /// document.
 #[must_use]
-pub fn chunk_range_filter(tenant: &TenantId, document: &DocumentId, lo: u32, hi: u32) -> Filter {
-    Filter::must([
+pub fn chunk_range_filter(
+    scope: &DocumentScope,
+    document: &DocumentId,
+    lo: u32,
+    hi: u32,
+) -> Filter {
+    let mut filter = Filter::must([
         Condition::matches(
             KEY_TENANT_ID,
-            MatchValue::Keyword(tenant.as_str().to_string()),
+            MatchValue::Keyword(scope.tenant().as_str().to_string()),
         ),
         Condition::matches(
             KEY_DOCUMENT_ID,
@@ -203,7 +244,9 @@ pub fn chunk_range_filter(tenant: &TenantId, document: &DocumentId, lo: u32, hi:
                 ..Default::default()
             },
         ),
-    ])
+    ]);
+    append_unit_range(&mut filter, scope.unit_range());
+    filter
 }
 
 /// Ids belong to this scope: the scope filter **and** the id list.
@@ -229,13 +272,15 @@ pub fn scoped_ids_filter(scope: &DocumentScope, ids: &[ChunkId]) -> Filter {
 /// alone is not scope, and the page list alone could cross into another
 /// document. The caller (the tree arm) only passes documents it read from a
 /// [`DocumentScope`], and this filter repeats the tenant/document condition so
-/// a bug in that caller cannot widen the read.
+/// a bug in that caller cannot widen the read. The caller's unit range is
+/// intersected here too, so the tree arm cannot fetch a page outside the part
+/// of the document being searched.
 #[must_use]
-pub fn pages_filter(tenant: &TenantId, document: &DocumentId, pages: &[u32]) -> Filter {
-    Filter::must([
+pub fn pages_filter(scope: &DocumentScope, document: &DocumentId, pages: &[u32]) -> Filter {
+    let mut filter = Filter::must([
         Condition::matches(
             KEY_TENANT_ID,
-            MatchValue::Keyword(tenant.as_str().to_string()),
+            MatchValue::Keyword(scope.tenant().as_str().to_string()),
         ),
         Condition::matches(
             KEY_DOCUMENT_ID,
@@ -247,7 +292,9 @@ pub fn pages_filter(tenant: &TenantId, document: &DocumentId, pages: &[u32]) -> 
                 integers: pages.iter().map(|page| i64::from(*page)).collect(),
             }),
         ),
-    ])
+    ]);
+    append_unit_range(&mut filter, scope.unit_range());
+    filter
 }
 
 /// The payload of one unit, as Qdrant stores it.
@@ -530,10 +577,57 @@ mod tests {
 
     #[test]
     fn a_pages_filter_names_tenant_document_and_page() {
-        let tenant = TenantId::new_unchecked("tenant-a");
+        let scope = test_scope(&["doc-a1"]);
         let document = DocumentId::new_unchecked("doc-a1");
-        let filter = pages_filter(&tenant, &document, &[3, 4]);
+        let filter = pages_filter(&scope, &document, &[3, 4]);
         assert_eq!(filter.must.len(), 3, "tenant, document and pages");
+    }
+
+    #[test]
+    fn a_unit_range_adds_index_range_conditions_to_every_search_filter() {
+        // Every path that queries the chunk store builds its filter here. All
+        // five must carry the range as conditions, not as a post-filter.
+        let scope = test_scope(&["doc-a1"]).with_unit_range(UnitRange {
+            pages: Some((1, 5)),
+            chunks: Some((40, 57)),
+        });
+        let document = DocumentId::new_unchecked("doc-a1");
+        let filters = [
+            scope_filter(&scope),
+            scoped_ids_filter(&scope, &[ChunkId::new_unchecked("doc-a1_3")]),
+            figures_filter(&scope, &["doc-a1".to_string()]),
+            pages_filter(&scope, &document, &[3]),
+            chunk_range_filter(&scope, &document, 40, 57),
+        ];
+        for filter in filters {
+            let debug = format!("{filter:?}");
+            assert!(debug.contains(KEY_PAGE), "no page range in {debug}");
+            assert!(debug.contains(KEY_CHUNK_INDEX), "no chunk range in {debug}");
+        }
+    }
+
+    #[test]
+    fn a_page_only_range_adds_only_the_page_condition() {
+        let scope = test_scope(&["doc-a1"]).with_unit_range(UnitRange {
+            pages: Some((1, 5)),
+            chunks: None,
+        });
+        let debug = format!("{:?}", scope_filter(&scope));
+        assert!(debug.contains(KEY_PAGE), "no page range in {debug}");
+        assert!(
+            !debug.contains(KEY_CHUNK_INDEX),
+            "unwanted chunk range: {debug}"
+        );
+    }
+
+    #[test]
+    fn no_unit_range_leaves_the_filter_untouched() {
+        let scope = test_scope(&["doc-a1"]);
+        let filter = scope_filter(&scope);
+        assert_eq!(filter.must.len(), 2, "tenant and documents only");
+        let debug = format!("{filter:?}");
+        assert!(!debug.contains(KEY_PAGE));
+        assert!(!debug.contains(KEY_CHUNK_INDEX));
     }
 
     #[test]
