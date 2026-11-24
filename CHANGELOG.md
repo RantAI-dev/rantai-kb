@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- New chunk metadata `charStart` / `charEnd` / `overlapPrefixLen` on newly ingested chunks,
+  carrying each chunk's character span and the length of the overlap prefix it repeats. Chunks
+  ingested before this change (and non-prose units such as figures and table summaries) have no
+  spans and read as absent, never as zero.
+- Integer payload indexes on `page` and `chunkIndex` in Qdrant, so page- and index-scoped reads
+  use range filters instead of scanning. Index creation is idempotent on an existing collection.
+- Old chunks get spans on `kb-server reindex` (rebuild from the originals); no store migration is
+  needed.
+
 ## 0.8.0 — 2026-11-23
 
 ### Added

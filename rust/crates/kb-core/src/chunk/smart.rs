@@ -82,6 +82,21 @@ pub struct SmartChunkMetadata {
     pub hierarchy_path: Option<Vec<String>>,
     pub page_number: Option<u32>,
     pub section: Option<String>,
+    /// Character offset of the first *new* char of this chunk in the
+    /// chunker's normalised source. The overlap prefix (if any) sits just
+    /// before this offset, so `[char_start, char_end)` is exactly
+    /// `text.chars().skip(overlap_prefix_len)`.
+    #[serde(default)]
+    pub char_start: u32,
+    /// Character offset just past the last new char of this chunk.
+    /// `char_end - char_start` is the number of non-overlap chars emitted.
+    #[serde(default)]
+    pub char_end: u32,
+    /// How many leading chars of `text` repeat the tail of the previous
+    /// chunk. Zero for the first chunk and for chunks that follow a hard
+    /// boundary (heading, section, code, table).
+    #[serde(default)]
+    pub overlap_prefix_len: u32,
 }
 
 /// One chunk produced by [`smart_chunk`].
@@ -111,6 +126,16 @@ impl SmartChunker {
     pub fn chunk(&self, markdown: &str) -> Vec<SmartChunk> {
         let mut chunks: Vec<SmartChunk> = Vec::new();
         let mut chunk_index: u32 = 0;
+        // Offsets are in the chunker's *normalised* source: the concatenation
+        // of the non-overlap bodies it emits. Block splitting trims each block,
+        // prose blocks are joined with "\n\n", tables repeat their header and
+        // the wall-of-text fallback rewrites separators, so these offsets only
+        // equal raw-markdown offsets when that normalisation is the identity.
+        let mut emitted_chars: u32 = 0;
+        // The overlap prepended to `current_chunk` by the last size flush.
+        // Tracked so the next chunk knows how much of its text repeats the
+        // previous one; `None` means a hard boundary reset it.
+        let mut pending_overlap: Option<String> = None;
 
         let mut blocks = Self::split_into_blocks(markdown, self.opts.preserve_code_blocks);
         let total_length = utf16_len(markdown);
@@ -148,6 +173,9 @@ impl SmartChunker {
             hierarchy_path: None,
             page_number: None,
             section: None,
+            char_start: 0,
+            char_end: 0,
+            overlap_prefix_len: 0,
         };
         let mut current_hierarchy: Vec<String> = Vec::new();
 
@@ -166,14 +194,17 @@ impl SmartChunker {
             // surrounding prose. Retrieval then treats these specially.
             if structure.chunk_type == "code" {
                 if utf16_len(current_chunk.trim()) > 0 {
-                    chunks.push(SmartChunk {
-                        chunk_index,
-                        metadata: current_metadata.clone(),
-                        text: current_chunk.trim().to_string(),
-                    });
-                    chunk_index += 1;
+                    Self::push_chunk(
+                        &mut chunks,
+                        &mut chunk_index,
+                        &mut emitted_chars,
+                        &current_metadata,
+                        current_chunk.trim().to_string(),
+                        pending_overlap.as_deref(),
+                    );
                     current_chunk.clear();
                 }
+                pending_overlap = None;
                 let meta = SmartChunkMetadata {
                     hierarchy_path: structure
                         .hierarchy_path
@@ -181,12 +212,14 @@ impl SmartChunker {
                         .or_else(|| Some(current_hierarchy.clone())),
                     ..structure.clone()
                 };
-                chunks.push(SmartChunk {
-                    chunk_index,
-                    metadata: meta,
-                    text: block.trim().to_string(),
-                });
-                chunk_index += 1;
+                Self::push_chunk(
+                    &mut chunks,
+                    &mut chunk_index,
+                    &mut emitted_chars,
+                    &meta,
+                    block.trim().to_string(),
+                    None,
+                );
                 continue;
             }
 
@@ -195,14 +228,17 @@ impl SmartChunker {
             // row, so a retrieved piece is readable on its own (`TBL-1`).
             if structure.chunk_type == "table" {
                 if utf16_len(current_chunk.trim()) > 0 {
-                    chunks.push(SmartChunk {
-                        chunk_index,
-                        metadata: current_metadata.clone(),
-                        text: current_chunk.trim().to_string(),
-                    });
-                    chunk_index += 1;
+                    Self::push_chunk(
+                        &mut chunks,
+                        &mut chunk_index,
+                        &mut emitted_chars,
+                        &current_metadata,
+                        current_chunk.trim().to_string(),
+                        pending_overlap.as_deref(),
+                    );
                     current_chunk.clear();
                 }
+                pending_overlap = None;
                 let meta = SmartChunkMetadata {
                     hierarchy_path: structure
                         .hierarchy_path
@@ -211,12 +247,18 @@ impl SmartChunker {
                     ..structure.clone()
                 };
                 for piece in Self::split_table(block, self.opts.max_chunk_size) {
-                    chunks.push(SmartChunk {
-                        chunk_index,
-                        metadata: meta.clone(),
-                        text: piece,
-                    });
-                    chunk_index += 1;
+                    // A split table repeats its header in every piece. That
+                    // repeated header is text the chunker inserts rather than
+                    // text from the markdown; it counts as part of the
+                    // normalised source, and there is no overlap to skip.
+                    Self::push_chunk(
+                        &mut chunks,
+                        &mut chunk_index,
+                        &mut emitted_chars,
+                        &meta,
+                        piece,
+                        None,
+                    );
                 }
                 continue;
             }
@@ -231,27 +273,35 @@ impl SmartChunker {
                     && utf16_len(&current_chunk) > 0);
 
             if should_flush {
-                chunks.push(SmartChunk {
-                    chunk_index,
-                    metadata: current_metadata.clone(),
-                    text: current_chunk.trim().to_string(),
-                });
-                chunk_index += 1;
+                Self::push_chunk(
+                    &mut chunks,
+                    &mut chunk_index,
+                    &mut emitted_chars,
+                    &current_metadata,
+                    current_chunk.trim().to_string(),
+                    pending_overlap.as_deref(),
+                );
                 current_chunk.clear();
+                pending_overlap = None;
             }
 
             // Size flush + overlap.
             if utf16_len(&current_chunk) + utf16_len(block) > self.opts.max_chunk_size as usize
                 && utf16_len(&current_chunk) > 0
             {
-                chunks.push(SmartChunk {
-                    chunk_index,
-                    metadata: current_metadata.clone(),
-                    text: current_chunk.trim().to_string(),
-                });
-                chunk_index += 1;
+                Self::push_chunk(
+                    &mut chunks,
+                    &mut chunk_index,
+                    &mut emitted_chars,
+                    &current_metadata,
+                    current_chunk.trim().to_string(),
+                    pending_overlap.as_deref(),
+                );
                 let overlap = Self::get_overlap(&current_chunk, self.opts.overlap_size);
-                current_chunk = overlap;
+                current_chunk = overlap.clone();
+                // Everything from here until the next hard boundary is a
+                // repeat of the tail of the chunk just emitted.
+                pending_overlap = Some(overlap);
             }
 
             // Append the block.
@@ -272,14 +322,77 @@ impl SmartChunker {
 
         // Flush remaining.
         if utf16_len(current_chunk.trim()) > 0 {
-            chunks.push(SmartChunk {
-                chunk_index,
-                metadata: current_metadata,
-                text: current_chunk.trim().to_string(),
-            });
+            Self::push_chunk(
+                &mut chunks,
+                &mut chunk_index,
+                &mut emitted_chars,
+                &current_metadata,
+                current_chunk.trim().to_string(),
+                pending_overlap.as_deref(),
+            );
         }
 
         chunks
+    }
+
+    /// Emit one chunk with its span in the normalised source. `overlap` is the
+    /// exact prefix that `get_overlap` put at the start of `current_chunk`; it
+    /// is used to measure how much of `text` repeats the previous chunk.
+    fn push_chunk(
+        chunks: &mut Vec<SmartChunk>,
+        chunk_index: &mut u32,
+        emitted_chars: &mut u32,
+        meta: &SmartChunkMetadata,
+        text: String,
+        overlap: Option<&str>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let prefix_len = Self::overlap_prefix_len(&text, overlap);
+        let text_chars = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
+        // `char_end - char_start` is the number of non-overlap chars, exactly
+        // what a future `text.chars().skip(overlap_prefix_len)` will emit.
+        let body_len = text_chars.saturating_sub(prefix_len);
+        chunks.push(SmartChunk {
+            chunk_index: *chunk_index,
+            metadata: SmartChunkMetadata {
+                char_start: *emitted_chars,
+                char_end: emitted_chars.saturating_add(body_len),
+                overlap_prefix_len: prefix_len,
+                ..meta.clone()
+            },
+            text,
+        });
+        *chunk_index = chunk_index.saturating_add(1);
+        *emitted_chars = emitted_chars.saturating_add(body_len);
+    }
+
+    /// Number of leading chars of `text` that are the `overlap` prefix.
+    /// `trim()` on flush can strip the overlap's leading or trailing
+    /// whitespace, so compare against the trimmed variants too.
+    fn overlap_prefix_len(text: &str, overlap: Option<&str>) -> u32 {
+        let Some(overlap) = overlap else {
+            return 0;
+        };
+        let count = |s: &str| u32::try_from(s.chars().count()).unwrap_or(u32::MAX);
+        if text.starts_with(overlap) {
+            return count(overlap);
+        }
+        let trimmed = overlap.trim();
+        if text.starts_with(trimmed) {
+            return count(trimmed);
+        }
+        let trimmed_start = overlap.trim_start();
+        if text.starts_with(trimmed_start) {
+            return count(trimmed_start);
+        }
+        // When the overlap budget covers the whole preceding chunk, the
+        // emitted text can be nothing but overlap: no new chars at all.
+        if trimmed.starts_with(text) {
+            return count(text);
+        }
+        0
     }
 
     fn detect_structure(block: &str) -> SmartChunkMetadata {
@@ -290,6 +403,9 @@ impl SmartChunker {
             hierarchy_path: None,
             page_number: None,
             section: None,
+            char_start: 0,
+            char_end: 0,
+            overlap_prefix_len: 0,
         };
 
         if let Some(caps) = HEADING_LINE.captures(block).ok().flatten() {
@@ -556,4 +672,260 @@ impl SmartChunker {
 #[must_use]
 pub fn smart_chunk(markdown: &str, options: SmartChunkingOptions) -> Vec<SmartChunk> {
     SmartChunker::new(options).chunk(markdown)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn options() -> SmartChunkingOptions {
+        // Deliberately small so the overlap path really runs in the tests.
+        SmartChunkingOptions {
+            max_chunk_size: Some(64),
+            overlap_size: Some(16),
+            ..SmartChunkingOptions::default()
+        }
+    }
+
+    fn fixtures() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "plain paragraphs longer than the chunk size",
+                "Alpha paragraph repeats its message so that it is longer than \
+                 sixty-four characters and must be split into several pieces. \
+                 Beta paragraph also repeats its own message until it is longer \
+                 than the configured maximum chunk size. Gamma paragraph closes \
+                 this document with yet more prose to chunk.",
+            ),
+            (
+                "headings",
+                "# Laporan Keuangan\n\nPendahuluan laporan ini berisi penjelasan \
+                 panjang tentang pendapatan dan pengeluaran perusahaan selama \
+                 tahun yang lalu, supaya pengujian melihat pemotongan.\n\nHasil \
+                 akhir dari laporan ini dirangkum kembali dalam beberapa \
+                 paragraf tambahan yang sengaja dibuat panjang.",
+            ),
+            (
+                "nested headings",
+                "# Bab I\n\n## Pasal 1\n\nSetiap orang yang membaca bab ini akan \
+                 menemukan penjelasan panjang mengenai ketentuan yang berlaku \
+                 di dalam pasal ini dan pasal lainnya.\n\n## Pasal 2\n\nKetentuan \
+                 berikutnya dijelaskan di sini dengan kalimat-kalimat yang cukup \
+                 panjang untuk memicu pemotongan dan overlap.",
+            ),
+            (
+                "markdown table",
+                "| No | Nama | Nilai |\n| --- | --- | --- |\n\
+                 | 1 | Alpha | 10 |\n| 2 | Beta | 20 |\n| 3 | Gamma | 30 |\n\
+                 | 4 | Delta | 40 |\n| 5 | Epsilon | 50 |\n| 6 | Zeta | 60 |\n\
+                 | 7 | Eta | 70 |\n\nPenjelasan setelah tabel ini sengaja \
+                 dibuat cukup panjang untuk menghasilkan lebih dari satu chunk.",
+            ),
+            (
+                "fenced code block",
+                "```rust\nlet mut total = 0;\nfor value in [10, 20, 30] {\n    \
+                 total += value;\n}\nprintln!(\"total = {total}\");\n```\n\nTeks \
+                 setelah blok kode ini juga panjang agar chunker memotongnya \
+                 menjadi beberapa bagian dengan overlap yang terukur.",
+            ),
+            (
+                "Indonesian law text",
+                "BAB I\nKETENTUAN UMUM\n\nPasal 1\nDalam peraturan ini yang \
+                 dimaksud dengan pelapor adalah orang atau badan yang menyampaikan \
+                 laporan berkala kepada otoritas sesuai ketentuan peraturan ini.\n\n\
+                 Pasal 2\nSetiap pelapor wajib memastikan bahwa seluruh data \
+                 yang disampaikan benar, lengkap, dan dapat dipertanggungjawabkan \
+                 sesuai dengan ketentuan yang berlaku.",
+            ),
+            (
+                "multibyte characters",
+                "Café naïve über Größen — émoji 🚀✨ dan 日本語のテキスト.\n\n\
+                 Ünicode characters count as one char each, even though they \
+                 occupy several bytes or two UTF-16 units; café, naïve, and \
+                 over Größen must all keep their exact positions here.\n\n🚀 \
+                 Last paragraph with more emojis 😀🎉 to exercise offsets.",
+            ),
+            ("document shorter than one chunk", "Dokumen pendek."),
+            (
+                "wall of text split by sentences",
+                "First sentence is reasonably long. Second sentence adds more \
+                 detail to the wall of text. Third sentence keeps going with \
+                 additional clarification. Fourth sentence is here as well. \
+                 Fifth sentence finally closes this oversized single block.",
+            ),
+        ]
+    }
+
+    /// Reference text for the invariant: the chunker's **own normalised
+    /// source**, not the raw markdown. It mirrors the chunker's block pipeline
+    /// (block split + trim, `"\n\n"` between prose blocks, hard flushes at
+    /// headings/sections/code/tables, repeated table headers and the
+    /// wall-of-text sentence split) but omits overlap. Exceptions to using the
+    /// raw input as reference: the chunker trims each block and the assembled
+    /// chunk, drops blank-line separators, inserts `"\n\n"` between prose
+    /// blocks, repeats a table header in every split piece, and rewrites
+    /// separators in the wall-of-text fallback. Offsets likewise address this
+    /// normalised source, which equals the received markdown only when that
+    /// normalisation is the identity.
+    fn normalised_source(markdown: &str, opts: ResolvedOptions) -> String {
+        let mut blocks = SmartChunker::split_into_blocks(markdown, opts.preserve_code_blocks);
+        let total = utf16_len(markdown);
+        let avg = if blocks.is_empty() {
+            total
+        } else {
+            total / blocks.len()
+        };
+        if avg > (opts.max_chunk_size * 2) as usize && total > opts.max_chunk_size as usize {
+            blocks = blocks
+                .into_iter()
+                .flat_map(|b| {
+                    let t = SmartChunker::detect_structure(&b).chunk_type;
+                    if t == "table" || t == "code" {
+                        vec![b]
+                    } else if utf16_len(&b) > (opts.max_chunk_size * 2) as usize {
+                        SmartChunker::split_by_sentences(&b, opts.max_chunk_size)
+                    } else {
+                        vec![b]
+                    }
+                })
+                .collect();
+        }
+
+        let mut out = String::new();
+        let mut current = String::new();
+        let mut current_section: Option<String> = None;
+        let mut pending_overlap: Option<String> = None;
+        // The overlap at the start of `current` repeats the tail of the chunk
+        // just emitted; skip it, exactly as the reader skips it in a real
+        // chunk, or the reference would double it.
+        let emit = |out: &mut String, text: &str, overlap: Option<&str>| {
+            let prefix = SmartChunker::overlap_prefix_len(text, overlap);
+            out.extend(text.chars().skip(prefix as usize));
+        };
+        for block in &blocks {
+            let structure = SmartChunker::detect_structure(block);
+            if structure.chunk_type == "code" || structure.chunk_type == "table" {
+                if !current.trim().is_empty() {
+                    emit(&mut out, current.trim(), pending_overlap.as_deref());
+                    current.clear();
+                }
+                pending_overlap = None;
+                if structure.chunk_type == "table" {
+                    for piece in SmartChunker::split_table(block, opts.max_chunk_size) {
+                        out.push_str(&piece);
+                    }
+                } else {
+                    out.push_str(block.trim());
+                }
+                continue;
+            }
+            let should_flush = (opts.respect_heading_boundaries
+                && structure.chunk_type == "heading"
+                && utf16_len(&current) > 0)
+                || (opts.respect_section_boundaries
+                    && structure.section.is_some()
+                    && structure.section != current_section
+                    && utf16_len(&current) > 0);
+            if should_flush {
+                emit(&mut out, current.trim(), pending_overlap.as_deref());
+                current.clear();
+                pending_overlap = None;
+            }
+            if utf16_len(&current) + utf16_len(block) > opts.max_chunk_size as usize
+                && utf16_len(&current) > 0
+            {
+                emit(&mut out, current.trim(), pending_overlap.as_deref());
+                let overlap = SmartChunker::get_overlap(&current, opts.overlap_size);
+                current = overlap.clone();
+                pending_overlap = Some(overlap);
+            }
+            if current.is_empty() {
+                current.push_str(block);
+            } else {
+                current.push_str("\n\n");
+                current.push_str(block);
+            }
+            current_section = structure.section;
+        }
+        if !current.trim().is_empty() {
+            emit(&mut out, current.trim(), pending_overlap.as_deref());
+        }
+        out
+    }
+
+    #[test]
+    fn spans_reconstruct_the_normalised_source_without_duplicated_overlap() {
+        let opts = options();
+        let resolved = ResolvedOptions::from_options(opts);
+        let mut saw_overlap = false;
+
+        for (name, markdown) in fixtures() {
+            let chunks = smart_chunk(markdown, opts);
+            assert!(!chunks.is_empty(), "{name} produced no chunks");
+
+            let reconstructed: String = chunks
+                .iter()
+                .flat_map(|c| c.text.chars().skip(c.metadata.overlap_prefix_len as usize))
+                .collect();
+            let expected = normalised_source(markdown, resolved);
+            assert_eq!(reconstructed, expected, "fixture: {name}");
+
+            let mut cursor = 0usize;
+            for (i, chunk) in chunks.iter().enumerate() {
+                assert_eq!(chunk.chunk_index, i as u32, "fixture: {name}");
+                let prefix = chunk.metadata.overlap_prefix_len as usize;
+                let body: String = chunk.text.chars().skip(prefix).collect();
+                assert_eq!(
+                    chunk.metadata.char_start as usize, cursor,
+                    "fixture: {name}, chunk {i}: spans must be contiguous"
+                );
+                assert_eq!(
+                    chunk.metadata.char_end - chunk.metadata.char_start,
+                    u32::try_from(body.chars().count()).unwrap_or(u32::MAX),
+                    "fixture: {name}, chunk {i}: span must cover non-overlap chars"
+                );
+                cursor = chunk.metadata.char_end as usize;
+                if prefix > 0 {
+                    saw_overlap = true;
+                    let repeated: String = chunk.text.chars().take(prefix).collect();
+                    assert!(
+                        chunks[i - 1].text.ends_with(&repeated),
+                        "fixture: {name}, chunk {i}: overlap must repeat the previous tail"
+                    );
+                }
+            }
+            assert_eq!(
+                cursor,
+                expected.chars().count(),
+                "fixture: {name}: spans must cover the whole normalised source"
+            );
+        }
+        assert!(saw_overlap, "fixture options must actually produce overlap");
+    }
+
+    #[test]
+    fn spans_count_characters_not_bytes_or_utf16_units() {
+        let markdown = "Café ü 🚀 — petite.";
+        let chunks = smart_chunk(markdown, options());
+        assert_eq!(chunks.len(), 1);
+        let meta = &chunks[0].metadata;
+        assert_eq!(meta.overlap_prefix_len, 0);
+        assert_eq!(meta.char_start, 0);
+        assert_eq!(
+            meta.char_end,
+            u32::try_from(markdown.chars().count()).unwrap_or(u32::MAX)
+        );
+        assert!(meta.char_end as usize <= markdown.len());
+        assert!(meta.char_end as usize <= utf16_len(markdown));
+    }
+
+    #[test]
+    fn a_short_document_has_no_overlap() {
+        let chunks = smart_chunk("Dokumen pendek.", options());
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].metadata.overlap_prefix_len, 0);
+        assert_eq!(chunks[0].metadata.char_start, 0);
+        assert_eq!(chunks[0].metadata.char_end, 15);
+    }
 }
