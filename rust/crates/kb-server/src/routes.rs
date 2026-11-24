@@ -23,10 +23,12 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
+use kb_core::outline::{OutlineChunk, build_outline};
 use kb_core::policy::MimeRegistry;
 use kb_engine::timing::{Stopwatch, SystemClock};
 use kb_ports::{
-    AuthContext, DocumentFilter, DocumentId, KnowledgeBaseId, MetadataFilter, ScopeRequest,
+    AuthContext, DocumentFilter, DocumentId, DocumentMeta, DocumentScope, KnowledgeBaseId,
+    MetadataFilter, ScopeRequest, UnitRange,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -567,6 +569,29 @@ pub async fn search(
     let metadata_filter = parse_metadata_filter(body.metadata.as_ref())?;
     let boost = parse_boost(body.boost.as_ref())?;
 
+    // RET-15: both forms name one part of one document. Validate before any
+    // arm runs, so a bad request never spends top-k and never gets an empty
+    // answer that looks like a legitimate "no matches".
+    if body.page_range.is_some() && body.section.is_some() {
+        return Err(ApiError::BadRequest(
+            "pageRange and section cannot be used together".to_string(),
+        ));
+    }
+    if let Some(range) = body.page_range.as_ref()
+        && range.start > range.end
+    {
+        return Err(ApiError::BadRequest(
+            "pageRange.start must be <= pageRange.end".to_string(),
+        ));
+    }
+    if (body.page_range.is_some() || body.section.is_some())
+        && body.document_ids.as_ref().is_none_or(|ids| ids.len() != 1)
+    {
+        return Err(ApiError::BadRequest(
+            "pageRange/section need exactly one documentIds entry".to_string(),
+        ));
+    }
+
     // A key bound to specific knowledge bases that asks for none of them gets
     // an explicit note rather than an empty result: "no results" and "you may
     // not see these" are different answers for a client.
@@ -629,7 +654,20 @@ pub async fn search(
             })
             .await
             .map_err(ApiError::from)?;
-        let scope = filtered_scope.narrowed_to(&requested);
+        let mut scope = filtered_scope.narrowed_to(&requested);
+        // RET-15: the range lives on the scope, so every arm inherits it from
+        // the same object that carries the tenant and document visibility.
+        if scope.document_ids().len() == 1 {
+            if let Some(range) = body.page_range.as_ref() {
+                scope = scope.with_unit_range(UnitRange {
+                    pages: Some((range.start, range.end)),
+                    chunks: None,
+                });
+            } else if let Some(section) = body.section.as_ref() {
+                let range = resolve_section_range(&state, &scope, &alive, section).await?;
+                scope = scope.with_unit_range(range);
+            }
+        }
         let scope_build_ms = scope_sw.elapsed_ms();
         // RET-11: the narrowed scope is the security-relevant part of this
         // branch. Once it is built, the search is the same one Branch 3 runs —
@@ -705,6 +743,52 @@ pub async fn search(
         route_sw,
     })
     .await
+}
+
+/// Resolve a `section` id to the chunk (and page) range of the outline v2 that
+/// `/v1/documents/:id/structure` serves. The same scoped, vector-free chunk
+/// read is used, so a document outside the caller's scope contributes nothing.
+async fn resolve_section_range(
+    state: &AppState,
+    scope: &DocumentScope,
+    alive: &[DocumentMeta],
+    requested: &str,
+) -> Result<UnitRange, ApiError> {
+    let Some(doc) = alive.first() else {
+        return Err(ApiError::BadRequest(format!(
+            "unknown section id: {requested}"
+        )));
+    };
+    let chunk_meta = state
+        .index
+        .list_chunk_meta(scope, &doc.id)
+        .await
+        .map_err(ApiError::from)?;
+    let chunks: Vec<OutlineChunk> = chunk_meta
+        .into_iter()
+        .map(|meta| OutlineChunk {
+            chunk_index: meta.chunk_index,
+            page: meta.page,
+            section: meta.section,
+            content: meta.content,
+            char_start: meta.char_start,
+            char_end: meta.char_end,
+            overlap_prefix_len: meta.overlap_prefix_len,
+        })
+        .collect();
+    let stored = doc
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("outline"))
+        .and_then(|value| serde_json::from_value::<kb_core::Outline>(value.clone()).ok());
+    let section = build_outline(&chunks, stored.as_ref())
+        .into_iter()
+        .find(|section| section.id == requested)
+        .ok_or_else(|| ApiError::BadRequest(format!("unknown section id: {requested}")))?;
+    Ok(UnitRange {
+        pages: section.page_start.zip(section.page_end),
+        chunks: Some((section.chunk_start, section.chunk_end)),
+    })
 }
 
 /// The inputs the two search branches share once their scope is resolved.

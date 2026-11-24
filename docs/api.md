@@ -37,13 +37,27 @@ because the contract has to be readable before the caller has one.
 `tablePrivacy` — `open` (default) or `aggregate-only`.
 
 **Search options** (JSON): `query` (required), `maxChunks`, `knowledgeBaseIds`,
-`documentIds`, `category`, `hybrid`, `format`, `minScore`.
+`documentIds`, `category`, `hybrid`, `format`, `minScore`, `pageRange`, `section`.
 
 `documentIds` restricts a search to the named documents using the full pipeline — BM25,
 reranker, page/tree/neighbour and figure arms all run — inside the caller's visible scope. It
 only narrows that scope: a document from another tenant or outside the key's knowledge bases
 is never searched. Such an answer carries `sources` and `context` in the standard format, just
 like any other search.
+
+`pageRange: {start, end}` (inclusive, 0-based pages) and `section: "s3"` narrow the search to
+one part of a document. Both are additive and require **exactly one** `documentIds` entry;
+they cannot be combined. `pageRange.start > pageRange.end` and an unknown section id are
+`400`s. A section id comes from `GET /v1/documents/:id/structure` (`sections[].id`) and resolves
+to that section's chunk range (and its page range for the page arm). The restriction is applied
+inside the index query — an integer range on `page` / `chunkIndex`, backed by the ING-13
+payload indexes — so dense, BM25, page-image, figure, neighbour and tree arms cannot return a
+unit outside the part, and top-k is never spent on one.
+
+```json
+POST /v1/search
+{"query": "berlaku 12 hari", "documentIds": ["doc-42"], "pageRange": {"start": 12, "end": 15}}
+```
 
 `chunks[].content`, `documentTitle`, `page` and `similarity` carry the results; `degrades`
 is non-empty when an arm failed, because a failed arm is reported rather than silently

@@ -44,6 +44,7 @@ use crate::config::{
 };
 use crate::error::{ApiError, ErrorBody};
 use crate::openapi::{SecurityAddon, VersionAddon};
+use crate::routes::structure::SectionDto;
 use crate::routes::upload::is_accepted_extension;
 use crate::routes::{
     FormatsResponse, RouteSpec, cors, max_file_bytes, payload_too_large_message, upload_body_limit,
@@ -911,6 +912,21 @@ pub struct ProcessedChunkSchema {
     pub table_index: Option<u32>,
     pub embedding: Option<Vec<f32>>,
     pub sparse_vector: Option<SparseVectorSchema>,
+    /// Character span in the chunker's normalised source; absent when the
+    /// chunk carries no span.
+    pub char_start: Option<u32>,
+    pub char_end: Option<u32>,
+    pub overlap_prefix_len: Option<u32>,
+}
+
+/// One page's change-detection digest in the `POST /v1/process` response.
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessedPageSchema {
+    /// Zero-based page index, matching `pageMap[].page`.
+    pub page: u32,
+    /// Lowercase hex SHA-256 of `pageMap[].text` (UTF-8 bytes).
+    pub page_sha256: String,
 }
 
 /// Processed figure schema for OpenAPI documentation.
@@ -937,6 +953,12 @@ pub struct ProcessResponseSchema {
     pub content: String,
     #[schema(value_type = Vec<Object>)]
     pub page_map: Vec<serde_json::Value>,
+    /// Outline v2 version, always `2`.
+    pub outline_version: u32,
+    /// Reuses the `/v1/documents/:id/structure` section schema verbatim.
+    pub sections: Vec<SectionDto>,
+    /// Per-page digests for cheap change detection.
+    pub pages: Vec<ProcessedPageSchema>,
     #[schema(value_type = Option<Object>)]
     pub outline: Option<serde_json::Value>,
     #[schema(value_type = Option<Object>)]

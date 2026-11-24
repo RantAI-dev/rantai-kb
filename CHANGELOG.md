@@ -63,12 +63,26 @@
   use range filters instead of scanning. Index creation is idempotent on an existing collection.
 - Old chunks get spans on `kb-server reindex` (rebuild from the originals); no store migration is
   needed.
+- **Progressive-disclosure parity in stateless `/v1/process` (`ING-14`).** The response additively
+  carries `outlineVersion: 2` and `sections[]` built by the same `kb-core` outline v2 builder as
+  `/structure`, per-chunk `charStart` / `charEnd` / `overlapPrefixLen` (absent, not zero, when a
+  chunk has no span), and `pages[]` with a lowercase hex `pageSha256` of each page's returned
+  `pageMap[].text` (UTF-8 bytes) for cheap change detection. No existing field changed; the
+  stateless integration guide now documents the Qdrant integer-index payload recipe, the
+  client-side stitching rule and the per-page re-process loop.
 - **Outline v2 on `GET /v1/documents/:id/structure` (`RET-13`).** The response additively carries
   `outlineVersion: 2`, `sections` (each with an id, title, level, path, page/chunk ranges and a
   detected marker), document-level `estimatedChars` and `hasSpans`. Section sources are the stored
   outline, chunk headings, Indonesian legal markers (`BAB` / `Bagian` / `Pasal` / `Paragraf`) and
   a per-page fallback. A new scoped, vector-free `RetrievalIndex::list_chunk_meta` port method
   backs this and the upcoming content route. No existing response field changed.
+- **Search inside part of a document (`RET-15`).** `POST /v1/search` additively accepts
+  `pageRange: {start, end}` (inclusive) and `section: "s3"`. Each requires exactly one
+  `documentIds` entry, and the two cannot be combined. The range is carried on the tenant- and
+  document-scoped `DocumentScope` and applied as an integer range condition inside every index
+  query — dense, BM25, page-image, figure, neighbour and tree — so no arm spends top-k on, or
+  returns, a unit outside the part. A section resolves through the outline v2 from
+  `list_chunk_meta` + `build_outline`; an unknown section id is a `400`.
 
 ## 0.8.0 — 2026-11-23
 

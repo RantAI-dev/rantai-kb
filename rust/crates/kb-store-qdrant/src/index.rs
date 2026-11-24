@@ -659,8 +659,7 @@ impl RetrievalIndex for QdrantIndex {
         let min_idx = *adjacent.iter().min().unwrap_or(&0);
         let max_idx = *adjacent.iter().max().unwrap_or(&0);
 
-        let filter =
-            crate::payload::chunk_range_filter(scope.tenant(), document_id, min_idx, max_idx);
+        let filter = crate::payload::chunk_range_filter(scope, document_id, min_idx, max_idx);
 
         let limit = (max_idx - min_idx + 1).max(1);
         let response = self
@@ -699,7 +698,7 @@ impl RetrievalIndex for QdrantIndex {
         if matching_docs.is_empty() {
             return Ok(Vec::new());
         }
-        let filter = crate::payload::figures_filter(scope.tenant(), &matching_docs);
+        let filter = crate::payload::figures_filter(scope, &matching_docs);
         let response = self
             .client
             .scroll(
@@ -745,7 +744,7 @@ impl RetrievalIndex for QdrantIndex {
         for (document, mut wanted) in by_document {
             wanted.sort_unstable();
             wanted.dedup();
-            let filter = crate::payload::pages_filter(scope.tenant(), document, &wanted);
+            let filter = crate::payload::pages_filter(scope, document, &wanted);
             // The cap is a safety valve, not the contract: keep scrolling until
             // every page has `per_page` units, the server has no more matches,
             // or the read cap is reached. A page with more chunks than
