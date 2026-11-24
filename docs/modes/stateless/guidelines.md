@@ -200,13 +200,18 @@ join with a blank line instead of guessing an overlap. Read chunks in
 `chunkIndex` order:
 
 ```python
-def stitch(chunks):
+def stitch(chunks, from_document_start=True):
     out = []
     for i, chunk in enumerate(chunks):
         text = chunk["content"]
         overlap = chunk.get("overlapPrefixLen")
         if i == 0:
-            out.append(text)                       # first chunk: full text
+            # A window that starts mid-document (a section, a page range)
+            # drops the first chunk's overlap: it repeats a chunk outside
+            # the window.
+            if not from_document_start and overlap:
+                text = "".join(list(text)[overlap:])
+            out.append(text)
         elif overlap is not None and overlap > 0:
             out.append("".join(list(text)[overlap:]))  # skip repeated prefix
         else:
@@ -216,7 +221,8 @@ def stitch(chunks):
 
 This is the same rule as `GET /v1/documents/:id/content`: a section from
 `sections[]` is the inclusive chunk range `chunkStart..chunkEnd`, so
-`/content`-equivalent text is `stitch(chunks[chunkStart:chunkEnd + 1])`.
+`/content`-equivalent text is
+`stitch(chunks[chunkStart:chunkEnd + 1], from_document_start=(chunkStart == 0))`.
 
 ### Cheap change detection with `pageSha256`
 
