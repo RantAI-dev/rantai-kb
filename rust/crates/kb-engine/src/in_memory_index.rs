@@ -341,6 +341,12 @@ impl RetrievalIndex for InMemoryIndex {
                     char_start: span("charStart"),
                     char_end: span("charEnd"),
                     overlap_prefix_len: span("overlapPrefixLen"),
+                    chunk_type: unit.chunk_type,
+                    asset_key: unit
+                        .metadata
+                        .get("assetKey")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
                 }
             })
             .collect();
