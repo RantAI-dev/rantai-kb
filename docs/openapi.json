@@ -2748,7 +2748,11 @@
           "pages",
           "figures",
           "chunks",
-          "truncated"
+          "truncated",
+          "outlineVersion",
+          "sections",
+          "estimatedChars",
+          "hasSpans"
         ],
         "properties": {
           "chunks": {
@@ -2761,6 +2765,12 @@
           "documentId": {
             "type": "string",
             "description": "The document's id."
+          },
+          "estimatedChars": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The document's estimated character count, from chunk spans when all\nchunks have them and from the chunks' own text otherwise.",
+            "minimum": 0
           },
           "externalRef": {
             "type": [
@@ -2776,12 +2786,29 @@
             },
             "description": "The document's figures."
           },
+          "hasSpans": {
+            "type": "boolean",
+            "description": "True only when every listed chunk carries a complete span."
+          },
+          "outlineVersion": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Outline v2. Additive: the older fields above are unchanged.",
+            "minimum": 0
+          },
           "pages": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/PageStructure"
             },
             "description": "The document's pages, by page number."
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SectionDto"
+            },
+            "description": "A navigable table of contents with chunk and page ranges. Empty for an\nempty document."
           },
           "title": {
             "type": "string",
@@ -4323,6 +4350,83 @@
           "vectorSearchTimeMs": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "SectionDto": {
+        "type": "object",
+        "description": "One section of the outline v2, mapping to a contiguous chunk range.",
+        "required": [
+          "id",
+          "title",
+          "level",
+          "path",
+          "chunkStart",
+          "chunkEnd",
+          "estimatedChars",
+          "marker"
+        ],
+        "properties": {
+          "chunkEnd": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Last chunk index (inclusive).",
+            "minimum": 0
+          },
+          "chunkStart": {
+            "type": "integer",
+            "format": "int32",
+            "description": "First chunk index (inclusive).",
+            "minimum": 0
+          },
+          "estimatedChars": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Estimated non-overlap characters in the section.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable section id within this document (`s1`, `s2`, …), used by the\ncontent route's `?section=` parameter."
+          },
+          "level": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1 for a chapter/top-level heading, deeper for nested markers.",
+            "minimum": 0
+          },
+          "marker": {
+            "type": "string",
+            "description": "What produced the boundary: `bab`, `bagian`, `pasal`, `paragraf`,\n`heading` or `page`."
+          },
+          "pageEnd": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Last page of the section, or null when its chunks have no page.",
+            "minimum": 0
+          },
+          "pageStart": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "First page of the section, or null when its chunks have no page.",
+            "minimum": 0
+          },
+          "path": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ancestor titles from the top-level BAB down to this section."
+          },
+          "title": {
+            "type": "string",
+            "description": "The heading as printed, or the detected legal marker."
           }
         }
       },

@@ -86,6 +86,41 @@ them, never a guess. The read is capped at 20,000 chunks and 2,000 pages and set
 `truncated` when either cap is reached. Like every by-ID route it enforces the tenant and
 the key's knowledge-base limit.
 
+### Outline v2 (additive)
+
+The same response also carries a table of contents, built by `kb-core` from the document's
+chunks. These fields are additive: no field above changed.
+
+- `outlineVersion: 2`.
+- `sections`: an ordered list of `{id, title, level, path, pageStart, pageEnd, chunkStart,
+  chunkEnd, estimatedChars, marker}`. `id` is stable within the document (`s1`, `s2`, …)
+  and is what the content route's `?section=` parameter uses. Chunk ranges are inclusive;
+  page ranges are `null` when the chunks carry no page. `marker` is one of `bab`, `bagian`,
+  `pasal`, `paragraf`, `heading`, `page`.
+- `estimatedChars`, `hasSpans`: document-level estimates. `hasSpans` is `true` only when
+  every chunk carries a complete character span; old chunks answer `false`.
+
+Section sources are tried in order: the stored PDF outline, headings in chunk metadata,
+Indonesian legal markers (`BAB`, `Bagian`, `Pasal`, `Paragraf`) at the start of lines, and
+finally one section per page. An agent can read `sections` first, then request exactly one
+section's chunk range from `/content`.
+
+```json
+{
+  "outlineVersion": 2,
+  "sections": [
+    {"id": "s1", "title": "BAB I KETENTUAN UMUM", "level": 1,
+     "path": ["BAB I KETENTUAN UMUM"], "pageStart": 0, "pageEnd": 0,
+     "chunkStart": 0, "chunkEnd": 0, "estimatedChars": 100, "marker": "bab"},
+    {"id": "s3", "title": "Pasal 2", "level": 4,
+     "path": ["BAB I KETENTUAN UMUM", "Pasal 2"], "pageStart": 0, "pageEnd": 0,
+     "chunkStart": 1, "chunkEnd": 1, "estimatedChars": 100, "marker": "pasal"}
+  ],
+  "estimatedChars": 450,
+  "hasSpans": true
+}
+```
+
 ## Keys
 
 `rantai-kb key <tenant>` (or `kb-dev.sh key`) mints an unrestricted key. For anything

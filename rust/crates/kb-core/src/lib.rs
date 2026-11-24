@@ -14,6 +14,7 @@ pub mod furniture;
 mod fusion;
 pub mod graph;
 pub mod intelligence;
+pub mod outline;
 pub mod page_fusion;
 pub mod page_map;
 pub mod pagination;

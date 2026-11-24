@@ -30,7 +30,7 @@ fn next_id() -> u64 {
 
 use kb_ports::{
     ArmRanks, ArmScores, AuthContext, BlobStore, Candidate, CategoryRecord, Chunk, ChunkId,
-    ChunkMetadata, ChunkStore, ChunkToStore, ChunkType, CreateCategory, CreateJobInput,
+    ChunkMeta, ChunkMetadata, ChunkStore, ChunkToStore, ChunkType, CreateCategory, CreateJobInput,
     CreateKnowledgeBase, DocumentDownloadMeta, DocumentId, DocumentIntelligenceData, DocumentMeta,
     DocumentPage, DocumentScope, DocumentStore, Embedder, Entity, EntityExtractor, EntityStore,
     ExtractionOptions, ExtractionResult, Extractor, FigureGate, FigureGateCandidate, Fusion,
@@ -1393,6 +1393,46 @@ impl RetrievalIndex for FakeChunkStore {
             })
             .collect();
         out.sort_by_key(|c| c.chunk_index);
+        Ok(out)
+    }
+
+    async fn list_chunk_meta(
+        &self,
+        scope: &DocumentScope,
+        document: &DocumentId,
+    ) -> Result<Vec<ChunkMeta>, PortError> {
+        if !scope.document_ids().contains(document) {
+            return Ok(Vec::new());
+        }
+        let stored = self.stored_chunks.read().unwrap();
+        let mut out: Vec<ChunkMeta> = stored
+            .get(document)
+            .map(|chunks| {
+                chunks
+                    .iter()
+                    .map(|chunk| {
+                        let span = |key: &str| {
+                            chunk
+                                .metadata
+                                .get(key)
+                                .and_then(serde_json::Value::as_u64)
+                                .and_then(|value| u32::try_from(value).ok())
+                        };
+                        let meta = stored_chunk_metadata(&chunk.metadata);
+                        ChunkMeta {
+                            chunk_index: meta.chunk_index.unwrap_or(chunk.chunk_index),
+                            page: meta.page,
+                            section: meta.section,
+                            content: chunk.content.clone(),
+                            char_start: span("charStart"),
+                            char_end: span("charEnd"),
+                            overlap_prefix_len: span("overlapPrefixLen"),
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort_by_key(|meta| meta.chunk_index);
         Ok(out)
     }
 

@@ -7,7 +7,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use kb_ports::Fusion as PortFusion;
 use kb_ports::{
-    ArmRanks, ArmScores, Candidate, ChunkId, DocumentId, DocumentScope, HybridQuery,
+    ArmRanks, ArmScores, Candidate, ChunkId, ChunkMeta, DocumentId, DocumentScope, HybridQuery,
     IndexCapabilities, IndexUnit, KeywordSemantics, PortError, RetrievalIndex, TenantId,
     sort_candidates,
 };
@@ -19,7 +19,7 @@ use qdrant_client::qdrant::{
 };
 
 use crate::ids::point_id;
-use crate::payload::{candidate_from, unit_payload};
+use crate::payload::{candidate_from, chunk_meta_from_payload, unit_payload};
 use crate::settings::{DENSE_VECTOR, QdrantSettings, SPARSE_VECTOR, map};
 
 /// Points below which the dense arm scans exactly instead of walking the HNSW
@@ -879,6 +879,47 @@ impl RetrievalIndex for QdrantIndex {
         }
         out.truncate(max_units);
         out.sort_by_key(|c| c.chunk_index);
+        Ok(out)
+    }
+
+    async fn list_chunk_meta(
+        &self,
+        scope: &DocumentScope,
+        document: &DocumentId,
+    ) -> Result<Vec<ChunkMeta>, PortError> {
+        // The caller checked visibility; repeat the scope test here so a
+        // document outside the caller's visible set is never read, even if a
+        // future caller forgets.
+        if !scope.document_ids().contains(document) {
+            return Ok(Vec::new());
+        }
+        let filter = crate::payload::one_document_filter(scope.tenant(), document);
+        let mut out: Vec<ChunkMeta> = Vec::new();
+        let mut offset: Option<PointId> = None;
+        loop {
+            let mut builder = ScrollPointsBuilder::new(&self.collection)
+                .filter(filter.clone())
+                .limit(DOCUMENT_SCROLL_WINDOW)
+                .with_payload(true)
+                .with_vectors(false);
+            if let Some(next) = offset.take() {
+                builder = builder.offset(next);
+            }
+            let response = self.client.scroll(builder).await.map_err(map)?;
+            if response.result.is_empty() {
+                break;
+            }
+            for point in response.result {
+                if let Some(meta) = chunk_meta_from_payload(&point.payload) {
+                    out.push(meta);
+                }
+            }
+            match response.next_page_offset {
+                Some(next) => offset = Some(next),
+                None => break,
+            }
+        }
+        out.sort_by_key(|meta| meta.chunk_index);
         Ok(out)
     }
 

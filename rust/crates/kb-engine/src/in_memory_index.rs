@@ -26,9 +26,9 @@ use std::sync::{Arc, RwLock};
 use async_trait::async_trait;
 use kb_core::sparse::{BM25_K1, SparseVector};
 use kb_ports::{
-    ArmRanks, ArmScores, Candidate, ChunkId, DocumentId, DocumentScope, Fusion, HybridQuery,
-    IndexCapabilities, IndexUnit, KeywordQuery, KeywordSemantics, PortError, RetrievalIndex,
-    TenantId, sort_candidates,
+    ArmRanks, ArmScores, Candidate, ChunkId, ChunkMeta, DocumentId, DocumentScope, Fusion,
+    HybridQuery, IndexCapabilities, IndexUnit, KeywordQuery, KeywordSemantics, PortError,
+    RetrievalIndex, TenantId, sort_candidates,
 };
 
 /// One stored unit plus everything an arm needs to score it.
@@ -304,6 +304,47 @@ impl RetrievalIndex for InMemoryIndex {
             .map(|s| candidate_of(&s.unit, (ArmScores::default(), ArmRanks::default())))
             .collect();
         out.sort_by_key(|c| c.chunk_index);
+        Ok(out)
+    }
+
+    async fn list_chunk_meta(
+        &self,
+        scope: &DocumentScope,
+        document: &DocumentId,
+    ) -> Result<Vec<ChunkMeta>, PortError> {
+        if !scope.document_ids().contains(document) {
+            return Ok(Vec::new());
+        }
+        let guard = self.read();
+        let mut out: Vec<ChunkMeta> = guard
+            .values()
+            .filter(|stored| {
+                stored.unit.tenant == *scope.tenant() && stored.unit.document_id == *document
+            })
+            .map(|stored| {
+                let unit = &stored.unit;
+                let span = |key: &str| {
+                    unit.metadata
+                        .get(key)
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                };
+                ChunkMeta {
+                    chunk_index: unit.chunk_index,
+                    page: unit.page,
+                    section: unit
+                        .metadata
+                        .get("section")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                    content: unit.content.clone(),
+                    char_start: span("charStart"),
+                    char_end: span("charEnd"),
+                    overlap_prefix_len: span("overlapPrefixLen"),
+                }
+            })
+            .collect();
+        out.sort_by_key(|meta| meta.chunk_index);
         Ok(out)
     }
 

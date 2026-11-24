@@ -182,6 +182,47 @@ pub struct Candidate {
     pub ranks: ArmRanks,
 }
 
+/// One chunk's metadata as the outline v2 and content routes need it, with no
+/// vectors and no scores. Ordered by `chunk_index`; the spans are absent for
+/// chunks ingested before `ING-13`, never a misleading zero.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkMeta {
+    pub chunk_index: u32,
+    pub page: Option<u32>,
+    /// The heading stored on the chunk, when ingest had one.
+    pub section: Option<String>,
+    pub content: String,
+    pub char_start: Option<u32>,
+    pub char_end: Option<u32>,
+    pub overlap_prefix_len: Option<u32>,
+}
+
+/// Build [`ChunkMeta`] from a retrieved candidate. Shared by the scoped
+/// default of [`RetrievalIndex::list_chunk_meta`] and by fakes.
+#[must_use]
+pub fn chunk_meta_from_candidate(candidate: &Candidate) -> ChunkMeta {
+    let span = |key: &str| {
+        candidate
+            .metadata
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+    };
+    ChunkMeta {
+        chunk_index: candidate.chunk_index,
+        page: candidate.page,
+        section: candidate
+            .metadata
+            .get("section")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        content: candidate.content.clone(),
+        char_start: span("charStart"),
+        char_end: span("charEnd"),
+        overlap_prefix_len: span("overlapPrefixLen"),
+    }
+}
+
 /// How the backend's keyword arm matches. `None` means the adapter has no
 /// keyword arm at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -367,6 +408,30 @@ pub trait RetrievalIndex: Send + Sync {
         let mut units = self.ordered_chunks(tenant, document_id).await?;
         units.truncate(max_units);
         Ok(units)
+    }
+
+    /// List one document's chunk metadata, ordered by `chunk_index`, **without
+    /// vectors or scores**. The outline v2 (`RET-13`) and the content route
+    /// (`RET-14`) use this instead of a search-shaped read.
+    ///
+    /// Scope is part of the contract: a document outside `scope` is refused by
+    /// returning an empty list. The default derives the answer from
+    /// [`Self::document_units`] for fakes and small adapters; a real adapter
+    /// overrides it with a scroll that asks the store for payloads only.
+    async fn list_chunk_meta(
+        &self,
+        scope: &DocumentScope,
+        document: &DocumentId,
+    ) -> Result<Vec<ChunkMeta>, PortError> {
+        if !scope.document_ids().contains(document) {
+            return Ok(Vec::new());
+        }
+        let units = self
+            .document_units(scope.tenant(), document, usize::MAX)
+            .await?;
+        let mut out: Vec<ChunkMeta> = units.iter().map(chunk_meta_from_candidate).collect();
+        out.sort_by_key(|meta| meta.chunk_index);
+        Ok(out)
     }
 
     /// Probe whether the index backend is healthy and responding.

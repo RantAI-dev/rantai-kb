@@ -15,8 +15,8 @@
 //! [`RetrievalIndex::fetch`]: kb_ports::RetrievalIndex::fetch
 
 use kb_ports::{
-    ArmRanks, ArmScores, Candidate, ChunkId, ChunkType, DocumentId, DocumentScope, IndexUnit,
-    TenantId,
+    ArmRanks, ArmScores, Candidate, ChunkId, ChunkMeta, ChunkType, DocumentId, DocumentScope,
+    IndexUnit, TenantId,
 };
 use qdrant_client::Payload;
 use qdrant_client::qdrant::{
@@ -314,6 +314,35 @@ pub fn candidate_from(
             .map_or(serde_json::Value::Null, json_of),
         scores,
         ranks,
+    })
+}
+
+/// Read vector-free chunk metadata from a scrolled point's payload. The
+/// mirrored `charStart`/`charEnd`/`overlapPrefixLen` fields are preferred;
+/// older payloads that only carry them inside `metadata` still read correctly.
+/// A point that is not one of ours (no tenant or document id) is skipped.
+#[must_use]
+pub fn chunk_meta_from_payload(
+    payload: &std::collections::HashMap<String, Value>,
+) -> Option<ChunkMeta> {
+    string(payload, KEY_TENANT_ID)?;
+    string(payload, KEY_DOCUMENT_ID)?;
+    let metadata = payload
+        .get(KEY_METADATA)
+        .map_or(serde_json::Value::Null, json_of);
+    let mirrored = spans_from_payload(payload);
+    let nested = spans_from_metadata(&metadata);
+    Some(ChunkMeta {
+        chunk_index: integer(payload, KEY_CHUNK_INDEX).unwrap_or(0) as u32,
+        page: integer(payload, KEY_PAGE).map(|value| value as u32),
+        section: metadata
+            .get("section")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        content: string(payload, KEY_CONTENT).unwrap_or_default(),
+        char_start: mirrored.char_start.or(nested.char_start),
+        char_end: mirrored.char_end.or(nested.char_end),
+        overlap_prefix_len: mirrored.overlap_prefix_len.or(nested.overlap_prefix_len),
     })
 }
 

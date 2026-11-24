@@ -30,7 +30,10 @@ use axum::Json;
 use axum::extract::{Path, State};
 use serde::Serialize;
 
-use kb_ports::{ChunkType, DocumentMeta, page_image_path};
+use kb_core::outline::{OutlineChunk, build_outline, estimated_chars, has_spans};
+use kb_ports::{
+    ChunkType, DocumentFilter, DocumentMeta, DocumentScope, ScopeRequest, page_image_path,
+};
 use utoipa::ToSchema;
 
 use crate::auth::Authed;
@@ -64,6 +67,61 @@ pub struct DocumentStructureResponse {
     /// listed. False does not prove there are none (an index can always answer
     /// short), it only means the cap was not reached.
     pub truncated: bool,
+    /// Outline v2. Additive: the older fields above are unchanged.
+    pub outline_version: u32,
+    /// A navigable table of contents with chunk and page ranges. Empty for an
+    /// empty document.
+    pub sections: Vec<SectionDto>,
+    /// The document's estimated character count, from chunk spans when all
+    /// chunks have them and from the chunks' own text otherwise.
+    pub estimated_chars: u32,
+    /// True only when every listed chunk carries a complete span.
+    pub has_spans: bool,
+}
+
+/// One section of the outline v2, mapping to a contiguous chunk range.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionDto {
+    /// Stable section id within this document (`s1`, `s2`, …), used by the
+    /// content route's `?section=` parameter.
+    pub id: String,
+    /// The heading as printed, or the detected legal marker.
+    pub title: String,
+    /// 1 for a chapter/top-level heading, deeper for nested markers.
+    pub level: u32,
+    /// Ancestor titles from the top-level BAB down to this section.
+    pub path: Vec<String>,
+    /// First page of the section, or null when its chunks have no page.
+    pub page_start: Option<u32>,
+    /// Last page of the section, or null when its chunks have no page.
+    pub page_end: Option<u32>,
+    /// First chunk index (inclusive).
+    pub chunk_start: u32,
+    /// Last chunk index (inclusive).
+    pub chunk_end: u32,
+    /// Estimated non-overlap characters in the section.
+    pub estimated_chars: u32,
+    /// What produced the boundary: `bab`, `bagian`, `pasal`, `paragraf`,
+    /// `heading` or `page`.
+    pub marker: String,
+}
+
+impl From<kb_core::outline::Section> for SectionDto {
+    fn from(section: kb_core::outline::Section) -> Self {
+        Self {
+            id: section.id,
+            title: section.title,
+            level: section.level,
+            path: section.path,
+            page_start: section.page_start,
+            page_end: section.page_end,
+            chunk_start: section.chunk_start,
+            chunk_end: section.chunk_end,
+            estimated_chars: section.estimated_chars,
+            marker: section.marker.as_str().to_string(),
+        }
+    }
 }
 
 /// One page. `number` is 0-based, the same numbering as `ChunkMetadata.page`
@@ -163,14 +221,29 @@ pub async fn get_document_structure(
     if !crate::auth::has_scope(&auth, "kb:read") {
         return Err(ApiError::missing_scope("kb:read"));
     }
+    // Visibility first: the same tenant + KB-limited-key check as the rest of
+    // the route. No chunk is listed before this passes.
     let doc = crate::routes::find_visible_document(&state, &auth, &id).await?;
-    structure_for(&state, &auth.tenant_id.0, &doc).await
+    let scope = state
+        .documents
+        .build_scope(&ScopeRequest {
+            tenant: auth.tenant_id.clone(),
+            filter: DocumentFilter {
+                knowledge_base_ids: auth.knowledge_base_ids.clone(),
+                ..DocumentFilter::default()
+            },
+        })
+        .await
+        .map_err(ApiError::from)?
+        .narrowed_to(std::slice::from_ref(&doc.id));
+    structure_for(&state, &auth.tenant_id.0, &doc, &scope).await
 }
 
 async fn structure_for(
     state: &AppState,
     tenant: &str,
     doc: &DocumentMeta,
+    scope: &DocumentScope,
 ) -> Result<Json<DocumentStructureResponse>, ApiError> {
     let tenant_id = kb_ports::TenantId(tenant.to_string());
     let text_units = state
@@ -259,6 +332,36 @@ async fn structure_for(
         }
     }
 
+    // Outline v2 is built from the same scoped chunk read; a document outside
+    // the scope can never contribute sections here. The stored outline from
+    // the tree arm (RET-6) is the first source, when it can be mapped to chunks.
+    let chunk_meta = state
+        .index
+        .list_chunk_meta(scope, &doc.id)
+        .await
+        .map_err(ApiError::from)?;
+    let outline_chunks: Vec<OutlineChunk> = chunk_meta
+        .into_iter()
+        .map(|meta| OutlineChunk {
+            chunk_index: meta.chunk_index,
+            page: meta.page,
+            section: meta.section,
+            content: meta.content,
+            char_start: meta.char_start,
+            char_end: meta.char_end,
+            overlap_prefix_len: meta.overlap_prefix_len,
+        })
+        .collect();
+    let stored_outline = doc
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("outline"))
+        .and_then(|value| serde_json::from_value::<kb_core::Outline>(value.clone()).ok());
+    let sections = build_outline(&outline_chunks, stored_outline.as_ref())
+        .into_iter()
+        .map(SectionDto::from)
+        .collect();
+
     Ok(Json(DocumentStructureResponse {
         document_id: doc.id.0.clone(),
         external_ref: doc.external_ref.clone(),
@@ -267,6 +370,10 @@ async fn structure_for(
         figures,
         chunks,
         truncated,
+        outline_version: 2,
+        sections,
+        estimated_chars: estimated_chars(&outline_chunks),
+        has_spans: has_spans(&outline_chunks),
     }))
 }
 
