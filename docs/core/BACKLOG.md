@@ -38,13 +38,8 @@ Started 2026-11-04 from:
 
 | ID | Kind | Item | Module | Priority | Status | PR | Source |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-<<<<<<< HEAD
 | `RET-10` | Bug | **v0.9.0.** Citations keep same-titled documents apart: `source_dedupe_key` keys text sources by `title-section`, so two documents titled alike (versioned policies) merge into one `[N]` with the wrong `documentId`/page. Key by `documentId` [Roadmap](specs/v1-roadmap.md) | Retrieval | P0 | Done | | Two-architect review 2026-11-24 |
-| `RET-11` | Bug | **v0.9.0.** `documentIds` searches run the full pipeline: `routes.rs` Branch 1 is dense-only (no BM25, rerank, page/tree/neighbour arms, figures). Reuse the narrowed scope in `retrieve_inner`; BM25 × `documentIds` leak test [Roadmap](specs/v1-roadmap.md) | Retrieval | P0 | Todo | | Two-architect review 2026-11-24 |
-=======
-| `RET-10` | Bug | **v0.9.0.** Citations keep same-titled documents apart: `source_dedupe_key` keys text sources by `title-section`, so two documents titled alike (versioned policies) merge into one `[N]` with the wrong `documentId`/page. Key by `documentId` [Roadmap](specs/v1-roadmap.md) | Retrieval | P0 | Todo | | Two-architect review 2026-11-24 |
 | `RET-11` | Bug | **v0.9.0.** `documentIds` searches run the full pipeline: `routes.rs` Branch 1 is dense-only (no BM25, rerank, page/tree/neighbour arms, figures). Reuse the narrowed scope in `retrieve_inner`; BM25 × `documentIds` leak test [Roadmap](specs/v1-roadmap.md) | Retrieval | P0 | Done | | Two-architect review 2026-11-24 |
->>>>>>> origin/main
 | `RET-12` | Feature | **v0.9.0.** Reranker sees `title › section · page` before the chunk (`KB_RERANK_BREADCRUMBS`, no re-index). Default on only if A/B Δ nDCG@10 ≥ +0.01, CI > 0 [Roadmap](specs/v1-roadmap.md) | Retrieval | P0 | Todo | | Two-architect review 2026-11-24 |
 | `ING-13` | Feature | **v0.9.0.** Chunk spans: `charStart`/`charEnd`/`overlapPrefixLen` from `smart_chunk` into the payload; integer Qdrant indexes on `page` and `chunkIndex`. Invariant: spans rebuild the text with no duplicated overlap [Roadmap](specs/v1-roadmap.md) | Ingest | P0 | Todo | | Two-architect review 2026-11-24 |
 | `RET-13` | Feature | **v0.9.0.** Outline v2 on `/v1/documents/:id/structure`: sections for every format (headings, `BAB`/`Bagian`/`Pasal`, per-page fallback) with page and chunk ranges and `estimatedChars` [Roadmap](specs/v1-roadmap.md) | Retrieval | P0 | Todo | | Two-architect review 2026-11-24 |
