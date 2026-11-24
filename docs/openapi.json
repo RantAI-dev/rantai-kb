@@ -927,6 +927,179 @@
         ]
       }
     },
+    "/v1/documents/{id}/content": {
+      "get": {
+        "tags": [
+          "structure"
+        ],
+        "summary": "Read a bounded, byte-exact slice of one document.",
+        "description": "`GET /v1/documents/{id}/content`. The visibility check is identical to\n[`crate::routes::structure::get_document_structure`]: a document of another\ntenant, outside the key's knowledge-base limit or soft-deleted answers the\nsame 404. A cursor for another document is a 400, a changed content hash a\n409, so neither can be used to read outside the caller's scope.",
+        "operationId": "get_document_content",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The document's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "section",
+            "in": "query",
+            "description": "A section id from `/structure`'s outline v2, e.g. `s3`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pageStart",
+            "in": "query",
+            "description": "First zero-based page, inclusive. Used with `pageEnd`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "pageEnd",
+            "in": "query",
+            "description": "Last zero-based page, inclusive. Used with `pageStart`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "chunkStart",
+            "in": "query",
+            "description": "First chunk index, inclusive. Used with `chunkEnd`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "chunkEnd",
+            "in": "query",
+            "description": "Last chunk index, inclusive. Used with `chunkStart`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque continuation token from a previous response.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "maxChars",
+            "in": "query",
+            "description": "Character budget, clamped to 500..50000 (default 8000).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stitched text, its range, refs and a continuation cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentContentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Two selectors, a malformed cursor or a cursor for another document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document is visible to this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The document changed since the cursor was issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
     "/v1/documents/{id}/intelligence": {
       "get": {
         "tags": [
@@ -2506,6 +2679,95 @@
           "low"
         ]
       },
+      "ContentRange": {
+        "type": "object",
+        "description": "The chunk and page range actually returned, both inclusive. Pages are null\nwhen no chunk in the window carries one.",
+        "required": [
+          "chunkStart",
+          "chunkEnd"
+        ],
+        "properties": {
+          "chunkEnd": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "chunkStart": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pageEnd": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "pageStart": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ContentRef": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "table_id",
+              "page",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "table"
+                ]
+              },
+              "page": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "table_id": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "asset_key",
+              "page",
+              "kind"
+            ],
+            "properties": {
+              "asset_key": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "figure"
+                ]
+              },
+              "page": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "A reference to another record of the same document. Ids and pages only —\nno payloads, so reading on cannot turn into a second search."
+      },
       "DocumentChunkView": {
         "type": "object",
         "required": [
@@ -2550,6 +2812,54 @@
               "null"
             ],
             "description": "The heading path the chunk sits under."
+          }
+        }
+      },
+      "DocumentContentResponse": {
+        "type": "object",
+        "description": "The response body, camelCase on the wire like every other `/v1` shape.",
+        "required": [
+          "documentId",
+          "text",
+          "range",
+          "truncated",
+          "refs",
+          "degrades"
+        ],
+        "properties": {
+          "degrades": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Visible degradation, never a silent empty answer."
+          },
+          "documentId": {
+            "type": "string"
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64url cursor for the next page, or null on the last one."
+          },
+          "range": {
+            "$ref": "#/components/schemas/ContentRange"
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContentRef"
+            }
+          },
+          "text": {
+            "type": "string",
+            "description": "Stitched text, with overlap removed. Page boundaries are not marked:\nconcatenating successive cursor pages reproduces one unbounded read."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when more chunks of the selection remain after this page."
           }
         }
       },

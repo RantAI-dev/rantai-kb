@@ -1461,6 +1461,17 @@ impl RetrievalIndex for FakeChunkStore {
                             char_start: span("charStart"),
                             char_end: span("charEnd"),
                             overlap_prefix_len: span("overlapPrefixLen"),
+                            chunk_type: ChunkType::from_storage(
+                                chunk
+                                    .metadata
+                                    .get("chunkType")
+                                    .and_then(serde_json::Value::as_str),
+                            ),
+                            asset_key: chunk
+                                .metadata
+                                .get("assetKey")
+                                .and_then(serde_json::Value::as_str)
+                                .map(str::to_string),
                         }
                     })
                     .collect()

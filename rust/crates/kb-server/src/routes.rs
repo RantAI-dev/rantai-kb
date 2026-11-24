@@ -43,6 +43,7 @@ use crate::state::AppState;
 
 // The route modules are public because their handlers carry the
 // `#[utoipa::path]` attributes the OpenAPI document is built from.
+pub mod content;
 pub mod jobs;
 pub mod media;
 pub mod structure;
@@ -289,6 +290,9 @@ route_table! {
         },
         "/v1/documents/:id/structure" => "structure" {
             GET => structure::get_document_structure,
+        },
+        "/v1/documents/:id/content" => "structure" {
+            GET => content::get_document_content,
         },
         "/v1/documents/:id/assets" => "media" {
             GET => media::get_document_asset,

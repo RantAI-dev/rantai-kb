@@ -390,6 +390,17 @@ pub fn chunk_meta_from_payload(
         char_start: mirrored.char_start.or(nested.char_start),
         char_end: mirrored.char_end.or(nested.char_end),
         overlap_prefix_len: mirrored.overlap_prefix_len.or(nested.overlap_prefix_len),
+        chunk_type: ChunkType::from_storage(string(payload, KEY_CHUNK_TYPE).as_deref().or_else(
+            || {
+                metadata
+                    .get("chunkType")
+                    .and_then(serde_json::Value::as_str)
+            },
+        )),
+        asset_key: metadata
+            .get("assetKey")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     })
 }
 

@@ -195,6 +195,14 @@ pub struct ChunkMeta {
     pub char_start: Option<u32>,
     pub char_end: Option<u32>,
     pub overlap_prefix_len: Option<u32>,
+    /// What kind of unit this is. The content route uses it to find figure
+    /// refs without a second, search-shaped read. Additive: old callers that
+    /// build a `ChunkMeta` by hand default to `Text`.
+    #[serde(default)]
+    pub chunk_type: ChunkType,
+    /// The blob key of a figure crop recorded on the chunk, when it has one.
+    #[serde(default)]
+    pub asset_key: Option<String>,
 }
 
 /// Build [`ChunkMeta`] from a retrieved candidate. Shared by the scoped
@@ -220,6 +228,12 @@ pub fn chunk_meta_from_candidate(candidate: &Candidate) -> ChunkMeta {
         char_start: span("charStart"),
         char_end: span("charEnd"),
         overlap_prefix_len: span("overlapPrefixLen"),
+        chunk_type: candidate.chunk_type,
+        asset_key: candidate
+            .metadata
+            .get("assetKey")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     }
 }
 
