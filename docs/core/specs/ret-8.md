@@ -161,6 +161,43 @@ At those rates, 300k pages with both text and image take ≈ **17 GB10-hours**: 
 - The vectors came from two machines (800 pages on x86, the rest on ARM), which shows the result
   does not depend on the CPU.
 
+## Plan revision (2026-11-24): better quality, speed and execution split
+
+Reviewing Step 0 and `docs/eval-ab/one-embedder` surfaced five upgrades adopted for Steps 0–6:
+
+1. **Distill against `image+text` (clean), not `image`-only.** On MIRACL-Vision-id the teacher's
+   `image`-only vector scored 0.654 vs 0.769 for `text` (−0.115, below Lite's 33M e5-small at 0.711),
+   whereas on ViDoRe HR its single-pass `image+text` vector scored 0.625 vs 0.626 `image`-only.
+   Verify `image+text` on MIRACL-Vision-id/en in Step 0; use clean `v_teacher(clean_image + clean_text)`
+   as the distillation target even when the student receives degraded scans + noisy `ocr-cpu` text
+   (clean-to-noisy denoising).
+2. **Text-tower shortlist: `mmBERT-small` (42M non-emb, 8K) vs `SEA-LION-ModernBERT-Emb-300M` (8K, MIT).**
+   Drop `multilingual-e5-small` for pages (its 512-token limit truncates dense tables and long pages).
+   Also verify Peregrine 0.3.0 GGUF tokenizer + `dense_2`/`dense_3` projection loading before training.
+3. **Late-fusion gated residual + selective vision routing instead of always-on early-fusion S1.**
+   Decouple `S0` (ModernBERT text/OCR encoder → 2048-d) from a low-res vision residual tower
+   (`SigLIP2-B/16 NaFlex` at 256–576 patches predicting `v_teacher − v_text`, gated by `g(img, txt)`).
+   `kb-extract` already knows per page whether it is a scan or has figures/charts: pure-text pages
+   run `S0` only (~0.4–0.9 s on 2 cores), while visual/scan pages add the residual. Ships `S0` first
+   with minimal Peregrine work and cuts average corpus ingest time 2–4×.
+4. **Always unify queries into the student text tower (`query: ` / `passage: `).** Do not keep the
+   1.5 GB 1B teacher resident on Lite just for queries; co-distilling EN+ID queries into the same
+   ModernBERT encoder cuts query latency from ~250 ms to ~10–25 ms and saves ~1.5 GB RAM while
+   staying in `Nemotron-3.5-Embed-1B`'s exact 2048-d space.
+5. **QAT `Q4_K_M` + free Matryoshka loss + 1,024-token page cap + de-biased eval.**
+   - Add a short QAT cooldown for `Q4_K_M` in Peregrine (~1.5–1.8× faster CPU, ~2× less RAM).
+   - Train with nested MRL cosine loss (`2048 + 0.5*1024 + 0.25*512`) so 2048-d stays drop-in portable
+     with GPU tiers while Lite can opt into 512/1024-d Qdrant indexes.
+   - Cap page text at 1,024 tokens after stripping running headers/footers to prevent 100 s outlier pages.
+   - Filter `IndoDocEval-v0` via **BM25 ∪ teacher top-50** (not teacher-only top-10, avoiding circular bias).
+   - For the 20k pilot and first 150k pages, use ready HF datasets (`Docmatix`, `ColPali`, `VisRAG`,
+     `INDOTABVQA`, `SEA-Vision`) + local BPS/JDIH/OJK/id-Wiki before crawling FinePDFs URLs (~54% dead links).
+   - Include an end-to-end **hybrid check** (Lite BM25 + chunks + new page arm) in Step 2.
+
+**Execution topology:** run orchestration, CPU timings, data prep, Peregrine parity/GGUF checks, and
+code changes mainly on **`bluefin`**; call **`thinkstationpgx-0010`** (NVIDIA GB10) only for GPU
+inference, teacher caching, VLM query generation, and PyTorch training.
+
 ## Schedule (estimate, 2026-11-20; not measured)
 
 About 4–6 weeks of wall-clock time until Lite ships the page arm. The only measured cost is the
