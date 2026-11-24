@@ -19,12 +19,14 @@ use crate::documents::row_to_doc_meta;
 use crate::queries::{
     COUNT_DOCS_TENANT_ONLY, COUNT_DOCS_WITH_KB, DELETE_CATEGORY, DELETE_DOCUMENT_GROUPS,
     DELETE_KB_GROUPS, DELETE_KNOWLEDGE_BASE, INSERT_CATEGORY, INSERT_DOCUMENT,
-    INSERT_DOCUMENT_GROUP, INSERT_KNOWLEDGE_BASE, MAX_LIMIT, SELECT_ALIVE_BY_IDS, SELECT_BY_ID,
-    SELECT_BY_ID_WITH_DELETED, SELECT_CATEGORIES, SELECT_CATEGORY_BY_ID_TENANT,
-    SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB, SELECT_DUPLICATE_BY_SHA256,
-    SELECT_EXISTS_FOR_PATCH, SELECT_FOR_DOWNLOAD, SELECT_KB_BY_ID_TENANT, SELECT_KNOWLEDGE_BASES,
-    SELECT_OUTLINES, SELECT_OWNED_KB_IDS, SET_DOCUMENT_STATUS, UPDATE_CATEGORY,
-    UPDATE_DOCUMENT_PATCH, UPDATE_EXTRACTED_CONTENT, UPDATE_KNOWLEDGE_BASE, UPDATE_METADATA,
+    INSERT_DOCUMENT_GROUP, INSERT_KNOWLEDGE_BASE, MAX_LIMIT, RETIRE_PREVIOUS_VERSION,
+    SELECT_ALIVE_BY_IDS, SELECT_BY_ID, SELECT_BY_ID_WITH_DELETED, SELECT_CATEGORIES,
+    SELECT_CATEGORY_BY_ID_TENANT, SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB,
+    SELECT_DUPLICATE_BY_SHA256, SELECT_EXISTS_FOR_PATCH, SELECT_FOR_DOWNLOAD,
+    SELECT_KB_BY_ID_TENANT, SELECT_KNOWLEDGE_BASES, SELECT_LATEST_BY_DOC_KEY, SELECT_OUTLINES,
+    SELECT_OWNED_KB_IDS, SET_DOCUMENT_STATUS, UPDATE_CATEGORY, UPDATE_DOCUMENT_PATCH,
+    UPDATE_DOCUMENT_VERSION_PATCH, UPDATE_EXTRACTED_CONTENT, UPDATE_KNOWLEDGE_BASE,
+    UPDATE_METADATA,
 };
 
 /// Open a connection pool from settings. A free function rather than a
@@ -288,31 +290,59 @@ fn scope_sql_inner(
         binds.push(ScopeBind::TextArray(
             ids.iter().map(|id| id.0.clone()).collect(),
         ));
+        // The version clause below takes the next parameter number.
+        next += 1;
+    }
+
+    // RET-16: version scope, applied here so every retrieval arm inherits it.
+    // These clauses NARROW the tenant/KB/meta scope; they can never widen it.
+    // `asOf` wins over `includeHistory`: a point-in-time question ignores the
+    // latest flag entirely and selects the half-open effective interval.
+    if let Some(as_of) = &filter.as_of {
+        query.push_str(&format!(
+            " AND (d.\"effectiveFrom\" IS NULL OR d.\"effectiveFrom\" <= ${next}::timestamptz) \
+                 AND (d.\"effectiveTo\" IS NULL OR d.\"effectiveTo\" > ${next}::timestamptz)"
+        ));
+        binds.push(ScopeBind::Text(as_of.clone()));
+    } else if !filter.include_history {
+        // `docKey IS NULL` keeps every document written before versioning —
+        // and every unversioned upload — visible by default.
+        query.push_str(" AND (d.\"isLatest\" = true OR d.\"docKey\" IS NULL)");
     }
 
     (query, binds)
 }
 
 /// RET-16 hook. The default `isLatest` filter needs an `is_latest` Qdrant
-/// payload key that does not exist. The safe rule chosen here is to force Ids
-/// mode unless the tenant has **zero** versioned documents; this schema has no
-/// `docKey` column yet, so zero is the only truthful answer today. When RET-16
-/// lands, replace this body with a `SELECT EXISTS(… "docKey" IS NOT NULL)`.
-fn tenant_has_versioned_documents(_tenant: &TenantId) -> bool {
-    false
-}
+/// payload key that does not exist, so a tenant with **any** versioned document
+/// keeps the id-list path. (The verify would still drop a stale version, but a
+/// coarse filter that cannot see versions would waste top-k on them.)
+const SELECT_TENANT_HAS_VERSIONED: &str = r#"
+    SELECT EXISTS (
+        SELECT 1 FROM "Document"
+         WHERE "tenantId" = $1 AND "docKey" IS NOT NULL AND "deletedAt" IS NULL
+    ) AS versioned
+"#;
 
 #[async_trait]
 impl DocumentStore for PgDocumentStore {
     async fn build_scope(&self, req: &ScopeRequest) -> Result<DocumentScope, PortError> {
         let ids = self.resolve_filter(&req.tenant, &req.filter).await?;
         let token = ScopeToken::new_for_adapter();
-        if let Some(spec) = predicate_spec_for(
-            req,
-            ids.len(),
-            scope_id_limit_from_env(),
-            tenant_has_versioned_documents(&req.tenant),
-        ) {
+        let limit = scope_id_limit_from_env();
+        // Only ask about versions when predicate mode is otherwise possible.
+        let versioned = if limit > 0 && ids.len() > limit {
+            sqlx::query(SELECT_TENANT_HAS_VERSIONED)
+                .bind(req.tenant.0.as_str())
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| PortError::Unavailable(format!("pg versioned tenant: {e}")))?
+                .try_get::<bool, _>("versioned")
+                .map_err(|e| PortError::Unavailable(format!("pg versioned tenant: {e}")))?
+        } else {
+            false
+        };
+        if let Some(spec) = predicate_spec_for(req, ids.len(), limit, versioned) {
             return Ok(DocumentScope::new_predicate(
                 &token,
                 req.tenant.clone(),
@@ -746,6 +776,25 @@ impl DocumentStore for PgDocumentStore {
             .await
             .map_err(|e| PortError::Unavailable(format!("pg tx begin: {e}")))?;
 
+        // RET-16: a new version supersedes the current one in the SAME
+        // transaction as the insert. `FOR UPDATE` serialises concurrent
+        // uploads of the same docKey, so exactly one row stays `isLatest`.
+        // Deleting the latest version does NOT promote an older one: the
+        // previous row keeps `isLatest=false` and the tenant can restore it by
+        // uploading that version again under the same docKey.
+        let previous_id: Option<String> = if let Some(doc_key) = &doc.doc_key {
+            sqlx::query(SELECT_LATEST_BY_DOC_KEY)
+                .bind(doc.tenant_id.as_str())
+                .bind(doc_key.as_str())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| PortError::Unavailable(format!("pg find latest version: {e}")))?
+                .map(|row| text(&row, "id"))
+                .transpose()?
+        } else {
+            None
+        };
+
         sqlx::query(INSERT_DOCUMENT)
             .bind(doc.id.as_str())
             .bind(doc.tenant_id.as_str())
@@ -760,9 +809,24 @@ impl DocumentStore for PgDocumentStore {
             .bind(doc.external_ref.as_deref())
             .bind(doc.metadata.as_ref())
             .bind(doc.sha256.as_deref())
+            .bind(doc.doc_key.as_deref())
+            .bind(doc.version.as_deref())
+            .bind(doc.effective_from.as_deref())
+            .bind(doc.effective_to.as_deref())
+            .bind(previous_id.as_deref())
             .execute(&mut *tx)
             .await
             .map_err(|e| PortError::Unavailable(format!("pg insert document: {e}")))?;
+
+        if let Some(previous_id) = &previous_id {
+            sqlx::query(RETIRE_PREVIOUS_VERSION)
+                .bind(previous_id.as_str())
+                .bind(doc.effective_from.as_deref())
+                .bind(doc.tenant_id.as_str())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| PortError::Unavailable(format!("pg retire previous version: {e}")))?;
+        }
 
         for kb_id in group_kb_ids {
             sqlx::query(INSERT_DOCUMENT_GROUP)
@@ -818,6 +882,31 @@ impl DocumentStore for PgDocumentStore {
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| PortError::Unavailable(format!("pg update document patch: {e}")))?;
+        }
+
+        // RET-16: version columns follow the same absent-leaves-alone rule as
+        // the title patch. The route has already validated the dates.
+        if patch.doc_key.is_some()
+            || patch.version.is_some()
+            || patch.effective_from.is_some()
+            || patch.effective_to.is_some()
+        {
+            sqlx::query(UPDATE_DOCUMENT_VERSION_PATCH)
+                .bind(id.as_str())
+                .bind(patch.doc_key.is_some())
+                .bind(patch.doc_key.as_deref().unwrap_or_default())
+                .bind(patch.version.is_some())
+                .bind(patch.version.as_deref().unwrap_or_default())
+                .bind(patch.effective_from.is_some())
+                .bind(patch.effective_from.as_deref())
+                .bind(patch.effective_to.is_some())
+                .bind(patch.effective_to.as_deref())
+                .bind(tenant.as_str())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| {
+                    PortError::Unavailable(format!("pg update document version patch: {e}"))
+                })?;
         }
 
         // `knowledgeBaseIds` is replace-not-merge: absent leaves the links
@@ -1078,10 +1167,7 @@ fn new_group_id() -> String {
 mod tests {
     use kb_ports::{DocumentId, KnowledgeBaseId, MetadataFilter, ScopeRequest, TenantId};
 
-    use super::{
-        DocumentFilter, ScopeBind, predicate_spec_for, scope_sql, scope_sql_inner,
-        tenant_has_versioned_documents,
-    };
+    use super::{DocumentFilter, ScopeBind, predicate_spec_for, scope_sql, scope_sql_inner};
 
     #[test]
     fn the_outline_query_binds_tenant_and_scope_and_never_interpolates() {
@@ -1125,6 +1211,8 @@ mod tests {
                     values: vec!["true".into()],
                 },
             ],
+            include_history: false,
+            as_of: None,
         };
         let (sql, binds) = scope_sql(&filter);
 
@@ -1214,7 +1302,6 @@ mod tests {
     fn a_versioned_tenant_forces_ids_mode() {
         let req = request(DocumentFilter::default(), false);
         assert!(predicate_spec_for(&req, 10_000, 1, true).is_none());
-        assert!(!tenant_has_versioned_documents(&req.tenant));
     }
 
     #[test]
@@ -1225,5 +1312,69 @@ mod tests {
         );
         assert!(sql.contains("d.id = ANY($2::text[])"), "{sql}");
         assert_eq!(binds, vec![ScopeBind::TextArray(vec!["doc-a".to_string()])]);
+    }
+
+    /// SEC-2a × RET-16: the verify's id restriction and the `asOf` clause
+    /// each take their own parameter number.
+    #[test]
+    fn a_verify_with_as_of_numbers_its_parameters_in_order() {
+        let (sql, binds) = scope_sql_inner(
+            &DocumentFilter {
+                as_of: Some("2024-06-01T00:00:00Z".into()),
+                ..DocumentFilter::default()
+            },
+            Some(&[DocumentId::new_unchecked("doc-a")]),
+        );
+        assert!(sql.contains("d.id = ANY($2::text[])"), "{sql}");
+        assert!(sql.contains("<= $3::timestamptz"), "{sql}");
+        assert!(sql.contains("> $3::timestamptz"), "{sql}");
+        assert_eq!(
+            binds,
+            vec![
+                ScopeBind::TextArray(vec!["doc-a".to_string()]),
+                ScopeBind::Text("2024-06-01T00:00:00Z".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_default_scope_selects_only_latest_or_unversioned_documents() {
+        let (sql, binds) = scope_sql(&DocumentFilter::default());
+        assert!(binds.is_empty());
+        assert!(
+            sql.contains("d.\"isLatest\" = true OR d.\"docKey\" IS NULL"),
+            "{sql}"
+        );
+        assert!(!sql.contains("effectiveFrom"), "{sql}");
+    }
+
+    #[test]
+    fn include_history_adds_no_version_filter() {
+        let (sql, binds) = scope_sql(&DocumentFilter {
+            include_history: true,
+            ..DocumentFilter::default()
+        });
+        assert!(binds.is_empty());
+        assert!(!sql.contains("isLatest"), "{sql}");
+        assert!(!sql.contains("effectiveFrom"), "{sql}");
+    }
+
+    #[test]
+    fn as_of_binds_one_timestamp_and_ignores_is_latest() {
+        let (sql, binds) = scope_sql(&DocumentFilter {
+            as_of: Some("2024-06-01T00:00:00Z".into()),
+            include_history: true, // asOf wins over this
+            ..DocumentFilter::default()
+        });
+        assert_eq!(binds, vec![ScopeBind::Text("2024-06-01T00:00:00Z".into())]);
+        assert!(
+            sql.contains("d.\"effectiveFrom\" <= $2::timestamptz"),
+            "{sql}"
+        );
+        assert!(sql.contains("d.\"effectiveTo\" > $2::timestamptz"), "{sql}");
+        assert!(sql.contains("d.\"effectiveFrom\" IS NULL"), "{sql}");
+        assert!(sql.contains("d.\"effectiveTo\" IS NULL"), "{sql}");
+        assert!(!sql.contains("isLatest"), "{sql}");
+        assert!(!sql.contains("2024-06-01"), "{sql}"); // never interpolated
     }
 }

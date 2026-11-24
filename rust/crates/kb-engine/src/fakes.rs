@@ -73,6 +73,12 @@ fn stored_chunk_metadata(value: &serde_json::Value) -> ChunkMetadata {
             .get("tableId")
             .and_then(serde_json::Value::as_str)
             .map(str::to_string),
+        // Version fields are filled from the document record at query time,
+        // not from the chunk payload, exactly as `document_title` is.
+        doc_key: None,
+        version: None,
+        effective_from: None,
+        effective_to: None,
     }
 }
 
@@ -189,6 +195,29 @@ fn meta_matches_filter(meta: &DocumentMeta, filter: &DocumentFilter) -> bool {
     if let Some(language) = &filter.language
         && !metadata_key_matches(meta.metadata.as_ref(), "language", language)
     {
+        return false;
+    }
+    // RET-16 version scope. KEEP IN SYNC with `scope_sql_inner` in
+    // `kb-store-pg/src/store.rs`: the same three modes, after every other
+    // clause, so a version filter can only narrow the caller's scope. Being in
+    // this shared predicate, it also governs the SEC-2a verify.
+    if let Some(as_of) = &filter.as_of {
+        // `asOf` wins over `includeHistory` and ignores isLatest.
+        if meta
+            .effective_from
+            .as_ref()
+            .is_some_and(|from| from.as_str() > as_of.as_str())
+        {
+            return false;
+        }
+        if meta
+            .effective_to
+            .as_ref()
+            .is_some_and(|to| to.as_str() <= as_of.as_str())
+        {
+            return false;
+        }
+    } else if !filter.include_history && meta.doc_key.is_some() && !meta.is_latest {
         return false;
     }
     filter.metadata.iter().all(|predicate| {
@@ -620,7 +649,7 @@ impl DocumentStore for FakeDocumentStore {
         doc: &NewDocument,
         group_kb_ids: &[KnowledgeBaseId],
     ) -> Result<(), PortError> {
-        let meta = DocumentMeta {
+        let mut meta = DocumentMeta {
             id: doc.id.clone(),
             title: doc.title.clone(),
             categories: doc.categories.clone(),
@@ -639,7 +668,35 @@ impl DocumentStore for FakeDocumentStore {
             knowledge_base_ids: group_kb_ids.iter().map(|k| k.0.clone()).collect(),
             metadata: doc.metadata.clone(),
             sha256: doc.sha256.clone(),
+            doc_key: doc.doc_key.clone(),
+            version: doc.version.clone(),
+            supersedes_document_id: None,
+            effective_from: doc.effective_from.clone(),
+            effective_to: doc.effective_to.clone(),
+            is_latest: true,
         };
+        // Mirror `PgDocumentStore::create_document`: the new version becomes
+        // latest and the previous one is retired in the same call. The HTTP
+        // fake store uses the same rule so the in-process tests exercise the
+        // semantics the SQL implements.
+        if let Some(doc_key) = &doc.doc_key {
+            let mut map = self.docs.write().unwrap();
+            if let Some(list) = map.get_mut(&doc.tenant_id) {
+                if let Some(previous) = list
+                    .iter_mut()
+                    .find(|d| d.doc_key.as_deref() == Some(doc_key.as_str()) && d.is_latest)
+                {
+                    meta.supersedes_document_id = Some(previous.id.0.clone());
+                    if previous.effective_to.is_none() {
+                        previous.effective_to = doc
+                            .effective_from
+                            .clone()
+                            .or_else(|| Some(FAKE_TIMESTAMP.to_string()));
+                    }
+                    previous.is_latest = false;
+                }
+            }
+        }
         self.insert_doc(doc.tenant_id.clone(), meta);
         self.download_metas.write().unwrap().insert(
             (doc.tenant_id.clone(), doc.id.clone()),
@@ -677,6 +734,18 @@ impl DocumentStore for FakeDocumentStore {
         }
         if let Some(k) = &patch.knowledge_base_ids {
             doc.knowledge_base_ids = k.iter().map(|kb| kb.0.clone()).collect();
+        }
+        if let Some(k) = &patch.doc_key {
+            doc.doc_key = Some(k.clone());
+        }
+        if let Some(v) = &patch.version {
+            doc.version = Some(v.clone());
+        }
+        if let Some(v) = &patch.effective_from {
+            doc.effective_from = Some(v.clone());
+        }
+        if let Some(v) = &patch.effective_to {
+            doc.effective_to = Some(v.clone());
         }
         doc.updated_at = FAKE_TIMESTAMP.to_string();
         Ok(Some(doc.clone()))

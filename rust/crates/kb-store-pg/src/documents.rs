@@ -22,6 +22,15 @@ pub fn row_to_doc_meta(row: &sqlx::postgres::PgRow) -> Result<DocumentMeta, sqlx
     // Tolerant like `external_ref`: a statement that does not select the hash
     // yields `None` rather than failing the whole read.
     let sha256: Option<String> = row.try_get("sha256").ok().flatten();
+    // RET-16: tolerant like `sha256` — a statement that predates the version
+    // columns yields no version, never a failed read.
+    let doc_key: Option<String> = row.try_get("doc_key").ok().flatten();
+    let version: Option<String> = row.try_get("version").ok().flatten();
+    let supersedes_document_id: Option<String> =
+        row.try_get("supersedes_document_id").ok().flatten();
+    let effective_from: Option<String> = row.try_get("effective_from").ok().flatten();
+    let effective_to: Option<String> = row.try_get("effective_to").ok().flatten();
+    let is_latest: bool = row.try_get("is_latest").ok().unwrap_or(true);
     Ok(DocumentMeta {
         id: DocumentId(id),
         title,
@@ -39,5 +48,11 @@ pub fn row_to_doc_meta(row: &sqlx::postgres::PgRow) -> Result<DocumentMeta, sqlx
         knowledge_base_ids,
         metadata,
         sha256,
+        doc_key,
+        version,
+        supersedes_document_id,
+        effective_from,
+        effective_to,
+        is_latest,
     })
 }

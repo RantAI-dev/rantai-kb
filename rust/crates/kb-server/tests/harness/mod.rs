@@ -285,6 +285,7 @@ fn engine_settings() -> EngineSettings {
         rerank_final_k: 10,
         rerank_max_k: 10,
         max_chunks: 10,
+        max_per_document: 0,
         min_similarity: 0.30,
         min_score: None,
         neighbour_window: 1,
@@ -339,6 +340,12 @@ pub async fn serve_status(status: u16) -> String {
 pub fn doc_meta(id: &str, title: &str) -> DocumentMeta {
     DocumentMeta {
         sha256: None,
+        doc_key: None,
+        version: None,
+        supersedes_document_id: None,
+        effective_from: None,
+        effective_to: None,
+        is_latest: true,
         id: kb_ports::DocumentId(id.to_string()),
         title: title.to_string(),
         categories: vec![],

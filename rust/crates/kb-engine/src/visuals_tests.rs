@@ -115,6 +115,12 @@ async fn ingest(
         tenant(),
         DocumentMeta {
             sha256: None,
+            doc_key: None,
+            version: None,
+            supersedes_document_id: None,
+            effective_from: None,
+            effective_to: None,
+            is_latest: true,
             id: DocumentId::new_unchecked(DOC),
             title: "t".into(),
             categories: vec!["c".into()],

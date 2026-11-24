@@ -2,12 +2,23 @@
 //!
 //! Explicit domain-to-wire conversions matching the TypeScript service's JSON shape.
 
+use std::collections::HashMap;
+
 use kb_core::SourceEntry;
 use kb_engine::{RetrievalOutcome, timing::StageTimings};
 use kb_ports::{ProvenanceArm, RetrievalProvenance, SearchHit};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+
+/// The four version fields copied from a document's meta onto its chunks
+/// (RET-16), in wire order: docKey, version, effectiveFrom, effectiveTo.
+type VersionFields = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 /// Parse a request body the way the TypeScript routes do: `request.json()`
 /// wrapped in `.catch(() => ({}))`, so a malformed body becomes an empty object
@@ -85,6 +96,11 @@ pub struct SearchRequestDto {
     pub query: Option<serde_json::Value>,
     #[serde(rename = "maxChunks", default)]
     pub max_chunks: Option<u32>,
+    /// Additive (`RET-17`): keep at most this many chunks per document. The
+    /// route answers 400 unless the value is in 1..=50; absent means the
+    /// server default `KB_MAX_PER_DOCUMENT` (off when unset or 0).
+    #[serde(rename = "maxPerDocument", default)]
+    pub max_per_document: Option<u32>,
     #[serde(rename = "knowledgeBaseIds", default)]
     pub knowledge_base_ids: Option<Vec<String>>,
     #[serde(rename = "documentIds", default)]
@@ -119,6 +135,15 @@ pub struct SearchRequestDto {
     /// default", which is off.
     #[serde(rename = "adaptiveArms", default)]
     pub adaptive_arms: Option<bool>,
+    /// Additive (`RET-16`): search every version of a `docKey`, not only the
+    /// latest. Default false. Kept untyped so a non-boolean is this route's 400.
+    #[serde(rename = "includeHistory", default)]
+    pub include_history: Option<serde_json::Value>,
+    /// Additive (`RET-16`): point-in-time search. Accepts `YYYY-MM-DD` or a full
+    /// ISO timestamp. Kept untyped so a bad value is a field-level 400 rather
+    /// than a deserialiser error the route cannot explain.
+    #[serde(rename = "asOf", default)]
+    pub as_of: Option<serde_json::Value>,
     /// Additive (`RET-15`): an inclusive page window inside one document.
     #[serde(rename = "pageRange", default)]
     pub page_range: Option<PageRangeDto>,
@@ -155,6 +180,27 @@ pub struct SearchResponseDto {
     /// without a second lookup. Omitted when there are none.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tables: Vec<TableRefDto>,
+    /// Additive (`RET-16`): when the answer mixes versions of one `docKey`, the
+    /// caller is told which documents and versions it is reading. Absent when
+    /// there is no mix (the default current-version search can never mix).
+    #[serde(
+        rename = "multiVersionWarning",
+        skip_serializing_if = "Vec::is_empty",
+        default
+    )]
+    pub multi_version_warning: Vec<MultiVersionWarningDto>,
+}
+
+/// One `docKey` whose versions were mixed in a single answer (`RET-16`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiVersionWarningDto {
+    /// The stable document key the versions share.
+    pub doc_key: String,
+    /// The returned documents holding that key, in first-appearance order.
+    pub document_ids: Vec<String>,
+    /// Their version labels, in the same order. `None` labels are omitted.
+    pub versions: Vec<String>,
 }
 
 /// One table named by a search answer (`TBL-1`). Additive.
@@ -257,8 +303,9 @@ pub struct SearchStatsDto {
     /// a default search keeps exactly the earlier shape.
     #[serde(rename = "treeArm", skip_serializing_if = "Option::is_none", default)]
     pub tree_arm: Option<TreeArmStatsDto>,
-    /// Additive (`DEC-5`): what the global community arm did. Present only when
-    /// the arm ran (`KB_GLOBAL_ARM` on and an aggregative query), so a server
+    /// Additive (`DEC-5`): what the global community arm did. `KB_GLOBAL_ARM` is
+    /// **deprecated (DEC-6)** and stays off; enabling it logs a startup warning.
+    /// Present only when the arm ran (on and an aggregative query), so a server
     /// with the flag off answers exactly the earlier shape. `communities: 0`
     /// means the tenant has no community set — the arm had nothing to say, and
     /// that is not a degrade.
@@ -289,6 +336,15 @@ pub struct SearchStatsDto {
         default
     )]
     pub scope_verify_dropped: Option<usize>,
+    /// Additive (`RET-17`): how many hits the per-document diversity cap
+    /// dropped. Present whenever the cap ran (even when it dropped nothing);
+    /// absent when it was off, so an old client's shape is unchanged.
+    #[serde(
+        rename = "perDocumentCapped",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub per_document_capped: Option<usize>,
 }
 
 /// `stats.treeArm`: outline nodes the query scored and the distinct pages the
@@ -505,6 +561,24 @@ pub struct SourceDto {
     pub page: Option<u32>,
     #[serde(rename = "chunkType")]
     pub chunk_type: Option<String>,
+    /// Version metadata of the source's document (`RET-16`). Filled from the
+    /// same DocumentMeta that supplies `documentTitle`; absent for old rows.
+    #[serde(rename = "docKey", skip_serializing_if = "Option::is_none", default)]
+    pub doc_key: Option<String>,
+    #[serde(rename = "version", skip_serializing_if = "Option::is_none", default)]
+    pub version: Option<String>,
+    #[serde(
+        rename = "effectiveFrom",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub effective_from: Option<String>,
+    #[serde(
+        rename = "effectiveTo",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub effective_to: Option<String>,
 }
 
 /// Which retrieval arms produced a chunk, as the response reports it.
@@ -588,6 +662,24 @@ pub struct ChunkDto {
         default
     )]
     pub table_title: Option<String>,
+    /// Version metadata of the chunk's document (`RET-16`). Absent when the
+    /// document predates versioning or carries no version fields.
+    #[serde(rename = "docKey", skip_serializing_if = "Option::is_none", default)]
+    pub doc_key: Option<String>,
+    #[serde(rename = "version", skip_serializing_if = "Option::is_none", default)]
+    pub version: Option<String>,
+    #[serde(
+        rename = "effectiveFrom",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub effective_from: Option<String>,
+    #[serde(
+        rename = "effectiveTo",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub effective_to: Option<String>,
 }
 
 impl SearchResponseDto {
@@ -604,6 +696,7 @@ impl SearchResponseDto {
             note: None,
             degrades: Vec::new(),
             tables: Vec::new(),
+            multi_version_warning: Vec::new(),
         }
     }
 }
@@ -623,12 +716,73 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             global_arm: outcome_global_arm,
             reranked_count: outcome_reranked_count,
             scope_verify_dropped: outcome_scope_verify_dropped,
+            per_document_capped: outcome_per_document_capped,
             timings: outcome_timings,
         } = outcome;
         let vector_results = outcome_chunks.iter().filter(|h| !h.is_bm25).count();
         let total_results = outcome_chunks.len();
+        // RET-16: version fields were filled from the DocumentMeta alongside
+        // each chunk's title. Index them by document id so the deduplicated
+        // source cards can carry the same version as their chunks.
+        let mut version_by_doc: HashMap<String, VersionFields> = HashMap::new();
+        for hit in &outcome_chunks {
+            version_by_doc
+                .entry(hit.chunk.document_id.0.clone())
+                .or_insert_with(|| {
+                    (
+                        hit.chunk.metadata.doc_key.clone(),
+                        hit.chunk.metadata.version.clone(),
+                        hit.chunk.metadata.effective_from.clone(),
+                        hit.chunk.metadata.effective_to.clone(),
+                    )
+                });
+        }
+        // More than one document holding the same docKey means the answer
+        // mixes versions. Keep first-appearance order so the warning reads in
+        // the same order as the chunks.
+        let mut mixed: Vec<MultiVersionWarningDto> = Vec::new();
+        for hit in &outcome_chunks {
+            let Some(doc_key) = hit.chunk.metadata.doc_key.as_ref() else {
+                continue;
+            };
+            let doc_id = hit.chunk.document_id.0.as_str();
+            let version = hit.chunk.metadata.version.as_ref();
+            if let Some(warning) = mixed.iter_mut().find(|w| w.doc_key == *doc_key) {
+                if !warning.document_ids.iter().any(|id| id == doc_id) {
+                    warning.document_ids.push(doc_id.to_string());
+                }
+                if let Some(version) = version
+                    && !warning.versions.iter().any(|v| v == version)
+                {
+                    warning.versions.push(version.clone());
+                }
+            } else {
+                mixed.push(MultiVersionWarningDto {
+                    doc_key: doc_key.clone(),
+                    document_ids: vec![doc_id.to_string()],
+                    versions: version.into_iter().cloned().collect(),
+                });
+            }
+        }
+        mixed.retain(|w| w.document_ids.len() > 1);
+
         let chunks: Vec<ChunkDto> = outcome_chunks.into_iter().map(ChunkDto::from).collect();
-        let sources = outcome_sources.into_iter().map(SourceDto::from).collect();
+        let sources = outcome_sources
+            .into_iter()
+            .map(|source| {
+                let mut dto = SourceDto::from(source);
+                if let Some(doc_id) = dto.document_id.as_ref()
+                    && let Some((doc_key, version, effective_from, effective_to)) =
+                        version_by_doc.get(doc_id)
+                {
+                    dto.doc_key = doc_key.clone();
+                    dto.version = version.clone();
+                    dto.effective_from = effective_from.clone();
+                    dto.effective_to = effective_to.clone();
+                }
+                dto
+            })
+            .collect();
         let degrades = outcome_degrades
             .into_iter()
             .map(|d| d.label().to_string())
@@ -698,6 +852,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             }),
             reranked_count: outcome_reranked_count,
             scope_verify_dropped: outcome_scope_verify_dropped,
+            per_document_capped: outcome_per_document_capped,
         };
         SearchResponseDto {
             chunks: Some(chunks),
@@ -708,6 +863,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             note: outcome_note,
             degrades,
             tables: Vec::new(),
+            multi_version_warning: mixed,
         }
     }
 }
@@ -764,6 +920,10 @@ impl From<SearchHit> for ChunkDto {
             }),
             table_id: hit.chunk.metadata.table_id,
             table_title: None,
+            doc_key: hit.chunk.metadata.doc_key,
+            version: hit.chunk.metadata.version,
+            effective_from: hit.chunk.metadata.effective_from,
+            effective_to: hit.chunk.metadata.effective_to,
         }
     }
 }
@@ -778,6 +938,12 @@ impl From<SourceEntry> for SourceDto {
             asset_key: s.asset_key,
             page: s.page,
             chunk_type: s.chunk_type,
+            // Filled by `From<RetrievalOutcome>` from the document's meta; a
+            // bare `SourceEntry` carries no version fields.
+            doc_key: None,
+            version: None,
+            effective_from: None,
+            effective_to: None,
         }
     }
 }
@@ -1171,6 +1337,7 @@ mod tests {
             global_arm: None,
             reranked_count: None,
             scope_verify_dropped: None,
+            per_document_capped: None,
         };
         let value = serde_json::to_value(&stats).unwrap();
         for key in [
@@ -1219,6 +1386,7 @@ mod tests {
             global_arm: None,
             scope_verify_dropped: None,
             reranked_count: None,
+            per_document_capped: None,
         };
         let off = serde_json::to_value(&stats).unwrap();
         assert!(off.get("queryClass").is_none());
@@ -1262,6 +1430,7 @@ mod tests {
             scope_verify_dropped: None,
             tree_arm: None,
             reranked_count: None,
+            per_document_capped: None,
         };
         let off = serde_json::to_value(&stats).unwrap();
         assert!(
@@ -1305,6 +1474,7 @@ mod tests {
             global_arm: None,
             tree_arm: None,
             reranked_count: None,
+            per_document_capped: None,
         };
         let off = serde_json::to_value(&stats).unwrap();
         assert!(
@@ -1315,6 +1485,45 @@ mod tests {
         stats.reranked_count = Some(10);
         let on = serde_json::to_value(&stats).unwrap();
         assert_eq!(on["rerankedCount"], 10);
+    }
+
+    /// `stats.perDocumentCapped` (RET-17) is additive: off is absent, on is a
+    /// count — including zero, which says the cap ran and dropped nothing.
+    #[test]
+    fn the_per_document_capped_stat_is_additive_and_absent_when_the_cap_is_off() {
+        let mut stats = SearchStatsDto {
+            total_time_ms: 5.0,
+            embedding_time_ms: 1.0,
+            vector_search_time_ms: 2.0,
+            entity_search_time_ms: 0.0,
+            graph_search_time_ms: 0.0,
+            fusion_time_ms: 0.5,
+            vector_results: 2,
+            entity_results: 0,
+            graph_results: 0,
+            total_results: 3,
+            stage_timings_ms: StageTimingsDto::empty(),
+            floor_score_kind: None,
+            floor_dropped: None,
+            boost: None,
+            query_class: None,
+            skipped_arms: None,
+            arm_plan_fallback: None,
+            global_arm: None,
+            tree_arm: None,
+            reranked_count: None,
+            per_document_capped: None,
+        };
+        let off = serde_json::to_value(&stats).unwrap();
+        assert!(off.get("perDocumentCapped").is_none());
+
+        stats.per_document_capped = Some(0);
+        let zero = serde_json::to_value(&stats).unwrap();
+        assert_eq!(zero["perDocumentCapped"], 0);
+
+        stats.per_document_capped = Some(8);
+        let on = serde_json::to_value(&stats).unwrap();
+        assert_eq!(on["perDocumentCapped"], 8);
     }
 
     #[test]

@@ -160,9 +160,13 @@ pub fn predicate_spec_for(
     if limit == 0 || visible_count <= limit || req.force_ids || tenant_has_versioned_documents {
         return None;
     }
+    // Filters the payload cannot express keep the id list. RET-16's `asOf` and
+    // `includeHistory` are among them: the payload carries no version fields.
     if req.filter.external_refs.is_some()
         || req.filter.language.is_some()
         || !req.filter.metadata.is_empty()
+        || req.filter.as_of.is_some()
+        || req.filter.include_history
     {
         return None;
     }
@@ -535,5 +539,26 @@ mod tests {
                 .unit_range(),
             None
         );
+    }
+
+    #[test]
+    fn version_filters_other_than_the_default_keep_the_id_list() {
+        for filter in [
+            DocumentFilter {
+                as_of: Some("2024-06-01".into()),
+                ..DocumentFilter::default()
+            },
+            DocumentFilter {
+                include_history: true,
+                ..DocumentFilter::default()
+            },
+        ] {
+            let req = ScopeRequest {
+                tenant: TenantId::new_unchecked("t"),
+                filter,
+                force_ids: false,
+            };
+            assert!(predicate_spec_for(&req, 10_000, 1, false).is_none());
+        }
     }
 }
