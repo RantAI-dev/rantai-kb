@@ -22,6 +22,7 @@ pub mod bench;
 pub mod calibrate_confidence;
 pub mod cli;
 pub mod dataset;
+pub mod disclosure;
 pub mod leak;
 pub mod leak_http;
 pub mod metrics;

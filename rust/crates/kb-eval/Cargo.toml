@@ -27,3 +27,6 @@ chrono = { workspace = true }
 hdrhistogram = { version = "7.5", default-features = false }
 
 [dev-dependencies]
+# A local axum server for the EVAL-7 end-to-end test: the harness must be
+# exercised over real HTTP, not by calling its scoring functions directly.
+axum = { workspace = true }
