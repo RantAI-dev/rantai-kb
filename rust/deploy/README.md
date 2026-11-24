@@ -309,11 +309,28 @@ visible documents the server stops sending the whole id list to Qdrant: it filte
 `knowledge_base_id` / `category` payload and re-verifies every candidate against Postgres
 before fusion. It is **off by default**: chunks ingested before this release carry no
 `knowledge_base_id` payload, so a KB-limited key would quietly miss them in predicate mode
-(fail-closed, no leak, but lower recall). Enable it after `kb-server reindex` (or the SEC-2b
-payload backfill) on large tenants. A tenant whose documents are versioned (RET-16) always uses the id-list path until
+(fail-closed, no leak, but lower recall).
+
+**Upgrade path (SEC-2b):** run `kb-server scope backfill` first, then set
+`KB_SCOPE_ID_LIMIT=2000` (or your chosen limit). The backfill walks the live documents in
+Postgres and overwrites `knowledge_base_id` on their existing points in place — no
+re-embed, no ingest jobs, idempotent, and safe to run while the service serves. Use
+`kb-server scope backfill --tenant <id> --dry-run` to see the tenant and counts first.
+`kb-server reindex` also restores the payload but re-embeds every chunk, so prefer the
+backfill when only the KB payload is missing.
+
+A tenant whose documents are versioned (RET-16) always uses the id-list path until
 the payload carries `is_latest`. In predicate mode `stats.scopeVerifyDropped` reports how
 many candidates Postgres rejected; a failed verify fails the search instead of answering
 with unverified hits.
+
+**`KB_SCOPE_OUTBOX_INTERVAL_MS` (default `2000`).** How often the in-process reconciler
+drains the `ScopeOutbox` table. Every document create, KB-membership PATCH, KB delete and
+document delete writes a repair row in the same Postgres transaction; the worker either
+rewrites the KB payload from Postgres or removes the document's points. Rows that fail ten
+times are logged at error level and left for an operator. The additive
+`/v1/health` field `scopeOutbox` reports the pending count and the oldest pending age
+in seconds.
 
 Model containers are profile-gated, so a `.env` override applies to the local
 tier you start. Do not keep an external-embedder URL in `.env` while running

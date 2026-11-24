@@ -554,3 +554,60 @@ pub const SELECT_REAPABLE_JOBS: &str = r#"
 pub const CLEAR_JOB_S3_KEY: &str = r#"
     UPDATE "IngestJob" SET "s3Key" = NULL, "updatedAt" = now() WHERE id = $1
 "#;
+
+// ─── Scope outbox (SEC-2b) ───────────────────────────────────────────────────
+
+/// Written by the document write paths inside their own transaction.
+pub const INSERT_SCOPE_OUTBOX: &str = r#"
+    INSERT INTO "ScopeOutbox" ("documentId", "tenantId", op)
+    VALUES ($1, $2, $3)
+"#;
+
+/// Documents whose membership changes when a knowledge base is deleted. The
+/// rows are selected before the links are removed, still inside the same
+/// transaction, so every affected document gets exactly one repair row.
+pub const SELECT_KB_MEMBER_DOCUMENTS: &str = r#"
+    SELECT DISTINCT "documentId" FROM "DocumentGroup" WHERE "knowledgeBaseId" = $1
+"#;
+
+/// Claim the oldest claimable rows. `$1` is the retry ceiling, `$2` the backoff
+/// step in seconds and `$3` the batch size.
+///
+/// `attempts` is incremented by the claim itself, not by `fail`: a worker that
+/// dies after claiming a row must not hold it forever. Rows already taken by
+/// another worker are skipped, not waited on, so several replicas can drain
+/// one table. The backoff grows linearly with the attempt count — with no extra
+/// column, `createdAt` is the only clock the schema has.
+pub const CLAIM_SCOPE_OUTBOX: &str = r#"
+    UPDATE "ScopeOutbox" SET "attempts" = "attempts" + 1
+     WHERE "id" IN (
+         SELECT "id" FROM "ScopeOutbox"
+          WHERE "attempts" < $1::integer
+            AND "createdAt" <= now() - ("attempts" * make_interval(secs => $2::double precision))
+          ORDER BY "createdAt", "id"
+          LIMIT $3::integer
+            FOR UPDATE SKIP LOCKED
+     )
+    RETURNING "id", "documentId", "tenantId", "op", "attempts"
+"#;
+
+pub const COMPLETE_SCOPE_OUTBOX: &str = r#"
+    DELETE FROM "ScopeOutbox" WHERE "id" = ANY($1::bigint[])
+"#;
+
+pub const FAIL_SCOPE_OUTBOX: &str = r#"
+    UPDATE "ScopeOutbox" SET "lastError" = $2 WHERE "id" = $1
+"#;
+
+pub const SCOPE_OUTBOX_LAG: &str = r#"
+    SELECT count(*)::bigint AS pending,
+           extract(epoch FROM (now() - min("createdAt")))::double precision AS oldest_age
+      FROM "ScopeOutbox"
+"#;
+
+/// Every tenant with documents, for `kb-server scope backfill` without
+/// `--tenant`. Soft-deleted rows are excluded: there is nothing to repair for
+/// a document that no longer exists.
+pub const SELECT_BACKFILL_TENANTS: &str = r#"
+    SELECT DISTINCT "tenantId" FROM "Document" WHERE "deletedAt" IS NULL ORDER BY "tenantId"
+"#;

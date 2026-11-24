@@ -748,6 +748,7 @@ pub async fn run_stateless(config: StatelessConfig) -> Result<()> {
         listener,
         None,
         None,
+        None,
         CancelToken::new(),
     )
     .await

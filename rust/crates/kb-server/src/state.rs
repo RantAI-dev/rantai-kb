@@ -9,7 +9,8 @@ use kb_engine::{Engine, EngineInputs, EngineSettings, NoopExpander, QueryExpande
 use kb_inference::EmbedderSettings;
 use kb_inference::ExpansionSettings;
 use kb_ports::{
-    BlobStore, DocumentStore, Embedder, EntityStore, GraphStore, JobStore, PortError, TableStore,
+    BlobStore, DocumentStore, Embedder, EntityStore, GraphStore, JobStore, PortError, ScopeOutbox,
+    TableStore,
 };
 
 use crate::config::{EmbedderConfig, RerankerConfig};
@@ -41,6 +42,9 @@ pub struct AppState {
     pub embedder: Arc<dyn Embedder>,
     /// Ingest queue, written by the upload route and read by the job routes.
     pub jobs: Arc<dyn JobStore>,
+    /// The durable payload-repair queue (SEC-2b). `None` only in hand-built
+    /// test states; a config-built state always has the Postgres outbox.
+    pub outbox: Option<Arc<dyn ScopeOutbox>>,
     /// In-process fan-out between the ingest worker and `GET /v1/events`.
     pub events: Arc<EventBus>,
     pub engine: Engine,
@@ -180,8 +184,12 @@ impl AppState {
                 .await?,
             )),
         };
-        let documents: Arc<dyn DocumentStore> =
-            Arc::new(kb_store_pg::PgDocumentStore::from_pool(pool.clone()));
+        // One Postgres-backed object serves both roles: every document write
+        // inserts its outbox row on the transaction it already holds, and the
+        // reconciler claims rows on the same pool.
+        let pg_documents = Arc::new(kb_store_pg::PgDocumentStore::from_pool(pool.clone()));
+        let documents: Arc<dyn DocumentStore> = pg_documents.clone();
+        let outbox: Option<Arc<dyn ScopeOutbox>> = Some(pg_documents);
         let jobs: Arc<dyn JobStore> = Arc::new(kb_store_pg::PgJobStore::from_pool(pool));
         let index: Arc<dyn kb_ports::RetrievalIndex> = {
             let collection = config
@@ -267,6 +275,7 @@ impl AppState {
             tables,
             embedder,
             jobs,
+            outbox,
             events: EventBus::new(),
             engine,
             version: config.version,
@@ -311,6 +320,7 @@ impl AppState {
             tables: parts.tables,
             embedder: parts.embedder,
             jobs: parts.jobs,
+            outbox: None,
             events: parts.events,
             engine,
             version: parts.version,
@@ -323,6 +333,14 @@ impl AppState {
             backends: crate::backends::BackendProbe::default(),
             upload_dedupe: parts.upload_dedupe,
         }
+    }
+
+    /// Attach an outbox to a hand-built state, so an in-process HTTP test can
+    /// run the same reconciler the production process starts.
+    #[must_use]
+    pub fn with_outbox(mut self, outbox: Arc<dyn ScopeOutbox>) -> Self {
+        self.outbox = Some(outbox);
+        self
     }
 
     /// Assemble a production [`IngestWorker`](kb_engine::IngestWorker) from the

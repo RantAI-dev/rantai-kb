@@ -4,6 +4,15 @@
 
 ### Added
 
+- **Scope outbox and KB payload backfill (SEC-2b).** Every document create, KB-membership
+  PATCH, KB delete and document delete now writes one `ScopeOutbox` row in the same Postgres
+  transaction. An in-process worker (poll interval `KB_SCOPE_OUTBOX_INTERVAL_MS`, default 2000)
+  claims rows with `FOR UPDATE SKIP LOCKED`, rewrites `knowledge_base_id` from Postgres or
+  removes the document's points, and retries failures with a linear backoff, leaving a row
+  for an operator after ten attempts. `kb-server scope backfill [--tenant T] [--dry-run]`
+  gives pre-SEC-2a chunks their payload in place without re-embedding, so operators can turn
+  on `KB_SCOPE_ID_LIMIT` safely. Additive migration, additive `/health` `scopeOutbox` field.
+
 - **Predicate scope with a fail-closed Postgres verify (SEC-2a).** When a tenant has more
   visible documents than `KB_SCOPE_ID_LIMIT` (opt-in: default `0` = off until old chunks carry a `knowledge_base_id` payload; enable after `kb-server reindex`, e.g. `2000`), the search no
   longer sends every document id to Qdrant: the index filters on the `tenant_id`,

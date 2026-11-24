@@ -36,11 +36,11 @@ use kb_ports::{
     Entity, EntityExtractor, EntityStore, ExtractionOptions, ExtractionResult, Extractor,
     FigureGate, FigureGateCandidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit, JobRecord,
     JobStore, JobView, KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor,
-    NewDocument, PatchCategory, PatchDocument, PatchKnowledgeBase, PortError, PredicateSpec,
-    ProgressSink, QueryEmbedding, ReapableJob, Relation, RerankCandidate, RerankResult, Reranker,
-    RetrievalIndex, RetryJobOutcome, ScopeRequest, SearchHit, StoredChunk, TableId,
-    TableQueryFailure, TableRecord, TableStore, TenantId, adapter::ScopeToken, predicate_spec_for,
-    scope_id_limit_from_env, sort_candidates,
+    NewDocument, OutboxItem, OutboxLag, OutboxOp, PatchCategory, PatchDocument, PatchKnowledgeBase,
+    PortError, PredicateSpec, ProgressSink, QueryEmbedding, ReapableJob, Relation, RerankCandidate,
+    RerankResult, Reranker, RetrievalIndex, RetryJobOutcome, ScopeOutbox, ScopeRequest, SearchHit,
+    StoredChunk, TableId, TableQueryFailure, TableRecord, TableStore, TenantId,
+    adapter::ScopeToken, predicate_spec_for, scope_id_limit_from_env, sort_candidates,
 };
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -899,6 +899,13 @@ pub struct FakeChunkStore {
     pub fail_bm25: Arc<AtomicBool>,
     pub fail_neighbours: Arc<AtomicBool>,
     pub fail_figures: Arc<AtomicBool>,
+    /// SEC-2b: a repair write fails while this is set, so a test can prove the
+    /// outbox row is retried instead of completed.
+    pub fail_payload: Arc<AtomicBool>,
+    /// SEC-2b: documents whose points were removed, in call order.
+    pub deleted_documents: Arc<RwLock<Vec<DocumentId>>>,
+    /// SEC-2b: `(document, kb ids)` pairs handed to `set_document_kb_payload`.
+    pub kb_payload_writes: Arc<RwLock<Vec<(DocumentId, Vec<String>)>>>,
 }
 
 impl FakeChunkStore {
@@ -945,6 +952,9 @@ impl FakeChunkStore {
 
     /// Both the scope's id rule and the index's coarse payload rule.
     fn scope_allows(&self, scope: &DocumentScope, document: &DocumentId) -> bool {
+        if self.deleted_documents.read().unwrap().contains(document) {
+            return false;
+        }
         scope.allows_document(document) && self.payload_allows(scope, document)
     }
 }
@@ -1180,7 +1190,35 @@ impl RetrievalIndex for FakeChunkStore {
             .remove(document_id)
             .map(|v| v.len() as u64)
             .unwrap_or(0);
+        self.deleted_documents
+            .write()
+            .unwrap()
+            .push(document_id.clone());
+        // A delete is idempotent in the reconciler: the second call (the route
+        // already deleted the points) records the intent but returns 0.
         Ok(removed)
+    }
+
+    async fn set_document_kb_payload(
+        &self,
+        _tenant: &TenantId,
+        document_id: &DocumentId,
+        kb_ids: &[KnowledgeBaseId],
+    ) -> Result<(), PortError> {
+        if self.fail_payload.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable("forced payload failure".to_string()));
+        }
+        let values: Vec<String> = kb_ids.iter().map(|kb| kb.0.clone()).collect();
+        {
+            let mut map = self.payloads.write().unwrap();
+            let entry = map.entry(document_id.clone()).or_default();
+            entry.knowledge_base_ids = values.clone();
+        }
+        self.kb_payload_writes
+            .write()
+            .unwrap()
+            .push((document_id.clone(), values));
+        Ok(())
     }
 
     async fn search(
@@ -1615,6 +1653,96 @@ impl RetrievalIndex for FakeChunkStore {
             multivector: false,
             approximate_dense: false,
         }
+    }
+}
+
+/// One durable outbox row in the fake. `attempts` is incremented by the claim,
+/// exactly as in Postgres, so a failed item can be claimed again.
+#[derive(Clone, Debug)]
+pub struct FakeOutboxRow {
+    pub item: OutboxItem,
+    pub last_error: Option<String>,
+}
+
+/// In-memory `ScopeOutbox` for reconciler tests.
+#[derive(Clone, Default)]
+pub struct FakeScopeOutbox {
+    pub rows: Arc<RwLock<Vec<FakeOutboxRow>>>,
+    /// Id source; a counter keeps the fakes free of a uuid dependency.
+    pub next_id: Arc<std::sync::atomic::AtomicI64>,
+}
+
+impl FakeScopeOutbox {
+    /// Queue one repair, as a document write would in Postgres.
+    pub fn push(&self, tenant: TenantId, document: DocumentId, op: OutboxOp) {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.rows.write().unwrap().push(FakeOutboxRow {
+            item: OutboxItem {
+                id,
+                tenant,
+                document,
+                op,
+                attempts: 0,
+            },
+            last_error: None,
+        });
+    }
+
+    /// The errors recorded by the last drain, in claim order.
+    pub fn errors(&self) -> Vec<Option<String>> {
+        self.rows
+            .read()
+            .unwrap()
+            .iter()
+            .map(|row| row.last_error.clone())
+            .collect()
+    }
+}
+
+#[async_trait]
+impl ScopeOutbox for FakeScopeOutbox {
+    async fn claim_batch(&self, limit: u32) -> Result<Vec<OutboxItem>, PortError> {
+        let mut rows = self.rows.write().unwrap();
+        let mut claimed = Vec::new();
+        for row in rows.iter_mut() {
+            if claimed.len() >= limit as usize || row.item.attempts >= 10 {
+                continue;
+            }
+            row.item.attempts += 1;
+            claimed.push(row.item.clone());
+        }
+        Ok(claimed)
+    }
+
+    async fn complete(&self, ids: &[i64]) -> Result<(), PortError> {
+        self.rows
+            .write()
+            .unwrap()
+            .retain(|row| !ids.contains(&row.item.id));
+        Ok(())
+    }
+
+    async fn fail(&self, id: i64, error: &str) -> Result<(), PortError> {
+        if let Some(row) = self
+            .rows
+            .write()
+            .unwrap()
+            .iter_mut()
+            .find(|row| row.item.id == id)
+        {
+            row.last_error = Some(error.to_string());
+        }
+        Ok(())
+    }
+
+    async fn lag(&self) -> Result<OutboxLag, PortError> {
+        let pending = self.rows.read().unwrap().len() as u64;
+        Ok(OutboxLag {
+            pending,
+            oldest_pending_secs: None,
+        })
     }
 }
 

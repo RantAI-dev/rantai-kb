@@ -402,6 +402,18 @@ pub struct HealthResponse {
     /// scanned documents can hold the upload until the OCR backend says
     /// `ready` instead of discovering the outage in the job queue.
     pub backends: crate::backends::BackendHealth,
+    /// Additive (SEC-2b): pending payload repairs and the age of the oldest
+    /// one. `null` when no database is configured. A failed lag query is
+    /// reported as `null`, never as a failed health check: it does not affect
+    /// whether the service can answer a search.
+    pub scope_outbox: Option<ScopeOutboxHealth>,
+}
+
+/// The additive outbox lag reported by `/health` and `/v1/health`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ScopeOutboxHealth {
+    pub pending: u64,
+    pub oldest_pending_secs: Option<u64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -438,6 +450,19 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Response {
     // whether the service is alive, but a client has to know whether the OCR
     // backend can serve a scanned document before it uploads one.
     let backends = state.backends.health().await;
+    let scope_outbox = match state.outbox.as_ref() {
+        Some(outbox) => match kb_ports::ScopeOutbox::lag(outbox.as_ref()).await {
+            Ok(lag) => Some(ScopeOutboxHealth {
+                pending: lag.pending,
+                oldest_pending_secs: lag.oldest_pending_secs,
+            }),
+            Err(err) => {
+                tracing::warn!(error = %err.to_string(), "scope outbox lag unavailable");
+                None
+            }
+        },
+        None => None,
+    };
     let body = HealthResponse {
         ok,
         checks: HealthChecks { postgres, vectors },
@@ -445,6 +470,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Response {
         tier: state.tier.clone(),
         egress: state.egress.clone(),
         backends,
+        scope_outbox,
     };
     let status = if ok {
         StatusCode::OK

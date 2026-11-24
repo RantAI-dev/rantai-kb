@@ -30,7 +30,7 @@ because the contract has to be readable before the caller has one.
 | `PATCH` `DELETE` | `/v1/categories/:id` | Edit or delete a category. |
 | `GET` | `/v1/events` | Server-sent ingest progress for the tenant. |
 | `GET` | `/v1/formats` | Accepted extensions and the size limit. No auth. |
-| `GET` | `/health` · `/v1/health` | Liveness, dependency checks, build version, tier and egress hosts. No auth. |
+| `GET` | `/health` · `/v1/health` | Liveness, dependency checks, build version, tier and egress hosts. Additive `scopeOutbox: {pending, oldestPendingSecs}` reports outbox lag (SEC-2b). No auth. |
 
 **Ingest options** (multipart fields): `title`, `categories`, `subcategory`,
 `knowledgeBaseIds`, `externalRef`, `figures` — `auto` (default), `force` or `skip` — and
@@ -65,6 +65,12 @@ instead of sending every document id, and Postgres re-verifies every candidate b
 The field counts candidates dropped because their document was no longer visible (stale
 payload, deleted document, a move between knowledge bases); it is absent when the id-list path
 ran. A failed verify fails the search rather than returning unverified hits.
+
+The additive outbox (SEC-2b) repairs that stale payload: document creates, KB-membership
+PATCHes, KB deletes and document deletes each write a repair row in the same Postgres
+transaction, and an in-process worker rewrites `knowledge_base_id` or removes the points.
+`kb-server scope backfill` gives pre-SEC-2a chunks their payload in place, with no re-embed;
+operators should run it before opting into predicate mode.
 
 `chunks[].content`, `documentTitle`, `page` and `similarity` carry the results; `degrades`
 is non-empty when an arm failed, because a failed arm is reported rather than silently
