@@ -76,6 +76,12 @@ fn job() -> JobRecord {
 fn document() -> DocumentMeta {
     DocumentMeta {
         sha256: None,
+        doc_key: None,
+        version: None,
+        supersedes_document_id: None,
+        effective_from: None,
+        effective_to: None,
+        is_latest: true,
         id: DocumentId::new_unchecked(DOC),
         title: "Quarterly report".to_string(),
         categories: vec!["finance".to_string()],
@@ -2703,6 +2709,12 @@ fn named_job(id: &str, doc: &str, filename: &str, created_at: i64) -> JobRecord 
 fn named_document(doc: &str) -> DocumentMeta {
     DocumentMeta {
         sha256: None,
+        doc_key: None,
+        version: None,
+        supersedes_document_id: None,
+        effective_from: None,
+        effective_to: None,
+        is_latest: true,
         id: DocumentId::new_unchecked(doc),
         ..document()
     }

@@ -82,6 +82,12 @@ fn engine_settings() -> EngineSettings {
 fn doc(id: &str, title: &str, kb: &str, category: &str) -> DocumentMeta {
     DocumentMeta {
         sha256: None,
+        doc_key: None,
+        version: None,
+        supersedes_document_id: None,
+        effective_from: None,
+        effective_to: None,
+        is_latest: true,
         id: DocumentId(id.to_string()),
         title: title.to_string(),
         categories: vec![category.to_string()],

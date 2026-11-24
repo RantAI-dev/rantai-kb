@@ -86,6 +86,17 @@ pub struct ChunkMetadata {
     /// Additive: absent for every chunk that is not a table unit.
     #[serde(default, rename = "tableId")]
     pub table_id: Option<String>,
+    /// Document-level version fields, filled alongside `document_title` by
+    /// `enrich_titles_cached` (RET-16). Absent on chunks from documents created
+    /// before versioning, so every reader treats them as "no version".
+    #[serde(default)]
+    pub doc_key: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub effective_from: Option<String>,
+    #[serde(default)]
+    pub effective_to: Option<String>,
 }
 
 /// A chunk returned by the chunk store. The store is responsible for filling
@@ -579,6 +590,37 @@ pub struct DocumentMeta {
     /// for one uploaded while the dedupe was off.
     #[serde(default)]
     pub sha256: Option<String>,
+    // ── Version metadata (RET-16) ────────────────────────────────────────────
+    // Every field is optional and defaults to the pre-version behaviour, so a
+    // document created before the migration stays visible in every search mode.
+    /// The caller's stable key across versions of one document (`"cuti"`).
+    /// `None` for an unversioned document.
+    #[serde(default)]
+    pub doc_key: Option<String>,
+    /// The caller's version label (`"2025"`), when this document is versioned.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// The id of the document this one superseded, set when a new version with
+    /// the same `docKey` was uploaded in this tenant.
+    #[serde(default)]
+    pub supersedes_document_id: Option<String>,
+    /// Start of the version's effective interval, normalised to UTC by the API.
+    #[serde(default)]
+    pub effective_from: Option<String>,
+    /// End of the effective interval (exclusive). Null means unbounded.
+    #[serde(default)]
+    pub effective_to: Option<String>,
+    /// True for the current version. Rows with no `docKey` are always treated
+    /// as latest, whatever the stored flag says.
+    #[serde(default = "default_is_latest")]
+    pub is_latest: bool,
+}
+
+/// Serde default for [`DocumentMeta::is_latest`]: old payloads and rows have no
+/// flag, and an unversioned document is implicitly current.
+#[must_use]
+pub fn default_is_latest() -> bool {
+    true
 }
 
 /// One page of the documents list: the rows, the size of the whole result
@@ -705,6 +747,16 @@ pub struct NewDocument {
     /// something other than an upload.
     #[serde(default)]
     pub sha256: Option<String>,
+    /// Version metadata (RET-16). All optional; a document without a `docKey`
+    /// is unversioned and stays visible under every search mode.
+    #[serde(default)]
+    pub doc_key: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub effective_from: Option<String>,
+    #[serde(default)]
+    pub effective_to: Option<String>,
 }
 
 /// Metadata update patch for a document.
@@ -714,6 +766,15 @@ pub struct PatchDocument {
     pub categories: Option<Vec<String>>,
     pub subcategory: Option<Option<String>>,
     pub knowledge_base_ids: Option<Vec<KnowledgeBaseId>>,
+    /// Version metadata (RET-16). Absent leaves the column alone.
+    #[serde(default)]
+    pub doc_key: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub effective_from: Option<String>,
+    #[serde(default)]
+    pub effective_to: Option<String>,
 }
 
 /// One stored chunk as the document-detail route returns it: the store id, the
