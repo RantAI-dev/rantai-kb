@@ -1063,3 +1063,18 @@ already there — that is the opt-in below.
 `KB_EMBED_PRECISION` is a new variable: unset or `bf16` is the old behaviour, `nvfp4` asks for the
 4-bit build. An unknown value is a startup error, not a fallback. `docs/kb-tiers.md` has the
 per-tier VRAM budgets per build.
+
+## 8. documentIds searches use the full pipeline (RET-11)
+
+`POST /v1/search` with `documentIds` used to take a private dense-only path: the BM25, reranker,
+page, tree, neighbour and figure arms never ran, so searching inside chosen documents was worse
+than searching everything. It now passes the same narrowed scope into the standard retrieval
+pipeline as every other search. The scope is still the intersection of the requested document ids
+and the documents the key may see (tenant, knowledge-base and metadata filters all still apply);
+`documentIds` cannot widen it, and a document from another tenant or another KB is never searched.
+
+This is additive to the response: `chunks` is still there, and the answer now also carries
+`sources` and `context` as a normal search does. Previously `sources` was omitted and `context`
+was only built for `format: "context"`, as a plain `"[i] content"` list; `context` now follows the
+standard format with numbered sources, with or without that request field. Clients that read only
+`chunks` need no change. `hybrid: true` is still the legacy Bun stub and is unchanged.
