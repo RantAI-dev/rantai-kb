@@ -62,7 +62,7 @@ today's defaults.
 | 11-04 | `RET-2` relevance floor at `minScore` 0.42 (rerank score) | Off-topic queries come back empty **90.9%** (MIRACL, 55) and **98.1%** (HR, 54), while in-domain nDCG is unchanged: 0.8380 → 0.8381 and 0.6398 → 0.6399 | off (`KB_MIN_SCORE` unset); 0.42 is a recommendation for this reranker, not a default | [`retrieval-gaps`](eval-ab/retrieval-gaps/) |
 | 11-04 | `RET-4` recency boost | Dated-versions set 0.3455 → **0.9909** (+0.6455 [+0.6212, +0.6636]); MIRACL +0.0001 (neutral) | opt-in | [`retrieval-gaps`](eval-ab/retrieval-gaps/) |
 | 11-04 | `EVAL-2` tree arm (navigate a document's outline) | 41 structural queries: +0.163 ungated, **+0.086 gated** by RET-5's classifier; regular HR unchanged when gated, **−0.193 if left ungated** | off (`KB_TREE_ARM`) — it needs the gate | [`retrieval-gaps`](eval-ab/retrieval-gaps/) |
-| 11-04 | `EVAL-3` graph community summaries | **A loss** on aggregative questions: HR −0.045 to −0.067, CS −0.091 to −0.103, even with an oracle gate | off (`KB_GLOBAL_ARM`) | [`retrieval-gaps`](eval-ab/retrieval-gaps/) |
+| 11-04 | `EVAL-3` graph community summaries | **A loss** on aggregative questions: HR −0.045 to −0.067, CS −0.091 to −0.103, even with an oracle gate | off (`KB_GLOBAL_ARM`, **deprecated DEC-6**: enabling it logs a startup warning; may be removed after v1.0). `KB_GRAPH_ARM` is deprecated on the same terms | [`retrieval-gaps`](eval-ab/retrieval-gaps/) |
 
 ## Models chosen, per role (the November bake-off)
 
