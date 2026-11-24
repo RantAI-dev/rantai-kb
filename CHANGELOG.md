@@ -33,6 +33,14 @@
 
 ### Added
 
+- **Thin Streamable-HTTP MCP endpoint at `POST /mcp` (`API-4`).** With `KB_MCP=on`
+  (default **off**), an AI agent can use rantai-kb as an MCP server on the same port and with the
+  same `Bearer` / `X-Api-Key` auth and `kb:read` scope. The five tools — `kb_search`,
+  `kb_list_documents`, `kb_outline`, `kb_read` and `kb_query_table` — each call the same shared
+  handler function as their `/v1` route, so tenant scope, knowledge-base limits, versions and
+  visible degradations are identical. JSON-RPC 2.0 in, `application/json` out; no sessions and no
+  SSE. An API error is an `isError: true` tool result, never a protocol error. With the flag off
+  `/mcp` is an unknown path (404). See `docs/api.md#mcp`.
 - **`KB_RERANK_BREADCRUMBS=off|on` (RET-12).** With the flag on, the reranker sees
   `"{document title} › {section path or section} · p.{page}\n"` before the chunk content, so a
   bare "berlaku 12 hari kerja" is judged with its "Kebijakan Cuti › Bab IV Cuti Tahunan · p.12"

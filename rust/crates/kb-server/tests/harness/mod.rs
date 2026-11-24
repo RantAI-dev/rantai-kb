@@ -51,7 +51,12 @@ impl Default for Harness {
 
 impl Harness {
     pub fn new() -> Self {
-        Self::build(BackendTargets::default(), UploadDedupe::default())
+        Self::build(BackendTargets::default(), UploadDedupe::default(), false)
+    }
+
+    /// A harness with the thin MCP endpoint mounted (`KB_MCP=on`).
+    pub fn with_mcp() -> Self {
+        Self::build(BackendTargets::default(), UploadDedupe::default(), true)
     }
 
     /// A harness whose health route probes the given backends (`#36`).
@@ -59,17 +64,17 @@ impl Harness {
     /// The router is built from the state, so the probe has to be in place
     /// before that.
     pub fn with_backends(targets: BackendTargets) -> Self {
-        Self::build(targets, UploadDedupe::default())
+        Self::build(targets, UploadDedupe::default(), false)
     }
 
     /// A harness whose upload route refuses a file the tenant already has
     /// (`KB_UPLOAD_DEDUPE=reject`, the default) or stores it again
     /// (`KB_UPLOAD_DEDUPE=off`).
     pub fn with_upload_dedupe(upload_dedupe: UploadDedupe) -> Self {
-        Self::build(BackendTargets::default(), upload_dedupe)
+        Self::build(BackendTargets::default(), upload_dedupe, false)
     }
 
-    fn build(targets: BackendTargets, upload_dedupe: UploadDedupe) -> Self {
+    fn build(targets: BackendTargets, upload_dedupe: UploadDedupe, mcp_enabled: bool) -> Self {
         let documents = FakeDocumentStore::default();
         let chunks = FakeChunkStore::default();
         let blobs = FakeBlobStore::default();
@@ -99,6 +104,7 @@ impl Harness {
         );
         // The backends the health route probes (`#36`).
         state.backends = BackendProbe::new(targets);
+        state.mcp_enabled = mcp_enabled;
 
         Self {
             app: kb_server::build_router(state),

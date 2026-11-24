@@ -13,6 +13,7 @@ pub mod egress;
 pub mod error;
 pub mod eval_ocr;
 pub mod events;
+pub mod mcp;
 pub mod openapi;
 pub mod routes;
 pub mod runtime;
@@ -52,10 +53,20 @@ use kb_engine::CancelToken;
 /// are served here too, and are public: a caller has to be able to read the
 /// contract before it has a key, exactly as with `/health`.
 pub fn build_router(state: AppState) -> Router {
+    // `KB_MCP=on` mounts the thin JSON-RPC endpoint. When it is off the route
+    // is not in the table at all, so `/mcp` falls through to the same
+    // authenticate-then-404 handler as any other unknown path.
+    let mcp_enabled = state.mcp_enabled;
     let shared = Arc::new(state);
-    routes::health_router()
+    let router = routes::health_router()
         .merge(routes::router())
-        .merge(openapi::router::<Arc<AppState>>())
+        .merge(openapi::router::<Arc<AppState>>());
+    let router = if mcp_enabled {
+        router.merge(mcp::router())
+    } else {
+        router
+    };
+    router
         .fallback(any(routes::not_found))
         .layer(axum::middleware::from_fn(routes::cors))
         .with_state(shared)

@@ -142,6 +142,9 @@ pub struct Config {
     /// What the upload route does with a file the tenant already has
     /// (`KB_UPLOAD_DEDUPE`). `reject` by default.
     pub upload_dedupe: kb_core::policy::UploadDedupe,
+    /// Whether the thin Streamable-HTTP MCP endpoint is mounted (`KB_MCP`).
+    /// Off by default: when off, `/mcp` is just an unknown path.
+    pub mcp_enabled: bool,
 }
 
 /// The table store (`TBL-1`). On by default: a document with no tables is
@@ -1293,6 +1296,7 @@ impl Config {
             request_timeout: Duration::from_secs(30),
             tier: tier_plan,
             upload_dedupe,
+            mcp_enabled: bool_flag(&lookup, "KB_MCP", false),
         })
     }
 

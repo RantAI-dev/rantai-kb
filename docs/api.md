@@ -180,6 +180,65 @@ GET  /v1/documents/:id/content?section=s3&maxChars=8000
 GET  /v1/documents/:id/content?cursor=<nextCursor>&maxChars=8000  ->  repeat until truncated=false
 ```
 
+## MCP
+
+When `KB_MCP=on` (default **off**), the same port also serves a thin
+Streamable-HTTP MCP endpoint at `POST /mcp`. It takes JSON-RPC 2.0 requests and
+answers `application/json` — there are no sessions and no SSE stream, so a GET
+on the endpoint answers `405`. With the flag off, `/mcp` is an unknown path and
+answers `404` like any other unmatched route.
+
+Authentication is identical to `/v1/*`: `Authorization: Bearer <key>` or
+`X-Api-Key`. No key is `401`; the tools need `kb:read`, and table queries use
+the same table-route authorisation. A tool failure (404, 400, 409) is a
+`tools/call` result with `isError: true` and the API's own error message — not
+a JSON-RPC protocol error and never a response containing another tenant's
+content.
+
+Supported methods: `initialize`, `notifications/initialized`, `ping`,
+`tools/list` and `tools/call`. The server echoes the client's
+`protocolVersion` when it is one of `2025-06-18`, `2025-03-26` or
+`2024-11-05`; otherwise it answers `2025-06-18`.
+
+A generic MCP client (Streamable HTTP) config:
+
+```json
+{
+  "mcpServers": {
+    "rantai-kb": {
+      "type": "http",
+      "url": "https://kb.example.com/mcp",
+      "headers": {"Authorization": "Bearer <your-api-key>"}
+    }
+  }
+}
+```
+
+For Claude Code, the equivalent is:
+
+```bash
+claude mcp add --transport http rantai-kb https://kb.example.com/mcp \
+  --header "Authorization: Bearer <your-api-key>"
+```
+
+The tools, with the arguments they take:
+
+| Tool | Arguments | Use it for |
+|---|---|---|
+| `kb_search` | `query`, `maxChunks?`, `documentIds?`, `pageRange?`, `section?` | The search response: chunks with `documentId`, `page`, `section`, `content`, `sources` and `context`. Start here. |
+| `kb_list_documents` | `knowledgeBaseId?`, `limit?`, `cursor?` | Discover `id`, `title`, `pages`, `status`, `knowledgeBaseIds` and `externalRef` when you have no search hit. |
+| `kb_outline` | `documentId` | The `/structure` sections (ids, titles, page/chunk ranges). |
+| `kb_read` | `documentId`, plus one of `section`, `pageStart`+`pageEnd` or `cursor`, and `maxChars?` | The `/content` text of one document without re-searching; follow `nextCursor` while `truncated`. |
+| `kb_query_table` | `tableId`, `query` | The `/v1/tables/:id/query` rows and receipt for exact numbers in a stored table. |
+
+The intended **reading loop** is `kb_search` → `kb_outline` → `kb_read`
+(repeating with `nextCursor`), with `kb_query_table` when the answer lives in a
+table. A successful result is
+`{content: [{type: "text", text: "<the JSON>"}], structuredContent: <the JSON>}`.
+
+Each tool calls the same shared handler function as its `/v1` route, so tenant
+scope, knowledge-base limits, versions and visible degradations are identical.
+
 ## Keys
 
 `rantai-kb key <tenant>` (or `kb-dev.sh key`) mints an unrestricted key. For anything

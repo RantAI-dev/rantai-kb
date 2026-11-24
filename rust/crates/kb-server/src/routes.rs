@@ -544,7 +544,21 @@ pub async fn search(
     Authed(auth): Authed,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    if !crate::auth::has_scope(&auth, "kb:read") {
+    search_inner(&state, &auth, body).await
+}
+
+/// The shared body of `POST /v1/search`.
+///
+/// The MCP `kb_search` tool calls this exact function, so scope building,
+/// knowledge-base limits, versions and every retrieval arm behave identically
+/// on the HTTP and MCP surfaces. There is deliberately no second visibility
+/// path here.
+pub(crate) async fn search_inner(
+    state: &Arc<AppState>,
+    auth: &AuthContext,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    if !crate::auth::has_scope(auth, "kb:read") {
         return Err(ApiError::missing_scope("kb:read"));
     }
     // From here the request is ours to account for: scope build, the pipeline
@@ -564,7 +578,7 @@ pub async fn search(
             "Body must include a 'query' string".to_string(),
         ));
     }
-    let requested_kbs = restrict_kbs(&auth, body.knowledge_base_ids.as_deref());
+    let requested_kbs = restrict_kbs(auth, body.knowledge_base_ids.as_deref());
     let max_chunks = body.max_chunks.unwrap_or(8).clamp(1, 50);
     let metadata_filter = parse_metadata_filter(body.metadata.as_ref())?;
     let boost = parse_boost(body.boost.as_ref())?;
@@ -664,7 +678,7 @@ pub async fn search(
                     chunks: None,
                 });
             } else if let Some(section) = body.section.as_ref() {
-                let range = resolve_section_range(&state, &scope, &alive, section).await?;
+                let range = resolve_section_range(state, &scope, &alive, section).await?;
                 scope = scope.with_unit_range(range);
             }
         }
@@ -673,8 +687,8 @@ pub async fn search(
         // branch. Once it is built, the search is the same one Branch 3 runs —
         // BM25, reranker, page/tree/neighbour and figure arms included.
         return retrieve_and_finish(SearchTail {
-            state: &state,
-            auth: &auth,
+            state,
+            auth,
             query: &query,
             scope: &scope,
             scope_build_ms,
@@ -732,8 +746,8 @@ pub async fn search(
         .map_err(ApiError::from)?;
     let scope_build_ms = scope_sw.elapsed_ms();
     retrieve_and_finish(SearchTail {
-        state: &state,
-        auth: &auth,
+        state,
+        auth,
         query: &query,
         scope: &scope,
         scope_build_ms,
@@ -1343,7 +1357,17 @@ pub async fn list_documents(
     Authed(auth): Authed,
     Query(q): Query<ListDocumentsQuery>,
 ) -> Result<Json<DocumentListResponse>, ApiError> {
-    if !crate::auth::has_scope(&auth, "kb:read") {
+    Ok(Json(list_documents_inner(&state, &auth, q).await?))
+}
+
+/// The shared body of `GET /v1/documents`. The MCP `kb_list_documents` tool
+/// calls it, so the key's knowledge-base limit and pagination are identical.
+pub(crate) async fn list_documents_inner(
+    state: &Arc<AppState>,
+    auth: &AuthContext,
+    q: ListDocumentsQuery,
+) -> Result<DocumentListResponse, ApiError> {
+    if !crate::auth::has_scope(auth, "kb:read") {
         return Err(ApiError::missing_scope("kb:read"));
     }
     // A limit above the cap is clamped, not refused: the callers that ask for
@@ -1369,19 +1393,19 @@ pub async fn list_documents(
         .unwrap_or_default();
     // An empty parameter parses to no ids, which is "absent".
     let requested = (!raw_kbs.is_empty()).then_some(raw_kbs.as_slice());
-    let kb_filter: Vec<KnowledgeBaseId> = match restrict_kbs(&auth, requested) {
+    let kb_filter: Vec<KnowledgeBaseId> = match restrict_kbs(auth, requested) {
         Some(v) => {
             if v.is_empty() {
                 // A restricted key asked for bases it does not hold. Answering
                 // with the whole tenant (what an empty filter means) would
                 // hand it documents it may not see.
-                return Ok(Json(DocumentListResponse {
+                return Ok(DocumentListResponse {
                     documents: Vec::new(),
                     next_cursor: None,
                     total: 0,
                     limit: page_size.limit,
                     limit_clamped: page_size.clamped,
-                }));
+                });
             }
             v.into_iter().map(KnowledgeBaseId::new_unchecked).collect()
         }
@@ -1421,13 +1445,13 @@ pub async fn list_documents(
             }
         })
         .collect();
-    Ok(Json(DocumentListResponse {
+    Ok(DocumentListResponse {
         documents,
         next_cursor: page.next_cursor,
         total: page.total,
         limit: page_size.limit,
         limit_clamped: page_size.clamped,
-    }))
+    })
 }
 
 #[derive(Debug, Serialize, ToSchema)]
