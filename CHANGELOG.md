@@ -41,6 +41,7 @@
   cap and are not counted, and neighbour chunks are counted against the same budget so a capped
   document cannot regain chunks as context. `stats.perDocumentCapped` reports the number dropped
   when the cap is on and is absent when it is off.
+- **Stateless parity is pinned by tests (`API-5`).** `/v1/encode` query/passage dense vectors, BM25 sparse vectors and `/v1/rerank` order/scores are now tested bit-for-bit against full mode with the same fake embedding and reranking backend; no API shape changed. The stateless guide now states the guarantees and documents the one deliberate difference: with `KB_RERANK_BREADCRUMBS=on` full mode prepends a breadcrumb that `/v1/rerank` cannot know, so the client must prepend the same `kb_core::rerank::breadcrumb(...)` text for parity.
 - **Document versions and point-in-time search (`RET-16`).** Upload and PATCH accept
   `docKey`, `version`, `effectiveFrom` and `effectiveTo`. Uploading a new version retires
   the previous one in one transaction (`isLatest=false`, its `effectiveTo` closed at the
@@ -58,6 +59,11 @@
   breadcrumb is never clipped. `false`/`true` are accepted too, an unknown value is a startup
   error, and the **default is `off`** until the A/B (`docs/core/specs/v1-roadmap.md` RET-12).
   additive: the response shapes and chunk content are unchanged and no re-index is needed.
+- **`kb-server eval disclosure` (`EVAL-7`).** A deterministic, no-LLM reader that walks
+  `search → structure → content` over page-level qrels under a 1.5× gold-char budget and writes
+  coverage with a 95% bootstrap CI, chars-read/gold-chars, per-endpoint latency and PASS/MISS
+  targets to `results.json`, `per_question.jsonl` and `report.md`. No live number is claimed yet;
+  the run procedure is in `docs/eval-ab/disclosure-v1/README.md`.
 - **`GET /v1/documents/:id/content` (`RET-14`).** Bounded, byte-exact reading of one
   document by section, page range, chunk range or an opaque continuation cursor, without
   re-searching. `maxChars` defaults to 8000 (clamped 500..50000); text is stitched from
