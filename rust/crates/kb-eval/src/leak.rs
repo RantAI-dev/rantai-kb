@@ -248,31 +248,26 @@ impl ScopeKind {
 
     /// Whether a search scoped this way runs the keyword arm at all.
     ///
-    /// `documentIds` does not, in **either** runtime: Bun answers it from
-    /// `searchByDocumentIds` (`src/lib/rag/vector-store.ts:307`), a
-    /// `vector::similarity::cosine` scan with no BM25 query, and the Rust route
-    /// mirrors that branch (`rust/crates/kb-server/src/routes.rs`, "Branch 1")
-    /// with `HybridQuery { sparse: None, fusion: None }`. So a keyword probe
-    /// scoped by `documentIds` cannot reach the keyword arm at all, and its
-    /// positive control is measuring the route rather than the arm. That is a
-    /// documented API property, not a retrieval failure, and the report says
-    /// which it is instead of leaving "this probe cannot find its own target".
+    /// Every scope kind does. `documentIds` used to be answered by a dense-only
+    /// branch (RET-11), so its keyword cell measured the route rather than the
+    /// arm; it now shares the standard pipeline with every other search, and a
+    /// keyword probe scoped by `documentIds` is a real probe of BM25.
     #[must_use]
     pub fn reaches_keyword_arm(self) -> bool {
-        !matches!(self, Self::DocumentIds)
+        let _ = self;
+        true
     }
 
     /// Whether a search scoped this way runs the hybrid pipeline, where the
     /// arms that are fused after the rerank (graph, page) live.
     ///
-    /// `documentIds` does not: the Rust route answers it from "Branch 1", one
-    /// dense search over the named documents and nothing else
-    /// (`rust/crates/kb-server/src/routes.rs`). A graph or page probe scoped by
-    /// `documentIds` therefore cannot reach its arm, for the same reason a
-    /// keyword probe cannot.
+    /// Every scope kind does: the `documentIds` route now runs the full
+    /// pipeline, so a graph, page or tree probe inside that scope reaches its
+    /// arm instead of being unreachable by construction.
     #[must_use]
     pub fn reaches_pipeline_arms(self) -> bool {
-        !matches!(self, Self::DocumentIds)
+        let _ = self;
+        true
     }
 }
 
@@ -1083,13 +1078,13 @@ impl LeakMatrix {
     }
 }
 
-/// Why a keyword cell is UNTESTED for a reason that is the API's, not retrieval's.
+/// Why a cell is UNTESTED for a reason that is the API's, not retrieval's.
 ///
 /// A positive control that cannot be issued is a hole in the evidence, and the
-/// matrix says so — but it should say *which* hole. When the scope kind has no
-/// keyword arm at all (see [`ScopeKind::reaches_keyword_arm`]) the control is
-/// unreachable by construction, and "the probe cannot find its own target" would
-/// read as a retrieval defect where there is none.
+/// matrix says so — but it should say *which* hole. This guard exists for scope
+/// kinds whose arm is unreachable by construction (see
+/// [`ScopeKind::reaches_keyword_arm`]); after RET-11 every current scope runs
+/// the full pipeline, so a missed control is reported as a retrieval finding.
 #[must_use]
 pub fn unreachable_arm_reason(arm: Arm, cell: &Cell) -> Option<String> {
     if cell.status != Status::Untested || cell.positive_probes == 0 {
@@ -1800,11 +1795,10 @@ mod tests {
     }
 
     #[test]
-    fn a_keyword_cell_with_no_keyword_arm_says_so_instead_of_guessing() {
-        // `documentIds` runs no keyword arm in either runtime, so its keyword
-        // positive control is unreachable by construction. Saying "the probe
-        // cannot find its own target" there would blame retrieval for a
-        // property of the route.
+    fn a_document_ids_keyword_cell_is_now_a_real_probe() {
+        // Since RET-11 a `documentIds` search runs BM25. A missed positive
+        // control in that cell is therefore a retrieval finding, not a
+        // documented property of the route, and must get the generic reason.
         let mut matrix = LeakMatrix::new("http://x");
         for positive in [true, false] {
             matrix.record(Observation {
@@ -1843,11 +1837,12 @@ mod tests {
             .unwrap();
         assert_eq!(cell.status, Status::Untested);
         let reason = cell.reason.as_deref().expect("a reason");
-        assert!(reason.contains("runs no keyword arm"), "{reason}");
-        assert!(reason.contains("document_ids"), "{reason}");
+        assert!(
+            reason.contains("positive control missed"),
+            "a real probe that missed says so: {reason}"
+        );
+        assert!(!reason.contains("runs no keyword arm"), "{reason}");
         assert_eq!(bm25.status, Status::Partial);
-        let md = render_markdown(&matrix, &plan(corpus()));
-        assert!(md.contains("runs no keyword arm"), "{md}");
     }
 
     #[test]
@@ -1984,10 +1979,10 @@ mod tests {
         assert!(query.contains("section 1.1"), "{query}");
     }
 
-    /// `documentIds` never reaches the page arm, and the report has to say that
-    /// is the route's doing rather than "the probe cannot find its target".
+    /// Since RET-11 `documentIds` reaches the page arm too, so a missed page
+    /// cell there gets the same generic reason as any other scope.
     #[test]
-    fn a_page_cell_scoped_by_document_ids_names_the_route_as_the_reason() {
+    fn a_document_ids_page_cell_is_now_a_real_probe() {
         let cell = Cell {
             scope: ScopeKind::DocumentIds,
             probes: 4,
@@ -1996,20 +1991,16 @@ mod tests {
             status: Status::Untested,
             ..Cell::default()
         };
-        let reason = unreachable_arm_reason(Arm::Page, &cell).expect("a reason");
-        assert!(
-            reason.contains("never reaches the page-image arm"),
-            "{reason}"
+        assert_eq!(
+            unreachable_arm_reason(Arm::Page, &cell),
+            None,
+            "a documentIds-scoped page cell that misses is a real hole, not the route's"
         );
         let tenant = Cell {
             scope: ScopeKind::Tenant,
             ..cell.clone()
         };
-        assert_eq!(
-            unreachable_arm_reason(Arm::Page, &tenant),
-            None,
-            "a tenant-scoped page cell that misses is a real hole, not the route's"
-        );
+        assert_eq!(unreachable_arm_reason(Arm::Page, &tenant), None);
     }
 
     #[test]

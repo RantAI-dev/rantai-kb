@@ -19,6 +19,18 @@
   longer prefixes queries either. No shipped tier preset combines the two.
 - **RET-10 — citations keep documents apart.** `source_dedupe_key` now keys text sources by `doc:{documentId}|{section}` when a document id is present, so documents sharing a title (e.g. a 2023 and 2024 "Kebijakan Cuti") stay separate sources with their own `documentId` and page. Sources without a document id keep the legacy `documentTitle-section` key; figures stay keyed by asset.
 
+### Changed
+
+- **`documentIds` searches now run the full retrieval pipeline (RET-11).** A search that names
+  documents previously answered from a private dense-only branch: no BM25, reranker, page, tree,
+  neighbour or figure arms. It now passes the same narrowed scope into the standard retrieval
+  pipeline as any other search, so a caller searching inside chosen documents gets the same
+  answer quality. The scope is still the intersection of the requested ids and what the key may
+  see; it can never widen the key's tenant, knowledge-base or metadata limits. The response still
+  carries `chunks`, and now also carries `sources` and `context` in the standard format (previously
+  `sources` was absent and `context` was a plain `"[i] content"` list, and only when
+  `format: "context"` was requested). `hybrid: true` is unchanged.
+
 ## 0.8.0 — 2026-11-23
 
 ### Added
