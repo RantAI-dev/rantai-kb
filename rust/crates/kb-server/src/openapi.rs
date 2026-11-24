@@ -60,6 +60,7 @@ pub const API_KEY_SCHEME: &str = "api_key_header";
         crate::routes::delete_document,
         crate::routes::media::get_document_raw,
         crate::routes::structure::get_document_structure,
+        crate::routes::content::get_document_content,
         crate::routes::media::get_document_asset,
         crate::routes::media::get_document_intelligence,
         crate::routes::jobs::get_job,

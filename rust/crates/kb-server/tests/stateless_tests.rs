@@ -31,6 +31,7 @@ use kb_server::stateless::{
     STATELESS_ROUTES, StatelessApiDoc, StatelessAuth, StatelessConfig, StatelessState,
     build_stateless_router,
 };
+use sha2::{Digest, Sha256};
 use tower::ServiceExt;
 use utoipa::OpenApi;
 
@@ -545,6 +546,146 @@ async fn process_validation_errors_return_accurate_statuses() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+}
+
+// ─── Progressive disclosure parity ───────────────────────────────────────────
+
+/// Extractor with a deterministic page map, so the HTTP response's digests
+/// can be checked against the exact page text the caller sees in `pageMap`.
+struct PageMapExtractor {
+    page_texts: Vec<String>,
+}
+
+#[async_trait]
+impl Extractor for PageMapExtractor {
+    async fn extract_with_options(
+        &self,
+        _filename: &str,
+        _mime_type: &str,
+        _bytes: &[u8],
+        _options: ExtractionOptions,
+    ) -> Result<ExtractionResult, PortError> {
+        Ok(ExtractionResult {
+            content: self.page_texts.join("\n\n"),
+            file_type: "markdown".to_string(),
+            page_map: Some(
+                self.page_texts
+                    .iter()
+                    .enumerate()
+                    .map(|(page, text)| kb_ports::PageText {
+                        page: page as u32,
+                        text: text.clone(),
+                    })
+                    .collect(),
+            ),
+            ..ExtractionResult::default()
+        })
+    }
+}
+
+#[tokio::test]
+async fn process_response_emits_outline_spans_and_page_sha256() {
+    let page_texts = vec![
+        "BAB I KETENTUAN UMUM\n\nPasal-pasal dalam bab ini mengatur hal-hal umum.".to_string(),
+        "Pasal 1\n\nCuti tahunan selama dua belas hari kerja.".to_string(),
+    ];
+    let processor = DocumentProcessor::new(
+        Arc::new(PageMapExtractor {
+            page_texts: page_texts.clone(),
+        }),
+        ProcessorSettings::default(),
+    );
+    let state =
+        StatelessState::from_parts(processor, StatelessAuth::Unauthenticated, "test".into());
+    let app = build_stateless_router(state);
+
+    let boundary = "----kbStatelessParityTest";
+    let body = build_multipart(
+        boundary,
+        Some(("regulation.md", "text/markdown", b"placeholder")),
+        &[],
+    );
+    let res = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/process")
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={boundary}"),
+                )
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let json = read_json(res).await;
+
+    assert_eq!(json["outlineVersion"], 2);
+    let sections = json["sections"].as_array().unwrap();
+    assert!(
+        sections
+            .iter()
+            .any(|s| s["title"].as_str().unwrap().starts_with("BAB I")),
+        "sections: {sections:?}"
+    );
+    assert_eq!(sections[0]["marker"], "bab");
+    for key in [
+        "id",
+        "title",
+        "level",
+        "path",
+        "pageStart",
+        "pageEnd",
+        "chunkStart",
+        "chunkEnd",
+        "estimatedChars",
+        "marker",
+    ] {
+        assert!(
+            sections[0].get(key).is_some(),
+            "section field {key} present"
+        );
+    }
+
+    let chunks = json["chunks"].as_array().unwrap();
+    assert!(chunks[0].get("charStart").is_some(), "charStart present");
+    assert!(chunks[0].get("charEnd").is_some(), "charEnd present");
+    assert!(
+        chunks[0].get("overlapPrefixLen").is_some(),
+        "overlapPrefixLen present"
+    );
+
+    let pages = json["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 2);
+    for (i, page) in pages.iter().enumerate() {
+        assert_eq!(page["page"], i as u64);
+        assert_eq!(
+            page["pageSha256"],
+            hex::encode(Sha256::digest(page_texts[i].as_bytes())),
+            "pageSha256 is sha256 of the returned pageMap text"
+        );
+    }
+
+    for key in [
+        "title",
+        "fileType",
+        "sha256",
+        "fileSize",
+        "content",
+        "pageMap",
+        "quality",
+        "degrades",
+        "chunks",
+        "tables",
+        "figures",
+        "entities",
+        "relations",
+        "timings",
+    ] {
+        assert!(json.get(key).is_some(), "old field {key} still present");
+    }
 }
 
 // ─── Embedder + /v1/encode Parity ────────────────────────────────────────────

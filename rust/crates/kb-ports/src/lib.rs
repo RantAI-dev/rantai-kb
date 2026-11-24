@@ -40,9 +40,9 @@ pub use retrieval::{
     ArmRanks, ArmScores, Candidate, ChunkMeta, Fusion, HybridQuery, IndexCapabilities, IndexUnit,
     KeywordQuery, KeywordSemantics, RetrievalIndex, chunk_meta_from_candidate, sort_candidates,
 };
-pub use scope::DocumentScope;
 #[cfg(feature = "scope-adapter")]
 pub use scope::adapter;
+pub use scope::{DocumentScope, UnitRange};
 pub use tables::{TableId, TableQueryFailure, TableRecord, TableStore};
 pub use traits::{
     ChunkStore, DocumentFilter, DocumentStore, Embedder, EntityExtractor, EntityStore, Extractor,
