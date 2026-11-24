@@ -30,6 +30,16 @@
   `sources` was absent and `context` was a plain `"[i] content"` list, and only when
   `format: "context"` was requested). `hybrid: true` is unchanged.
 
+### Added
+
+- **`KB_RERANK_BREADCRUMBS=off|on` (RET-12).** With the flag on, the reranker sees
+  `"{document title} › {section path or section} · p.{page}\n"` before the chunk content, so a
+  bare "berlaku 12 hari kerja" is judged with its "Kebijakan Cuti › Bab IV Cuti Tahunan · p.12"
+  context. `KB_RERANK_CHAR_BUDGET` still truncates only the content at a UTF-8 boundary; the
+  breadcrumb is never clipped. `false`/`true` are accepted too, an unknown value is a startup
+  error, and the **default is `off`** until the A/B (`docs/core/specs/v1-roadmap.md` RET-12).
+  additive: the response shapes and chunk content are unchanged and no re-index is needed.
+
 ## 0.8.0 — 2026-11-23
 
 ### Added

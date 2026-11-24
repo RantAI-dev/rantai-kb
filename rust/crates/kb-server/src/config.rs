@@ -826,6 +826,20 @@ impl Config {
         // e.g. 5 candidates of 200 chars (`docs/eval-baseline.md` §8).
         let rerank_candidate_limit = int_var(&lookup, "KB_RERANK_CANDIDATE_LIMIT", 0u32)?.min(50);
         let rerank_char_budget = int_var(&lookup, "KB_RERANK_CHAR_BUDGET", 0)? as usize;
+        // RET-12: prepend the document/section breadcrumb to what the reranker
+        // sees. Off until the A/B shows it helps (`docs/core/specs/v1-roadmap.md`
+        // RET-12). An unknown value is a startup error, like the other enum
+        // settings above (`KB_GRAPH_STORE`, `KB_ENTITY_EXTRACTOR`).
+        let rerank_breadcrumbs = match lookup("KB_RERANK_BREADCRUMBS")
+            .map(|v| v.trim().to_lowercase())
+            .as_deref()
+        {
+            None | Some("") | Some("off") | Some("false") => false,
+            Some("on") | Some("true") => true,
+            Some(other) => {
+                bail!("KB_RERANK_BREADCRUMBS must be \"off\" or \"on\", got {other:?}")
+            }
+        };
         let rerank_timeout_ms = int_var(&lookup, "KB_RERANK_TIMEOUT_MS", 20_000)? as u64;
 
         // `KB_MIN_SIMILARITY` is not a documented variable. The minimum is the
@@ -853,6 +867,7 @@ impl Config {
             rrf_k,
             rerank_candidate_limit,
             rerank_char_budget,
+            rerank_breadcrumbs,
             rerank_timeout_ms,
             rerank_final_k,
             rerank_max_k,
@@ -1579,6 +1594,39 @@ mod tests {
             100,
             "the cap is clamped, so a typo cannot ask for a thousand reranked hits"
         );
+    }
+
+    #[test]
+    fn test_rerank_breadcrumbs_default_off_and_reject_unknown() {
+        let load = |value: Option<&'static str>| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            if let Some(v) = value {
+                map.insert("KB_RERANK_BREADCRUMBS", v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .engine
+                .rerank_breadcrumbs
+        };
+        assert!(!load(None), "off by default until the A/B result");
+        assert!(!load(Some("")), "empty is the same as unset");
+        assert!(!load(Some("off")));
+        assert!(!load(Some("false")));
+        assert!(load(Some("on")));
+        assert!(load(Some("true")));
+        assert!(
+            load(Some(" ON ")),
+            "values are case-insensitive and trimmed"
+        );
+
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_RERANK_BREADCRUMBS", "maybe");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        assert!(err.to_string().contains("KB_RERANK_BREADCRUMBS"), "{err}");
     }
 
     #[test]
