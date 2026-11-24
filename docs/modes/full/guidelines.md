@@ -77,7 +77,7 @@ If your application already owns Postgres and Qdrant and only wants a stateless 
    - When search results include `tables: [{tableId, title, documentId}]` (or `table_summary` / `table_row` chunks), call `POST /v1/tables/:id/query` for exact sums, filters, and group-bys instead of asking an LLM to sum prose snippets.
    - `kb-server` validates the typed query against the Postgres manifest, downloads the Parquet file once into `KB_CACHE_DIR` (or `<temp>/rantai-kb-tables`), executes it in **embedded in-process DuckDB** with a wall-clock timeout, and enforces `tablePrivacy=aggregate-only` suppression where configured. No separate DuckDB container is needed.
 4. **Inspect `GET /health` before bulk uploads:** Check `backends.ocr.state`, `backends.embedder.state`, and `backends.reranker.state` (`ready` / `starting` / `unavailable`) before kicking off large batch backfills.
-5. **Tune retrieval systematically:** See [`docs/retrieval.md`](../../retrieval.md) for `KB_RRF_K`, `KB_RERANK_MAX_K` (default `10`), and score floors before tweaking prompts.
+5. **Tune retrieval systematically:** See [`docs/retrieval.md`](../../retrieval.md) for `KB_RRF_K`, `KB_RERANK_MAX_K` (default `10`), `KB_MAX_PER_DOCUMENT` (default `0` = off; per-document answer diversity, RET-17), and score floors before tweaking prompts.
 
 ---
 

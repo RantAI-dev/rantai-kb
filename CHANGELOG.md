@@ -33,6 +33,14 @@
 
 ### Added
 
+- **`maxPerDocument` diversity cap on `/v1/search` (RET-17).** An additive body field (integer
+  `1..=50`, `400` outside that range) keeps at most N chunks from any one document: the engine
+  walks the reranked list after rerank and before the final `maxChunks` cut, drops surplus hits
+  instead of deferring them, and preserves the survivors' order. `KB_MAX_PER_DOCUMENT` supplies
+  the server default (unset or `0` = off); a request field wins. Figures are attached after the
+  cap and are not counted, and neighbour chunks are counted against the same budget so a capped
+  document cannot regain chunks as context. `stats.perDocumentCapped` reports the number dropped
+  when the cap is on and is absent when it is off.
 - **Stateless parity is pinned by tests (`API-5`).** `/v1/encode` query/passage dense vectors, BM25 sparse vectors and `/v1/rerank` order/scores are now tested bit-for-bit against full mode with the same fake embedding and reranking backend; no API shape changed. The stateless guide now states the guarantees and documents the one deliberate difference: with `KB_RERANK_BREADCRUMBS=on` full mode prepends a breadcrumb that `/v1/rerank` cannot know, so the client must prepend the same `kb_core::rerank::breadcrumb(...)` text for parity.
 - **`KB_RERANK_BREADCRUMBS=off|on` (RET-12).** With the flag on, the reranker sees
   `"{document title} › {section path or section} · p.{page}\n"` before the chunk content, so a
@@ -79,6 +87,13 @@
   query — dense, BM25, page-image, figure, neighbour and tree — so no arm spends top-k on, or
   returns, a unit outside the part. A section resolves through the outline v2 from
   `list_chunk_meta` + `build_outline`; an unknown section id is a `400`.
+
+### Deprecated
+
+- **`KB_GRAPH_ARM` and `KB_GLOBAL_ARM` (DEC-6).** Both arms stay off by default and are now
+  deprecated: starting the server with either enabled logs one warning naming the evidence
+  (HotpotQA −8.5 pp R@5 and +400 ms p95, `docs/eval-baseline.md`, `EVAL-3`) and noting they may be
+  removed after v1.0. Behaviour is unchanged — this is a warning only.
 
 ## 0.8.0 — 2026-11-23
 
