@@ -1242,6 +1242,7 @@ impl IngestWorker {
         if chunks.is_empty() {
             return Ok(0);
         }
+        let params = job.params.clone().unwrap_or_else(|| json!({}));
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
         // The text embedded for a chunk: the document's title, the chunk's
         // heading path when the chunker found one, and the chunk's content.
@@ -1435,6 +1436,7 @@ impl IngestWorker {
         first_index: usize,
         priority: &crate::seats::SeatPriority,
     ) {
+        let params = job.params.clone().unwrap_or_else(|| json!({}));
         let contents: Vec<(u32, String)> = descriptions
             .iter()
             .map(|(page, description)| (*page, format!("[Visual] {description}")))

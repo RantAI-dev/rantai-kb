@@ -345,7 +345,7 @@ fn page_units(tenant: &str, id: &str) -> Vec<IndexUnit> {
 
 /// Seed the fakes and serve them, with the scope hole `mode` names.
 async fn serve(mode: Mode, predicate: bool) -> (String, BTreeMap<String, String>) {
-    let documents = FakeDocumentStore::default();
+    let mut documents = FakeDocumentStore::default();
     // SEC-2a: `KB_SCOPE_ID_LIMIT=1` in production; the fake takes the same
     // limit explicitly because an integration test cannot mutate the process
     // environment under edition 2024.

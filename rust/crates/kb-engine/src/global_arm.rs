@@ -38,7 +38,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use kb_ports::{Candidate, ChunkId, CommunityStore, DocumentScope, PortError, RetrievalIndex};
+use kb_ports::{
+    Candidate, ChunkId, CommunityStore, DocumentId, DocumentScope, PortError, RetrievalIndex,
+};
 
 /// Arm tunables.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -135,9 +137,9 @@ impl GlobalArm {
                 .chunk_ids
                 .iter()
                 .filter(|chunk| {
-                    chunk
-                        .document_part()
-                        .is_some_and(|document| visible.contains(document))
+                    chunk.document_part().is_some_and(|document| {
+                        scope.allows_document(&DocumentId::new_unchecked(document))
+                    })
                 })
                 .collect();
             members.sort();

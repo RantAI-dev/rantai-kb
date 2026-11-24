@@ -59,6 +59,13 @@ POST /v1/search
 {"query": "berlaku 12 hari", "documentIds": ["doc-42"], "pageRange": {"start": 12, "end": 15}}
 ```
 
+`stats.scopeVerifyDropped` is additive (SEC-2a): when the tenant has more visible documents
+than `KB_SCOPE_ID_LIMIT`, the index filters on the tenant / knowledge-base / category payload
+instead of sending every document id, and Postgres re-verifies every candidate before fusion.
+The field counts candidates dropped because their document was no longer visible (stale
+payload, deleted document, a move between knowledge bases); it is absent when the id-list path
+ran. A failed verify fails the search rather than returning unverified hits.
+
 `chunks[].content`, `documentTitle`, `page` and `similarity` carry the results; `degrades`
 is non-empty when an arm failed, because a failed arm is reported rather than silently
 dropped.

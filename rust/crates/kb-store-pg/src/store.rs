@@ -1072,9 +1072,12 @@ fn new_group_id() -> String {
 
 #[cfg(test)]
 mod tests {
-    use kb_ports::{KnowledgeBaseId, MetadataFilter};
+    use kb_ports::{DocumentId, KnowledgeBaseId, MetadataFilter, ScopeRequest, TenantId};
 
-    use super::{DocumentFilter, ScopeBind, scope_sql};
+    use super::{
+        DocumentFilter, ScopeBind, predicate_spec_for, scope_sql, scope_sql_inner,
+        tenant_has_versioned_documents,
+    };
 
     #[test]
     fn the_outline_query_binds_tenant_and_scope_and_never_interpolates() {

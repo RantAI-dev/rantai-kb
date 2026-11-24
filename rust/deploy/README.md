@@ -304,6 +304,15 @@ Three layers, in order of preference:
    when it is empty; a variable that is *absent* takes the preset. Every setting
    the server reads is listed in [`rust/README.md`](../README.md).
 
+**`KB_SCOPE_ID_LIMIT` (default `2000`, SEC-2a).** Above this many visible documents the
+server stops sending the whole id list to Qdrant: it filters on the `tenant_id` /
+`knowledge_base_id` / `category` payload and re-verifies every candidate against Postgres
+before fusion. Set `0` to keep the id-list path at any size (useful for debugging a scope
+issue). A tenant whose documents are versioned (RET-16) always uses the id-list path until
+the payload carries `is_latest`. In predicate mode `stats.scopeVerifyDropped` reports how
+many candidates Postgres rejected; a failed verify fails the search instead of answering
+with unverified hits.
+
 Model containers are profile-gated, so a `.env` override applies to the local
 tier you start. Do not keep an external-embedder URL in `.env` while running
 `cloud` — cloud deliberately gets no local URLs (its preset points everything

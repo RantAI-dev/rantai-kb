@@ -16,7 +16,7 @@
           "health"
         ],
         "summary": "Liveness and readiness: are the dependencies answering?",
-        "description": "`GET /health` — the liveness probe. Public: a health check must not need a\nkey, or an operator cannot use it to find out why the service is not\nanswering.",
+        "description": "`GET /health` \u2014 the liveness probe. Public: a health check must not need a\nkey, or an operator cannot use it to find out why the service is not\nanswering.",
         "operationId": "health",
         "responses": {
           "200": {
@@ -51,7 +51,7 @@
           "taxonomy"
         ],
         "summary": "List the tenant's categories.",
-        "description": "`GET /v1/categories` — the tenant's categories, ordered by name.",
+        "description": "`GET /v1/categories` \u2014 the tenant's categories, ordered by name.",
         "operationId": "list_categories",
         "responses": {
           "200": {
@@ -109,7 +109,7 @@
           "taxonomy"
         ],
         "summary": "Create a category.",
-        "description": "`POST /v1/categories` — 201 with the created category.",
+        "description": "`POST /v1/categories` \u2014 201 with the created category.",
         "operationId": "create_category",
         "requestBody": {
           "content": {
@@ -359,13 +359,13 @@
           "documents"
         ],
         "summary": "List the caller's documents.",
-        "description": "`GET /v1/documents` — the caller's documents. Needs the `kb:read` scope. A\nkey bound to some knowledge bases sees only the documents in them.\n\nThe list is paged: the response carries `nextCursor` and `total`, and the\ncaller sends the cursor back to continue. A `limit` above the cap is\nclamped, never refused — and the response says so (`limitClamped`), because\na caller that asked for 500 and got 200 has to know which it got.",
+        "description": "`GET /v1/documents` \u2014 the caller's documents. Needs the `kb:read` scope. A\nkey bound to some knowledge bases sees only the documents in them.\n\nThe list is paged: the response carries `nextCursor` and `total`, and the\ncaller sends the cursor back to continue. A `limit` above the cap is\nclamped, never refused \u2014 and the response says so (`limitClamped`), because\na caller that asked for 500 and got 200 has to know which it got.",
         "operationId": "list_documents",
         "parameters": [
           {
             "name": "limit",
             "in": "query",
-            "description": "How many documents to return. 1–200; anything else is the default (100).",
+            "description": "How many documents to return. 1\u2013200; anything else is the default (100).",
             "required": false,
             "schema": {
               "type": "string"
@@ -465,7 +465,7 @@
           "documents"
         ],
         "summary": "Upload a document.",
-        "description": "`POST /v1/documents` — accepts the upload, returns `202` with the document\nand job ids. Needs the `kb:write` scope. The answer is `202` because\nnothing is indexed yet: a worker picks the job up and the caller polls\n`GET /v1/jobs/{id}`.",
+        "description": "`POST /v1/documents` \u2014 accepts the upload, returns `202` with the document\nand job ids. Needs the `kb:write` scope. The answer is `202` because\nnothing is indexed yet: a worker picks the job up and the caller polls\n`GET /v1/jobs/{id}`.",
         "operationId": "ingest_document",
         "requestBody": {
           "content": {
@@ -585,7 +585,7 @@
           "documents"
         ],
         "summary": "Read one document and its chunks.",
-        "description": "`GET /v1/documents/{id}` — one document and its chunks. Needs the\n`kb:read` scope. A document outside the caller's tenant, or outside a\nlimited key's knowledge bases, answers the same 404 as an unknown id.",
+        "description": "`GET /v1/documents/{id}` \u2014 one document and its chunks. Needs the\n`kb:read` scope. A document outside the caller's tenant, or outside a\nlimited key's knowledge bases, answers the same 404 as an unknown id.",
         "operationId": "get_document",
         "parameters": [
           {
@@ -664,7 +664,7 @@
           "documents"
         ],
         "summary": "Delete a document, softly or for good.",
-        "description": "`DELETE /v1/documents/{id}` — mirrors TS deleteDocument: needs `kb:write`;\nsoft delete sets `deletedAt` and leaves chunks and the blob alone; hard\ndelete (`?hard=true`) removes the chunks, then the stored object, then the\nrow.",
+        "description": "`DELETE /v1/documents/{id}` \u2014 mirrors TS deleteDocument: needs `kb:write`;\nsoft delete sets `deletedAt` and leaves chunks and the blob alone; hard\ndelete (`?hard=true`) removes the chunks, then the stored object, then the\nrow.",
         "operationId": "delete_document",
         "parameters": [
           {
@@ -752,7 +752,7 @@
           "documents"
         ],
         "summary": "Change a document's metadata.",
-        "description": "`PATCH /v1/documents/{id}` — change a document's metadata. Needs the\n`kb:write` scope. Absent members are left alone; `subcategory` set to\n`null` clears the column.",
+        "description": "`PATCH /v1/documents/{id}` \u2014 change a document's metadata. Needs the\n`kb:write` scope. Absent members are left alone; `subcategory` set to\n`null` clears the column.",
         "operationId": "patch_document",
         "parameters": [
           {
@@ -843,7 +843,7 @@
           "media"
         ],
         "summary": "Download one figure crop.",
-        "description": "`GET /v1/documents/{id}/assets?key=…` — streams one figure crop. The key\nmust live under the document's own asset prefix; anything else is the same\n404 an unknown document gives, so a key cannot be probed.",
+        "description": "`GET /v1/documents/{id}/assets?key=\u2026` \u2014 streams one figure crop. The key\nmust live under the document's own asset prefix; anything else is the same\n404 an unknown document gives, so a key cannot be probed.",
         "operationId": "get_document_asset",
         "parameters": [
           {
@@ -1106,7 +1106,7 @@
           "media"
         ],
         "summary": "The entities and relations extracted for a document.",
-        "description": "`GET /v1/documents/{id}/intelligence` — entities and relations extracted\nfor a document.",
+        "description": "`GET /v1/documents/{id}/intelligence` \u2014 entities and relations extracted\nfor a document.",
         "operationId": "get_document_intelligence",
         "parameters": [
           {
@@ -1187,7 +1187,7 @@
           "media"
         ],
         "summary": "Download the stored original.",
-        "description": "`GET /v1/documents/{id}/raw` — streams the stored original. The bytes come\nback with the document's own MIME type (or `application/octet-stream` when\nthe store has none).",
+        "description": "`GET /v1/documents/{id}/raw` \u2014 streams the stored original. The bytes come\nback with the document's own MIME type (or `application/octet-stream` when\nthe store has none).",
         "operationId": "get_document_raw",
         "parameters": [
           {
@@ -1359,7 +1359,7 @@
           "events"
         ],
         "summary": "Stream ingest progress (server-sent events).",
-        "description": "`GET /v1/events` — server-sent ingest progress for the caller's tenant.\nThe wire format is the TypeScript one byte for byte: an immediate\n`\": connected\\n\\n\"`, a `\": ping\\n\\n\"` keep-alive every 25 s, and one\n`event: <name>\\ndata: <json>\\n\\n` frame per progress update. Only this\ntenant's frames are written; another tenant's are dropped without waking\nthe connection's writer. A key limited to some knowledge bases also drops a\nframe that names a document outside them, so the stream does not reveal\nprogress for a document its other routes answer 404 for.",
+        "description": "`GET /v1/events` \u2014 server-sent ingest progress for the caller's tenant.\nThe wire format is the TypeScript one byte for byte: an immediate\n`\": connected\\n\\n\"`, a `\": ping\\n\\n\"` keep-alive every 25 s, and one\n`event: <name>\\ndata: <json>\\n\\n` frame per progress update. Only this\ntenant's frames are written; another tenant's are dropped without waking\nthe connection's writer. A key limited to some knowledge bases also drops a\nframe that names a document outside them, so the stream does not reveal\nprogress for a document its other routes answer 404 for.",
         "operationId": "events_stream",
         "responses": {
           "200": {
@@ -1419,7 +1419,7 @@
           "health"
         ],
         "summary": "The upload formats the service accepts.",
-        "description": "`GET /v1/formats` — the accepted extensions and the size limit. Public,\nlike the health probe: a client has to know the accepted list before it\nhas a key.",
+        "description": "`GET /v1/formats` \u2014 the accepted extensions and the size limit. Public,\nlike the health probe: a client has to know the accepted list before it\nhas a key.",
         "operationId": "formats",
         "responses": {
           "200": {
@@ -1444,7 +1444,7 @@
           "health"
         ],
         "summary": "Liveness and readiness, under the versioned path.",
-        "description": "`GET /v1/health` — the same probe as `GET /health`. A separate handler so\nthat each path is its own OpenAPI operation; the body is the same one\n`/health` returns.",
+        "description": "`GET /v1/health` \u2014 the same probe as `GET /health`. A separate handler so\nthat each path is its own OpenAPI operation; the body is the same one\n`/health` returns.",
         "operationId": "health_v1",
         "responses": {
           "200": {
@@ -1560,7 +1560,7 @@
           "jobs"
         ],
         "summary": "Requeue a failed ingest job.",
-        "description": "`POST /v1/jobs/{id}/retry` — only a failed job can be retried (409\notherwise). The row goes back to `pending` with the shape the worker's\nclaim expects, so the next poll picks it up exactly like a fresh job.",
+        "description": "`POST /v1/jobs/{id}/retry` \u2014 only a failed job can be retried (409\notherwise). The row goes back to `pending` with the shape the worker's\nclaim expects, so the next poll picks it up exactly like a fresh job.",
         "operationId": "retry_job",
         "parameters": [
           {
@@ -1651,7 +1651,7 @@
           "taxonomy"
         ],
         "summary": "List the caller's knowledge bases.",
-        "description": "`GET /v1/knowledge-bases` — the caller's knowledge bases. Needs the\n`kb:read` scope. A key bound to some bases sees only those.",
+        "description": "`GET /v1/knowledge-bases` \u2014 the caller's knowledge bases. Needs the\n`kb:read` scope. A key bound to some bases sees only those.",
         "operationId": "list_knowledge_bases",
         "responses": {
           "200": {
@@ -1709,7 +1709,7 @@
           "taxonomy"
         ],
         "summary": "Create a knowledge base.",
-        "description": "`POST /v1/knowledge-bases` — 201 with the created row. Needs the `kb:write`\nscope. A base without a name is a 400.",
+        "description": "`POST /v1/knowledge-bases` \u2014 201 with the created row. Needs the `kb:write`\nscope. A base without a name is a 400.",
         "operationId": "create_knowledge_base",
         "requestBody": {
           "content": {
@@ -1789,7 +1789,7 @@
           "taxonomy"
         ],
         "summary": "Delete a knowledge base.",
-        "description": "`DELETE /v1/knowledge-bases/{id}` — removes the base and its document\nlinks.",
+        "description": "`DELETE /v1/knowledge-bases/{id}` \u2014 removes the base and its document\nlinks.",
         "operationId": "delete_knowledge_base",
         "parameters": [
           {
@@ -1959,7 +1959,7 @@
           "search"
         ],
         "summary": "Ask a question; get the chunks, the sources and the assembled context.",
-        "description": "`POST /v1/search` — the retrieval answer. Needs the `kb:read` scope. The\nanswer carries the chunks, the numbered sources, the assembled context and\nthe stage timings; `degrades` names the arms that did not run, so an empty\nanswer is never a silent one.",
+        "description": "`POST /v1/search` \u2014 the retrieval answer. Needs the `kb:read` scope. The\nanswer carries the chunks, the numbered sources, the assembled context and\nthe stage timings; `degrades` names the arms that did not run, so an empty\nanswer is never a silent one.",
         "operationId": "search",
         "requestBody": {
           "content": {
@@ -2039,7 +2039,7 @@
           "tables"
         ],
         "summary": "List the tables the extractor found.",
-        "description": "`GET /v1/tables?documentId=…` — the document's tables, current version. A\nmissing `documentId` lists every table of the tenant: the same scope the\ntenant-wide reads use, and the shape a caller needs to discover what it may\nquery after a search.",
+        "description": "`GET /v1/tables?documentId=\u2026` \u2014 the document's tables, current version. A\nmissing `documentId` lists every table of the tenant: the same scope the\ntenant-wide reads use, and the shape a caller needs to discover what it may\nquery after a search.",
         "operationId": "list_tables",
         "parameters": [
           {
@@ -2123,7 +2123,7 @@
           "tables"
         ],
         "summary": "Read one table and its manifest.",
-        "description": "`GET /v1/tables/{id}` — one table with its manifest.",
+        "description": "`GET /v1/tables/{id}` \u2014 one table with its manifest.",
         "operationId": "get_table",
         "parameters": [
           {
@@ -2204,7 +2204,7 @@
           "tables"
         ],
         "summary": "Run a typed query against a table.",
-        "description": "`POST /v1/tables/{id}/query` — run a typed query and return its rows and\nreceipt. The body is a typed query, never SQL: columns are checked against\nthe manifest and values are bound as parameters. A refused query answers\n`400` with the [`kb_core::tables::QueryError`] JSON itself, so a client\ncan react to `unknown_column` (and read `available`) instead of parsing\nprose.",
+        "description": "`POST /v1/tables/{id}/query` \u2014 run a typed query and return its rows and\nreceipt. The body is a typed query, never SQL: columns are checked against\nthe manifest and values are bound as parameters. A refused query answers\n`400` with the [`kb_core::tables::QueryError`] JSON itself, so a client\ncan react to `unknown_column` (and read `available`) instead of parsing\nprose.",
         "operationId": "query_table",
         "parameters": [
           {
@@ -2304,7 +2304,7 @@
     "schemas": {
       "Agg": {
         "type": "string",
-        "description": "`kb_core::tables::Agg` — the aggregate functions a query may use.",
+        "description": "`kb_core::tables::Agg` \u2014 the aggregate functions a query may use.",
         "enum": [
           "sum",
           "avg",
@@ -2604,7 +2604,7 @@
       },
       "ColumnInfo": {
         "type": "object",
-        "description": "`kb_core::tables::ColumnInfo` — one column of a table's manifest.",
+        "description": "`kb_core::tables::ColumnInfo` \u2014 one column of a table's manifest.",
         "required": [
           "name",
           "kind",
@@ -2649,7 +2649,7 @@
       },
       "ColumnKind": {
         "type": "string",
-        "description": "`kb_core::tables::ColumnKind` — what a column holds.",
+        "description": "`kb_core::tables::ColumnKind` \u2014 what a column holds.",
         "enum": [
           "number",
           "text",
@@ -2661,7 +2661,7 @@
       },
       "ColumnRole": {
         "type": "string",
-        "description": "`kb_core::tables::ColumnRole` — what a column *means*.\n\nA phone number, a postcode or a year is numeric but never summed, so the\nrole decides what an aggregate may do with the column.",
+        "description": "`kb_core::tables::ColumnRole` \u2014 what a column *means*.\n\nA phone number, a postcode or a year is numeric but never summed, so the\nrole decides what an aggregate may do with the column.",
         "enum": [
           "quantity",
           "code",
@@ -2672,7 +2672,7 @@
       },
       "Confidence": {
         "type": "string",
-        "description": "`kb_core::tables::Confidence` — how far the manifest's reading of the table\ncan be trusted.",
+        "description": "`kb_core::tables::Confidence` \u2014 how far the manifest's reading of the table\ncan be trusted.",
         "enum": [
           "high",
           "medium",
@@ -2766,7 +2766,7 @@
             }
           }
         ],
-        "description": "A reference to another record of the same document. Ids and pages only —\nno payloads, so reading on cannot turn into a second search."
+        "description": "A reference to another record of the same document. Ids and pages only \u2014\nno payloads, so reading on cannot turn into a second search."
       },
       "DocumentChunkView": {
         "type": "object",
@@ -2787,7 +2787,7 @@
               "string",
               "null"
             ],
-            "description": "The chunk's kind (`text`, `table_summary`, `table_row`, …)."
+            "description": "The chunk's kind (`text`, `table_summary`, `table_row`, \u2026)."
           },
           "content": {
             "type": "string",
@@ -2795,7 +2795,7 @@
           },
           "id": {
             "type": "string",
-            "description": "The chunk's id, in the wire form `document_chunk:⟨{bare}⟩`."
+            "description": "The chunk's id, in the wire form `document_chunk:\u27e8{bare}\u27e9`."
           },
           "page": {
             "type": [
@@ -3256,7 +3256,7 @@
       },
       "EntityView": {
         "type": "object",
-        "description": "`kb_ports::EntityView` — one entity the graph extracted for a document.",
+        "description": "`kb_ports::EntityView` \u2014 one entity the graph extracted for a document.",
         "required": [
           "id",
           "name",
@@ -3268,7 +3268,7 @@
           "confidence": {
             "type": "number",
             "format": "float",
-            "description": "How sure the extractor is, 0–1."
+            "description": "How sure the extractor is, 0\u20131."
           },
           "id": {
             "type": "string",
@@ -3283,7 +3283,7 @@
           },
           "type": {
             "type": "string",
-            "description": "The entity's kind (`person`, `organisation`, `place`, …)."
+            "description": "The entity's kind (`person`, `organisation`, `place`, \u2026)."
           }
         }
       },
@@ -3348,7 +3348,7 @@
               "string",
               "null"
             ],
-            "description": "The picture's kind (`photo`, `chart`, `diagram`, …), when known."
+            "description": "The picture's kind (`photo`, `chart`, `diagram`, \u2026), when known."
           },
           "ocrText": {
             "type": [
@@ -3389,7 +3389,7 @@
           },
           "kind": {
             "type": "string",
-            "description": "The figure's kind (`figure`, `chart`, `photo`, …)."
+            "description": "The figure's kind (`figure`, `chart`, `photo`, \u2026)."
           },
           "page": {
             "type": "integer",
@@ -3401,7 +3401,7 @@
       },
       "Filter": {
         "type": "object",
-        "description": "`kb_core::tables::Filter` — one predicate on a column.",
+        "description": "`kb_core::tables::Filter` \u2014 one predicate on a column.",
         "required": [
           "column",
           "op",
@@ -3423,7 +3423,7 @@
       },
       "FilterOp": {
         "type": "string",
-        "description": "`kb_core::tables::FilterOp` — the comparison a filter makes.",
+        "description": "`kb_core::tables::FilterOp` \u2014 the comparison a filter makes.",
         "enum": [
           "=",
           "!=",
@@ -3563,7 +3563,7 @@
           },
           "status": {
             "type": "string",
-            "description": "Always `processing` — the document is not indexed yet."
+            "description": "Always `processing` \u2014 the document is not indexed yet."
           },
           "title": {
             "type": "string",
@@ -3639,7 +3639,7 @@
       },
       "JobView": {
         "type": "object",
-        "description": "`kb_ports::JobView` — the ingest job as `GET /v1/jobs/{id}` returns it.\n\ncamelCase on the wire, like every other `/v1` shape.",
+        "description": "`kb_ports::JobView` \u2014 the ingest job as `GET /v1/jobs/{id}` returns it.\n\ncamelCase on the wire, like every other `/v1` shape.",
         "required": [
           "id",
           "status",
@@ -3681,7 +3681,7 @@
           "progress": {
             "type": "integer",
             "format": "int32",
-            "description": "Percent complete, 0–100.",
+            "description": "Percent complete, 0\u2013100.",
             "minimum": 0
           },
           "status": {
@@ -3871,7 +3871,7 @@
       },
       "OrderBy": {
         "type": "object",
-        "description": "`kb_core::tables::OrderBy` — one output ordering.",
+        "description": "`kb_core::tables::OrderBy` \u2014 one output ordering.",
         "required": [
           "key",
           "dir"
@@ -4073,7 +4073,7 @@
       },
       "ProvenanceArm": {
         "type": "string",
-        "description": "`kb_ports::ProvenanceArm` — the arms that produced a search hit.\n\nThe wire vocabulary, not the store's: `dense` and `sparse` are the two\nscored arms, the rest are the engine phases that add a chunk.",
+        "description": "`kb_ports::ProvenanceArm` \u2014 the arms that produced a search hit.\n\nThe wire vocabulary, not the store's: `dense` and `sparse` are the two\nscored arms, the rest are the engine phases that add a chunk.",
         "enum": [
           "dense",
           "sparse",
@@ -4226,11 +4226,11 @@
             }
           }
         ],
-        "description": "`kb_core::tables::QueryError` — why a query was refused before it ran.\n\nEvery variant is a `400` at the API, and the JSON is the body, so a client\ncan react to `unknown_column` (and read `available`) instead of parsing a\nprose message."
+        "description": "`kb_core::tables::QueryError` \u2014 why a query was refused before it ran.\n\nEvery variant is a `400` at the API, and the JSON is the body, so a client\ncan react to `unknown_column` (and read `available`) instead of parsing a\nprose message."
       },
       "QueryResult": {
         "type": "object",
-        "description": "`kb_core::tables::QueryResult` — the rows a query returned, and the receipt\nthat lets a caller say exactly how the number was computed.",
+        "description": "`kb_core::tables::QueryResult` \u2014 the rows a query returned, and the receipt\nthat lets a caller say exactly how the number was computed.",
         "required": [
           "columns",
           "rows",
@@ -4289,7 +4289,7 @@
       },
       "RelationView": {
         "type": "object",
-        "description": "`kb_ports::RelationView` — one edge of the document's entity graph.\n\n`in` and `out` are the record ids of the edge's endpoints.",
+        "description": "`kb_ports::RelationView` \u2014 one edge of the document's entity graph.\n\n`in` and `out` are the record ids of the edge's endpoints.",
         "required": [
           "id",
           "in",
@@ -4302,7 +4302,7 @@
           "confidence": {
             "type": "number",
             "format": "float",
-            "description": "How sure the extractor is, 0–1."
+            "description": "How sure the extractor is, 0\u20131."
           },
           "id": {
             "type": "string",
@@ -4321,13 +4321,13 @@
           },
           "relation_type": {
             "type": "string",
-            "description": "The relation's type — the dynamic table the edge lives in."
+            "description": "The relation's type \u2014 the dynamic table the edge lives in."
           }
         }
       },
       "RetrievalDto": {
         "type": "object",
-        "description": "Which retrieval arms produced a chunk, as the response reports it.\n\n**Additive** (step S.1c): Bun does not emit `retrieval`, and every field Bun\ndoes emit is unchanged. `search-parity.sh` deletes `.chunks[].retrieval`\nbefore diffing a Bun answer against a Rust one, because a field only one\nimplementation produces is not a divergence to fix — see\n`docs/rust-cutover.md`.",
+        "description": "Which retrieval arms produced a chunk, as the response reports it.\n\n**Additive** (step S.1c): Bun does not emit `retrieval`, and every field Bun\ndoes emit is unchanged. `search-parity.sh` deletes `.chunks[].retrieval`\nbefore diffing a Bun answer against a Rust one, because a field only one\nimplementation produces is not a divergence to fix \u2014 see\n`docs/rust-cutover.md`.",
         "required": [
           "arms"
         ],
@@ -4560,7 +4560,7 @@
       },
       "SearchStatsDto": {
         "type": "object",
-        "description": "The `stats` object of a search response.\n\nEvery field of the Bun `HybridSearchStats` is kept, with the same name and\nthe same meaning, because clients already read them and this service is\nmeant to be a drop-in for it. `stageTimingsMs` is additive: a client that\nhas never heard of it keeps working, and a client that reads it gets the\npart of the latency that the five legacy fields cannot explain — the arms,\nthe rerank, the Postgres round trips and the serialisation.\n\nThe legacy fields are now measured rather than zeroed, so `embeddingTimeMs`\non the standard path is a number instead of a lie. Milliseconds keep\nmicrosecond resolution: a query-cache hit and a 0.4 ms arm are both \"0 ms\"\nonce rounded to an integer, and the difference between them is the whole\nreason this exists.",
+        "description": "The `stats` object of a search response.\n\nEvery field of the Bun `HybridSearchStats` is kept, with the same name and\nthe same meaning, because clients already read them and this service is\nmeant to be a drop-in for it. `stageTimingsMs` is additive: a client that\nhas never heard of it keeps working, and a client that reads it gets the\npart of the latency that the five legacy fields cannot explain \u2014 the arms,\nthe rerank, the Postgres round trips and the serialisation.\n\nThe legacy fields are now measured rather than zeroed, so `embeddingTimeMs`\non the standard path is a number instead of a lie. Milliseconds keep\nmicrosecond resolution: a query-cache hit and a 0.4 ms arm are both \"0 ms\"\nonce rounded to an integer, and the difference between them is the whole\nreason this exists.",
         "required": [
           "totalTimeMs",
           "embeddingTimeMs",
@@ -4631,7 +4631,7 @@
               },
               {
                 "$ref": "#/components/schemas/GlobalArmStatsDto",
-                "description": "Additive (`DEC-5`): what the global community arm did. Present only when\nthe arm ran (`KB_GLOBAL_ARM` on and an aggregative query), so a server\nwith the flag off answers exactly the earlier shape. `communities: 0`\nmeans the tenant has no community set — the arm had nothing to say, and\nthat is not a degrade."
+                "description": "Additive (`DEC-5`): what the global community arm did. Present only when\nthe arm ran (`KB_GLOBAL_ARM` on and an aggregative query), so a server\nwith the flag off answers exactly the earlier shape. `communities: 0`\nmeans the tenant has no community set \u2014 the arm had nothing to say, and\nthat is not a degrade."
               }
             ]
           },
@@ -4655,7 +4655,7 @@
               "integer",
               "null"
             ],
-            "description": "Additive (issue #31): how many of the returned chunks carry a\n`rerankScore` — that is, how many of them the reranker scored.\n\nWithout a relevance floor that is the reranked head: the chunks ordered\nby the rerank score, followed by the rest in the fused order without\none. With a relevance floor (`minScore`) the whole pool was scored (the\nfloor compares every hit against its score), so it can be the whole\nanswer.\n\nAbsent when no reranker ran, so a search without a reranker keeps\nexactly the earlier shape.",
+            "description": "Additive (issue #31): how many of the returned chunks carry a\n`rerankScore` \u2014 that is, how many of them the reranker scored.\n\nWithout a relevance floor that is the reranked head: the chunks ordered\nby the rerank score, followed by the rest in the fused order without\none. With a relevance floor (`minScore`) the whole pool was scored (the\nfloor compares every hit against its score), so it can be the whole\nanswer.\n\nAbsent when no reranker ran, so a search without a reranker keeps\nexactly the earlier shape.",
             "minimum": 0
           },
           "skippedArms": {
@@ -4698,6 +4698,14 @@
           "vectorSearchTimeMs": {
             "type": "number",
             "format": "double"
+          },
+          "scopeVerifyDropped": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "SEC-2a: candidates dropped because Postgres did not verify their\ndocument. Absent in Ids mode, so an old client sees the earlier shape.",
+            "minimum": 0
           }
         }
       },
@@ -4735,7 +4743,7 @@
           },
           "id": {
             "type": "string",
-            "description": "Stable section id within this document (`s1`, `s2`, …), used by the\ncontent route's `?section=` parameter."
+            "description": "Stable section id within this document (`s1`, `s2`, \u2026), used by the\ncontent route's `?section=` parameter."
           },
           "level": {
             "type": "integer",
@@ -4828,7 +4836,7 @@
             }
           }
         ],
-        "description": "`kb_core::tables::SelectItem` — one output column: a plain column, or an\naggregate.\n\nJSON: `{\"column\":\"Region\"}` or `{\"agg\":\"sum\",\"column\":\"Revenue\",\"as\":\"total\"}`;\n`{\"agg\":\"count\"}` with no column counts rows."
+        "description": "`kb_core::tables::SelectItem` \u2014 one output column: a plain column, or an\naggregate.\n\nJSON: `{\"column\":\"Region\"}` or `{\"agg\":\"sum\",\"column\":\"Revenue\",\"as\":\"total\"}`;\n`{\"agg\":\"count\"}` with no column counts rows."
       },
       "SkippedArmDto": {
         "type": "object",
@@ -4848,7 +4856,7 @@
       },
       "SortDir": {
         "type": "string",
-        "description": "`kb_core::tables::SortDir` — which way to sort.",
+        "description": "`kb_core::tables::SortDir` \u2014 which way to sort.",
         "enum": [
           "asc",
           "desc"
@@ -4978,7 +4986,7 @@
       },
       "StageTimingsDto": {
         "type": "object",
-        "description": "The per-stage breakdown, in milliseconds.\n\nThe top level is a *partition* of the request: the stages there run one\nafter another and add up to no more than [`SearchStatsDto::total_time_ms`].\n`detail` is the overlapping part — the query embed and the two arms all\nhappen inside `arms`, so they are reported, never summed with it.",
+        "description": "The per-stage breakdown, in milliseconds.\n\nThe top level is a *partition* of the request: the stages there run one\nafter another and add up to no more than [`SearchStatsDto::total_time_ms`].\n`detail` is the overlapping part \u2014 the query embed and the two arms all\nhappen inside `arms`, so they are reported, never summed with it.",
         "required": [
           "scopeBuild",
           "expand",
@@ -5133,7 +5141,7 @@
           },
           "source": {
             "type": "string",
-            "description": "Where the table came from (`csv`, `xlsx`, `pdf`, …)."
+            "description": "Where the table came from (`csv`, `xlsx`, `pdf`, \u2026)."
           },
           "tenantId": {
             "type": "string",
@@ -5156,7 +5164,7 @@
       },
       "TableManifest": {
         "type": "object",
-        "description": "`kb_core::tables::TableManifest` — what the manifest's own reading of a\ntable can be trusted to mean.",
+        "description": "`kb_core::tables::TableManifest` \u2014 what the manifest's own reading of a\ntable can be trusted to mean.",
         "required": [
           "columns",
           "derived_rows",
@@ -5209,7 +5217,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Extraction notes carried forward (\"hidden sheet skipped\", …)."
+            "description": "Extraction notes carried forward (\"hidden sheet skipped\", \u2026)."
           },
           "truncated": {
             "type": "boolean",
@@ -5219,7 +5227,7 @@
       },
       "TableQuery": {
         "type": "object",
-        "description": "`kb_core::tables::TableQuery` — the typed query\n`POST /v1/tables/{id}/query` accepts. Never SQL: columns are checked\nagainst the manifest and values are bound as parameters.",
+        "description": "`kb_core::tables::TableQuery` \u2014 the typed query\n`POST /v1/tables/{id}/query` accepts. Never SQL: columns are checked\nagainst the manifest and values are bound as parameters.",
         "required": [
           "select",
           "filter",
@@ -5313,7 +5321,7 @@
       },
       "UploadForm": {
         "type": "object",
-        "description": "The multipart form `POST /v1/documents` accepts.\n\nThe file is the part named `file`; every other part is a text field. The\nschema names them all — with the names the form really uses, camelCase\nincluded — so a reader of the spec knows the whole form without reading\nthe route.",
+        "description": "The multipart form `POST /v1/documents` accepts.\n\nThe file is the part named `file`; every other part is a text field. The\nschema names them all \u2014 with the names the form really uses, camelCase\nincluded \u2014 so a reader of the spec knows the whole form without reading\nthe route.",
         "required": [
           "file"
         ],

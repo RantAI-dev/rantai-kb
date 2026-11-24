@@ -276,7 +276,7 @@ impl DocumentScope {
                     tenant: self.tenant.clone(),
                     mode: ScopeMode::Predicate(PredicateSpec {
                         verify,
-                        ..spec.clone()
+                        ..(*spec).clone()
                     }),
                     unit_range: self.unit_range,
                 }

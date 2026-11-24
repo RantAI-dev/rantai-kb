@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- **Predicate scope with a fail-closed Postgres verify (SEC-2a).** When a tenant has more
+  visible documents than `KB_SCOPE_ID_LIMIT` (default `2000`, `0` disables), the search no
+  longer sends every document id to Qdrant: the index filters on the `tenant_id`,
+  `knowledge_base_id` and `category` payload, arms over-fetch 1.5×, and every candidate is
+  verified against the same Postgres visibility rule before fusion. Unverified candidates are
+  dropped and counted in the additive `stats.scopeVerifyDropped`; a failed verify fails the
+  search instead of returning unverified hits. Filters the payload cannot express (metadata,
+  language, external refs, `documentIds` narrowing with unit ranges, RET-16 versions) keep the
+  id-list path.
+
 ### Fixed
 
 - **Passage prefixes are applied on the batch path (`ING-9`).** `embed_many` (used by ingest and

@@ -507,7 +507,7 @@ impl GraphStore for PgGraphStore {
         // SEC-2a: these reads are `ANY(ids)` lookups. A predicate scope has no
         // id list, so the arm stays off instead of running unfiltered.
         if scope.is_predicate() {
-            return TenantGraph::empty();
+            return Ok(TenantGraph::empty());
         }
         let document_ids: Vec<String> = scope
             .document_ids()
@@ -556,7 +556,7 @@ impl GraphStore for PgGraphStore {
         // SEC-2a: these reads are `ANY(ids)` lookups. A predicate scope has no
         // id list, so the arm stays off instead of running unfiltered.
         if scope.is_predicate() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let document_ids: Vec<String> = scope
             .document_ids()
@@ -618,7 +618,7 @@ impl GraphStore for PgGraphStore {
         // SEC-2a: these reads are `ANY(ids)` lookups. A predicate scope has no
         // id list, so the arm stays off instead of running unfiltered.
         if scope.is_predicate() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let document_ids: Vec<String> = scope
             .document_ids()
