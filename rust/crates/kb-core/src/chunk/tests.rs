@@ -264,6 +264,51 @@ fn smart_chunk_document_emits_storage_shape() {
 }
 
 #[test]
+fn smart_chunk_document_carries_spans_into_storage_shape() {
+    let out = smart_chunk_document(
+        "First long paragraph that is deliberately longer than the chunk \
+         budget so the chunker must split and repeat overlap. Second long \
+         paragraph keeps the document going past the same budget.",
+        "Doc",
+        "cat",
+        None,
+        SmartChunkingOptions {
+            max_chunk_size: Some(64),
+            overlap_size: Some(16),
+            ..Default::default()
+        },
+    );
+    assert!(out.len() > 1);
+    let mut cursor = 0;
+    let mut saw_overlap = false;
+    for (i, chunk) in out.iter().enumerate() {
+        let start = chunk.metadata.char_start.unwrap_or_default();
+        let end = chunk.metadata.char_end.unwrap_or_default();
+        let overlap = chunk.metadata.overlap_prefix_len.unwrap_or_default();
+        assert_eq!(
+            chunk.metadata.char_start,
+            Some(start),
+            "chunk {i} has charStart"
+        );
+        assert_eq!(chunk.metadata.char_end, Some(end), "chunk {i} has charEnd");
+        assert_eq!(
+            chunk.metadata.overlap_prefix_len,
+            Some(overlap),
+            "chunk {i} has overlapPrefixLen"
+        );
+        assert_eq!(start, cursor, "chunk {i} span is contiguous");
+        assert_eq!(
+            end - start,
+            u32::try_from(chunk.content.chars().count()).unwrap_or(u32::MAX) - overlap,
+            "chunk {i} span counts non-overlap chars"
+        );
+        cursor = end;
+        saw_overlap |= overlap > 0;
+    }
+    assert!(saw_overlap, "test options must produce overlap");
+}
+
+#[test]
 fn smart_chunk_document_carries_the_heading_path() {
     // The heading path is what the embedding text puts after the title, so a
     // chunk from under a subsection still says where it came from.

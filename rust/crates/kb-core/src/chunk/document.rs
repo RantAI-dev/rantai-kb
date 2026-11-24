@@ -43,6 +43,15 @@ pub struct ChunkMetadata {
     /// absent for every other chunk.
     #[serde(default)]
     pub table_id: Option<String>,
+    /// Character span in the chunker's normalised source (`ING-13`). Absent on
+    /// chunks ingested before spans existed and on chunks built by hand
+    /// (figures, table summaries), never a misleading zero.
+    #[serde(default)]
+    pub char_start: Option<u32>,
+    #[serde(default)]
+    pub char_end: Option<u32>,
+    #[serde(default)]
+    pub overlap_prefix_len: Option<u32>,
 }
 
 impl crate::page_map::HasContent<ChunkMetadata> for Chunk {
@@ -237,6 +246,9 @@ pub fn smart_chunk_document(
                 asset_key: None,
                 anchor_chunk_index: None,
                 table_id: None,
+                char_start: Some(sc.metadata.char_start),
+                char_end: Some(sc.metadata.char_end),
+                overlap_prefix_len: Some(sc.metadata.overlap_prefix_len),
             },
         })
         .filter(|c| !c.content.is_empty())

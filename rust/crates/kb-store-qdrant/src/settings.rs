@@ -217,18 +217,26 @@ pub async fn create_collection(
             .await
             .map_err(map)?;
     }
-    client
-        .create_field_index(
-            CreateFieldIndexCollectionBuilder::new(
-                collection,
-                crate::payload::KEY_CHUNK_INDEX,
-                FieldType::Integer,
+    // Integer indexes: `chunkIndex` for neighbour windows and re-ingest
+    // bookkeeping, `page` for page-scoped reads. Both must be range-filterable
+    // without scanning the collection. Creating an index on an existing
+    // collection is normally a no-op; a server that answers "already exists"
+    // is tolerated exactly like collection creation above, so re-running
+    // setup is idempotent.
+    for field in [crate::payload::KEY_CHUNK_INDEX, crate::payload::KEY_PAGE] {
+        let created = client
+            .create_field_index(
+                CreateFieldIndexCollectionBuilder::new(collection, field, FieldType::Integer)
+                    .field_index_params(IntegerIndexParamsBuilder::default().build())
+                    .wait(true),
             )
-            .field_index_params(IntegerIndexParamsBuilder::default().build())
-            .wait(true),
-        )
-        .await
-        .map_err(map)?;
+            .await;
+        if let Err(err) = created {
+            if !already_exists(&err) {
+                return Err(map(err));
+            }
+        }
+    }
 
     Ok(())
 }
