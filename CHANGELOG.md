@@ -17,6 +17,7 @@
   One query-side change: a custom config that sets `KB_EMBEDDING_QUERY_PREFIX` **and** sends the
   instruction out of band (`KB_EMBEDDING_INPUT_TYPE=true` or `KB_EMBEDDING_FORMAT=omniembed`) no
   longer prefixes queries either. No shipped tier preset combines the two.
+- **RET-10 — citations keep documents apart.** `source_dedupe_key` now keys text sources by `doc:{documentId}|{section}` when a document id is present, so documents sharing a title (e.g. a 2023 and 2024 "Kebijakan Cuti") stay separate sources with their own `documentId` and page. Sources without a document id keep the legacy `documentTitle-section` key; figures stay keyed by asset.
 
 ### Changed
 

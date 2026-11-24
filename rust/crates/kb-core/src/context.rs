@@ -8,6 +8,7 @@ use std::collections::HashMap;
 /// Inputs for [`source_dedupe_key`].
 #[derive(Debug, Clone, Default)]
 pub struct SourceDedupKey<'a> {
+    pub document_id: Option<&'a str>,
     pub document_title: Option<&'a str>,
     pub section: Option<&'a str>,
     pub asset_key: Option<&'a str>,
@@ -34,17 +35,22 @@ pub struct NumberedSource<'a> {
     pub figure: bool,
 }
 
-/// Stable dedupe key for a source. Figures are distinct by asset; text chunks
-/// collapse by `documentTitle-section`. Mirrors the TypeScript
-/// `sourceDedupeKey` so excerpt labels, the Sources list and the UI cards all
-/// share the same `[N]`.
+/// Stable dedupe key for a source. Figures are distinct by asset. Text chunks
+/// collapse by `documentId|section` when a document id is present, so two
+/// different documents sharing a title keep separate sources (RET-10); without
+/// an id they keep the legacy `documentTitle-section` key. Mirrors the
+/// TypeScript `sourceDedupeKey` so excerpt labels, the Sources list and the UI
+/// cards all share the same `[N]`.
 #[must_use]
 pub fn source_dedupe_key(k: &SourceDedupKey<'_>) -> String {
     if let Some(asset) = k.asset_key {
         return format!("asset:{asset}");
     }
-    let title = k.document_title.unwrap_or("Document");
     let section = k.section.unwrap_or("");
+    if let Some(document_id) = k.document_id {
+        return format!("doc:{document_id}|{section}");
+    }
+    let title = k.document_title.unwrap_or("Document");
     format!("{title}-{section}")
 }
 
@@ -76,6 +82,7 @@ pub fn build_context_and_sources(chunks: &[ContextItem<'_>]) -> (String, Vec<Sou
 
     for c in chunks {
         let key = source_dedupe_key(&SourceDedupKey {
+            document_id: c.document_id,
             document_title: Some(c.document_title),
             section: c.section,
             asset_key: c.asset_key,
@@ -99,6 +106,7 @@ pub fn build_context_and_sources(chunks: &[ContextItem<'_>]) -> (String, Vec<Sou
     let mut context_parts: Vec<String> = Vec::with_capacity(chunks.len());
     for c in chunks {
         let key = source_dedupe_key(&SourceDedupKey {
+            document_id: c.document_id,
             document_title: Some(c.document_title),
             section: c.section,
             asset_key: c.asset_key,
@@ -148,6 +156,7 @@ mod tests {
     #[test]
     fn asset_key_takes_precedence() {
         let k = SourceDedupKey {
+            document_id: Some("doc-1"),
             document_title: Some("Doc"),
             section: Some("sec"),
             asset_key: Some("a/b"),
@@ -158,11 +167,31 @@ mod tests {
     #[test]
     fn text_uses_title_and_section() {
         let k = SourceDedupKey {
+            document_id: None,
             document_title: Some("Apple 10-K"),
             section: Some("Income Statement"),
             asset_key: None,
         };
         assert_eq!(source_dedupe_key(&k), "Apple 10-K-Income Statement");
+    }
+
+    #[test]
+    fn text_uses_document_id_when_present() {
+        let k = SourceDedupKey {
+            document_id: Some("doc-2024"),
+            document_title: Some("Kebijakan Cuti"),
+            section: Some("Cuti Tahunan"),
+            asset_key: None,
+        };
+        assert_eq!(source_dedupe_key(&k), "doc:doc-2024|Cuti Tahunan");
+
+        let k = SourceDedupKey {
+            document_id: Some("doc-2024"),
+            document_title: Some("Kebijakan Cuti"),
+            section: None,
+            asset_key: None,
+        };
+        assert_eq!(source_dedupe_key(&k), "doc:doc-2024|");
     }
 
     #[test]
@@ -227,5 +256,81 @@ mod tests {
         assert!(context.contains("[1] Apple 10-K — Income\nQ4 summary\n\nRevenue was $100B."));
         assert!(context.contains("\n\n---\n\n"));
         assert!(context.contains("[1] Apple 10-K — Income\nNet income was $30B."));
+    }
+
+    #[test]
+    fn same_title_different_documents_stay_separate_sources() {
+        let cat = vec!["hr".to_string()];
+        let items = vec![
+            ContextItem {
+                document_id: Some("doc-2023"),
+                document_title: "Kebijakan Cuti",
+                section: Some("Cuti Tahunan"),
+                categories: &cat,
+                asset_key: None,
+                page: Some(3),
+                chunk_type: Some("text"),
+                content: "12 hari",
+                contextual_prefix: None,
+            },
+            ContextItem {
+                document_id: Some("doc-2024"),
+                document_title: "Kebijakan Cuti",
+                section: Some("Cuti Tahunan"),
+                categories: &cat,
+                asset_key: None,
+                page: Some(5),
+                chunk_type: Some("text"),
+                content: "14 hari",
+                contextual_prefix: None,
+            },
+        ];
+        let (context, sources) = build_context_and_sources(&items);
+        assert_eq!(
+            sources.len(),
+            2,
+            "two documents with the same title must not collapse into one source"
+        );
+        assert_eq!(sources[0].document_id.as_deref(), Some("doc-2023"));
+        assert_eq!(sources[0].page, Some(3));
+        assert_eq!(sources[1].document_id.as_deref(), Some("doc-2024"));
+        assert_eq!(sources[1].page, Some(5));
+        assert!(context.contains("[1] Kebijakan Cuti — Cuti Tahunan\n12 hari"));
+        assert!(context.contains("[2] Kebijakan Cuti — Cuti Tahunan\n14 hari"));
+    }
+
+    #[test]
+    fn same_document_and_section_two_chunks_is_one_source() {
+        let cat = vec!["hr".to_string()];
+        let items = vec![
+            ContextItem {
+                document_id: Some("doc-2023"),
+                document_title: "Kebijakan Cuti",
+                section: Some("Cuti Tahunan"),
+                categories: &cat,
+                asset_key: None,
+                page: Some(3),
+                chunk_type: Some("text"),
+                content: "first chunk",
+                contextual_prefix: None,
+            },
+            ContextItem {
+                document_id: Some("doc-2023"),
+                document_title: "Kebijakan Cuti",
+                section: Some("Cuti Tahunan"),
+                categories: &cat,
+                asset_key: None,
+                page: Some(4),
+                chunk_type: Some("text"),
+                content: "second chunk",
+                contextual_prefix: None,
+            },
+        ];
+        let (context, sources) = build_context_and_sources(&items);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].document_id.as_deref(), Some("doc-2023"));
+        assert_eq!(sources[0].page, Some(3));
+        assert!(context.contains("[1] Kebijakan Cuti — Cuti Tahunan\nfirst chunk"));
+        assert!(context.contains("[1] Kebijakan Cuti — Cuti Tahunan\nsecond chunk"));
     }
 }
