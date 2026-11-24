@@ -37,13 +37,21 @@ async fn fresh_store() -> PgDocumentStore {
     // this contract also proves a fresh database can be migrated from zero.
     let migrations = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../prisma/migrations");
     migrate::apply(&pool, &migrations).await.unwrap();
-    for table in ["DocumentGroup", "Document"] {
-        sqlx::query(&format!(r#"DELETE FROM "{table}" WHERE "tenantId" = $1"#))
-            .bind(TENANT)
-            .execute(&pool)
-            .await
-            .unwrap();
-    }
+    // `DocumentGroup` has no tenant column; its rows hang off the tenant's
+    // documents, so delete them through `documentId` first.
+    sqlx::query(
+        r#"DELETE FROM "DocumentGroup" WHERE "documentId" IN
+           (SELECT id FROM "Document" WHERE "tenantId" = $1)"#,
+    )
+    .bind(TENANT)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(r#"DELETE FROM "Document" WHERE "tenantId" = $1"#)
+        .bind(TENANT)
+        .execute(&pool)
+        .await
+        .unwrap();
     PgDocumentStore::from_pool(pool)
 }
 
@@ -137,7 +145,12 @@ async fn postgres_supersedes_and_scopes_versions() {
         .unwrap()
         .unwrap();
     assert!(!old.is_latest, "v1 must be retired");
-    assert_eq!(old.effective_to.as_deref(), Some("2025-01-01T00:00:00Z"));
+    // Postgres renders timestamps with milliseconds, like every other
+    // timestamp the API returns.
+    assert_eq!(
+        old.effective_to.as_deref(),
+        Some("2025-01-01T00:00:00.000Z")
+    );
     assert_eq!(new.supersedes_document_id.as_deref(), Some("v1"));
 
     assert_eq!(
