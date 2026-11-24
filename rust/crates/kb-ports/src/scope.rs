@@ -265,10 +265,7 @@ impl DocumentScope {
             ScopeMode::Predicate(spec) => {
                 let mut verify = spec.verify.clone();
                 let narrowed: Vec<DocumentId> = match verify.restricted_ids.take() {
-                    Some(previous) => previous
-                        .into_iter()
-                        .filter(|id| ids.contains(id))
-                        .collect(),
+                    Some(previous) => previous.into_iter().filter(|id| ids.contains(id)).collect(),
                     None => ids.to_vec(),
                 };
                 verify.restricted_ids = Some(narrowed);
@@ -486,9 +483,7 @@ mod tests {
             pages: Some((12, 15)),
             chunks: Some((40, 57)),
         };
-        let page_scope = ids_scope(&["doc-a"])
-            .with_unit_range(range)
-            .pages_only();
+        let page_scope = ids_scope(&["doc-a"]).with_unit_range(range).pages_only();
         assert_eq!(
             page_scope.unit_range(),
             Some(UnitRange {
@@ -524,13 +519,17 @@ mod tests {
 
     #[test]
     fn a_predicate_scope_narrowed_to_one_document_can_carry_a_range() {
-        let scope = predicate_scope(None, None)
-            .narrowed_to(&[DocumentId::new_unchecked("doc-a")]);
+        let scope = predicate_scope(None, None).narrowed_to(&[DocumentId::new_unchecked("doc-a")]);
         let range = UnitRange {
             pages: Some((3, 4)),
             chunks: Some((10, 20)),
         };
         assert_eq!(scope.with_unit_range(range).unit_range(), Some(range));
-        assert_eq!(predicate_scope(None, None).with_unit_range(range).unit_range(), None);
+        assert_eq!(
+            predicate_scope(None, None)
+                .with_unit_range(range)
+                .unit_range(),
+            None
+        );
     }
 }

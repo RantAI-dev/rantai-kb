@@ -347,7 +347,10 @@ impl GraphStore for InMemoryGraphStore {
         //    needed for an out-of-scope relation not to become a path.
         let mut edges: Vec<Edge> = Vec::new();
         for relation in &data.relations {
-            if visible.as_ref().is_some_and(|ids| !ids.contains(&relation.document_id.0)) {
+            if visible
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(&relation.document_id.0))
+            {
                 continue;
             }
             let (Some(src), Some(dst)) =

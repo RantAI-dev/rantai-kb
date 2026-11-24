@@ -726,7 +726,7 @@ mod tests {
             PredicateSpec {
                 kb_ids: kb_ids.map(|ids| {
                     ids.into_iter()
-                        .map(|id| KnowledgeBaseId::new_unchecked(id))
+                        .map(KnowledgeBaseId::new_unchecked)
                         .collect()
                 }),
                 category: category.map(str::to_string),

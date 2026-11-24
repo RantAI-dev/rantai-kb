@@ -317,10 +317,7 @@ fn page_units(tenant: &str, id: &str) -> Vec<IndexUnit> {
         .nth(1)
         .and_then(|rest| rest.split("-cat").next())
         .map(|n| format!("{tenant}-kb{n}"));
-    let category = id
-        .split("-cat")
-        .nth(1)
-        .map(|n| format!("{tenant}-cat{n}"));
+    let category = id.split("-cat").nth(1).map(|n| format!("{tenant}-cat{n}"));
     (0..2u32)
         .map(|page| IndexUnit {
             id: kb_engine::page_arm::page_unit_id(&DocumentId(id.to_string()), page),
@@ -345,13 +342,13 @@ fn page_units(tenant: &str, id: &str) -> Vec<IndexUnit> {
 
 /// Seed the fakes and serve them, with the scope hole `mode` names.
 async fn serve(mode: Mode, predicate: bool) -> (String, BTreeMap<String, String>) {
-    let mut documents = FakeDocumentStore::default();
     // SEC-2a: `KB_SCOPE_ID_LIMIT=1` in production; the fake takes the same
     // limit explicitly because an integration test cannot mutate the process
     // environment under edition 2024.
-    if predicate {
-        documents.scope_id_limit = Some(1);
-    }
+    let documents = FakeDocumentStore {
+        scope_id_limit: predicate.then_some(1),
+        ..FakeDocumentStore::default()
+    };
     let chunks = FakeChunkStore::default();
     let blobs = FakeBlobStore::default();
     let jobs = FakeJobStore::default();
@@ -938,7 +935,11 @@ async fn the_matrix_passes_with_predicate_scopes_and_no_leaks() {
                 .iter()
                 .find(|a| a.arm == arm)
                 .unwrap_or_else(|| panic!("{arm:?} was never probed"));
-            assert_eq!(report.leaks, 0, "{mode:?} {arm:?}: {:?}", report.leak_examples);
+            assert_eq!(
+                report.leaks, 0,
+                "{mode:?} {arm:?}: {:?}",
+                report.leak_examples
+            );
         }
     }
 }

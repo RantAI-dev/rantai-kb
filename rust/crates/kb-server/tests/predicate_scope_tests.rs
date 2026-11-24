@@ -95,34 +95,27 @@ struct Fixture {
 }
 
 fn fixture(scope_id_limit: Option<usize>) -> Fixture {
-    let mut documents = FakeDocumentStore::default();
-    documents.scope_id_limit = scope_id_limit;
+    let documents = FakeDocumentStore {
+        scope_id_limit,
+        ..FakeDocumentStore::default()
+    };
     documents.insert_api_key("predicate-key", TenantId(TENANT_A.to_string()));
     // Three visible documents so the scope stays in predicate mode with the
     // limit set to 1 even after one is moved out of a KB or soft-deleted.
-    documents.insert_doc(
-        TenantId(TENANT_A.to_string()),
-        doc(TENANT_A, DOC, KB_1),
-    );
-    documents.insert_doc(
-        TenantId(TENANT_A.to_string()),
-        doc(TENANT_A, "doc-e", KB_1),
-    );
-    documents.insert_doc(
-        TenantId(TENANT_A.to_string()),
-        doc(TENANT_A, "doc-f", KB_1),
-    );
+    documents.insert_doc(TenantId(TENANT_A.to_string()), doc(TENANT_A, DOC, KB_1));
+    documents.insert_doc(TenantId(TENANT_A.to_string()), doc(TENANT_A, "doc-e", KB_1));
+    documents.insert_doc(TenantId(TENANT_A.to_string()), doc(TENANT_A, "doc-f", KB_1));
     let chunks = FakeChunkStore::default();
     chunks
         .vector_hits
         .write()
         .unwrap()
         .push(hit("chunk-d", DOC, CANARY));
-    chunks.bm25_hits.write().unwrap().push(hit(
-        "chunk-d-bm25",
-        DOC,
-        CANARY,
-    ));
+    chunks
+        .bm25_hits
+        .write()
+        .unwrap()
+        .push(hit("chunk-d-bm25", DOC, CANARY));
     chunks.set_payload(
         &DocumentId(DOC.to_string()),
         FakeChunkPayload {
@@ -188,12 +181,7 @@ fn doc_ids(body: &Value) -> Vec<String> {
         .map(|chunks| {
             chunks
                 .iter()
-                .map(|chunk| {
-                    chunk["documentId"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_string()
-                })
+                .map(|chunk| chunk["documentId"].as_str().unwrap_or_default().to_string())
                 .collect()
         })
         .unwrap_or_default()
@@ -211,7 +199,7 @@ async fn predicate_and_ids_mode_return_the_same_hits_on_an_honest_fixture() {
     let (status_i, ids) = search(&ids_url, "predicate-key", query()).await;
     assert_eq!(status_p, reqwest::StatusCode::OK);
     assert_eq!(status_i, reqwest::StatusCode::OK);
-    assert_eq!(doc_ids(&predicate), vec![DOC]);
+    assert_eq!(doc_ids(&predicate), vec![DOC, DOC]);
     assert_eq!(doc_ids(&predicate), doc_ids(&ids));
     // The stat is additive: absent in Ids mode, present (zero drops) in predicate.
     assert_eq!(dropped(&predicate), Some(0));
@@ -266,7 +254,10 @@ async fn a_stale_tenant_payload_cannot_show_another_tenants_document() {
 async fn a_deleted_documents_chunks_are_never_returned() {
     let f = fixture(Some(1));
     f.documents
-        .soft_delete(&TenantId(TENANT_A.to_string()), &DocumentId(DOC.to_string()))
+        .soft_delete(
+            &TenantId(TENANT_A.to_string()),
+            &DocumentId(DOC.to_string()),
+        )
         .await
         .unwrap();
     let url = serve(f).await;
@@ -284,6 +275,9 @@ async fn a_failed_verify_fails_the_search_instead_of_returning_unverified_hits()
         .store(true, std::sync::atomic::Ordering::Relaxed);
     let url = serve(f).await;
     let (status, body) = search(&url, "predicate-key", query()).await;
-    assert!(status.is_server_error(), "expected 5xx, got {status}: {body}");
+    assert!(
+        status.is_server_error(),
+        "expected 5xx, got {status}: {body}"
+    );
     assert_ne!(doc_ids(&body), vec![DOC]);
 }

@@ -109,14 +109,14 @@ impl InMemoryIndex {
         } else {
             kb_ids
         };
-        predicate.kb_ids.as_ref().is_none_or(|wanted| {
-            wanted
-                .iter()
-                .any(|kb| kb_ids.iter().any(|id| id == &kb.0))
-        }) && predicate
-            .category
+        predicate
+            .kb_ids
             .as_ref()
-            .is_none_or(|cat| unit.category.as_ref() == Some(cat))
+            .is_none_or(|wanted| wanted.iter().any(|kb| kb_ids.iter().any(|id| id == &kb.0)))
+            && predicate
+                .category
+                .as_ref()
+                .is_none_or(|cat| unit.category.as_ref() == Some(cat))
     }
 
     /// Units matching a scope, as clones. The single place the scope filter —

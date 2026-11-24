@@ -8,8 +8,8 @@ use kb_ports::{
     AuthContext, CategoryRecord, CreateCategory, CreateKnowledgeBase, DocumentDownloadMeta,
     DocumentFilter, DocumentId, DocumentMeta, DocumentPage, DocumentScope, DocumentStore,
     KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary, NewDocument, PatchCategory,
-    PatchDocument, PatchKnowledgeBase, PortError, ScopeRequest, TenantId,
-    adapter::ScopeToken, predicate_spec_for, scope_id_limit_from_env,
+    PatchDocument, PatchKnowledgeBase, PortError, ScopeRequest, TenantId, adapter::ScopeToken,
+    predicate_spec_for, scope_id_limit_from_env,
 };
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
@@ -134,10 +134,7 @@ impl PgDocumentStore {
         tenant: &TenantId,
         verify: &kb_ports::VerifySpec,
     ) -> Result<Vec<(DocumentId, kb_core::tree::Outline)>, PortError> {
-        let (sql, binds) = scope_sql_inner(
-            &verify.filter,
-            verify.restricted_ids.as_deref(),
-        );
+        let (sql, binds) = scope_sql_inner(&verify.filter, verify.restricted_ids.as_deref());
         let sql = format!("{sql} AND jsonb_typeof(d.metadata -> 'outline') = 'object'");
         let mut query = sqlx::query(&sql).bind(tenant.as_str());
         for bind in binds {
@@ -162,8 +159,9 @@ impl PgDocumentStore {
             let Some(value) = value else {
                 continue;
             };
-            let outline: kb_core::tree::Outline = serde_json::from_value(value)
-                .map_err(|e| PortError::Malformed(format!("document {id} metadata.outline: {e}")))?;
+            let outline: kb_core::tree::Outline = serde_json::from_value(value).map_err(|e| {
+                PortError::Malformed(format!("document {id} metadata.outline: {e}"))
+            })?;
             out.push((DocumentId(id), outline));
         }
         Ok(out)
@@ -314,9 +312,12 @@ impl DocumentStore for PgDocumentStore {
             ids.len(),
             scope_id_limit_from_env(),
             tenant_has_versioned_documents(&req.tenant),
-        )
-        {
-            return Ok(DocumentScope::new_predicate(&token, req.tenant.clone(), spec));
+        ) {
+            return Ok(DocumentScope::new_predicate(
+                &token,
+                req.tenant.clone(),
+                spec,
+            ));
         }
         Ok(DocumentScope::new(&token, req.tenant.clone(), ids))
     }
@@ -363,7 +364,9 @@ impl DocumentStore for PgDocumentStore {
         if let Some(verify) = scope.verify_spec() {
             // No id list to check: ask Postgres the same visibility question the
             // verify asks, restricted to this one document.
-            let visible = self.verify_visible(&verify.request(), std::slice::from_ref(id)).await?;
+            let visible = self
+                .verify_visible(&verify.request(), std::slice::from_ref(id))
+                .await?;
             if !visible.contains(id) {
                 return Ok(None);
             }
@@ -1071,6 +1074,7 @@ fn new_group_id() -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use kb_ports::{DocumentId, KnowledgeBaseId, MetadataFilter, ScopeRequest, TenantId};
 
@@ -1220,9 +1224,6 @@ mod tests {
             Some(&[DocumentId::new_unchecked("doc-a")]),
         );
         assert!(sql.contains("d.id = ANY($2::text[])"), "{sql}");
-        assert_eq!(
-            binds,
-            vec![ScopeBind::TextArray(vec!["doc-a".to_string()])]
-        );
+        assert_eq!(binds, vec![ScopeBind::TextArray(vec!["doc-a".to_string()])]);
     }
 }

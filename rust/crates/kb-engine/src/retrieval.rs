@@ -1346,17 +1346,15 @@ async fn execute_pipeline_with_plan(
     // be dropped. The index filter was only a coarse optimisation: a chunk whose
     // payload is stale still arrives here, and must not become a hit.
     if is_predicate {
-        let spec = scope
-            .verify_spec()
-            .expect("a predicate scope always carries its verify spec");
+        let spec = scope.verify_spec().ok_or_else(|| {
+            EngineError::RetrievalFailed("predicate scope has no verify spec".to_string())
+        })?;
         let ids: Vec<DocumentId> = {
             let mut seen = HashSet::with_capacity(candidates.len());
             candidates
                 .iter()
-                .filter_map(|candidate| {
-                    seen.insert(candidate.document_id.clone())
-                        .then(|| candidate.document_id.clone())
-                })
+                .filter(|candidate| seen.insert(candidate.document_id.clone()))
+                .map(|candidate| candidate.document_id.clone())
                 .collect()
         };
         // Fail closed: a verify error is an error, never unverified hits and
@@ -1364,9 +1362,7 @@ async fn execute_pipeline_with_plan(
         let visible = doc_store
             .verify_visible(&spec.request(), &ids)
             .await
-            .map_err(|e| {
-                EngineError::RetrievalFailed(format!("scope verify failed: {e}"))
-            })?;
+            .map_err(|e| EngineError::RetrievalFailed(format!("scope verify failed: {e}")))?;
         let before = candidates.len();
         candidates.retain(|candidate| visible.contains(&candidate.document_id));
         scope_verify_dropped += before - candidates.len();

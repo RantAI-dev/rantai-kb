@@ -31,17 +31,16 @@ fn next_id() -> u64 {
 use kb_ports::{
     ArmRanks, ArmScores, AuthContext, BlobStore, Candidate, CategoryRecord, Chunk, ChunkId,
     ChunkMeta, ChunkMetadata, ChunkStore, ChunkToStore, ChunkType, CreateCategory, CreateJobInput,
-    CreateKnowledgeBase, DocumentDownloadMeta, DocumentFilter, DocumentId, DocumentIntelligenceData,
-    DocumentMeta,
-    DocumentPage, DocumentScope, DocumentStore, Embedder, Entity, EntityExtractor, EntityStore,
-    ExtractionOptions, ExtractionResult, Extractor, FigureGate, FigureGateCandidate, Fusion,
-    HybridQuery, IndexCapabilities, IndexUnit, JobRecord, JobStore, JobView, KnowledgeBaseId,
-    KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor, NewDocument, PatchCategory,
-    PatchDocument, PatchKnowledgeBase, PortError, ProgressSink, QueryEmbedding, ReapableJob,
-    Relation, RerankCandidate, RerankResult, Reranker, RetrievalIndex, RetryJobOutcome,
-    PredicateSpec, ScopeRequest, SearchHit, StoredChunk, TableId, TableQueryFailure, TableRecord,
-    TableStore, TenantId, adapter::ScopeToken, predicate_spec_for, scope_id_limit_from_env,
-    sort_candidates,
+    CreateKnowledgeBase, DocumentDownloadMeta, DocumentFilter, DocumentId,
+    DocumentIntelligenceData, DocumentMeta, DocumentPage, DocumentScope, DocumentStore, Embedder,
+    Entity, EntityExtractor, EntityStore, ExtractionOptions, ExtractionResult, Extractor,
+    FigureGate, FigureGateCandidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit, JobRecord,
+    JobStore, JobView, KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor,
+    NewDocument, PatchCategory, PatchDocument, PatchKnowledgeBase, PortError, PredicateSpec,
+    ProgressSink, QueryEmbedding, ReapableJob, Relation, RerankCandidate, RerankResult, Reranker,
+    RetrievalIndex, RetryJobOutcome, ScopeRequest, SearchHit, StoredChunk, TableId,
+    TableQueryFailure, TableRecord, TableStore, TenantId, adapter::ScopeToken, predicate_spec_for,
+    scope_id_limit_from_env, sort_candidates,
 };
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
