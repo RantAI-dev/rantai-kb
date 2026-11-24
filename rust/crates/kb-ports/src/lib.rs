@@ -37,8 +37,8 @@ pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 pub use ocr::{LayoutBox, LayoutDetector, OcrPageCache, OcrReport, PageLayout};
 pub use pages::{PageDescriber, PageEmbedder, PageImage, PageRenderer, PageVisionScorer};
 pub use retrieval::{
-    ArmRanks, ArmScores, Candidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit,
-    KeywordQuery, KeywordSemantics, RetrievalIndex, sort_candidates,
+    ArmRanks, ArmScores, Candidate, ChunkMeta, Fusion, HybridQuery, IndexCapabilities, IndexUnit,
+    KeywordQuery, KeywordSemantics, RetrievalIndex, chunk_meta_from_candidate, sort_candidates,
 };
 pub use scope::DocumentScope;
 #[cfg(feature = "scope-adapter")]
