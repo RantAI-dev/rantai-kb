@@ -134,6 +134,21 @@ pub struct UploadForm {
     /// comma-separated list. Ids the tenant does not own are a 400.
     #[schema(value_type = Option<String>, rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Option<String>,
+    /// Additive (`RET-16`): stable key shared by all versions of one document.
+    /// Uploading a new version with an existing `docKey` retires the current
+    /// one in the same transaction.
+    #[schema(value_type = Option<String>, rename = "docKey")]
+    pub doc_key: Option<String>,
+    /// Additive (`RET-16`): the caller's version label, e.g. `"2025"`.
+    #[schema(value_type = Option<String>, rename = "version")]
+    pub version: Option<String>,
+    /// Additive (`RET-16`): when this version comes into force. Accepts
+    /// `YYYY-MM-DD` or a full ISO timestamp; a bad date is a 400.
+    #[schema(value_type = Option<String>, rename = "effectiveFrom")]
+    pub effective_from: Option<String>,
+    /// Additive (`RET-16`): when this version stops being in force (exclusive).
+    #[schema(value_type = Option<String>, rename = "effectiveTo")]
+    pub effective_to: Option<String>,
 }
 
 /// Upload a document.
@@ -223,6 +238,23 @@ pub async fn ingest_document(
         .field("documentType")
         .filter(|v| !v.is_empty())
         .map(str::to_string);
+    // RET-16: version metadata is carried on the document row, not in JSONB,
+    // because the scope query uses SQL date comparisons and a (tenant, docKey)
+    // index. Dates are validated here so a store never sees an unparsed value.
+    let doc_key = upload
+        .field("docKey")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let version = upload
+        .field("version")
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let effective_from =
+        crate::routes::parse_version_date("effectiveFrom", upload.field("effectiveFrom"))?;
+    let effective_to =
+        crate::routes::parse_version_date("effectiveTo", upload.field("effectiveTo"))?;
     let figure_mode = parse_figure_mode(upload.field("figures"));
     let knowledge_base_ids = requested_knowledge_bases(&auth, upload.field("knowledgeBaseIds"));
     // Every requested knowledge base must belong to the caller's tenant. Without
@@ -309,6 +341,10 @@ pub async fn ingest_document(
                 // The hash is stored even when the dedupe is off: it is what a
                 // later dedupe check compares against.
                 sha256: Some(sha256.clone()),
+                doc_key,
+                version,
+                effective_from,
+                effective_to,
             },
             &knowledge_base_ids,
         )

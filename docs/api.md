@@ -34,10 +34,13 @@ because the contract has to be readable before the caller has one.
 
 **Ingest options** (multipart fields): `title`, `categories`, `subcategory`,
 `knowledgeBaseIds`, `externalRef`, `figures` — `auto` (default), `force` or `skip` — and
-`tablePrivacy` — `open` (default) or `aggregate-only`.
+`tablePrivacy` — `open` (default) or `aggregate-only`. Versioned documents add `docKey`,
+`version`, `effectiveFrom` and `effectiveTo` (see "Versioned documents" below); the two date
+fields accept `YYYY-MM-DD` or a full ISO timestamp and a bad date is a `400`.
 
 **Search options** (JSON): `query` (required), `maxChunks`, `maxPerDocument`, `knowledgeBaseIds`,
-`documentIds`, `category`, `hybrid`, `format`, `minScore`, `pageRange`, `section`.
+`documentIds`, `category`, `hybrid`, `format`, `minScore`, `pageRange`, `section`, `includeHistory`
+(default `false`) and `asOf` (`YYYY-MM-DD` or a full ISO timestamp; a bad date is a `400`).
 
 `maxPerDocument` (additive, RET-17) caps how many chunks one document may contribute to an
 answer. It is an integer in `1..=50`; `0` or a value above `50` is a `400`. The cap is applied
@@ -79,7 +82,44 @@ POST /v1/search
 
 `chunks[].content`, `documentTitle`, `page` and `similarity` carry the results; `degrades`
 is non-empty when an arm failed, because a failed arm is reported rather than silently
-dropped.
+dropped. Each chunk and source may also carry `docKey`, `version`, `effectiveFrom` and
+`effectiveTo`; these are absent for documents uploaded before versioning.
+
+## Versioned documents (RET-16)
+
+Upload several versions of one policy under a stable `docKey`:
+
+```sh
+curl -F file=@cuti-2024.txt -F 'title=Kebijakan Cuti' \
+     -F docKey=cuti -F version=2024 -F effectiveFrom=2024-01-01 \
+     -H 'Authorization: Bearer KEY' /v1/documents
+curl -F file=@cuti-2025.txt -F 'title=Kebijakan Cuti' \
+     -F docKey=cuti -F version=2025 -F effectiveFrom=2025-01-01 \
+     -H 'Authorization: Bearer KEY' /v1/documents
+```
+
+The second upload makes `2025` the current version in one transaction: it sets the old
+row's `isLatest=false`, closes its `effectiveTo` at `2025-01-01` (or at the upload time
+when the new version has no `effectiveFrom`) and records the old id in the new row's
+`supersedesDocumentId`. Deleting the latest version does **not** promote the previous
+one — upload that version again under the same `docKey` to restore it.
+
+`PATCH /v1/documents/:id` accepts `docKey`, `version`, `effectiveFrom` and `effectiveTo`;
+absent fields are left alone. `GET /v1/documents/:id` and `GET /v1/documents` report
+`docKey`, `version`, `supersedesDocumentId`, `effectiveFrom`, `effectiveTo` and `isLatest`.
+
+**Search modes** (all narrow the tenant/KB scope; none can widen it):
+
+| Body | Documents searched |
+|---|---|
+| default | only current versions (`isLatest=true`) and every unversioned document (`docKey` null) |
+| `includeHistory: true` | all versions |
+| `asOf: "2024-06-01"` | versions with `effectiveFrom <= asOf < effectiveTo`; null bounds are unbounded, undated documents stay visible, `isLatest` ignored |
+
+`asOf` takes precedence if both fields are sent. When an answer contains chunks from more
+than one document with the same `docKey`, the response adds
+`multiVersionWarning: [{docKey, documentIds: [...], versions: [...]}]` so a caller that
+asked for history is warned that it is mixing versions. A default search can never mix.
 
 ## Tables
 

@@ -38,6 +38,12 @@ const TENANT: &str = "tenant-a";
 fn doc(id: &str) -> DocumentMeta {
     DocumentMeta {
         sha256: None,
+        doc_key: None,
+        version: None,
+        supersedes_document_id: None,
+        effective_from: None,
+        effective_to: None,
+        is_latest: true,
         id: DocumentId::new_unchecked(id),
         title: format!("Title {id}"),
         categories: vec![],

@@ -346,6 +346,12 @@ pub async fn serve_status(status: u16) -> String {
 pub fn doc_meta(id: &str, title: &str) -> DocumentMeta {
     DocumentMeta {
         sha256: None,
+        doc_key: None,
+        version: None,
+        supersedes_document_id: None,
+        effective_from: None,
+        effective_to: None,
+        is_latest: true,
         id: kb_ports::DocumentId(id.to_string()),
         title: title.to_string(),
         categories: vec![],

@@ -51,6 +51,18 @@ pub struct DocumentFilter {
     /// predicate. An empty list means no metadata filter.
     #[serde(default)]
     pub metadata: Vec<MetadataFilter>,
+    /// Version modes (RET-16), applied in `build_scope` so every retrieval arm
+    /// inherits them. The default (`false`) selects only current versions and
+    /// unversioned documents; `true` selects every version. Mutually exclusive
+    /// with `as_of`, which the HTTP route enforces.
+    #[serde(default)]
+    pub include_history: bool,
+    /// Point-in-time query, normalised to a UTC timestamp by the HTTP route.
+    /// When set, `isLatest` is ignored and a document is visible only if
+    /// `effectiveFrom <= asOf < effectiveTo`, with null bounds unbounded and
+    /// undated documents always visible.
+    #[serde(default)]
+    pub as_of: Option<String>,
 }
 
 /// One top-level JSONB metadata predicate: `metadata[key]` equals one of
