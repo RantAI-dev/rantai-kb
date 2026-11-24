@@ -99,6 +99,7 @@ KB_RERANK_API_KEY=<key>
 KB_RERANK_MODEL=bge-reranker-v2-m3
 KB_RERANK_CANDIDATE_LIMIT=20       # 10 for ~0.8 s/query at a small quality cost
 KB_RERANK_MAX_K=10                  # width of the reranked head (the scored, reordered part)
+# KB_RERANK_BREADCRUMBS=off          # on: prepend title > section · p.N to the rerank input (no re-index)
 ```
 
 | Measure (RX 590) | Value |
