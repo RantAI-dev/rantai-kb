@@ -41,6 +41,7 @@
   cap and are not counted, and neighbour chunks are counted against the same budget so a capped
   document cannot regain chunks as context. `stats.perDocumentCapped` reports the number dropped
   when the cap is on and is absent when it is off.
+- **Stateless parity is pinned by tests (`API-5`).** `/v1/encode` query/passage dense vectors, BM25 sparse vectors and `/v1/rerank` order/scores are now tested bit-for-bit against full mode with the same fake embedding and reranking backend; no API shape changed. The stateless guide now states the guarantees and documents the one deliberate difference: with `KB_RERANK_BREADCRUMBS=on` full mode prepends a breadcrumb that `/v1/rerank` cannot know, so the client must prepend the same `kb_core::rerank::breadcrumb(...)` text for parity.
 - **Additive `confidence` object on `/v1/search` (`RET-18`).** Every standard and
   `documentIds` answer now carries `{topScore, scoreKind, margin, band, calibrated}`:
   the top comparable score, the scale it came from (`rerank`, `dense`, `fused`), the

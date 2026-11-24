@@ -152,6 +152,46 @@ PUT /collections/kb_chunks
 2. Query your Qdrant collection with native hybrid `prefetch` (`dense` top-40 + `sparse` top-40) fused via `rrf`, filtered by `tenant_id` (and `kb_id` / `document_id` when scoped).
 3. *(Optional, recommended for accuracy)* Send the top 15–20 fused candidate texts to `POST /v1/rerank` with `{"query": userQuery, "documents": texts, "topK": 10}` and reorder your results using the returned `results[].index` and `results[].score`.
 
+### Parity guarantees (tested)
+
+`API-5` pins stateless `/v1/encode` and `/v1/rerank` to the vectors and ordering that full mode produces, driving both modes against the same recording fake embedder and reranker (`rust/crates/kb-server/tests/stateless_parity_tests.rs`):
+
+| Guarantee | Test |
+|---|---|
+| `/v1/encode mode=passage` dense vector is bit-for-bit the vector full-mode ingest stores for a chunk with that exact text, with no prefixes, and the provider sees the same text | `encode_passage_matches_full_mode_ingest_bit_for_bit_without_prefix` |
+| The same with `KB_EMBEDDING_PASSAGE_PREFIX="passage: "`, provider text included | `encode_passage_matches_full_mode_ingest_bit_for_bit_with_prefix` |
+| `/v1/encode mode=query` dense vector equals the vector full mode uses in `/v1/search`, with and without `KB_EMBEDDING_QUERY_PREFIX` | `encode_query_matches_full_mode_search_bit_for_bit_without_prefix`, `encode_query_matches_full_mode_search_bit_for_bit_with_prefix` |
+| `/v1/encode` BM25 sparse vector equals the `kb_core::sparse` vector full mode indexes (`encode_document`) and queries (`encode_query`) with | `encode_sparse_matches_full_mode_bm25_indexer_and_query` |
+| `/v1/rerank` returns the same order and scores as the full-mode rerank stage for the same candidates, with `KB_RERANK_BREADCRUMBS=off`, and hands the reranker the same candidate text | `rerank_order_and_scores_match_full_mode_with_breadcrumbs_off` |
+| The exact breadcrumb a stateless client must prepend when `KB_RERANK_BREADCRUMBS=on` | `full_mode_breadcrumb_text_is_client_side_for_stateless_rerank` |
+
+Passage text composition: full mode embeds `kb_core::title::embedding_text(title, heading_path, content)` — `"{title > heading path}\n\n{content}"`, truncated at `KB_EMBEDDING_MAX_CHARS` when set — while `/v1/encode mode=passage` embeds exactly the text you send. Send the composed text in `texts[]` to match a titled or headed chunk; for an untitled, headingless chunk the content alone is already identical. Prefixes are applied by the configured embedder on both sides, so keep `KB_EMBEDDING_QUERY_PREFIX`, `KB_EMBEDDING_PASSAGE_PREFIX`, `KB_EMBEDDING_INPUT_TYPE` and `KB_EMBEDDING_FORMAT` the same on the stateless service and on the full-mode service whose Qdrant index you are querying.
+
+#### Reranker breadcrumbs: the one deliberate difference
+
+With `KB_RERANK_BREADCRUMBS=on`, full mode prepends a breadcrumb to the text the reranker sees (the response content is unchanged). Stateless `/v1/rerank` only receives `documents[]` strings — it has no document title, section or page — so it sends the bare text. This is a caller responsibility, not a parity bug: **if the flag is on and you want full-mode ordering, prepend the same breadcrumb yourself.**
+
+The exact format is:
+
+```
+"{document title} › {section path or section}" + (page ? " · p.{page}" : "") + "\n" + content
+```
+
+Empty title/section parts are skipped, so no dangling `›` or ` · ` is left behind. It is the same pure function full mode uses, `kb_core::rerank::breadcrumb(title, section, page)`:
+
+```python
+crumb = title.strip()
+section = (section or "").strip()
+if section:
+    crumb = f"{crumb} › {section}" if crumb else section
+if page is not None:
+    crumb = f"{crumb} · p.{page}" if crumb else f"p.{page}"
+# Full mode caps only the content at KB_RERANK_CHAR_BUDGET, then prepends the crumb.
+document = f"{crumb}\n{content}" if crumb else content
+```
+
+With the flag off (the default) send the bare content; no prepending is needed.
+
 ---
 
 ## Progressive disclosure in stateless mode
