@@ -417,6 +417,11 @@ fn candidate_to_hit_with(c: Candidate, retrieval: Option<RetrievalProvenance>) -
                     .or_else(|| c.metadata.get("table_id"))
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
+                // Filled from the DocumentMeta in `enrich_titles_cached`.
+                doc_key: None,
+                version: None,
+                effective_from: None,
+                effective_to: None,
             },
             categories: Vec::new(),
             subcategory: None,
@@ -562,6 +567,12 @@ pub async fn enrich_titles_cached(
             h.chunk.categories = meta.categories.clone();
             h.chunk.subcategory = meta.subcategory.clone();
             h.chunk.external_ref = meta.external_ref.clone();
+            // RET-16: version fields travel with the document title, so every
+            // chunk and source the answer renders can name its version.
+            h.chunk.metadata.doc_key = meta.doc_key.clone();
+            h.chunk.metadata.version = meta.version.clone();
+            h.chunk.metadata.effective_from = meta.effective_from.clone();
+            h.chunk.metadata.effective_to = meta.effective_to.clone();
         }
     }
 }

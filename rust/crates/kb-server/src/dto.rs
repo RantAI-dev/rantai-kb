@@ -2,6 +2,8 @@
 //!
 //! Explicit domain-to-wire conversions matching the TypeScript service's JSON shape.
 
+use std::collections::HashMap;
+
 use kb_core::SourceEntry;
 use kb_engine::{RetrievalOutcome, timing::StageTimings};
 use kb_ports::{ProvenanceArm, RetrievalProvenance, SearchHit};
@@ -119,6 +121,15 @@ pub struct SearchRequestDto {
     /// default", which is off.
     #[serde(rename = "adaptiveArms", default)]
     pub adaptive_arms: Option<bool>,
+    /// Additive (`RET-16`): search every version of a `docKey`, not only the
+    /// latest. Default false. Kept untyped so a non-boolean is this route's 400.
+    #[serde(rename = "includeHistory", default)]
+    pub include_history: Option<serde_json::Value>,
+    /// Additive (`RET-16`): point-in-time search. Accepts `YYYY-MM-DD` or a full
+    /// ISO timestamp. Kept untyped so a bad value is a field-level 400 rather
+    /// than a deserialiser error the route cannot explain.
+    #[serde(rename = "asOf", default)]
+    pub as_of: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
@@ -142,6 +153,27 @@ pub struct SearchResponseDto {
     /// without a second lookup. Omitted when there are none.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tables: Vec<TableRefDto>,
+    /// Additive (`RET-16`): when the answer mixes versions of one `docKey`, the
+    /// caller is told which documents and versions it is reading. Absent when
+    /// there is no mix (the default current-version search can never mix).
+    #[serde(
+        rename = "multiVersionWarning",
+        skip_serializing_if = "Vec::is_empty",
+        default
+    )]
+    pub multi_version_warning: Vec<MultiVersionWarningDto>,
+}
+
+/// One `docKey` whose versions were mixed in a single answer (`RET-16`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MultiVersionWarningDto {
+    /// The stable document key the versions share.
+    pub doc_key: String,
+    /// The returned documents holding that key, in first-appearance order.
+    pub document_ids: Vec<String>,
+    /// Their version labels, in the same order. `None` labels are omitted.
+    pub versions: Vec<String>,
 }
 
 /// One table named by a search answer (`TBL-1`). Additive.
@@ -484,6 +516,24 @@ pub struct SourceDto {
     pub page: Option<u32>,
     #[serde(rename = "chunkType")]
     pub chunk_type: Option<String>,
+    /// Version metadata of the source's document (`RET-16`). Filled from the
+    /// same DocumentMeta that supplies `documentTitle`; absent for old rows.
+    #[serde(rename = "docKey", skip_serializing_if = "Option::is_none", default)]
+    pub doc_key: Option<String>,
+    #[serde(rename = "version", skip_serializing_if = "Option::is_none", default)]
+    pub version: Option<String>,
+    #[serde(
+        rename = "effectiveFrom",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub effective_from: Option<String>,
+    #[serde(
+        rename = "effectiveTo",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub effective_to: Option<String>,
 }
 
 /// Which retrieval arms produced a chunk, as the response reports it.
@@ -567,6 +617,24 @@ pub struct ChunkDto {
         default
     )]
     pub table_title: Option<String>,
+    /// Version metadata of the chunk's document (`RET-16`). Absent when the
+    /// document predates versioning or carries no version fields.
+    #[serde(rename = "docKey", skip_serializing_if = "Option::is_none", default)]
+    pub doc_key: Option<String>,
+    #[serde(rename = "version", skip_serializing_if = "Option::is_none", default)]
+    pub version: Option<String>,
+    #[serde(
+        rename = "effectiveFrom",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub effective_from: Option<String>,
+    #[serde(
+        rename = "effectiveTo",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub effective_to: Option<String>,
 }
 
 impl SearchResponseDto {
@@ -583,6 +651,7 @@ impl SearchResponseDto {
             note: None,
             degrades: Vec::new(),
             tables: Vec::new(),
+            multi_version_warning: Vec::new(),
         }
     }
 }
@@ -605,8 +674,76 @@ impl From<RetrievalOutcome> for SearchResponseDto {
         } = outcome;
         let vector_results = outcome_chunks.iter().filter(|h| !h.is_bm25).count();
         let total_results = outcome_chunks.len();
+        // RET-16: version fields were filled from the DocumentMeta alongside
+        // each chunk's title. Index them by document id so the deduplicated
+        // source cards can carry the same version as their chunks.
+        let mut version_by_doc: HashMap<
+            String,
+            (
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        > = HashMap::new();
+        for hit in &outcome_chunks {
+            version_by_doc
+                .entry(hit.chunk.document_id.0.clone())
+                .or_insert_with(|| {
+                    (
+                        hit.chunk.metadata.doc_key.clone(),
+                        hit.chunk.metadata.version.clone(),
+                        hit.chunk.metadata.effective_from.clone(),
+                        hit.chunk.metadata.effective_to.clone(),
+                    )
+                });
+        }
+        // More than one document holding the same docKey means the answer
+        // mixes versions. Keep first-appearance order so the warning reads in
+        // the same order as the chunks.
+        let mut mixed: Vec<MultiVersionWarningDto> = Vec::new();
+        for hit in &outcome_chunks {
+            let Some(doc_key) = hit.chunk.metadata.doc_key.as_ref() else {
+                continue;
+            };
+            let doc_id = hit.chunk.document_id.0.as_str();
+            let version = hit.chunk.metadata.version.as_ref();
+            if let Some(warning) = mixed.iter_mut().find(|w| w.doc_key == *doc_key) {
+                if !warning.document_ids.iter().any(|id| id == doc_id) {
+                    warning.document_ids.push(doc_id.to_string());
+                }
+                if let Some(version) = version
+                    && !warning.versions.iter().any(|v| v == version)
+                {
+                    warning.versions.push(version.clone());
+                }
+            } else {
+                mixed.push(MultiVersionWarningDto {
+                    doc_key: doc_key.clone(),
+                    document_ids: vec![doc_id.to_string()],
+                    versions: version.into_iter().cloned().collect(),
+                });
+            }
+        }
+        mixed.retain(|w| w.document_ids.len() > 1);
+
         let chunks: Vec<ChunkDto> = outcome_chunks.into_iter().map(ChunkDto::from).collect();
-        let sources = outcome_sources.into_iter().map(SourceDto::from).collect();
+        let sources = outcome_sources
+            .into_iter()
+            .map(|source| {
+                let mut dto = SourceDto::from(source);
+                if let Some(doc_id) = dto.document_id.as_ref()
+                    && let Some((doc_key, version, effective_from, effective_to)) =
+                        version_by_doc.get(doc_id)
+                {
+                    dto.doc_key = doc_key.clone();
+                    dto.version = version.clone();
+                    dto.effective_from = effective_from.clone();
+                    dto.effective_to = effective_to.clone();
+                }
+                dto
+            })
+            .collect();
         let degrades = outcome_degrades
             .into_iter()
             .map(|d| d.label().to_string())
@@ -685,6 +822,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             note: outcome_note,
             degrades,
             tables: Vec::new(),
+            multi_version_warning: mixed,
         }
     }
 }
@@ -741,6 +879,10 @@ impl From<SearchHit> for ChunkDto {
             }),
             table_id: hit.chunk.metadata.table_id,
             table_title: None,
+            doc_key: hit.chunk.metadata.doc_key,
+            version: hit.chunk.metadata.version,
+            effective_from: hit.chunk.metadata.effective_from,
+            effective_to: hit.chunk.metadata.effective_to,
         }
     }
 }
@@ -755,6 +897,12 @@ impl From<SourceEntry> for SourceDto {
             asset_key: s.asset_key,
             page: s.page,
             chunk_type: s.chunk_type,
+            // Filled by `From<RetrievalOutcome>` from the document's meta; a
+            // bare `SourceEntry` carries no version fields.
+            doc_key: None,
+            version: None,
+            effective_from: None,
+            effective_to: None,
         }
     }
 }

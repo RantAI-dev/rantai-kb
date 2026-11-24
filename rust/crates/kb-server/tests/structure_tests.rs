@@ -63,6 +63,12 @@ async fn seed(h: &Harness) {
         TenantId(TENANT.to_string()),
         DocumentMeta {
             sha256: None,
+            doc_key: None,
+            version: None,
+            supersedes_document_id: None,
+            effective_from: None,
+            effective_to: None,
+            is_latest: true,
             metadata: Some(serde_json::json!({"figures": [
                 {
                     "assetKey": "documents/tenant-a/doc-1/assets/fig-p1-1.png",
