@@ -409,6 +409,10 @@ postprocessing.
   back with a `rerankScore` and are ordered by it); it does not change what is
   sent to the reranker, so it costs no VRAM, no latency and no spend. Leave it at
   the default (10).
+- `KB_RERANK_BREADCRUMBS=off|on` (`false|true` also accepted, default `off`)
+  prepends `"{document title} › {section} · p.{page}\n"` to what the reranker
+  sees, with no re-index. `KB_RERANK_CHAR_BUDGET` still caps only the content.
+  Default off until the A/B in `docs/core/specs/v1-roadmap.md` RET-12.
 - The first start downloads each model into the shared `hf-models` volume. That
   is minutes on a slow link, which is why the TEI healthchecks allow a 15-minute
   start period.

@@ -115,6 +115,10 @@ pub struct EngineSettings {
     pub rerank_candidate_limit: u32,
     /// Character budget per candidate (`KB_RERANK_CHAR_BUDGET`); 0 = full text.
     pub rerank_char_budget: usize,
+    /// Prepend the document/section breadcrumb to the rerank text (`KB_RERANK_BREADCRUMBS`,
+    /// RET-12). Off by default until the A/B result; with it on, the budget still
+    /// applies to the content part only.
+    pub rerank_breadcrumbs: bool,
     /// Per-request reranker timeout in ms (`KB_RERANK_TIMEOUT_MS`).
     pub rerank_timeout_ms: u64,
     /// Chunks kept by the reranker (`KB_RERANK_FINAL_K`).
@@ -169,6 +173,7 @@ impl Default for EngineSettings {
             rrf_k: 60,
             rerank_candidate_limit: 0,
             rerank_char_budget: 0,
+            rerank_breadcrumbs: false,
             rerank_timeout_ms: 20_000,
             rerank_final_k: 5,
             rerank_max_k: 10,
@@ -413,6 +418,7 @@ impl Engine {
             rrf_k: self.settings.rrf_k,
             rerank_candidate_limit: self.settings.rerank_candidate_limit,
             rerank_char_budget: self.settings.rerank_char_budget,
+            rerank_breadcrumbs: self.settings.rerank_breadcrumbs,
             rerank_timeout_ms: self.settings.rerank_timeout_ms,
             rerank_final_k: self.settings.rerank_final_k,
             rerank_max_k: self.settings.rerank_max_k,

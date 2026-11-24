@@ -557,6 +557,18 @@ impl EmbedderConfig {
             self.model, self.dimension
         )
     }
+
+    /// The prefixes the inner embedder really applies. With an out-of-band
+    /// instruction (`input_type`, or every OmniEmbed request) the text is not
+    /// prefixed, so the cache key must not claim a prefix either (`ING-9`).
+    #[must_use]
+    pub fn effective_prefixes(&self) -> (&str, &str) {
+        if self.send_input_type || self.format == kb_inference::EmbedFormat::OmniEmbed {
+            ("", "")
+        } else {
+            (&self.query_prefix, &self.passage_prefix)
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -814,6 +826,20 @@ impl Config {
         // e.g. 5 candidates of 200 chars (`docs/eval-baseline.md` §8).
         let rerank_candidate_limit = int_var(&lookup, "KB_RERANK_CANDIDATE_LIMIT", 0u32)?.min(50);
         let rerank_char_budget = int_var(&lookup, "KB_RERANK_CHAR_BUDGET", 0)? as usize;
+        // RET-12: prepend the document/section breadcrumb to what the reranker
+        // sees. Off until the A/B shows it helps (`docs/core/specs/v1-roadmap.md`
+        // RET-12). An unknown value is a startup error, like the other enum
+        // settings above (`KB_GRAPH_STORE`, `KB_ENTITY_EXTRACTOR`).
+        let rerank_breadcrumbs = match lookup("KB_RERANK_BREADCRUMBS")
+            .map(|v| v.trim().to_lowercase())
+            .as_deref()
+        {
+            None | Some("") | Some("off") | Some("false") => false,
+            Some("on") | Some("true") => true,
+            Some(other) => {
+                bail!("KB_RERANK_BREADCRUMBS must be \"off\" or \"on\", got {other:?}")
+            }
+        };
         let rerank_timeout_ms = int_var(&lookup, "KB_RERANK_TIMEOUT_MS", 20_000)? as u64;
 
         // `KB_MIN_SIMILARITY` is not a documented variable. The minimum is the
@@ -841,6 +867,7 @@ impl Config {
             rrf_k,
             rerank_candidate_limit,
             rerank_char_budget,
+            rerank_breadcrumbs,
             rerank_timeout_ms,
             rerank_final_k,
             rerank_max_k,
@@ -1570,6 +1597,39 @@ mod tests {
     }
 
     #[test]
+    fn test_rerank_breadcrumbs_default_off_and_reject_unknown() {
+        let load = |value: Option<&'static str>| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            if let Some(v) = value {
+                map.insert("KB_RERANK_BREADCRUMBS", v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .engine
+                .rerank_breadcrumbs
+        };
+        assert!(!load(None), "off by default until the A/B result");
+        assert!(!load(Some("")), "empty is the same as unset");
+        assert!(!load(Some("off")));
+        assert!(!load(Some("false")));
+        assert!(load(Some("on")));
+        assert!(load(Some("true")));
+        assert!(
+            load(Some(" ON ")),
+            "values are case-insensitive and trimmed"
+        );
+
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_RERANK_BREADCRUMBS", "maybe");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        assert!(err.to_string().contains("KB_RERANK_BREADCRUMBS"), "{err}");
+    }
+
+    #[test]
     fn test_tree_arm_is_off_by_default_and_settable() {
         let load = |vars: &[(&'static str, &'static str)]| {
             let mut map = HashMap::new();
@@ -1963,6 +2023,28 @@ mod tests {
         let fp = extract.cache_fingerprint();
         assert!(!fp.contains("sk-secret-value"));
         assert_ne!(fp, cfg.extract.cache_fingerprint(), "key presence matters");
+    }
+
+    /// The disk cache must key only the prefixes the inner embedder applies:
+    /// an out-of-band `input_type` (or OmniEmbed) leaves the text alone.
+    #[test]
+    fn effective_prefixes_are_empty_when_the_instruction_is_out_of_band() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db".into());
+        map.insert("OPENROUTER_API_KEY", "test-key".into());
+        map.insert("KB_EMBEDDING_QUERY_PREFIX", "query: ".into());
+        map.insert("KB_EMBEDDING_PASSAGE_PREFIX", "passage: ".into());
+        let cfg = Config::from_lookup(|k| map.get(k).cloned()).expect("config");
+        assert_eq!(cfg.embedder.effective_prefixes(), ("query: ", "passage: "));
+
+        map.insert("KB_EMBEDDING_INPUT_TYPE", "true".into());
+        let cfg = Config::from_lookup(|k| map.get(k).cloned()).expect("config");
+        assert_eq!(cfg.embedder.effective_prefixes(), ("", ""));
+
+        map.remove("KB_EMBEDDING_INPUT_TYPE");
+        map.insert("KB_EMBEDDING_FORMAT", "omniembed".into());
+        let cfg = Config::from_lookup(|k| map.get(k).cloned()).expect("config");
+        assert_eq!(cfg.embedder.effective_prefixes(), ("", ""));
     }
 
     #[test]

@@ -2,6 +2,44 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Passage prefixes are applied on the batch path (`ING-9`).** `embed_many` (used by ingest and
+  stateless `/v1/process`) now sends every text through the same prefix rule as the single-text
+  path: models that need it see `passage: ` before each chunk, so `/v1/encode mode=passage` and
+  `/v1/process` produce vectors in the same space. Prefixes are applied exactly once, and providers
+  whose instruction travels out of band (`input_type`, Voyage / OmniEmbed) still send no text
+  prefix; the embedding disk cache keys only the prefixes actually applied.
+  **Corpora indexed with `lite` (e5-small) before this fix are missing the prefix and must be
+  re-indexed with `kb-server reindex`** to get the fix. Queries and other tiers are unaffected.
+  The embedding disk cache (`KB_CACHE_DIR`) no longer reuses passage vectors cached under a
+  non-empty passage prefix (they were stored unprefixed), so that re-index really re-embeds.
+  One query-side change: a custom config that sets `KB_EMBEDDING_QUERY_PREFIX` **and** sends the
+  instruction out of band (`KB_EMBEDDING_INPUT_TYPE=true` or `KB_EMBEDDING_FORMAT=omniembed`) no
+  longer prefixes queries either. No shipped tier preset combines the two.
+
+### Changed
+
+- **`documentIds` searches now run the full retrieval pipeline (RET-11).** A search that names
+  documents previously answered from a private dense-only branch: no BM25, reranker, page, tree,
+  neighbour or figure arms. It now passes the same narrowed scope into the standard retrieval
+  pipeline as any other search, so a caller searching inside chosen documents gets the same
+  answer quality. The scope is still the intersection of the requested ids and what the key may
+  see; it can never widen the key's tenant, knowledge-base or metadata limits. The response still
+  carries `chunks`, and now also carries `sources` and `context` in the standard format (previously
+  `sources` was absent and `context` was a plain `"[i] content"` list, and only when
+  `format: "context"` was requested). `hybrid: true` is unchanged.
+
+### Added
+
+- **`KB_RERANK_BREADCRUMBS=off|on` (RET-12).** With the flag on, the reranker sees
+  `"{document title} › {section path or section} · p.{page}\n"` before the chunk content, so a
+  bare "berlaku 12 hari kerja" is judged with its "Kebijakan Cuti › Bab IV Cuti Tahunan · p.12"
+  context. `KB_RERANK_CHAR_BUDGET` still truncates only the content at a UTF-8 boundary; the
+  breadcrumb is never clipped. `false`/`true` are accepted too, an unknown value is a startup
+  error, and the **default is `off`** until the A/B (`docs/core/specs/v1-roadmap.md` RET-12).
+  additive: the response shapes and chunk content are unchanged and no re-index is needed.
+
 ### Added
 
 - New chunk metadata `charStart` / `charEnd` / `overlapPrefixLen` on newly ingested chunks,
