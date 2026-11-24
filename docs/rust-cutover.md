@@ -653,6 +653,11 @@ commands are in `docs/core/specs/ret-5.md`.
 
 ### 21. Additive: global community arm (`DEC-5`, 2026-11-04)
 
+**Deprecated (DEC-6, 2026-11-24):** `KB_GLOBAL_ARM` and `KB_GRAPH_ARM` stay off and are
+deprecated. Starting the server with either enabled logs one warning naming the evidence
+(HotpotQA −8.5 pp R@5 and +400 ms p95, `docs/eval-baseline.md`, `EVAL-3`); they may be removed
+after v1.0. Behaviour is unchanged in this release — warning only.
+
 `KB_GLOBAL_ARM=1` turns on a "global mode" retrieval arm built on graph community
 summaries. **It is off by default and it is a measured loss**: `EVAL-3` found that
 fusing summary-selected communities into search lowered aggregative recall@10 by

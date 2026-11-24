@@ -1002,6 +1002,10 @@ Two of the five profile guesses were wrong and measurement replaced both:
 
 ### 6.4 Graph retrieval arm (L.3b)
 
+**Deprecated (DEC-6):** `KB_GRAPH_ARM` and `KB_GLOBAL_ARM` stay off and are deprecated; enabling
+either logs a startup warning naming this section's evidence (HotpotQA −8.5 pp R@5 and +400 ms
+p95; `EVAL-3`) and noting they may be removed after v1.0. Behaviour is unchanged — warning only.
+
 Step L.3b connects the Postgres entity graph built in L.3a to ingest and search,
 and measures whether an entity-graph retrieval arm (`KB_GRAPH_ARM=1`) improves
 multi-hop retrieval on a held-out test split without regressing single-fact lookup.

@@ -201,3 +201,7 @@ search field `maxPerDocument`: it caps the chunks one document may contribute, a
 before the `maxChunks` cut (`docs/core/specs/v1-roadmap.md` RET-17). A request field overrides
 it for that search.
 
+**Deprecated (DEC-6):** `KB_GRAPH_ARM` and `KB_GLOBAL_ARM` are frozen and deprecated; enabling
+either logs a startup warning naming the evidence (HotpotQA −8.5 pp R@5 and +400 ms p95,
+`docs/eval-baseline.md`, `EVAL-3`). They may be removed after v1.0. The arms still work today.
+

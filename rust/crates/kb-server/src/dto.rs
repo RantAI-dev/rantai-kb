@@ -249,8 +249,9 @@ pub struct SearchStatsDto {
     /// a default search keeps exactly the earlier shape.
     #[serde(rename = "treeArm", skip_serializing_if = "Option::is_none", default)]
     pub tree_arm: Option<TreeArmStatsDto>,
-    /// Additive (`DEC-5`): what the global community arm did. Present only when
-    /// the arm ran (`KB_GLOBAL_ARM` on and an aggregative query), so a server
+    /// Additive (`DEC-5`): what the global community arm did. `KB_GLOBAL_ARM` is
+    /// **deprecated (DEC-6)** and stays off; enabling it logs a startup warning.
+    /// Present only when the arm ran (on and an aggregative query), so a server
     /// with the flag off answers exactly the earlier shape. `communities: 0`
     /// means the tenant has no community set — the arm had nothing to say, and
     /// that is not a degrade.

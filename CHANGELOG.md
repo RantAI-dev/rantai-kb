@@ -63,6 +63,13 @@
   a per-page fallback. A new scoped, vector-free `RetrievalIndex::list_chunk_meta` port method
   backs this and the upcoming content route. No existing response field changed.
 
+### Deprecated
+
+- **`KB_GRAPH_ARM` and `KB_GLOBAL_ARM` (DEC-6).** Both arms stay off by default and are now
+  deprecated: starting the server with either enabled logs one warning naming the evidence
+  (HotpotQA −8.5 pp R@5 and +400 ms p95, `docs/eval-baseline.md`, `EVAL-3`) and noting they may be
+  removed after v1.0. Behaviour is unchanged — this is a warning only.
+
 ## 0.8.0 — 2026-11-23
 
 ### Added

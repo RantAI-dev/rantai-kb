@@ -999,6 +999,17 @@ impl Config {
             weight: float_var(&lookup, "KB_GLOBAL_ARM_WEIGHT", 0.5)?.clamp(0.0, 1.0),
             chunks: int_var(&lookup, "KB_GLOBAL_ARM_CHUNKS", 200)?.max(1) as usize,
         };
+        // DEC-6: one startup line for whichever deprecated arms are enabled.
+        // The arms still work today; the warning says why they are frozen.
+        let deprecated = deprecated_arms_enabled(graph_arm.enabled, global_arm.enabled);
+        if !deprecated.is_empty() {
+            tracing::warn!(
+                arms = %deprecated.join(", "),
+                "KB_GRAPH_ARM / KB_GLOBAL_ARM are deprecated (DEC-6): HotpotQA -8.5 pp R@5 \
+                 and +400 ms p95 (docs/eval-baseline.md, EVAL-3); these arms may be removed \
+                 after v1.0"
+            );
+        }
         // Communities are built from the Postgres entity graph and stored in
         // Postgres. Without `KB_GRAPH_STORE=pg` there is neither a graph to build
         // from nor a table to read, so an enabled arm would silently return
@@ -1394,6 +1405,23 @@ pub(crate) fn extract_outbound_urls(extract: &ExtractConfig) -> Vec<String> {
     urls
 }
 
+/// DEC-6: the names of the deprecated retrieval arms an operator enabled.
+///
+/// Kept pure so the warning condition can be tested without capturing log
+/// output. An empty vector means no warning; one entry per enabled arm is
+/// joined into the single startup warning line.
+#[must_use]
+pub(crate) fn deprecated_arms_enabled(graph: bool, global: bool) -> Vec<&'static str> {
+    let mut arms = Vec::with_capacity(2);
+    if graph {
+        arms.push("KB_GRAPH_ARM");
+    }
+    if global {
+        arms.push("KB_GLOBAL_ARM");
+    }
+    arms
+}
+
 pub(crate) fn bool_flag<F>(lookup: &F, name: &str, default: bool) -> bool
 where
     F: Fn(&str) -> Option<String>,
@@ -1621,6 +1649,20 @@ mod tests {
         assert_eq!(load(Some("0")), 0, "zero means off");
         assert_eq!(load(Some("3")), 3);
         assert_eq!(load(Some("9999")), 50, "clamped to the request range");
+    }
+
+    #[test]
+    fn test_only_enabled_deprecated_arms_trigger_the_warning_condition() {
+        assert!(
+            deprecated_arms_enabled(false, false).is_empty(),
+            "a default server warns about nothing"
+        );
+        assert_eq!(deprecated_arms_enabled(true, false), vec!["KB_GRAPH_ARM"]);
+        assert_eq!(deprecated_arms_enabled(false, true), vec!["KB_GLOBAL_ARM"]);
+        assert_eq!(
+            deprecated_arms_enabled(true, true),
+            vec!["KB_GRAPH_ARM", "KB_GLOBAL_ARM"]
+        );
     }
 
     #[test]
