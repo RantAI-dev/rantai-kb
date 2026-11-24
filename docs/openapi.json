@@ -3887,6 +3887,26 @@
           }
         }
       },
+      "PageRangeDto": {
+        "type": "object",
+        "description": "An inclusive page window. Valid only with exactly one `documentIds` entry.",
+        "required": [
+          "start",
+          "end"
+        ],
+        "properties": {
+          "end": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "start": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
       "PageStructure": {
         "type": "object",
         "description": "One page. `number` is 0-based, the same numbering as `ChunkMetadata.page`\nand a search chunk's `page`; the page-image key is built from `number + 1`.",
@@ -4450,8 +4470,26 @@
             "format": "float",
             "description": "Optional relevance floor for this request (RET-2). Overrides the\nserver's `KB_MIN_SCORE`; absent means \"use the server default\" (which\nis unset unless an operator configured one)."
           },
+          "pageRange": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PageRangeDto",
+                "description": "Additive (`RET-15`): an inclusive page window inside one document."
+              }
+            ]
+          },
           "query": {
             "description": "Left as raw JSON: the TypeScript route rejects a non-string query with\nits own 400, which a typed field would turn into a parser error."
+          },
+          "section": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`RET-15`): an outline v2 section id inside one document."
           }
         }
       },

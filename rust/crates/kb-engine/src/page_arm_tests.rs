@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use kb_ports::{
     BlobStore, ChunkId, ChunkType, DocumentId, IndexUnit, PageEmbedder, PageImage, PageRenderer,
     PageVisionScorer, PortError, ProvenanceArm, RetrievalDegrade, RetrievalIndex, SearchHit,
-    TenantId, page_image_path,
+    TenantId, UnitRange, page_image_path,
 };
 
 use crate::fakes::{
@@ -137,6 +137,35 @@ async fn the_page_arm_never_returns_a_page_outside_the_scope() {
 
     let empty = make_fake_scope(t("t1"), vec![]);
     assert!(arm.rank(&empty, "q").await.unwrap().is_empty());
+}
+
+/// RET-15: a page-range restriction is applied inside the page index query.
+/// A section's chunk range is deliberately *not* applied here: page units use
+/// the page number as their `chunkIndex`, so the page half of the range is the
+/// only meaningful one for this arm.
+#[tokio::test]
+async fn the_page_arm_never_returns_a_page_outside_the_page_range() {
+    let pages = Arc::new(InMemoryIndex::new(3));
+    pages
+        .upsert(vec![
+            page_unit("t1", "d1", 3, vec![1.0, 0.0, 0.0], &["d1_3"]),
+            page_unit("t1", "d1", 30, vec![1.0, 0.0, 0.0], &["d1_30"]),
+        ])
+        .await
+        .unwrap();
+    let arm = PageArm {
+        embedder: embedder(vec![1.0, 0.0, 0.0]),
+        index: pages,
+        vision: None,
+        config: PageArmConfig::default(),
+    };
+    let scoped = make_fake_scope(t("t1"), vec![d("d1")]).with_unit_range(UnitRange {
+        pages: Some((1, 5)),
+        chunks: Some((40, 57)),
+    });
+    let ranked = arm.rank(&scoped, "q").await.unwrap();
+    assert_eq!(ranked.len(), 1, "{ranked:?}");
+    assert_eq!(ranked[0].page, 3);
 }
 
 #[tokio::test]

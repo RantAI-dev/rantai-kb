@@ -1083,6 +1083,15 @@ impl RetrievalIndex for FakeChunkStore {
         }
 
         let allowed = scope.document_ids();
+        let range = scope.unit_range();
+        let in_range = |h: &SearchHit| {
+            range.is_none_or(|r| {
+                r.allows(
+                    h.chunk.metadata.page,
+                    h.chunk.metadata.chunk_index.unwrap_or(0),
+                )
+            })
+        };
         // Fused by unit id, as both real adapters do: a unit both arms rank is
         // one candidate with two arm scores, not two candidates. The fake used
         // to concatenate, which hid the difference between "the keyword arm
@@ -1094,7 +1103,7 @@ impl RetrievalIndex for FakeChunkStore {
             let v_list = self.vector_hits.read().unwrap();
             for h in v_list
                 .iter()
-                .filter(|h| allowed.contains(&h.chunk.document_id))
+                .filter(|h| allowed.contains(&h.chunk.document_id) && in_range(h))
             {
                 out.push(Candidate {
                     unit_id: h.chunk.id.clone(),
@@ -1131,7 +1140,7 @@ impl RetrievalIndex for FakeChunkStore {
             let b_list = self.bm25_hits.read().unwrap();
             for h in b_list
                 .iter()
-                .filter(|h| allowed.contains(&h.chunk.document_id))
+                .filter(|h| allowed.contains(&h.chunk.document_id) && in_range(h))
             {
                 out.push(Candidate {
                     unit_id: h.chunk.id.clone(),
@@ -1193,6 +1202,13 @@ impl RetrievalIndex for FakeChunkStore {
                 if !wanted.contains(unit_id.as_str()) {
                     continue;
                 }
+                let meta = stored_chunk_metadata(&chunk.metadata);
+                if !scope
+                    .unit_range()
+                    .is_none_or(|r| r.allows(meta.page, chunk.chunk_index))
+                {
+                    continue;
+                }
                 out.push(Candidate {
                     unit_id: ChunkId(unit_id),
                     document_id: document_id.clone(),
@@ -1227,10 +1243,14 @@ impl RetrievalIndex for FakeChunkStore {
         if !allowed.contains(document_id) {
             return Ok(Vec::new());
         }
+        let range = scope.unit_range();
         let mut out = Vec::new();
         for h in list.iter() {
             if &h.chunk.document_id == document_id {
                 let idx = h.chunk.metadata.chunk_index.unwrap_or(0);
+                if !range.is_none_or(|r| r.allows(h.chunk.metadata.page, idx)) {
+                    continue;
+                }
                 out.push(Candidate {
                     unit_id: h.chunk.id.clone(),
                     document_id: h.chunk.document_id.clone(),
@@ -1266,9 +1286,17 @@ impl RetrievalIndex for FakeChunkStore {
         }
         let list = self.figure_hits.read().unwrap();
         let allowed = scope.document_ids();
+        let range = scope.unit_range();
         let mut out = Vec::new();
         for h in list.iter() {
-            if allowed.contains(&h.chunk.document_id) && document_ids.contains(&h.chunk.document_id)
+            if allowed.contains(&h.chunk.document_id)
+                && document_ids.contains(&h.chunk.document_id)
+                && range.is_none_or(|r| {
+                    r.allows(
+                        h.chunk.metadata.page,
+                        h.chunk.metadata.chunk_index.unwrap_or(0),
+                    )
+                })
             {
                 out.push(Candidate {
                     unit_id: h.chunk.id.clone(),
@@ -1322,6 +1350,12 @@ impl RetrievalIndex for FakeChunkStore {
                 let Some(page) = meta.page else {
                     continue;
                 };
+                if !scope
+                    .unit_range()
+                    .is_none_or(|r| r.allows(meta.page, meta.chunk_index.unwrap_or(0)))
+                {
+                    continue;
+                }
                 let key = (document.clone(), page);
                 if !wanted.contains(&key) {
                     continue;
