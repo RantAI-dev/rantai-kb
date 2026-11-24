@@ -38,6 +38,12 @@ because the contract has to be readable before the caller has one.
 **Search options** (JSON): `query` (required), `maxChunks`, `knowledgeBaseIds`,
 `documentIds`, `category`, `hybrid`, `format`, `minScore`.
 
+`documentIds` restricts a search to the named documents using the full pipeline — BM25,
+reranker, page/tree/neighbour and figure arms all run — inside the caller's visible scope. It
+only narrows that scope: a document from another tenant or outside the key's knowledge bases
+is never searched. Such an answer carries `sources` and `context` in the standard format, just
+like any other search.
+
 `chunks[].content`, `documentTitle`, `page` and `similarity` carry the results; `degrades`
 is non-empty when an arm failed, because a failed arm is reported rather than silently
 dropped.

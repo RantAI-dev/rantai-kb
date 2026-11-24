@@ -557,6 +557,18 @@ impl EmbedderConfig {
             self.model, self.dimension
         )
     }
+
+    /// The prefixes the inner embedder really applies. With an out-of-band
+    /// instruction (`input_type`, or every OmniEmbed request) the text is not
+    /// prefixed, so the cache key must not claim a prefix either (`ING-9`).
+    #[must_use]
+    pub fn effective_prefixes(&self) -> (&str, &str) {
+        if self.send_input_type || self.format == kb_inference::EmbedFormat::OmniEmbed {
+            ("", "")
+        } else {
+            (&self.query_prefix, &self.passage_prefix)
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2011,6 +2023,28 @@ mod tests {
         let fp = extract.cache_fingerprint();
         assert!(!fp.contains("sk-secret-value"));
         assert_ne!(fp, cfg.extract.cache_fingerprint(), "key presence matters");
+    }
+
+    /// The disk cache must key only the prefixes the inner embedder applies:
+    /// an out-of-band `input_type` (or OmniEmbed) leaves the text alone.
+    #[test]
+    fn effective_prefixes_are_empty_when_the_instruction_is_out_of_band() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db".into());
+        map.insert("OPENROUTER_API_KEY", "test-key".into());
+        map.insert("KB_EMBEDDING_QUERY_PREFIX", "query: ".into());
+        map.insert("KB_EMBEDDING_PASSAGE_PREFIX", "passage: ".into());
+        let cfg = Config::from_lookup(|k| map.get(k).cloned()).expect("config");
+        assert_eq!(cfg.embedder.effective_prefixes(), ("query: ", "passage: "));
+
+        map.insert("KB_EMBEDDING_INPUT_TYPE", "true".into());
+        let cfg = Config::from_lookup(|k| map.get(k).cloned()).expect("config");
+        assert_eq!(cfg.embedder.effective_prefixes(), ("", ""));
+
+        map.remove("KB_EMBEDDING_INPUT_TYPE");
+        map.insert("KB_EMBEDDING_FORMAT", "omniembed".into());
+        let cfg = Config::from_lookup(|k| map.get(k).cloned()).expect("config");
+        assert_eq!(cfg.embedder.effective_prefixes(), ("", ""));
     }
 
     #[test]
