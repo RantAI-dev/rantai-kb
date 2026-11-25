@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use kb_core::{CalibrationTable, Confidence, ScoreEvidence, ScoreKind};
 use kb_engine::{Engine, EngineInputs, EngineSettings, NoopExpander, QueryExpander};
 use kb_inference::EmbedderSettings;
 use kb_inference::ExpansionSettings;
@@ -62,6 +63,12 @@ pub struct AppState {
     pub upload_dedupe: kb_core::policy::UploadDedupe,
     /// Whether the thin MCP endpoint is mounted (`KB_MCP`, default off).
     pub mcp_enabled: bool,
+    /// Confidence bands fitted per scoring model (`RET-18`).
+    pub confidence_table: CalibrationTable,
+    /// Model id used for rerank-scored answers.
+    pub rerank_model_id: Option<String>,
+    /// Model id used for dense and fused answers.
+    pub embedding_model_id: String,
 }
 
 /// Adapters a caller supplies. Grouped so tests can build a state from fakes
@@ -96,6 +103,12 @@ impl AppState {
             .as_ref()
             .map(|plan| plan.tier.as_str().to_string());
         let egress = config.egress_hosts();
+        // Read the model ids and the fitted table before any part of `config`
+        // is moved into an adapter: a whole-struct method borrow would not
+        // survive the moves below.
+        let rerank_model_id = config.rerank_model_id().map(str::to_string);
+        let embedding_model_id = config.embedding_model_id().to_string();
+        let confidence_table = config.confidence_table.clone();
         // The model backends the health route probes (`#36`). Read before any
         // field is moved out of the config.
         let backends = crate::backends::BackendTargets::from_config(&config);
@@ -278,6 +291,9 @@ impl AppState {
             backends: crate::backends::BackendProbe::new(backends),
             upload_dedupe: config.upload_dedupe,
             mcp_enabled: config.mcp_enabled,
+            confidence_table,
+            rerank_model_id,
+            embedding_model_id,
         })
     }
 
@@ -328,6 +344,11 @@ impl AppState {
             // A hand-built state has no config: MCP is off unless a test turns
             // it on explicitly with `with_mcp`.
             mcp_enabled: false,
+            // A hand-built test state has no fitted table and no configured
+            // model ids, so it answers honestly `calibrated: false`.
+            confidence_table: CalibrationTable::default(),
+            rerank_model_id: None,
+            embedding_model_id: String::new(),
         }
     }
 
@@ -336,6 +357,38 @@ impl AppState {
     pub fn with_mcp(mut self, enabled: bool) -> Self {
         self.mcp_enabled = enabled;
         self
+    }
+
+
+    /// Install the calibration table and model ids an operator configured.
+    /// Used by the HTTP tests that exercise a loaded override file.
+    #[must_use]
+    pub fn with_confidence(
+        mut self,
+        table: CalibrationTable,
+        embedding_model_id: String,
+        rerank_model_id: Option<String>,
+    ) -> Self {
+        self.confidence_table = table;
+        self.embedding_model_id = embedding_model_id;
+        self.rerank_model_id = rerank_model_id;
+        self
+    }
+
+    /// Reduce one answer to an actionable band with the table in force.
+    #[must_use]
+    pub fn confidence(&self, evidence: &ScoreEvidence, min_score: Option<f32>) -> Confidence {
+        let model_id = match evidence.score_kind {
+            ScoreKind::Rerank => self.rerank_model_id.as_deref().unwrap_or(""),
+            ScoreKind::Dense | ScoreKind::Fused => self.embedding_model_id.as_str(),
+        };
+        kb_core::confidence(
+            evidence.top,
+            evidence.second,
+            evidence.score_kind,
+            model_id,
+            &self.confidence_table.clone().with_min_score(min_score),
+        )
     }
 
     /// Assemble a production [`IngestWorker`](kb_engine::IngestWorker) from the

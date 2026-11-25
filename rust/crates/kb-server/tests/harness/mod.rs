@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use kb_core::CalibrationTable;
 use kb_core::policy::UploadDedupe;
 use kb_engine::fakes::{
     FakeBlobStore, FakeChunkStore, FakeDocumentStore, FakeEmbedder, FakeEntityStore, FakeJobStore,
@@ -51,12 +52,27 @@ impl Default for Harness {
 
 impl Harness {
     pub fn new() -> Self {
-        Self::build(BackendTargets::default(), UploadDedupe::default(), false)
+        Self::build(BackendTargets::default(), UploadDedupe::default(), false, None)
     }
 
     /// A harness with the thin MCP endpoint mounted (`KB_MCP=on`).
     pub fn with_mcp() -> Self {
-        Self::build(BackendTargets::default(), UploadDedupe::default(), true)
+        Self::build(BackendTargets::default(), UploadDedupe::default(), true, None)
+    }
+
+    /// A harness with a fitted calibration table and model ids installed, for
+    /// the RET-18 tests that check a loaded override drives the band.
+    pub fn with_confidence(
+        table: CalibrationTable,
+        embedding_model_id: String,
+        rerank_model_id: Option<String>,
+    ) -> Self {
+        Self::build(
+            BackendTargets::default(),
+            UploadDedupe::default(),
+            false,
+            Some((table, embedding_model_id, rerank_model_id)),
+        )
     }
 
     /// A harness whose health route probes the given backends (`#36`).
@@ -64,17 +80,22 @@ impl Harness {
     /// The router is built from the state, so the probe has to be in place
     /// before that.
     pub fn with_backends(targets: BackendTargets) -> Self {
-        Self::build(targets, UploadDedupe::default(), false)
+        Self::build(targets, UploadDedupe::default(), false, None)
     }
 
     /// A harness whose upload route refuses a file the tenant already has
     /// (`KB_UPLOAD_DEDUPE=reject`, the default) or stores it again
     /// (`KB_UPLOAD_DEDUPE=off`).
     pub fn with_upload_dedupe(upload_dedupe: UploadDedupe) -> Self {
-        Self::build(BackendTargets::default(), upload_dedupe, false)
+        Self::build(BackendTargets::default(), upload_dedupe, false, None)
     }
 
-    fn build(targets: BackendTargets, upload_dedupe: UploadDedupe, mcp_enabled: bool) -> Self {
+    fn build(
+        targets: BackendTargets,
+        upload_dedupe: UploadDedupe,
+        mcp_enabled: bool,
+        confidence: Option<(CalibrationTable, String, Option<String>)>,
+    ) -> Self {
         let documents = FakeDocumentStore::default();
         let chunks = FakeChunkStore::default();
         let blobs = FakeBlobStore::default();
@@ -105,6 +126,9 @@ impl Harness {
         // The backends the health route probes (`#36`).
         state.backends = BackendProbe::new(targets);
         state.mcp_enabled = mcp_enabled;
+        if let Some((table, embedding_model_id, rerank_model_id)) = confidence {
+            state = state.with_confidence(table, embedding_model_id, rerank_model_id);
+        }
 
         Self {
             app: kb_server::build_router(state),
