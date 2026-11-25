@@ -304,6 +304,15 @@ async fn leak(args: &[String]) -> Result<(), EvalError> {
     config.database_url = flag(args, "--database-url")
         .or_else(|| std::env::var("DATABASE_URL").ok())
         .filter(|url| !url.trim().is_empty());
+    // `--stale-payload` rewrites Postgres rows directly (moves, soft-deletes,
+    // ACLs) to make Qdrant stale on purpose: never against a real database.
+    if config.stale_payload && !has_flag(args, "--allow-db-writes") {
+        return Err(EvalError::Usage(
+            "--stale-payload edits Postgres rows directly; run it only against a throwaway \
+             stack and pass --allow-db-writes to confirm"
+                .to_string(),
+        ));
+    }
     if config.pdf_corpus && config.docx_corpus {
         return Err(EvalError::Usage(
             "--pdf and --docx are mutually exclusive".to_string(),

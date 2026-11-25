@@ -1,5 +1,9 @@
 # Scope scale and stale payloads (SEC-2c)
 
+> **Both instruments write straight into Postgres and Qdrant** (synthetic tenants; stale
+> moves, soft-deletes and ACLs). Run them only against a throwaway stack. Each refuses to run
+> without `--allow-db-writes`.
+
 Two instruments prove the two halves of SEC-2 on a live stack:
 
 1. `kb-server eval scope-bench` — does predicate scope keep search latency flat
@@ -38,7 +42,7 @@ kb-server eval scope-bench \
   --sizes 1000,10000,100000 \
   --queries 200 \
   --out docs/eval-ab/scope-scale/out \
-  --mode-label ids
+  --mode-label ids --allow-db-writes
 kill "$IDS_PID"
 
 # Pass 2 — Predicate mode. Restart with the new limit.
@@ -50,7 +54,7 @@ kb-server eval scope-bench \
   --sizes 1000,10000,100000 \
   --queries 200 \
   --out docs/eval-ab/scope-scale/out \
-  --mode-label predicate
+  --mode-label predicate --allow-db-writes
 kill "$PRED_PID"
 ```
 
@@ -89,7 +93,7 @@ that the Ids path is exercised. The tool records that in `leak.json` notes.
 kb-server eval leak \
   --base-url http://127.0.0.1:3000 \
   --api-key "$KB_EVAL_API_KEY" --peer-key "$KB_EVAL_PEER_API_KEY" \
-  --stale-payload --database-url "$DATABASE_URL" \
+  --stale-payload --allow-db-writes --database-url "$DATABASE_URL" \
   --out docs/eval-ab/scope-scale/out/leak-stale \
   --strict
 ```

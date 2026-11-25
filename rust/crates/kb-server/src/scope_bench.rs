@@ -256,6 +256,15 @@ fn parse_args(args: &[String]) -> Result<ScopeBenchConfig, CliError> {
         }
         Some(next.clone())
     };
+    // It inserts tenants, documents and points straight into Postgres and
+    // Qdrant: refuse unless the operator says this is a throwaway database.
+    if !args.iter().any(|a| a == "--allow-db-writes") {
+        return Err(CliError::Usage(
+            "scope-bench writes synthetic tenants straight into Postgres and Qdrant; run it only \
+             against a throwaway stack and pass --allow-db-writes to confirm"
+                .to_string(),
+        ));
+    }
     let base_url = value("--base-url")
         .ok_or_else(|| CliError::Usage("scope-bench: missing --base-url".to_string()))?;
     let database_url = value("--database-url")
@@ -645,6 +654,16 @@ mod tests {
             qdrant_client::qdrant::value::Kind::StringValue(s) => Some(s.clone()),
             _ => None,
         }
+    }
+
+    #[test]
+    fn it_refuses_to_run_without_the_write_confirmation() {
+        let args: Vec<String> = ["--base-url", "http://x", "--database-url", "postgres://x"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let err = parse_args(&args).unwrap_err();
+        assert!(format!("{err:?}").contains("--allow-db-writes"), "{err:?}");
     }
 
     #[test]
