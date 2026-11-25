@@ -74,6 +74,7 @@ fn doc(id: &str, doc_key: Option<&str>, version: Option<&str>, from: Option<&str
         version: version.map(str::to_string),
         effective_from: from.map(str::to_string),
         effective_to: None,
+        acl_principals: Vec::new(),
     }
 }
 

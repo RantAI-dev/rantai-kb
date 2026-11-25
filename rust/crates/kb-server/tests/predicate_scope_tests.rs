@@ -48,6 +48,7 @@ fn doc(_tenant: &str, id: &str, kb: &str) -> DocumentMeta {
         effective_from: None,
         effective_to: None,
         is_latest: true,
+        acl_principals: Vec::new(),
         sha256: None,
         id: DocumentId(id.to_string()),
         title: id.to_string(),

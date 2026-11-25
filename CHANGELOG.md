@@ -13,6 +13,17 @@
   search instead of returning unverified hits. Filters the payload cannot express (metadata,
   language, external refs, `documentIds` narrowing with unit ranges, RET-16 versions) keep the
   id-list path.
+- **Per-document access lists (`SEC-3`).** Documents can carry `aclPrincipals`, set on upload
+  (`aclPrincipals` multipart field) or `PATCH /v1/documents/:id` and returned additively by the
+  document read/list routes. Requests assert their principals with `X-KB-Principals:
+  user:42,group:hr` (or the new `principals` field of a `/v1/search` body), which requires the
+  new privileged `kb:assert-principals` scope (`403` without it). An ACL'd document is visible
+  only when the sets overlap and is hidden by default when no principals are asserted; an empty
+  ACL keeps the old behaviour. The clause lives in the same Postgres visibility SQL that scopes
+  every retrieval arm and the SEC-2a verify, and in the by-id lookup used by every document and
+  table route. A tenant with any ACL'd document stays in Ids mode because the Qdrant payload
+  carries no ACL. The additive migration adds `"aclPrincipals" TEXT[] NOT NULL DEFAULT '{}'`
+  with a GIN index.
 
 ### Fixed
 

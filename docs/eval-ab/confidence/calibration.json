@@ -1,0 +1,9 @@
+[
+  {
+    "modelId": "Qwen/Qwen3-Reranker-0.6B",
+    "scoreKind": "rerank",
+    "high": 0.9876907,
+    "medium": 0.70805687,
+    "low": 0.42842302
+  }
+]

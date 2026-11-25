@@ -208,6 +208,12 @@ pub(crate) async fn get_document_content_inner(
             tenant: auth.tenant_id.clone(),
             filter: DocumentFilter {
                 knowledge_base_ids: auth.knowledge_base_ids.clone(),
+                // SEC-3: the chunk read below must be scoped by the same
+                // principals that made the document visible above.
+                principals: auth.principals.clone(),
+                // A by-id read already chose this document: an older
+                // version must still read its chunks (RET-16).
+                include_history: true,
                 ..DocumentFilter::default()
             },
             force_ids: false,

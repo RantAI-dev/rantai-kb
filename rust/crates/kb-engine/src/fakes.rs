@@ -220,6 +220,18 @@ fn meta_matches_filter(meta: &DocumentMeta, filter: &DocumentFilter) -> bool {
     } else if !filter.include_history && meta.doc_key.is_some() && !meta.is_latest {
         return false;
     }
+    // SEC-3 access list. KEEP IN SYNC with `scope_sql_inner` in
+    // `kb-store-pg/src/store.rs`: the same overlap clause, so an empty principal
+    // set hides every ACL'd document and an un-ACL'd document stays visible.
+    // Being in this shared predicate, it also governs the SEC-2a verify.
+    if !meta.acl_principals.is_empty()
+        && !meta
+            .acl_principals
+            .iter()
+            .any(|principal| filter.principals.contains(principal))
+    {
+        return false;
+    }
     filter.metadata.iter().all(|predicate| {
         metadata_values_match(meta.metadata.as_ref(), &predicate.key, &predicate.values)
     })
@@ -271,6 +283,7 @@ impl FakeDocumentStore {
             key_id: format!("key-{key}"),
             scopes: vec!["kb:read".to_string(), "kb:write".to_string()],
             knowledge_base_ids: vec![],
+            principals: Vec::new(),
         };
         self.api_keys.write().unwrap().insert(key.to_string(), auth);
     }
@@ -287,6 +300,7 @@ impl FakeDocumentStore {
             key_id: format!("key-{key}"),
             scopes,
             knowledge_base_ids: kb_ids,
+            principals: Vec::new(),
         };
         self.api_keys.write().unwrap().insert(key.to_string(), auth);
     }
@@ -307,7 +321,11 @@ impl DocumentStore for FakeDocumentStore {
             .collect();
         let token = ScopeToken::new_for_adapter();
         let limit = self.scope_id_limit.unwrap_or_else(scope_id_limit_from_env);
-        if let Some(spec) = predicate_spec_for(req, filtered.len(), limit, false) {
+        // Same tenant-wide check as the Postgres adapter's
+        // `SELECT_TENANT_HAS_ACL`: an ACL'd document anywhere in the tenant
+        // forces Ids mode, because the Qdrant payload has no ACL key.
+        let has_acl = list.iter().any(|d| !d.acl_principals.is_empty());
+        if let Some(spec) = predicate_spec_for(req, filtered.len(), limit, false, has_acl) {
             return Ok(DocumentScope::new_predicate(
                 &token,
                 req.tenant.clone(),
@@ -380,6 +398,44 @@ impl DocumentStore for FakeDocumentStore {
                 .cloned());
         }
         Ok(None)
+    }
+
+    async fn find_visible_meta_by_id(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+        include_deleted: bool,
+        principals: &[String],
+    ) -> Result<Option<DocumentMeta>, PortError> {
+        let map = self.docs.read().unwrap();
+        let found = map
+            .get(tenant)
+            .and_then(|list| list.iter().find(|d| &d.id == id))
+            .filter(|doc| {
+                doc.acl_principals.is_empty()
+                    || doc
+                        .acl_principals
+                        .iter()
+                        .any(|principal| principals.contains(principal))
+            })
+            .cloned();
+        if found.is_some() || !include_deleted {
+            return Ok(found);
+        }
+        Ok(self
+            .deleted
+            .read()
+            .unwrap()
+            .iter()
+            .find(|d| &d.id == id)
+            .filter(|doc| {
+                doc.acl_principals.is_empty()
+                    || doc
+                        .acl_principals
+                        .iter()
+                        .any(|principal| principals.contains(principal))
+            })
+            .cloned())
     }
 
     async fn soft_delete(&self, tenant: &TenantId, id: &DocumentId) -> Result<bool, PortError> {
@@ -513,6 +569,7 @@ impl DocumentStore for FakeDocumentStore {
         knowledge_base_ids: &[KnowledgeBaseId],
         external_ref: Option<&str>,
         cursor: Option<&kb_core::pagination::Cursor>,
+        principals: &[String],
     ) -> Result<DocumentPage, PortError> {
         let map = self.docs.read().unwrap();
         let list = map.get(tenant).cloned().unwrap_or_default();
@@ -527,6 +584,12 @@ impl DocumentStore for FakeDocumentStore {
                         .any(|id| knowledge_base_ids.iter().any(|k| k.0 == *id))
             })
             .filter(|d| external_ref.is_none_or(|r| d.external_ref.as_deref() == Some(r)))
+            .filter(|d| {
+                d.acl_principals.is_empty()
+                    || d.acl_principals
+                        .iter()
+                        .any(|principal| principals.contains(principal))
+            })
             .collect();
         // The same total order the Postgres adapter uses: newest first, the id
         // breaking the tie. Without the tie-break two rows created in the same
@@ -674,6 +737,7 @@ impl DocumentStore for FakeDocumentStore {
             effective_from: doc.effective_from.clone(),
             effective_to: doc.effective_to.clone(),
             is_latest: true,
+            acl_principals: doc.acl_principals.clone(),
         };
         // Mirror `PgDocumentStore::create_document`: the new version becomes
         // latest and the previous one is retired in the same call. The HTTP
@@ -746,6 +810,9 @@ impl DocumentStore for FakeDocumentStore {
         }
         if let Some(v) = &patch.effective_to {
             doc.effective_to = Some(v.clone());
+        }
+        if let Some(acl) = &patch.acl_principals {
+            doc.acl_principals = acl.clone();
         }
         doc.updated_at = FAKE_TIMESTAMP.to_string();
         Ok(Some(doc.clone()))
