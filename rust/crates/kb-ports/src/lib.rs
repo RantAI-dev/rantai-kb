@@ -50,7 +50,7 @@ pub use retrieval::{
 pub use scope::adapter;
 pub use scope::{
     DEFAULT_SCOPE_ID_LIMIT, DocumentScope, PredicateSpec, UnitRange, VerifySpec,
-    predicate_spec_for, scope_id_limit_from_env,
+    predicate_filter_allowed, predicate_spec_for, scope_id_limit_from_env,
 };
 pub use tables::{TableId, TableQueryFailure, TableRecord, TableStore};
 pub use traits::{

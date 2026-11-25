@@ -10,6 +10,7 @@
 //!
 //! The target is `predicate p95(100k) <= 1.2 x predicate p95(1k)`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -51,6 +52,13 @@ pub struct ScopeBenchConfig {
     pub keep: bool,
 }
 
+/// p50/p95 of one server-reported stage, in milliseconds.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct StageSample {
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+}
+
 /// One measured (size, mode) row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BenchRow {
@@ -62,6 +70,12 @@ pub struct BenchRow {
     pub queries: usize,
     pub errors: usize,
     pub tenant_id: String,
+    /// Per-stage p50/p95 from `stats.stageTimingsMs` (SEC-2d). Keyed by the
+    /// field name the server actually sent, so a future stage appears here
+    /// without a schema change. Defaulted so earlier results.json files still
+    /// deserialize and merge.
+    #[serde(default)]
+    pub stage_timings_ms: BTreeMap<String, StageSample>,
     #[serde(default)]
     pub skipped: bool,
 }
@@ -105,6 +119,42 @@ pub fn percentile(sorted: &[f64], q: f64) -> f64 {
     }
     let rank = (q.clamp(0.0, 1.0) * sorted.len() as f64).ceil() as usize;
     sorted[rank.saturating_sub(1).min(sorted.len() - 1)]
+}
+
+/// Aggregate every scalar field of `stats.stageTimingsMs` across successful
+/// search responses into p50/p95 (SEC-2d). A field missing from a response is
+/// simply not sampled for that query; nothing is fabricated. The `detail`
+/// object is deliberately skipped: it holds measurements that *overlap* the
+/// partition stages (query embed and both arms live inside `arms`), so mixing
+/// it into a p95 table would imply an additive breakdown that does not exist.
+pub fn stage_timings(samples: &[Json]) -> BTreeMap<String, StageSample> {
+    let mut values: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for body in samples {
+        let Some(timings) = body["stats"]["stageTimingsMs"].as_object() else {
+            continue;
+        };
+        for (field, value) in timings {
+            if field == "detail" {
+                continue;
+            }
+            if let Some(ms) = value.as_f64() {
+                values.entry(field.clone()).or_default().push(ms);
+            }
+        }
+    }
+    values
+        .into_iter()
+        .map(|(field, mut samples)| {
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            (
+                field,
+                StageSample {
+                    p50_ms: percentile(&samples, 0.50),
+                    p95_ms: percentile(&samples, 0.95),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Deterministic xorshift64. Same seed, same queries in both passes, so the
@@ -234,6 +284,28 @@ pub fn render_report(results: &ResultsFile) -> String {
             row.errors
         ));
     }
+    out.push_str("\n## Stage timings (p50 / p95 ms)\n\n");
+    out.push_str("| size | mode | stage | p50 ms | p95 ms |\n|---:|---|---|---:|---:|\n");
+    for row in &results.rows {
+        if row.stage_timings_ms.is_empty() {
+            out.push_str(&format!(
+                "| {} | {} | (not reported by this server) | — | — |\n",
+                row.size, row.mode_label
+            ));
+            continue;
+        }
+        for (stage, timing) in &row.stage_timings_ms {
+            out.push_str(&format!(
+                "| {} | {} | {} | {:.2} | {:.2} |\n",
+                row.size, row.mode_label, stage, timing.p50_ms, timing.p95_ms
+            ));
+        }
+    }
+    out.push_str(
+        "\nThese are the fields of `stats.stageTimingsMs`, not the HTTP round trip: \
+         they show where the server spent the time. The nested `detail` object is \
+         omitted because those measurements overlap the stages above.\n",
+    );
     out.push_str("\n## How to run the two passes\n\n");
     out.push_str("1. Start the server with `KB_SCOPE_ID_LIMIT=0`, then run `kb-server eval scope-bench --mode-label ids ...`.\n");
     out.push_str("2. Restart it with `KB_SCOPE_ID_LIMIT=2000`, then run the same command with `--mode-label predicate` against the same `--out` dir.\n");
@@ -430,6 +502,7 @@ async fn measure_size(
     }
 
     let mut samples = Vec::with_capacity(config.queries);
+    let mut stage_samples = Vec::with_capacity(config.queries);
     let mut dropped = 0.0f64;
     let mut errors = 0usize;
     let mut query_random = Prng::new(0xBEEF ^ size as u64 ^ (run_id.len() as u64));
@@ -456,6 +529,7 @@ async fn measure_size(
                 let d = parsed["stats"]["scopeVerifyDropped"].as_u64().unwrap_or(0) as f64;
                 dropped += d;
                 samples.push(elapsed);
+                stage_samples.push(parsed);
             }
             _ => {
                 errors += 1;
@@ -482,6 +556,7 @@ async fn measure_size(
         queries: config.queries,
         errors,
         tenant_id: tenant,
+        stage_timings_ms: stage_timings(&stage_samples),
         skipped: false,
     })
 }
@@ -754,6 +829,7 @@ mod tests {
                     queries: 200,
                     errors: 0,
                     tenant_id: "t1".into(),
+                    stage_timings_ms: BTreeMap::new(),
                     skipped: false,
                 },
                 BenchRow {
@@ -765,6 +841,7 @@ mod tests {
                     queries: 200,
                     errors: 0,
                     tenant_id: "t2".into(),
+                    stage_timings_ms: BTreeMap::new(),
                     skipped: false,
                 },
             ],
@@ -782,12 +859,65 @@ mod tests {
     }
 
     #[test]
+    fn every_reported_stage_is_aggregated_and_overlapping_detail_is_skipped() {
+        // SEC-2d: the next live run must show WHERE the p95 growth happens.
+        let samples = vec![
+            json!({"stats": {"stageTimingsMs": {
+                "scopeBuild": 10.0, "arms": 20.0, "rerank": 5.0, "total": 40.0,
+                "detail": {"queryEmbed": 3.0, "vectorArm": 4.0}
+            }}}),
+            json!({"stats": {"stageTimingsMs": {
+                "scopeBuild": 30.0, "arms": 60.0, "rerank": 9.0, "total": 100.0,
+                "detail": {"queryEmbed": 7.0}
+            }}}),
+            // A field present in only one response is still reported honestly.
+            json!({"stats": {"stageTimingsMs": {"scopeBuild": 20.0, "enrich": 2.5}}}),
+            json!({"chunks": []}), // no stats at all: contributes nothing
+        ];
+        let timings = stage_timings(&samples);
+        assert_eq!(timings["scopeBuild"].p50_ms, 20.0);
+        assert_eq!(timings["scopeBuild"].p95_ms, 30.0);
+        assert_eq!(timings["arms"].p95_ms, 60.0);
+        assert_eq!(timings["rerank"].p50_ms, 5.0);
+        assert_eq!(timings["total"].p95_ms, 100.0);
+        assert_eq!(timings["enrich"].p50_ms, 2.5);
+        assert!(!timings.contains_key("detail"));
+        assert_eq!(timings.len(), 5);
+
+        // Older rows without stage timings deserialise as an empty map.
+        let old: BenchRow = serde_json::from_value(json!({
+            "size": 1000, "mode_label": "ids", "p50_ms": 1.0, "p95_ms": 2.0,
+            "mean_scope_verify_dropped": 0.0, "queries": 1, "errors": 0,
+            "tenant_id": "t"
+        }))
+        .unwrap();
+        assert!(old.stage_timings_ms.is_empty());
+    }
+
+    #[test]
     fn the_report_names_the_target_and_every_row() {
         let report = render_report(&results(10.0, 15.0, "predicate"));
         assert!(report.contains("**MISS**"));
         assert!(report.contains("| 100000 | predicate |"));
         assert!(report.contains("KB_SCOPE_ID_LIMIT=2000"));
         assert!(report.contains("1.50x"));
+    }
+
+    #[test]
+    fn the_report_breaks_each_row_down_by_stage() {
+        let mut data = results(10.0, 15.0, "predicate");
+        data.rows[1].stage_timings_ms.insert(
+            "scopeBuild".to_string(),
+            StageSample {
+                p50_ms: 12.5,
+                p95_ms: 340.0,
+            },
+        );
+        let report = render_report(&data);
+        assert!(report.contains("## Stage timings (p50 / p95 ms)"));
+        assert!(report.contains("| 100000 | predicate | scopeBuild | 12.50 | 340.00 |"));
+        assert!(report.contains("| 1000 | predicate | (not reported by this server)"));
+        assert!(report.contains("`detail`"));
     }
 
     #[test]

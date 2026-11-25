@@ -9,7 +9,7 @@ use kb_ports::{
     DocumentFilter, DocumentId, DocumentMeta, DocumentPage, DocumentScope, DocumentStore,
     KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary, NewDocument, OutboxOp,
     PatchCategory, PatchDocument, PatchKnowledgeBase, PortError, ScopeRequest, TenantId,
-    adapter::ScopeToken, predicate_spec_for, scope_id_limit_from_env,
+    adapter::ScopeToken, predicate_filter_allowed, predicate_spec_for, scope_id_limit_from_env,
 };
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
@@ -170,12 +170,87 @@ impl PgDocumentStore {
         Ok(out)
     }
 
+    /// `build_scope` with an explicit server-side limit. `DocumentStore::build_scope`
+    /// passes `scope_id_limit_from_env()`; integration tests pass the limit
+    /// directly so no process-wide environment mutation is needed.
+    pub async fn build_scope_with_limit(
+        &self,
+        req: &ScopeRequest,
+        limit: usize,
+    ) -> Result<DocumentScope, PortError> {
+        let token = ScopeToken::new_for_adapter();
+        if limit == 0 {
+            // SEC-2d: the legacy path is untouched when predicate mode is off.
+            let ids = self.resolve_filter(&req.tenant, &req.filter, None).await?;
+            return Ok(DocumentScope::new(&token, req.tenant.clone(), ids));
+        }
+
+        // SEC-2d: read at most limit+1 ids. `limit` comes from the server's
+        // environment (a usize), so the LIMIT clause is a literal number, never
+        // caller input and never a bind that could change the plan.
+        let probe = self
+            .resolve_filter(&req.tenant, &req.filter, Some(limit.saturating_add(1)))
+            .await?;
+        match scope_probe_decision(probe.len(), limit, predicate_filter_allowed(req)) {
+            ScopeProbe::UseProbedIds => {
+                // At most `limit` rows came back: the probe *is* the full list.
+                // A predicate scope would be refused by the count anyway, so
+                // there is no reason to run the tenant-wide checks.
+                Ok(DocumentScope::new(&token, req.tenant.clone(), probe))
+            }
+            ScopeProbe::Predicate => {
+                // The request is indexable and more than `limit` ids exist.
+                // Only now ask the two tenant-wide questions; both are cheap
+                // EXISTS queries and neither needs the full id list.
+                let versioned = self.tenant_has_versioned(&req.tenant).await?;
+                let has_acl = self.tenant_has_acl(&req.tenant).await?;
+                if let Some(spec) = predicate_spec_for(req, probe.len(), limit, versioned, has_acl)
+                {
+                    return Ok(DocumentScope::new_predicate(
+                        &token,
+                        req.tenant.clone(),
+                        spec,
+                    ));
+                }
+                // A versioned/ACL'd tenant still forces Ids mode: read the
+                // whole list exactly as before, fail-closed.
+                let ids = self.resolve_filter(&req.tenant, &req.filter, None).await?;
+                Ok(DocumentScope::new(&token, req.tenant.clone(), ids))
+            }
+            ScopeProbe::FetchAll => {
+                // The request itself (force_ids or filter kind) forbids the
+                // predicate. No tenant checks: the full list is unavoidable.
+                let ids = self.resolve_filter(&req.tenant, &req.filter, None).await?;
+                Ok(DocumentScope::new(&token, req.tenant.clone(), ids))
+            }
+        }
+    }
+
+    async fn tenant_has_versioned(&self, tenant: &TenantId) -> Result<bool, PortError> {
+        sqlx::query(SELECT_TENANT_HAS_VERSIONED)
+            .bind(tenant.0.as_str())
+            .fetch_one(&self.pool)
+            .await
+            .and_then(|row| row.try_get::<bool, _>("versioned"))
+            .map_err(|e| PortError::Unavailable(format!("pg versioned tenant: {e}")))
+    }
+
+    async fn tenant_has_acl(&self, tenant: &TenantId) -> Result<bool, PortError> {
+        sqlx::query(SELECT_TENANT_HAS_ACL)
+            .bind(tenant.0.as_str())
+            .fetch_one(&self.pool)
+            .await
+            .and_then(|row| row.try_get::<bool, _>("has_acl"))
+            .map_err(|e| PortError::Unavailable(format!("pg acl tenant: {e}")))
+    }
+
     async fn resolve_filter(
         &self,
         tenant: &TenantId,
         filter: &DocumentFilter,
+        limit: Option<usize>,
     ) -> Result<Vec<DocumentId>, PortError> {
-        let (sql, binds) = scope_sql(filter);
+        let (sql, binds) = scope_sql_with_limit(filter, limit);
         let mut q = sqlx::query(&sql).bind(tenant.0.as_str());
         for bind in binds {
             q = match bind {
@@ -220,6 +295,44 @@ enum ScopeBind {
 /// two parameters (key, values) and appears in the statement only as `$n`.
 fn scope_sql(filter: &DocumentFilter) -> (String, Vec<ScopeBind>) {
     scope_sql_inner(filter, None)
+}
+
+/// The same statement with an optional server-side row cap. `limit` is a
+/// `usize` from `KB_SCOPE_ID_LIMIT` (limit + 1), not caller input, so it is
+/// appended as a literal number: every *value* in the statement stays bound.
+fn scope_sql_with_limit(filter: &DocumentFilter, limit: Option<usize>) -> (String, Vec<ScopeBind>) {
+    let (sql, binds) = scope_sql(filter);
+    match limit {
+        Some(limit) => (format!("{sql} LIMIT {limit}"), binds),
+        None => (sql, binds),
+    }
+}
+
+/// What `build_scope` learns from the bounded (limit + 1) scope query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScopeProbe {
+    /// No more ids than the limit: the probe returned the complete id list.
+    UseProbedIds,
+    /// More ids exist and the index can express this request: predicate mode.
+    Predicate,
+    /// More ids exist, but the request or tenant needs the full id list.
+    FetchAll,
+}
+
+/// Pure decision for SEC-2d. `rows` is the row count of the `LIMIT limit + 1`
+/// query; `predicate_allowed` is the request-level eligibility checked before
+/// any full id read. A `limit` of 0 means no probe was run.
+fn scope_probe_decision(rows: usize, limit: usize, predicate_allowed: bool) -> ScopeProbe {
+    if limit == 0 {
+        return ScopeProbe::FetchAll;
+    }
+    if rows <= limit {
+        ScopeProbe::UseProbedIds
+    } else if predicate_allowed {
+        ScopeProbe::Predicate
+    } else {
+        ScopeProbe::FetchAll
+    }
 }
 
 /// The same statement as [`scope_sql`], optionally restricted to candidate ids.
@@ -349,39 +462,10 @@ const SELECT_TENANT_HAS_ACL: &str = r#"
 #[async_trait]
 impl DocumentStore for PgDocumentStore {
     async fn build_scope(&self, req: &ScopeRequest) -> Result<DocumentScope, PortError> {
-        let ids = self.resolve_filter(&req.tenant, &req.filter).await?;
-        let token = ScopeToken::new_for_adapter();
-        let limit = scope_id_limit_from_env();
-        // Only ask about versions/ACLs when predicate mode is otherwise
-        // possible. Both checks are tenant-wide: this filtered request may see
-        // few ids while the tenant still holds versioned or ACL'd documents.
-        let (versioned, has_acl) = if limit > 0 && ids.len() > limit {
-            let versioned = sqlx::query(SELECT_TENANT_HAS_VERSIONED)
-                .bind(req.tenant.0.as_str())
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|e| PortError::Unavailable(format!("pg versioned tenant: {e}")))?
-                .try_get::<bool, _>("versioned")
-                .map_err(|e| PortError::Unavailable(format!("pg versioned tenant: {e}")))?;
-            let has_acl = sqlx::query(SELECT_TENANT_HAS_ACL)
-                .bind(req.tenant.0.as_str())
-                .fetch_one(&self.pool)
-                .await
-                .map_err(|e| PortError::Unavailable(format!("pg acl tenant: {e}")))?
-                .try_get::<bool, _>("has_acl")
-                .map_err(|e| PortError::Unavailable(format!("pg acl tenant: {e}")))?;
-            (versioned, has_acl)
-        } else {
-            (false, false)
-        };
-        if let Some(spec) = predicate_spec_for(req, ids.len(), limit, versioned, has_acl) {
-            return Ok(DocumentScope::new_predicate(
-                &token,
-                req.tenant.clone(),
-                spec,
-            ));
-        }
-        Ok(DocumentScope::new(&token, req.tenant.clone(), ids))
+        // SEC-2d: the limit is read once per scope build from the server's
+        // environment. Everything else lives in `build_scope_with_limit`.
+        self.build_scope_with_limit(req, scope_id_limit_from_env())
+            .await
     }
 
     async fn verify_visible(
@@ -1295,7 +1379,10 @@ fn new_group_id() -> String {
 mod tests {
     use kb_ports::{DocumentId, KnowledgeBaseId, MetadataFilter, ScopeRequest, TenantId};
 
-    use super::{DocumentFilter, ScopeBind, predicate_spec_for, scope_sql, scope_sql_inner};
+    use super::{
+        DocumentFilter, ScopeBind, ScopeProbe, predicate_spec_for, scope_probe_decision, scope_sql,
+        scope_sql_inner, scope_sql_with_limit,
+    };
 
     #[test]
     fn the_outline_query_binds_tenant_and_scope_and_never_interpolates() {
@@ -1384,6 +1471,46 @@ mod tests {
             filter,
             force_ids,
         }
+    }
+
+    /// SEC-2d: the bounded probe must stop the full read as soon as the answer
+    /// is decided, in both directions.
+    #[test]
+    fn a_bounded_probe_stops_the_full_read_as_soon_as_it_can() {
+        assert_eq!(scope_probe_decision(2, 2, true), ScopeProbe::UseProbedIds);
+        assert_eq!(scope_probe_decision(0, 4, true), ScopeProbe::UseProbedIds);
+        // limit + 1 rows mean more ids exist: predicate if the request allows it.
+        assert_eq!(scope_probe_decision(5, 4, true), ScopeProbe::Predicate);
+        // An unindexable request or a forced Ids scope falls back to the full read.
+        assert_eq!(scope_probe_decision(5, 4, false), ScopeProbe::FetchAll);
+        // 0 means the legacy path: no probe, no early decision.
+        assert_eq!(scope_probe_decision(0, 0, true), ScopeProbe::FetchAll);
+        assert_eq!(scope_probe_decision(1, 0, true), ScopeProbe::FetchAll);
+    }
+
+    #[test]
+    fn a_limited_scope_query_appends_a_literal_server_side_limit() {
+        let filter = DocumentFilter {
+            category: Some("cat-1".into()),
+            ..DocumentFilter::default()
+        };
+        let (sql, binds) = scope_sql_with_limit(&filter, Some(2001));
+        assert!(
+            sql.trim_end().ends_with("LIMIT 2001"),
+            "unexpected statement: {sql}"
+        );
+        assert_eq!(
+            binds,
+            vec![
+                ScopeBind::Text("cat-1".into()),
+                ScopeBind::TextArray(vec![])
+            ]
+        );
+        // The limit is a number, never caller text pasted into the statement.
+        assert!(!sql.contains("'2001'"), "{sql}");
+        let (plain, plain_binds) = scope_sql_with_limit(&filter, None);
+        assert!(!plain.contains("LIMIT"), "{plain}");
+        assert_eq!(plain_binds, binds);
     }
 
     #[test]
