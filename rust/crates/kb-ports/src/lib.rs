@@ -35,7 +35,7 @@ pub mod contract;
 pub use error::{EngineError, PortError, RetrievalDegrade};
 pub use graph::{EntityMentions, EntityUpsert, GraphStore, RelationUpsert, TenantGraph};
 pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
-pub use ocr::{LayoutBox, LayoutDetector, OcrPageCache, OcrReport, PageLayout};
+pub use ocr::{LayoutBox, LayoutDetector, LayoutFigureReport, OcrPageCache, OcrReport, PageLayout};
 pub use outbox::{
     DEFAULT_OUTBOX_INTERVAL_MS, DEFAULT_OUTBOX_MAX_ATTEMPTS, OutboxItem, OutboxLag, OutboxOp,
     ScopeOutbox, outbox_interval_from_env,

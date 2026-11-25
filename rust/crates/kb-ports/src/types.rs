@@ -284,6 +284,12 @@ pub struct ExtractionResult {
     /// be read. `None` for a format that never goes to OCR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ocr: Option<crate::ocr::OcrReport>,
+    /// What the layout figure pass did for this document (ING-15): how many
+    /// pages the layout detector looked at, how many figures it cut out, and
+    /// which pages it failed on. `None` when the pass is off or the format has
+    /// no pages to render. ADDITIVE.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout_figures: Option<crate::ocr::LayoutFigureReport>,
     /// Set when extraction failed; the caller must abort rather than index the
     /// empty content.
     pub error: Option<String>,

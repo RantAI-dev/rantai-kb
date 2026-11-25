@@ -752,6 +752,15 @@ impl IngestWorker {
                 tracing::warn!(error = %e, "could not store the OCR report");
             }
         }
+        // The layout figure pass (ING-15) reports the same way, in
+        // `metadata.layoutFigures`: pages looked at, figures cut, and the
+        // pages the detector failed on.
+        if let Some(report) = extraction.layout_figures.as_ref() {
+            let patch = json!({ "layoutFigures": report });
+            if let Err(e) = self.documents.update_metadata(document_id, &patch).await {
+                tracing::warn!(error = %e, "could not store the layout figure report");
+            }
+        }
 
         self.progress(job, StepProgress::of(IngestStep::Chunking), started, &flags)
             .await;
