@@ -17,6 +17,7 @@
 //! - **Single round-trip hybrid search**: executed via Qdrant's Query API with
 //!   prefetching and RRF fusion.
 
+pub mod bench;
 pub mod ids;
 pub mod index;
 pub mod payload;
@@ -25,6 +26,6 @@ pub mod settings;
 pub use ids::{POINT_NAMESPACE, point_id, point_id_of};
 pub use index::QdrantIndex;
 pub use settings::{
-    ACTIVE_ALIAS, DENSE_VECTOR, QdrantSettings, SPARSE_VECTOR, create_collection,
-    create_if_missing, drop_collection,
+    ACTIVE_ALIAS, DENSE_VECTOR, QdrantSettings, QuantizationMode, SPARSE_VECTOR, create_collection,
+    create_if_missing, drop_collection, quantization_from_env,
 };

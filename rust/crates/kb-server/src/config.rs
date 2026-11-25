@@ -641,10 +641,16 @@ impl Config {
     /// Read separately from [`Config::from_lookup`] so `apply-schema` can create
     /// the collections without an inference provider: a Qdrant collection needs
     /// the model slug and the width, not an API key.
+    ///
+    /// # Errors
+    ///
+    /// Fails when `KB_QDRANT_QUANTIZATION` is not one of `off|scalar|binary`,
+    /// or when `KB_QDRANT_QUANT_RESCORE` is not a boolean: a setting that
+    /// cannot be honoured must stop startup rather than silently index float32.
     pub fn qdrant_from_lookup<F>(
         lookup: &F,
         model_slug: &str,
-    ) -> (kb_store_qdrant::QdrantSettings, Option<String>)
+    ) -> Result<(kb_store_qdrant::QdrantSettings, Option<String>)>
     where
         F: Fn(&str) -> Option<String>,
     {
@@ -653,6 +659,8 @@ impl Config {
             .unwrap_or_else(|| "http://127.0.0.1:16334".to_string());
         let api_key = lookup("QDRANT_API_KEY").filter(|s| !s.trim().is_empty());
         let collection_override = lookup("QDRANT_COLLECTION").filter(|s| !s.trim().is_empty());
+        let (quantization, quant_oversampling, quant_rescore) =
+            kb_store_qdrant::quantization_from_env(lookup).map_err(anyhow::Error::msg)?;
         let settings = kb_store_qdrant::QdrantSettings {
             url,
             api_key,
@@ -660,10 +668,13 @@ impl Config {
             dense_dims: Some(Self::embedding_dim(lookup)),
             hnsw_m: 16,
             hnsw_ef_construct: 100,
+            quantization,
+            quant_oversampling,
+            quant_rescore,
             request_timeout: Duration::from_secs(30),
             upsert_batch: 256,
         };
-        (settings, collection_override)
+        Ok((settings, collection_override))
     }
 
     /// Embedding width (`KB_EMBEDDING_DIM`, 4096 by default).
@@ -982,7 +993,7 @@ impl Config {
         let extract = ExtractConfig::from_lookup(&lookup);
 
         let (qdrant, qdrant_collection_override) =
-            Self::qdrant_from_lookup(&lookup, &embedding_model);
+            Self::qdrant_from_lookup(&lookup, &embedding_model)?;
 
         let entity = ExtractorSettings::from_lookup(&lookup);
         let entity_extractor = match lookup("KB_ENTITY_EXTRACTOR")
