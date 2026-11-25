@@ -676,7 +676,7 @@ pub(crate) async fn search_inner(
                 "chunks": [],
                 "context": "",
                 "note": "API key is not bound to any of the requested knowledge bases",
-                "confidence": empty_confidence(&state, &body),
+                "confidence": empty_confidence(state, &body),
             }))
             .into_response());
         }
@@ -718,7 +718,7 @@ pub(crate) async fn search_inner(
             return Ok(Json(serde_json::json!({
                 "chunks": [],
                 "context": "",
-                "confidence": empty_confidence(&state, &body),
+                "confidence": empty_confidence(state, &body),
             }))
             .into_response());
         }
