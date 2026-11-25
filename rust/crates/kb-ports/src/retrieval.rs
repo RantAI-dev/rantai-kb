@@ -323,6 +323,25 @@ pub trait RetrievalIndex: Send + Sync {
         document_id: &DocumentId,
     ) -> Result<u64, PortError>;
 
+    /// Overwrite the knowledge-base payload of one document's points (SEC-2b).
+    ///
+    /// The filter is always `tenant AND document_id`: a caller can never use
+    /// this to write another tenant's payload. An empty `kb_ids` clears the
+    /// list (a predicate filter then matches no knowledge base), which is the
+    /// safe result for a document that was moved out of every KB. The default
+    /// is an error so an adapter that has not implemented the write cannot
+    /// silently report a repaired payload.
+    async fn set_document_kb_payload(
+        &self,
+        _tenant: &TenantId,
+        _document_id: &DocumentId,
+        _kb_ids: &[KnowledgeBaseId],
+    ) -> Result<(), PortError> {
+        Err(PortError::Unavailable(
+            "this index cannot set a knowledge-base payload".to_string(),
+        ))
+    }
+
     /// Hybrid search, always scoped. Returns at most `query.k` candidates,
     /// ordered by fused score, with ties broken deterministically (see
     /// [`sort_candidates`]).

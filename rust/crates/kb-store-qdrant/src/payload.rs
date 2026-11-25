@@ -397,6 +397,20 @@ pub fn unit_payload(unit: &IndexUnit) -> Payload {
     payload
 }
 
+/// The payload written by a KB-membership repair (SEC-2b).
+///
+/// A Qdrant `set_payload` replaces only the keys it names, so this leaves the
+/// tenant, document, category and text fields alone. An empty list is written
+/// deliberately for a document that was moved out of every KB: an `any_of`
+/// over an empty list matches nothing, which fails closed until an operator
+/// re-enables a broader scope.
+#[must_use]
+pub fn knowledge_base_payload(kb_ids: &[String]) -> Payload {
+    let mut payload = Payload::new();
+    payload.insert(KEY_KNOWLEDGE_BASE_ID, kb_ids.to_vec());
+    payload
+}
+
 /// Every knowledge base id the engine wrote for this unit. Old units (and the
 /// stateless path) carry none; the singular `IndexUnit::knowledge_base_id` is
 /// then the only source.
@@ -773,6 +787,21 @@ mod tests {
             vec!["kb-1", "kb-2"]
         );
         assert!(map.contains_key(KEY_KNOWLEDGE_BASE_ID));
+    }
+
+    #[test]
+    fn a_repair_payload_replaces_only_the_kb_key() {
+        let payload = knowledge_base_payload(&["kb-2".to_string(), "kb-3".to_string()]);
+        let map: std::collections::HashMap<String, Value> = payload.into();
+        assert_eq!(map.len(), 1);
+        assert!(map.contains_key(KEY_KNOWLEDGE_BASE_ID));
+        assert!(!map.contains_key(KEY_TENANT_ID));
+
+        let empty: std::collections::HashMap<String, Value> = knowledge_base_payload(&[]).into();
+        assert!(
+            empty.contains_key(KEY_KNOWLEDGE_BASE_ID),
+            "clear, do not omit"
+        );
     }
 
     #[test]

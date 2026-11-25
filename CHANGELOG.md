@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- **Scope outbox and KB payload backfill (SEC-2b).** Every document create, KB-membership
+  PATCH, KB delete and document delete now writes one `ScopeOutbox` row in the same Postgres
+  transaction. An in-process worker (poll interval `KB_SCOPE_OUTBOX_INTERVAL_MS`, default 2000)
+  claims rows with `FOR UPDATE SKIP LOCKED`, rewrites `knowledge_base_id` from Postgres or
+  removes the document's points, and retries failures with a linear backoff, leaving a row
+  for an operator after ten attempts. `kb-server scope backfill [--tenant T] [--dry-run]`
+  gives pre-SEC-2a chunks their payload in place without re-embedding, so operators can turn
+  on `KB_SCOPE_ID_LIMIT` safely. Additive migration, additive `/health` `scopeOutbox` field.
+
 ### Fixed
 
 - **Tables: headers are named as the sheet shows them and codes are never summed (`TBL-2`).** The extractor now skips a World Bank preamble before the header, keeps year headers as text, flattens two- and three-level headers as `Parent / Child`, drops BPS column-number and source-note rows, and stops putting a merged title over a header row when the used range does not start at A1. A long all-digit identifier (NIP/NIK) stays text, so a sum refuses it and a distinct count works. Whole numbers in query results are returned as JSON integers (`2013`, not `2013.0`). **Stored tables need re-extraction to pick this up: run `kb-server reindex` after upgrading** (it rebuilds grids, manifests and Parquet from the originals). Offline `tables-v1` column drift fell from 180 to 0 queries with an unknown column; all 15 code traps now match offline.

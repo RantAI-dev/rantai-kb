@@ -1170,3 +1170,40 @@ mode is disabled for it); the SEC-2a verify applies the ACL too. To grant the ne
 comma-separated `--scopes` list; a key with no scope list already has every scope). Clients that
 never assert principals keep working unchanged, except that ACL'd documents are intentionally
 hidden from them.
+
+## 12. Scope outbox (SEC-2b)
+
+Predicate scope (SEC-2a) is fail-closed: when the Qdrant payload disagrees with Postgres,
+the candidate is dropped and counted in `stats.scopeVerifyDropped`. That is safe but loses
+recall, and a document that moves between knowledge bases or is deleted leaves stale points
+behind. This release adds a `ScopeOutbox` table and a one-off payload backfill.
+
+**Migration.** `kb-server migrate` applies
+`prisma/migrations/20261124130000_scope_outbox/migration.sql`, creating `ScopeOutbox`
+(`id`, `documentId`, `tenantId`, `op` in `('kb_changed','deleted')`, `createdAt`,
+`attempts`, `lastError`) and an index on `createdAt`. This is additive: the Bun schema is
+untouched, so a mixed fleet can share the database during cutover.
+
+**Every Postgres write that changes membership or deletes a document inserts one row in
+the same transaction:** document creation, `PATCH /v1/documents/:id` with
+`knowledgeBaseIds`, KB deletion (one row per document that loses that KB), soft delete and
+hard delete. A worker started alongside the ingest worker claims rows with `FOR UPDATE
+SKIP LOCKED`, rewrites `knowledge_base_id` from Postgres or removes the document's points,
+then deletes the row. Failures are recorded in `lastError` and retried with a linear
+backoff; after ten attempts the row is logged at error level and left for an operator. The
+poll interval is `KB_SCOPE_OUTBOX_INTERVAL_MS` (default 2000). Hard delete already removes
+the points directly in the route, so the outbox `deleted` row is an idempotent second
+delete, not a second destructive action.
+
+**Upgrade path.** Chunks ingested before SEC-2a have no `knowledge_base_id` payload,
+which is why `KB_SCOPE_ID_LIMIT` stays `0` (off) by default. Run:
+
+    kb-server migrate
+    kb-server scope backfill                # add --tenant T or --dry-run as needed
+    # then set KB_SCOPE_ID_LIMIT=2000 (or your chosen limit)
+
+The backfill pages through live documents and sets the payload from the group links in
+Postgres. It is idempotent, needs no re-embed and does not touch vectors, BM25 or page
+images; soft-deleted documents are skipped. `kb-server reindex` also restores the payload
+but re-embeds every chunk, so prefer the backfill when only the payload is missing.
+`GET /v1/health` gains an additive `scopeOutbox` field (`pending`, `oldestPendingSecs`).

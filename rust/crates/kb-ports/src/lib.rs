@@ -14,6 +14,7 @@ pub mod graph;
 pub mod graph_contract;
 mod ids;
 pub mod ocr;
+pub mod outbox;
 mod pages;
 mod retrieval;
 mod scope;
@@ -35,6 +36,10 @@ pub use error::{EngineError, PortError, RetrievalDegrade};
 pub use graph::{EntityMentions, EntityUpsert, GraphStore, RelationUpsert, TenantGraph};
 pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 pub use ocr::{LayoutBox, LayoutDetector, OcrPageCache, OcrReport, PageLayout};
+pub use outbox::{
+    DEFAULT_OUTBOX_INTERVAL_MS, DEFAULT_OUTBOX_MAX_ATTEMPTS, OutboxItem, OutboxLag, OutboxOp,
+    ScopeOutbox, outbox_interval_from_env,
+};
 pub use pages::{PageDescriber, PageEmbedder, PageImage, PageRenderer, PageVisionScorer};
 pub use retrieval::{
     ArmRanks, ArmScores, Candidate, ChunkMeta, Fusion, HybridQuery, IndexCapabilities, IndexUnit,
