@@ -14,8 +14,9 @@ use kb_ports::{
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
     CountPointsBuilder, DeletePointsBuilder, NamedVectors, PointId, PointStruct,
-    PrefetchQueryBuilder, Query, QueryBatchPointsBuilder, QueryPointsBuilder, ScrollPointsBuilder,
-    SearchParams, SetPayloadPointsBuilder, UpsertPointsBuilder, Vector, VectorInput,
+    PrefetchQueryBuilder, QuantizationSearchParams, Query, QueryBatchPointsBuilder,
+    QueryPointsBuilder, ScrollPointsBuilder, SearchParams, SetPayloadPointsBuilder,
+    UpsertPointsBuilder, Vector, VectorInput,
 };
 
 use crate::ids::point_id;
@@ -146,14 +147,34 @@ impl QdrantIndex {
 
     /// `SearchParams` for one dense query, exact or not.
     async fn dense_params(&self) -> Option<SearchParams> {
-        if self.dense_is_exact().await {
-            Some(SearchParams {
-                exact: Some(true),
-                ..Default::default()
-            })
-        } else {
-            None
-        }
+        let quantization = self.settings.quantization.search_params(
+            self.settings.quant_oversampling,
+            self.settings.quant_rescore,
+        );
+        dense_search_params(self.dense_is_exact().await, quantization)
+    }
+}
+
+/// The dense arm's `SearchParams` as a pure function of the scan mode and the
+/// quantization setting. Keeping the decision here makes the "off is
+/// byte-identical" contract testable without a Qdrant.
+fn dense_search_params(
+    exact: bool,
+    quantization: Option<QuantizationSearchParams>,
+) -> Option<SearchParams> {
+    if exact {
+        Some(SearchParams {
+            exact: Some(true),
+            quantization,
+            ..Default::default()
+        })
+    } else if quantization.is_some() {
+        Some(SearchParams {
+            quantization,
+            ..Default::default()
+        })
+    } else {
+        None
     }
 }
 
@@ -963,6 +984,7 @@ impl RetrievalIndex for QdrantIndex {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::settings::QuantizationMode;
 
     fn point(id: u64, content: &str, score: f32) -> ScoredPoint {
         ScoredPoint {
@@ -1063,5 +1085,30 @@ mod tests {
         // Below it exact search costs nothing measurable (2.38 vs 2.34 ms p50 at
         // 1.5k points); above 15k it starts to cost and HNSW recall falls away.
         assert_eq!(EXACT_SEARCH_THRESHOLD, 20_000);
+    }
+
+    #[test]
+    fn quantization_off_leaves_the_dense_search_params_byte_identical() {
+        // The baseline is the struct RET-20 replaced: exact scan sets only
+        // `exact`, approximate search sends no `params` at all. `SearchParams`
+        // is a prost message, so equal structs encode to equal bytes.
+        assert_eq!(
+            dense_search_params(true, None),
+            Some(SearchParams {
+                exact: Some(true),
+                ..Default::default()
+            })
+        );
+        assert_eq!(dense_search_params(false, None), None);
+    }
+
+    #[test]
+    fn quantization_on_sets_rescore_and_oversampling_without_forcing_exact() {
+        let params = QuantizationMode::Scalar.search_params(2.0, true);
+        let built = dense_search_params(false, params).expect("params");
+        assert_eq!(built.exact, None);
+        assert_eq!(built.quantization, params);
+        assert_eq!(built.quantization.and_then(|q| q.oversampling), Some(2.0));
+        assert_eq!(built.quantization.and_then(|q| q.rescore), Some(true));
     }
 }

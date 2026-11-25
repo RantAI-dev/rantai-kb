@@ -15,6 +15,7 @@ pub mod eval_ocr;
 pub mod events;
 pub mod mcp;
 pub mod openapi;
+pub mod quant_bench;
 pub mod routes;
 pub mod runtime;
 pub mod scope;
