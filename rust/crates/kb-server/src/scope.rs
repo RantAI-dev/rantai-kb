@@ -94,7 +94,8 @@ pub async fn run(args: &[String]) -> Result<(), CliError> {
     let model = overlaid("KB_EMBEDDING_MODEL")
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "qwen/qwen3-embedding-8b".to_string());
-    let (settings, collection_override) = Config::qdrant_from_lookup(&overlaid, &model);
+    let (settings, collection_override) = Config::qdrant_from_lookup(&overlaid, &model)
+        .map_err(|e| CliError::Failed(e.to_string()))?;
     let collection = collection_override.unwrap_or_else(|| settings.collection_name());
     let index: Arc<dyn RetrievalIndex> = Arc::new(
         QdrantIndex::new_with_collection(settings, collection.clone())
