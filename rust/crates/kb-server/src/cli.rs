@@ -26,7 +26,7 @@ use crate::config::Config;
 pub enum CliError {
     #[error(
         "{}\n\nusage: {} \
-         <serve|up|down|logs|ps|status|key|create-api-key|apply-schema|migrate|reindex|communities|setup|eval|bench|openapi|check-boundary>",
+         <serve|up|down|logs|ps|status|key|create-api-key|apply-schema|migrate|reindex|scope|communities|setup|eval|bench|openapi|check-boundary>",
         .0,
         program_name()
     )]
@@ -71,6 +71,7 @@ pub async fn dispatch(args: &[String]) -> Result<(), CliError> {
         Some("apply-schema") => apply_schema().await,
         Some("migrate") => migrate().await,
         Some("reindex") => reindex(&args[1..]).await,
+        Some("scope") => crate::scope::run(&args[1..]).await,
         Some("communities") => crate::communities::run(&args[1..]).await,
         Some("setup") => crate::setup::run(&args[1..]).await,
         Some("check-boundary") => check_boundary(),
@@ -187,6 +188,10 @@ USAGE
     {program} reindex [--tenant <id>] [--dry-run]
                                                Re-queue ingest for every live document so Qdrant
                                                is rebuilt from the originals in S3 (see below)
+    {program} scope backfill [--tenant <id>] [--dry-run]
+                                               Overwrite knowledge_base_id on every live
+                                               document's points from Postgres, in place; no
+                                               re-embed (SEC-2b)
     {program} communities build --tenant <id> [--min-pages 2] [--max-usd X] [--dry-run]
                                                Detect graph communities and write one LLM summary
                                                per community for the global arm (DEC-5, off by
