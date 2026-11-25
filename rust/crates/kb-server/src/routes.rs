@@ -25,6 +25,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use kb_core::outline::{OutlineChunk, build_outline};
 use kb_core::policy::MimeRegistry;
+use kb_core::versions::normalise_timestamp;
 use kb_engine::timing::{Stopwatch, SystemClock};
 use kb_ports::{
     AuthContext, DocumentFilter, DocumentId, DocumentMeta, DocumentScope, KnowledgeBaseId,
@@ -519,6 +520,54 @@ pub struct OkResponse {
     pub ok: bool,
 }
 
+/// Parse one effective-date field on upload or PATCH. An absent or empty field
+/// is `None`; anything that is not a date is the route's own 400, naming the
+/// field so the caller can fix it.
+pub(crate) fn parse_version_date(
+    field: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    normalise_timestamp(raw).map(Some).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "Invalid '{field}': expected YYYY-MM-DD or an ISO timestamp, got '{raw}'"
+        ))
+    })
+}
+
+/// The two additive version fields of a search body, validated at the boundary.
+/// Both may be sent: `asOf` takes precedence in the store's scope resolution,
+/// because a point-in-time question is more specific than "show me history".
+fn parse_search_versions(body: &SearchRequestDto) -> Result<(bool, Option<String>), ApiError> {
+    let include_history = match body.include_history.as_ref() {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "Invalid 'includeHistory': expected a boolean".to_string(),
+            ));
+        }
+    };
+    let as_of = match body.as_of.as_ref() {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => {
+            Some(parse_version_date("asOf", Some(value))?.ok_or_else(|| {
+                ApiError::BadRequest(
+                    "Invalid 'asOf': expected YYYY-MM-DD or an ISO timestamp".to_string(),
+                )
+            })?)
+        }
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "Invalid 'asOf': expected YYYY-MM-DD or an ISO timestamp".to_string(),
+            ));
+        }
+    };
+    Ok((include_history, as_of))
+}
+
 /// Ask a question; get the chunks, the sources and the assembled context.
 ///
 /// `POST /v1/search` — the retrieval answer. Needs the `kb:read` scope. The
@@ -578,6 +627,7 @@ pub async fn search(
     }
     let metadata_filter = parse_metadata_filter(body.metadata.as_ref())?;
     let boost = parse_boost(body.boost.as_ref())?;
+    let (include_history, as_of) = parse_search_versions(&body)?;
 
     // RET-15: both forms name one part of one document. Validate before any
     // arm runs, so a bad request never spends top-k and never gets an empty
@@ -632,6 +682,8 @@ pub async fn search(
         external_refs: body.external_refs.clone(),
         language: body.language.clone(),
         metadata: metadata_filter,
+        include_history,
+        as_of,
     };
 
     // Branch 1: documentIds filtering (TypeScript api.ts:139)
@@ -726,6 +778,7 @@ pub async fn search(
                 // so the stub degrades visibly instead of answering silently.
                 degrades: vec![HYBRID_STUB_DEGRADE.to_string()],
                 tables: Vec::new(),
+                multi_version_warning: Vec::new(),
             },
             route_sw,
         ));
@@ -1331,6 +1384,24 @@ pub struct DocumentSummary {
     /// one. Null for a document uploaded before the hash was recorded.
     #[serde(rename = "sha256")]
     pub sha256: Option<String>,
+    /// Version metadata (`RET-16`). Absent on documents created before the
+    /// version columns existed.
+    #[serde(rename = "docKey", skip_serializing_if = "Option::is_none")]
+    pub doc_key: Option<String>,
+    #[serde(rename = "version", skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(
+        rename = "supersedesDocumentId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supersedes_document_id: Option<String>,
+    #[serde(rename = "effectiveFrom", skip_serializing_if = "Option::is_none")]
+    pub effective_from: Option<String>,
+    #[serde(rename = "effectiveTo", skip_serializing_if = "Option::is_none")]
+    pub effective_to: Option<String>,
+    /// True for the current version; unversioned documents are current too.
+    #[serde(rename = "isLatest")]
+    pub is_latest: bool,
 }
 
 /// List the caller's documents.
@@ -1436,6 +1507,12 @@ pub async fn list_documents(
                 chars_extracted: quality.chars_extracted,
                 degrades: quality.degrades,
                 sha256: d.sha256,
+                doc_key: d.doc_key,
+                version: d.version,
+                supersedes_document_id: d.supersedes_document_id,
+                effective_from: d.effective_from,
+                effective_to: d.effective_to,
+                is_latest: d.is_latest,
             }
         })
         .collect();
@@ -1611,6 +1688,24 @@ pub struct DocumentDetail {
     /// one. Null for a document uploaded before the hash was recorded.
     #[serde(rename = "sha256")]
     pub sha256: Option<String>,
+    /// Version metadata (`RET-16`). Absent on documents created before the
+    /// version columns existed.
+    #[serde(rename = "docKey", skip_serializing_if = "Option::is_none")]
+    pub doc_key: Option<String>,
+    #[serde(rename = "version", skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(
+        rename = "supersedesDocumentId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supersedes_document_id: Option<String>,
+    #[serde(rename = "effectiveFrom", skip_serializing_if = "Option::is_none")]
+    pub effective_from: Option<String>,
+    #[serde(rename = "effectiveTo", skip_serializing_if = "Option::is_none")]
+    pub effective_to: Option<String>,
+    /// True for the current version; unversioned documents are current too.
+    #[serde(rename = "isLatest")]
+    pub is_latest: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1702,6 +1797,12 @@ pub async fn get_document(
             chars_extracted: quality.chars_extracted,
             degrades: quality.degrades,
             sha256: meta.sha256,
+            doc_key: meta.doc_key,
+            version: meta.version,
+            supersedes_document_id: meta.supersedes_document_id,
+            effective_from: meta.effective_from,
+            effective_to: meta.effective_to,
+            is_latest: meta.is_latest,
         },
         chunks: chunk_views,
     }))
@@ -1718,6 +1819,16 @@ pub struct PatchDocumentBody {
     /// The knowledge bases the document belongs to.
     #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Option<Vec<String>>,
+    /// Version metadata (`RET-16`). Absent leaves the column alone; a bad date
+    /// is a 400. Dates accept `YYYY-MM-DD` or a full ISO timestamp.
+    #[serde(rename = "docKey")]
+    pub doc_key: Option<String>,
+    #[serde(rename = "version")]
+    pub version: Option<String>,
+    #[serde(rename = "effectiveFrom")]
+    pub effective_from: Option<String>,
+    #[serde(rename = "effectiveTo")]
+    pub effective_to: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1756,6 +1867,23 @@ pub struct PatchedDocument {
     /// The knowledge bases the document belongs to.
     #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Vec<String>,
+    /// Version metadata after the patch (`RET-16`).
+    #[serde(rename = "docKey", skip_serializing_if = "Option::is_none")]
+    pub doc_key: Option<String>,
+    #[serde(rename = "version", skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(
+        rename = "supersedesDocumentId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supersedes_document_id: Option<String>,
+    #[serde(rename = "effectiveFrom", skip_serializing_if = "Option::is_none")]
+    pub effective_from: Option<String>,
+    #[serde(rename = "effectiveTo", skip_serializing_if = "Option::is_none")]
+    pub effective_to: Option<String>,
+    /// True for the current version; unversioned documents are current too.
+    #[serde(rename = "isLatest")]
+    pub is_latest: bool,
 }
 
 /// Change a document's metadata.
@@ -1796,6 +1924,10 @@ pub async fn patch_document(
         categories: None,
         subcategory: None,
         knowledge_base_ids: None,
+        doc_key: None,
+        version: None,
+        effective_from: None,
+        effective_to: None,
     }));
 
     let knowledge_base_ids = match body.knowledge_base_ids {
@@ -1820,11 +1952,19 @@ pub async fn patch_document(
         }
     };
 
+    // RET-16: validate before writing, so a bad date cannot leave the row in a
+    // half-patched state. Absent fields keep whatever the row already had.
+    let effective_from = parse_version_date("effectiveFrom", body.effective_from.as_deref())?;
+    let effective_to = parse_version_date("effectiveTo", body.effective_to.as_deref())?;
     let patch = kb_ports::PatchDocument {
         title: body.title,
         categories: body.categories,
         subcategory: body.subcategory,
         knowledge_base_ids,
+        doc_key: body.doc_key,
+        version: body.version,
+        effective_from,
+        effective_to,
     };
     let updated = state
         .documents
@@ -1846,6 +1986,12 @@ pub async fn patch_document(
             created_at: updated.created_at,
             updated_at: updated.updated_at,
             knowledge_base_ids: updated.knowledge_base_ids,
+            doc_key: updated.doc_key,
+            version: updated.version,
+            supersedes_document_id: updated.supersedes_document_id,
+            effective_from: updated.effective_from,
+            effective_to: updated.effective_to,
+            is_latest: updated.is_latest,
         },
     }))
 }
