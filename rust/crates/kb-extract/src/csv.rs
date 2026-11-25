@@ -166,10 +166,12 @@ fn find_header(rows: &[Vec<String>]) -> (usize, usize) {
     let mut levels = 1usize;
     if let Some(next) = rows.get(header + 1) {
         let filled = non_empty(next);
-        if filled >= 2 && numbers(next) == 0 && labels(next) >= (7 * filled).div_ceil(10) {
-            if rows.get(header + 2).is_some_and(|row| numbers(row) >= 2) {
-                levels = 2;
-            }
+        if filled >= 2
+            && numbers(next) == 0
+            && labels(next) >= (7 * filled).div_ceil(10)
+            && rows.get(header + 2).is_some_and(|row| numbers(row) >= 2)
+        {
+            levels = 2;
         }
     }
     (header, levels)

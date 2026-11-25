@@ -160,11 +160,17 @@ TOTAL_MISMATCH_COLUMNS: 0
 
 The 180 offline rejections match the 180 live `query_rejected: unknown_column` failures exactly.
 A second offline check runs all 386 gold queries through the dataset's own reference executor
-(`import_tables.execute`) over the extracted grids: **370/386 = 0.940** after the naming
-fixes; the remaining differences are row-boundary cases (footnotes, year blocks and integer
-labels), not unknown columns. All 15 code traps now produce their gold distinct counts offline
-(previously `Kode Code` was off by one on `q-0234`/`q-0235` because a `(1) (2) (3)` numbering
-row was kept as data, and `NIP` was a `Quantity`/`Number` column).
+(`import_tables.execute`) over the extracted grids:
+
+```text
+offline execution: 386/386 = 1.000
+failures by template: {}
+```
+
+All 15 code traps now produce their gold distinct counts offline (previously `Kode Code` was
+off by one on `q-0234`/`q-0235` because a `(1) (2) (3)` numbering row was kept as data, and
+`NIP` was a `Quantity`/`Number` column). This is an offline check, not a live score; the
+reviewer's live re-score below is the acceptance measurement.
 
 **Live re-score (GPU box, reviewer).** Re-extract first — tables are stored, so the fix needs
 `kb-server reindex`; then run the same command as the 2026-11-25 run:

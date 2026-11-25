@@ -536,7 +536,13 @@ fn derived_rows(grid: &TableGrid, roles: &[ColumnRole]) -> Vec<u32> {
             .map(|(index, _)| index as u32)
             .collect()
     } else {
-        grid.formula_rows.clone()
+        // A formula in a year-keyed block computes a rate for that year; it
+        // does not make the year row a subtotal of the table above it.
+        grid.formula_rows
+            .iter()
+            .copied()
+            .filter(|row| !row_is_year_keyed(grid, *row as usize))
+            .collect()
     };
     rows.sort_unstable();
     rows.dedup();
@@ -1145,7 +1151,33 @@ mod tests {
                 vec![number(2020.0), number(15.0)],
             ],
         ));
-        assert_eq!(manifest.derived_rows, vec![2], "{:?}", manifest.derived_rows);
+        assert_eq!(
+            manifest.derived_rows,
+            vec![2],
+            "{:?}",
+            manifest.derived_rows
+        );
+    }
+
+    #[test]
+    fn a_formula_in_a_year_keyed_row_does_not_make_it_a_subtotal() {
+        let mut sheet = grid(
+            &["Kecamatan", "Produksi", "Rasio"],
+            vec![
+                vec![text("A"), number(10.0), number(1.0)],
+                vec![text("Jumlah"), number(10.0), number(1.0)],
+                vec![number(2019.0), number(20.0), number(2.0)],
+            ],
+        );
+        sheet.formula_rows = vec![1, 2];
+        let manifest = build_manifest(&sheet);
+        assert_eq!(
+            manifest.derived_rows,
+            vec![1],
+            "{:?}",
+            manifest.derived_rows
+        );
+        assert!(manifest.formulas_known);
     }
 
     #[test]
