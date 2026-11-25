@@ -14,6 +14,8 @@ Two instruments prove the two halves of SEC-2 on a live stack:
 **Live results were run 2026-11-25 on GB10; see ["Results (2026-11-25, GB10)"](#results-2026-11-25-gb10)
 at the end of this page.** Everything above that section is the method; the
 numbers below it are measurements from a fresh run, not claims.
+SEC-2d (bounded scope probe, MCP probe with scope filters, per-stage bench timings) changed
+the instruments **after** that run, so its numbers are the pre-SEC-2d baseline.
 
 ## 1. Scope bench: two passes, one output directory
 
@@ -73,6 +75,16 @@ Queries are deterministic per size, so both passes run the same workload. The
 vectors are random unit vectors of the server's configured embedding dimension;
 they measure scope-filter cost, not retrieval quality.
 
+Since SEC-2d, each row also carries the p50/p95 of **every scalar field** in the
+response's `stats.stageTimingsMs` — `scopeBuild`, `expand`, `arms`, `enrich`,
+`fusion`, `rerank`, `pages`, `neighbours`, `figures`, `context`, `serialise` and
+`total` — in `results.json` and in a second "Stage timings" table of
+`report.md`. A growth in `scopeBuild` now points at Postgres scope resolution;
+a growth in `arms` or `rerank` points elsewhere. The nested `detail` object is
+not aggregated: its measurements overlap those stages (the query embed and both
+arms happen inside `arms`), so a p95 over them would not be additive. Rows
+written before this change have no stage timings and are shown as "not reported".
+
 ## 2. Stale-payload leak matrix
 
 Seed the normal leak corpus, then inject drift in **Postgres only** and leave
@@ -102,7 +114,8 @@ A leak is **any** appearance of D under the KB-1-limited key, or of E or F
 under a principal-less key. Probes cover every arm in the normal matrix
 (vector, BM25, neighbour, figure, graph, page, tree, global, table, entity) plus
 `GET /v1/documents/:id/content`, `/structure`, the table routes and `/mcp`
-(`kb_search`, `kb_read` over JSON-RPC). `/mcp` is `UNTESTED` with a reason when
+(`kb_search` over JSON-RPC; `kb_read` was dropped in SEC-2d — see below).
+`/mcp` is `UNTESTED` with a reason when
 the server does not answer the path (`KB_MCP=off`); `--strict` makes UNTESTED a
 failure. The `/mcp` row is also part of the normal, non-stale matrix now, so
 API-4's "no leak row" gap is closed:
@@ -112,6 +125,38 @@ KB_MCP=on kb-server serve &
 kb-server eval leak --base-url http://127.0.0.1:3000 \
   --api-key "$KB_EVAL_API_KEY" --peer-key "$KB_EVAL_PEER_API_KEY" \
   --out docs/eval-ab/scope-scale/out/leak-normal --strict
+```
+
+#### SEC-2d: the MCP row and a clean tenant
+
+`mcp_probe` used to send only `{query, maxChunks}` to `kb_search`, and `finish`
+judged that answer against the whole tenant. In a tenant holding other people's
+documents that flagged legitimately visible documents as leaks, and the search
+filters were never exercised through JSON-RPC. `mcp_probe` now builds its
+arguments with the same `search_body(scope, query, max_chunks)` as the HTTP
+search probe, and the result is judged against `scope.allowed`, exactly like the
+`Search` row. The `kb_read` follow-up was dropped: it is a document-addressed
+read with a tenant-wide allowed set, which made a single answer judge two
+different things; the `content` row already covers document reads. The MCP tool
+schema now names the filter arguments it accepts.
+
+The harness does **not** create a tenant. `seed` discovers the tenant from the
+knowledge base it creates with the supplied key, so the live 2026-11-25 run
+pointed `--api-key` at `v1m-disclosure`, which also held the EVAL-9 HR corpus.
+The run now refuses a tenant whose key lists more documents than the run seeded
+(and warns loudly if the list route cannot be read). Create two throwaway
+tenants and use only those keys:
+
+```bash
+# Against the throwaway stack, with DATABASE_URL set for kb-server:
+kb-server create-api-key sec2d-leak-a leak-a
+kb-server create-api-key sec2d-leak-b leak-b
+# Copy the printed plaintext keys into these variables:
+KB_EVAL_API_KEY=... KB_EVAL_PEER_API_KEY=... kb-server eval leak \
+  --base-url http://127.0.0.1:3000 \
+  --api-key "$KB_EVAL_API_KEY" --peer-key "$KB_EVAL_PEER_API_KEY" \
+  --stale-payload --allow-db-writes --database-url "$DATABASE_URL" \
+  --out docs/eval-ab/scope-scale/out/leak-stale --strict
 ```
 
 Outputs: `leak.json` (matrix, plan, notes, evidence) and `leak-report.md`.
@@ -233,3 +278,142 @@ was changed and every ScopeOutbox row for D/E/F was deleted"; "F's tenant has an
 ACL'd document, so predicate mode is disabled there: its probes exercise the
 Ids path (KB_SCOPE_ID_LIMIT is ignored)". A cell marked UNTESTED found no leak
 because nothing was retrieved, not because retrieval was contained.
+
+## SEC-2d SQL re-run (2026-11-25, GB10)
+
+Scope-bench only (M1) after `ba8e0e35` (`perf(scope): semi-join for the KB
+limit; indexed ACL tenant check`). Same method and setup as the run above,
+reused exactly: branch `bench/sec2d-sql` @ `ba8e0e35`, release `kb-server`
+built fresh with `CARGO_TARGET_DIR=$HOME/kb-target-s2q`, `CARGO_BUILD_JOBS=8`,
+`cargo build --release --manifest-path rust/Cargo.toml -p kb-server`; Nemotron
+at `127.0.0.1:8210` (omniembed `/v2/embed`, 2048-d) used, not started or
+stopped; `qwen3-rerank-0.6b` started with
+`~/llmhost/bakeoff/serve.sh up qwen3-rerank-0.6b` (served at
+`127.0.0.1:8122`); `KB_MCP=on`; `--allow-db-writes` on both passes.
+**Brand-new throwaway stack** `KB_STACK_NAME=s2q`,
+`KB_STACK_DIR=$HOME/s2q/stack-s2q` (Postgres 25463, S3 29021, Qdrant
+26365/26366, kb-server `http://127.0.0.1:28101`), no eval corpus ingested;
+migrations applied from zero — `migrate: 10 applied, 0 already present` (the
+new partial index + expression statistics included). `KB_SERVER_BIN` was set
+to the fresh release binary and the serving process was verified, not assumed:
+
+```text
+$ ls -l /proc/2576312/exe
+lrwxrwxrwx 1 rismana rismana 0 Nov 25 18:30 /proc/2576312/exe -> /home/rismana/kb-target-s2q/release/kb-server
+```
+
+Wrappers/logs: `~/s2q/run-m1-scope.sh`, `~/s2q/logs/m1-scope.out`,
+`~/s2q/logs/m1-wrapper.out`, `~/s2q/logs/explain.out`; raw results:
+`~/s2q/results/scope-scale/`. The server was restarted between passes with
+`KB_SCOPE_ID_LIMIT=0` (ids) then `KB_SCOPE_ID_LIMIT=2000` (predicate). The
+predicate pass used `--keep`, so the 100k tenant
+`scope-bench-276fb7-6b06c808-100000` still existed for the EXPLAINs below.
+
+### 1. Scope bench — measured (fresh release binary)
+
+Raw lines from `~/s2q/logs/m1-scope.out`:
+
+```text
+scope-bench: 1000 n=200 p50 41.75 ms p95 61.37 ms dropped 0.00
+scope-bench: 10000 n=200 p50 70.58 ms p95 204.56 ms dropped 0.00
+scope-bench: 100000 n=200 p50 409.58 ms p95 2380.08 ms dropped 0.00
+scope-bench: 1000 n=200 p50 38.12 ms p95 62.05 ms dropped 0.00
+scope-bench: 10000 n=200 p50 48.08 ms p95 91.23 ms dropped 0.00
+scope-bench: 100000 n=200 p50 324.43 ms p95 500.07 ms dropped 0.00
+scope-bench: MISS — predicate p95 500.07 ms at 100000 / 62.05 ms at 1000 = 8.06x (limit 1.20x)
+```
+
+| size | mode | p50 ms | p95 ms | mean scopeVerifyDropped | queries | errors |
+|---:|---|---:|---:|---:|---:|---:|
+| 1000 | ids | 41.75 | 61.37 | 0.00 | 200 | 0 |
+| 10000 | ids | 70.58 | 204.56 | 0.00 | 200 | 0 |
+| 100000 | ids | 409.58 | 2380.08 | 0.00 | 200 | 0 |
+| 1000 | predicate | 38.12 | 62.05 | 0.00 | 200 | 0 |
+| 10000 | predicate | 48.08 | 91.23 | 0.00 | 200 | 0 |
+| 100000 | predicate | 324.43 | 500.07 | 0.00 | 200 | 0 |
+
+Per-stage p95 (ms), from `stage_timings_ms` in
+`~/s2q/results/scope-scale/results.json`:
+
+| stage | 1k ids | 1k predicate | 10k ids | 10k predicate | 100k ids | 100k predicate |
+|---|---:|---:|---:|---:|---:|---:|
+| scopeBuild | 7.537 | 5.961 | 14.139 | 17.751 | 349.967 | 47.822 |
+| expand | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.001 |
+| arms | 16.705 | 17.812 | 95.591 | 20.793 | 1901.846 | 279.339 |
+| enrich | 0.002 | 0.002 | 0.001 | 0.002 | 0.004 | 0.007 |
+| fusion | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| rerank | 0.041 | 0.041 | 0.023 | 0.043 | 0.084 | 0.170 |
+| pages | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.002 |
+| neighbours | 0.000 | 0.000 | 0.000 | 0.000 | 0.001 | 0.001 |
+| figures | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 | 0.001 |
+| context | 0.001 | 0.001 | 0.001 | 0.001 | 0.004 | 0.011 |
+| serialise | 0.010 | 0.012 | 0.009 | 0.010 | 0.033 | 0.036 |
+| total | 58.866 | 58.298 | 201.089 | 89.110 | 2336.533 | 492.737 |
+
+**Verdict: MISS** — `scope-bench: MISS — predicate p95 500.07 ms at 100000 /
+62.05 ms at 1000 = 8.06x (limit 1.20x)`. The growth is still in `arms` in
+predicate mode (17.812 → 20.793 → 279.339 ms p95), but `scopeBuild` no longer
+blows up: 5.961 → 17.751 → 47.822 ms p95, down from 18.05 → 146.69 → 2417.68
+ms in the previous run. Predicate p95 growth improved from 49.66× to 8.06×
+(pre-SEC-2d baseline 12.06×). All six rows had `mean_scope_verify_dropped =
+0.00` and 0 errors.
+
+### 2. EXPLAIN plans on the s2q Postgres (100k tenant still present)
+
+`EXPLAIN (ANALYZE, TIMING OFF, SUMMARY ON)` against
+`scope-bench-276fb7-6b06c808-100000`, with the binds substituted. Verbatim
+from `~/s2q/logs/explain.out`. The tenant-wide scope query is
+`scope_sql_inner` with the bench key's empty scope/KB/principal sets; the ACL
+tenant check is `SELECT_TENANT_HAS_ACL`. An extra KB-limited variant is
+included because that is where the old `JOIN`/`DISTINCT` was replaced by
+`EXISTS`.
+
+Tenant-wide scope query (`scope_sql_inner`):
+
+```text
+                                                                                                      QUERY PLAN                                                                                                      
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Seq Scan on "Document" d  (cost=0.00..6033.00 rows=100007 width=34) (actual rows=100000 loops=1)
+   Filter: (("deletedAt" IS NULL) AND ("isLatest" OR ("docKey" IS NULL)) AND ("tenantId" = 'scope-bench-276fb7-6b06c808-100000'::text) AND ((cardinality("aclPrincipals") = 0) OR ("aclPrincipals" && '{}'::text[])))
+   Rows Removed by Filter: 11000
+ Planning Time: 0.474 ms
+ Execution Time: 15.607 ms
+(5 rows)
+```
+
+Tenant-wide scope query with the KB limit as `EXISTS` (`scope_sql_inner`,
+tenant + bench KB `bench-kb-276fb7-6b06c808-100000`):
+
+```text
+                                                                                                         QUERY PLAN                                                                                                         
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Hash Semi Join  (cost=5191.09..14832.60 rows=89977 width=34) (actual rows=100000 loops=1)
+   Hash Cond: (d.id = dg."documentId")
+   ->  Seq Scan on "Document" d  (cost=0.00..6033.00 rows=100007 width=34) (actual rows=100000 loops=1)
+         Filter: (("deletedAt" IS NULL) AND ("isLatest" OR ("docKey" IS NULL)) AND ("tenantId" = 'scope-bench-276fb7-6b06c808-100000'::text) AND ((cardinality("aclPrincipals") = 0) OR ("aclPrincipals" && '{}'::text[])))
+         Rows Removed by Filter: 11000
+   ->  Hash  (cost=3161.75..3161.75 rows=99867 width=34) (actual rows=100000 loops=1)
+         Buckets: 131072  Batches: 2  Memory Usage: 4273kB
+         ->  Seq Scan on "DocumentGroup" dg  (cost=0.00..3161.75 rows=99867 width=34) (actual rows=100000 loops=1)
+               Filter: ("knowledgeBaseId" = ANY ('{bench-kb-276fb7-6b06c808-100000}'::text[]))
+               Rows Removed by Filter: 11000
+ Planning Time: 0.404 ms
+ Execution Time: 56.132 ms
+(12 rows)
+```
+
+ACL tenant check (`SELECT_TENANT_HAS_ACL`) — the new partial index is used as
+an index-only scan:
+
+```text
+                                                              QUERY PLAN                                                               
+---------------------------------------------------------------------------------------------------------------------------------------
+ Result  (cost=7.28..7.29 rows=1 width=1) (actual rows=1 loops=1)
+   InitPlan 1 (returns $0)
+     ->  Index Only Scan using "Document_tenantId_has_acl_idx" on "Document"  (cost=0.12..7.28 rows=1 width=0) (actual rows=0 loops=1)
+           Index Cond: ("tenantId" = 'scope-bench-276fb7-6b06c808-100000'::text)
+           Heap Fetches: 0
+ Planning Time: 0.101 ms
+ Execution Time: 0.012 ms
+(7 rows)
+```

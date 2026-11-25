@@ -139,14 +139,33 @@ impl VerifySpec {
     }
 }
 
+/// Whether a request can be expressed by the index at all (SEC-2a/2d).
+///
+/// This is the *request-level* half of predicate eligibility. It deliberately
+/// does not look at the visible-id count or at tenant-wide version/ACL state:
+/// `PgDocumentStore` needs to know before it reads the whole id list whether a
+/// bounded probe can stop early. A request is ineligible when:
+/// - a RET-15 unit range will be applied (`req.force_ids`); or
+/// - the filter uses something the index payload cannot express (RET-16's
+///   version fields, `metadata`, `language`, `externalRefs`).
+#[must_use]
+pub fn predicate_filter_allowed(req: &ScopeRequest) -> bool {
+    if req.force_ids {
+        return false;
+    }
+    !req.filter.external_refs.is_some()
+        && !req.filter.language.is_some()
+        && req.filter.metadata.is_empty()
+        && req.filter.as_of.is_none()
+        && !req.filter.include_history
+}
+
 /// The predicate mode a `DocumentStore` adapter may choose (SEC-2a).
 ///
 /// Eligibility is shared by Postgres and the fakes so a test cannot pass where
 /// production would stay in Ids mode. A request is eligible only when:
 /// - the visible-id count exceeds `limit` (`limit == 0` disables predicate mode);
-/// - no RET-15 unit range will be applied (`req.force_ids`);
-/// - the filter uses only tenant, knowledge bases and category, so the index
-///   payload can express it; and
+/// - [`predicate_filter_allowed`] holds (no unit range, indexable filter);
 /// - the tenant has no versioned documents (RET-16), because the payload has no
 ///   `is_latest` key and the default `isLatest` filter would be unenforceable
 ///   index-side;
@@ -164,19 +183,9 @@ pub fn predicate_spec_for(
 ) -> Option<PredicateSpec> {
     if limit == 0
         || visible_count <= limit
-        || req.force_ids
         || tenant_has_versioned_documents
         || tenant_has_acl_documents
-    {
-        return None;
-    }
-    // Filters the payload cannot express keep the id list. RET-16's `asOf` and
-    // `includeHistory` are among them: the payload carries no version fields.
-    if req.filter.external_refs.is_some()
-        || req.filter.language.is_some()
-        || !req.filter.metadata.is_empty()
-        || req.filter.as_of.is_some()
-        || req.filter.include_history
+        || !predicate_filter_allowed(req)
     {
         return None;
     }
@@ -571,6 +580,62 @@ mod tests {
             };
             assert!(predicate_spec_for(&req, 10_000, 1, false, false).is_none());
         }
+    }
+
+    #[test]
+    fn only_indexable_requests_can_stop_before_the_full_id_list() {
+        // SEC-2d: this is the request-level half of predicate eligibility, so
+        // the store can decide from a bounded probe without reading 100k ids.
+        let plain = ScopeRequest {
+            tenant: TenantId::new_unchecked("t"),
+            filter: DocumentFilter {
+                knowledge_base_ids: vec![crate::ids::KnowledgeBaseId("kb-1".into())],
+                category: Some("cat-1".into()),
+                ..DocumentFilter::default()
+            },
+            force_ids: false,
+        };
+        assert!(predicate_filter_allowed(&plain));
+        assert!(predicate_spec_for(&plain, 10_000, 1, false, false).is_some());
+
+        for filter in [
+            DocumentFilter {
+                external_refs: Some(vec!["ref-1".into()]),
+                ..DocumentFilter::default()
+            },
+            DocumentFilter {
+                language: Some("id".into()),
+                ..DocumentFilter::default()
+            },
+            DocumentFilter {
+                metadata: vec![crate::traits::MetadataFilter {
+                    key: "year".into(),
+                    values: vec!["2024".into()],
+                }],
+                ..DocumentFilter::default()
+            },
+            DocumentFilter {
+                as_of: Some("2024-06-01".into()),
+                ..DocumentFilter::default()
+            },
+            DocumentFilter {
+                include_history: true,
+                ..DocumentFilter::default()
+            },
+        ] {
+            let req = ScopeRequest {
+                tenant: TenantId::new_unchecked("t"),
+                filter,
+                force_ids: false,
+            };
+            assert!(!predicate_filter_allowed(&req));
+            assert!(predicate_spec_for(&req, 10_000, 1, false, false).is_none());
+        }
+        let forced = ScopeRequest {
+            force_ids: true,
+            ..plain
+        };
+        assert!(!predicate_filter_allowed(&forced));
     }
 
     #[test]

@@ -59,7 +59,8 @@ jobs:
     # tenant-agnostic, so leftover ScopeOutbox rows from another contract would be
     # claimed and break its "exactly one row" assertion. Versions, outbox and ACL
     # migrate their own database from prisma/migrations; graph_contract only
-    # connects, so its database is migrated by the step below.
+    # connects, so its database is migrated by the step below. The scope-limit
+    # contract also migrates itself (SEC-2d) and only needs its own database.
     services:
       postgres:
         image: postgres:16-alpine
@@ -82,6 +83,8 @@ jobs:
       KB_PG_ACL_URL: postgres://postgres:pw@localhost:5432/kb_acl
       KB_PG_GRAPH_CONTRACT: "1"
       KB_PG_GRAPH_URL: postgres://postgres:pw@localhost:5432/kb_graph
+      KB_PG_SCOPE_LIMIT_CONTRACT: "1"
+      KB_PG_SCOPE_LIMIT_URL: postgres://postgres:pw@localhost:5432/kb_scope_limit
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -91,7 +94,7 @@ jobs:
       # database. Apply the same prisma/migrations SQL to its database here.
       - name: Create contract databases and migrate the graph database
         run: |
-          for db in kb_versions kb_outbox kb_acl kb_graph; do
+          for db in kb_versions kb_outbox kb_acl kb_graph kb_scope_limit; do
             psql "postgres://postgres:pw@localhost:5432/postgres" -v ON_ERROR_STOP=1 -c "CREATE DATABASE $db"
           done
           for f in prisma/migrations/*/migration.sql; do
