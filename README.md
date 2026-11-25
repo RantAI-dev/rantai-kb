@@ -217,8 +217,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for guidelines.
 
 Tagging `v*` builds and publishes multi-arch images (`amd64`/`arm64`) to `ghcr.io/rantai-dev/rantai-kb` alongside OCR sidecars, packages Linux (`x86_64`, `aarch64`) and macOS (`arm64`) binaries with checksums, cuts a GitHub Release, and smoke-tests `install.sh`.
 
-- **Current release:** `v0.9.0`: progressive disclosure (outline v2, byte-exact `/content`, in-document search), document versions (`docKey`/`asOf`), `maxPerDocument`, calibrated `confidence`, `/mcp`, per-document access lists, opt-in predicate scope and Qdrant quantization. Measured numbers, including the targets missed, are in [`CHANGELOG.md`](CHANGELOG.md#090--2026-11-25).
-- **Previous:** `v0.8.0`: stateless processor-only mode (`/v1/process`, `/v1/encode`, `/v1/rerank`).
+- **Current release:** `v1.0.0`. The `/v1/*` API and the Postgres tables calling apps use are **stable**, and changes from now on are additive ([rules](docs/api.md#stability-v10), [0.8 → 1.0 upgrade](docs/rust-cutover.md)). New since 0.9: exact tables (execution 0.995 on `tables-v1`), `/content` p95 at 5.5 ms, a scope outbox with backfill, and cheaper predicate scope. 0 leaks in the clean-tenant leak matrix, including stale payloads and `/mcp`. Measured numbers, including the missed targets, are in [`CHANGELOG.md`](CHANGELOG.md#100--2026-11-25).
+- **Previous:** `v0.9.0`: progressive disclosure, document versions, access lists, `/mcp`. `v0.8.0`: stateless processor-only mode.
 - **Legacy Bun release:** `v0.1.0` ([migration guide](docs/rust-cutover.md)).
 
 ---
