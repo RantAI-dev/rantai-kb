@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Scope-scale bench and stale-payload leak matrix (SEC-2c).** `kb-server eval scope-bench`
+  measures `/v1/search` p50/p95 at 1k/10k/100k documents in Ids and Predicate modes across a
+  two-pass server restart (`docs/eval-ab/scope-scale/README.md`); `kb-server eval leak
+  --stale-payload` injects KB-move, soft-delete and ACL drift in Postgres only and probes every
+  arm plus `/content`, `/structure`, tables and `/mcp`. The normal leak matrix now has an
+  `/mcp` row (API-4). No HTTP or schema change.
+
 - **Scope outbox and KB payload backfill (SEC-2b).** Every document create, KB-membership
   PATCH, KB delete and document delete now writes one `ScopeOutbox` row in the same Postgres
   transaction. An in-process worker (poll interval `KB_SCOPE_OUTBOX_INTERVAL_MS`, default 2000)

@@ -319,6 +319,7 @@ fn bench_index_settings() -> Result<(QdrantSettings, String, u32), CliError> {
 }
 
 /// Seed one tenant, time its searches, and clean it up unless `--keep`.
+#[allow(clippy::too_many_arguments)]
 async fn measure_size(
     pool: &PgPool,
     index: &QdrantIndex,

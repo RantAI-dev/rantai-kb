@@ -588,6 +588,8 @@ async fn serve(mode: Mode, predicate: bool) -> (String, BTreeMap<String, String>
     // The tree arm is on for every mode, so the matrix's tree row has a
     // positive control; the leaking-outline mode is what proves the probe can
     // see a hole.
+    // API-4: the matrix's `/mcp` row needs a mounted endpoint, not a 404.
+    state.mcp_enabled = true;
     state.engine.inputs.tree_arm = Some(Arc::new(TreeArm::new(TreeArmConfig::default())));
     state.engine.inputs.page_arm = page_index.map(|index| {
         Arc::new(PageArm {
