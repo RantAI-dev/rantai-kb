@@ -776,6 +776,69 @@ async fn document_detail(
     Ok(response.json().await.unwrap_or(Value::Null))
 }
 
+/// The tenant's document count as its own key sees it. `None` means the server
+/// did not answer the list route; the caller warns instead of guessing.
+async fn tenant_document_total(
+    client: &reqwest::Client,
+    config: &LeakConfig,
+    key: &str,
+) -> Result<Option<u64>, LeakError> {
+    let response = client
+        .get(endpoint(&config.base_url, "/v1/documents?limit=1"))
+        .header(reqwest::header::AUTHORIZATION, bearer(key))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let body: Value = response.json().await.unwrap_or(Value::Null);
+    Ok(body.get("total").and_then(Value::as_u64))
+}
+
+/// Refuse a tenant that already held documents before this run (SEC-2d).
+///
+/// The live 2026-11-25 run pointed `--api-key` at a tenant that also held the
+/// EVAL-9 HR corpus. The harness does not create tenants: `seed` discovers the
+/// tenant from the knowledge base it creates with the supplied key, so a shared
+/// tenant makes "foreign" documents indistinguishable from real scope leaks.
+/// A clean tenant is a precondition of the matrix, not an operator detail.
+async fn require_clean_tenants(
+    client: &reqwest::Client,
+    config: &LeakConfig,
+    documents: &[SeedDocument],
+    keys: &BTreeMap<String, String>,
+    notes: &mut Vec<String>,
+) -> Result<(), LeakError> {
+    for (tenant, key) in keys {
+        let seeded = u64::try_from(
+            documents
+                .iter()
+                .filter(|document| &document.tenant == tenant)
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
+        match tenant_document_total(client, config, key).await? {
+            Some(total) if total > seeded => {
+                return Err(LeakError::Seed(format!(
+                    "tenant {tenant} holds {total} documents but this run seeded {seeded}; \
+                     a leak matrix in a shared tenant judges the wrong documents. Use a fresh \
+                     tenant id with `kb-server create-api-key <tenantId>` for --api-key/--peer-key"
+                )));
+            }
+            Some(total) if total < seeded => notes.push(format!(
+                "tenant {tenant} listed {total} documents to its key, fewer than the {seeded} seeded; \
+                 the key may be knowledge-base limited, so the cleanliness check is inconclusive"
+            )),
+            Some(_) => {}
+            None => notes.push(format!(
+                "GET /v1/documents for tenant {tenant} did not answer; could not prove the tenant \
+                 held no unseeded documents"
+            )),
+        }
+    }
+    Ok(())
+}
+
 // ─── probing ─────────────────────────────────────────────────────────────────
 
 /// The search body a scope selects.
@@ -795,6 +858,12 @@ pub fn search_body(scope: &Scope, query: &str, max_chunks: u32) -> Value {
         body["externalRefs"] = json!(external_refs);
     }
     body
+}
+
+/// SEC-2d: `kb_search` arguments are built by the same function as the HTTP
+/// search probe, so the two rows test the same filters through the same handler.
+fn mcp_search_arguments(scope: &Scope, query: &str, max_chunks: u32) -> Value {
+    search_body(scope, query, max_chunks)
 }
 
 /// The arms a returned chunk says it came from, as the server reports them.
@@ -1127,7 +1196,10 @@ async fn run_probe(
             }
         }
         ProbeKind::Mcp => {
-            let outcome = mcp_probe(client, config, key, probe).await;
+            let outcome = mcp_probe(client, config, key, scope, probe, max_chunks).await;
+            // SEC-2d: `kb_search` is a search, so its answer is judged against
+            // the same scope as the HTTP search probe — not against the whole
+            // tenant. `finish` handles that distinction.
             finish(probe, scope, outcome, max_chunks, &by_tenant)
         }
     }
@@ -1373,15 +1445,23 @@ async fn rpc_call(
     Ok((status, body))
 }
 
-/// MCP row: `kb_search` with the canary and `kb_read` for the canary's document.
+/// MCP row: `kb_search` with the canary, using *exactly* the arguments the HTTP
+/// search probe sends. `kb_search` forwards them to `search_inner`, the same
+/// handler `/v1/search` uses, so this row now tests the scope filters through
+/// JSON-RPC instead of silently searching the whole tenant (SEC-2d).
 ///
-/// Both delegate to the very handlers the `/v1` routes use, so a scope hole
-/// here is a hole in the shared visibility logic, not in a second copy of it.
+/// The old `kb_read` follow-up is deliberately dropped. It is a
+/// document-addressed read: its visibility is tenant-wide, not filter-scoped,
+/// so mixing it into one `Answer` made the row's allowed set ambiguous — the
+/// source of 24 false positives when the harness tenant held an eval corpus.
+/// The `content` row already covers tenant-addressed document reads.
 async fn mcp_probe(
     client: &reqwest::Client,
     config: &LeakConfig,
     key: &str,
+    scope: &Scope,
     probe: &crate::leak::PlannedProbe,
+    max_chunks: u32,
 ) -> Answer {
     let url = endpoint(&config.base_url, "/mcp");
     let (status, body) = match rpc_call(
@@ -1389,7 +1469,7 @@ async fn mcp_probe(
         &url,
         key,
         "kb_search",
-        json!({"query": probe.query, "maxChunks": config.max_chunks}),
+        mcp_search_arguments(scope, &probe.query, max_chunks),
     )
     .await
     {
@@ -1409,26 +1489,7 @@ async fn mcp_probe(
     let structured = result.get("structuredContent").unwrap_or(&Value::Null);
     // The neighbour arm reads every chunk, which is the widest containment
     // check the MCP search result allows.
-    let mut documents = documents_for_arm(structured, Arm::Neighbour);
-    if let Ok((read_status, read_body)) = rpc_call(
-        client,
-        &url,
-        key,
-        "kb_read",
-        json!({"documentId": probe.canary_owner}),
-    )
-    .await
-    {
-        let read_result = read_body.get("result").unwrap_or(&Value::Null);
-        let read_structured = read_result.get("structuredContent").unwrap_or(&Value::Null);
-        if (200..400).contains(&read_status)
-            && read_result.get("isError") != Some(&Value::Bool(true))
-        {
-            if let Some(id) = read_structured.get("documentId").and_then(Value::as_str) {
-                push_document(&mut documents, id);
-            }
-        }
-    }
+    let documents = documents_for_arm(structured, Arm::Neighbour);
     Answer {
         documents,
         http_status: status,
@@ -1445,15 +1506,15 @@ fn finish(
     by_tenant: &[String],
 ) -> ProbeOutcome {
     let allowed: &[String] = match probe.kind {
-        // Search arms answer inside the search scope; a document-addressed
-        // route answers for the whole tenant.
-        ProbeKind::Search => &scope.allowed,
+        // Search arms answer inside the search scope. SEC-2d: `kb_search` over
+        // MCP is one of them — it forwards the same filters to the same handler.
+        // Document-addressed routes answer for the whole tenant instead.
+        ProbeKind::Search | ProbeKind::Mcp => &scope.allowed,
         ProbeKind::SearchOrAsset
         | ProbeKind::DocumentIntelligence
         | ProbeKind::Tables
         | ProbeKind::DocumentContent
-        | ProbeKind::DocumentStructure
-        | ProbeKind::Mcp => by_tenant,
+        | ProbeKind::DocumentStructure => by_tenant,
     };
     let leaked = leaks_in(&answer, allowed);
     let hit = positive_hit(&answer, &probe.canary_owner);
@@ -1485,9 +1546,8 @@ fn finish(
                 ProbeKind::Mcp => json!({
                     "method": "POST",
                     "path": "/mcp",
-                    "tools": ["kb_search", "kb_read"],
-                    "query": probe.query,
-                    "documentId": probe.canary_owner,
+                    "tool": "kb_search",
+                    "arguments": search_body(scope, &probe.query, max_chunks),
                 }),
                 _ => search_body(scope, &probe.query, max_chunks),
             },
@@ -1654,12 +1714,21 @@ pub async fn run(config: LeakConfig) -> Result<LeakRun, LeakError> {
 
     eprintln!("leak: seeding the matrix corpus…");
     let (documents, keys, seed_notes) = seed(&client, &config).await?;
-    matrix.notes.extend(seed_notes);
+    let mut notes = seed_notes;
+    let clean_plan = plan(documents.clone());
+    // SEC-2d: a shared tenant makes the matrix flag legitimately visible
+    // documents as leaks. Refuse before probing, and do not leave our own seed
+    // behind when we do.
+    if let Err(err) = require_clean_tenants(&client, &config, &documents, &keys, &mut notes).await {
+        cleanup(&client, &config, &clean_plan, &keys).await;
+        return Err(err);
+    }
     let (plan, stale_notes) = if config.stale_payload {
         inject_stale(&documents, &config).await?
     } else {
-        (plan(documents.clone()), Vec::new())
+        (clean_plan, Vec::new())
     };
+    matrix.notes.extend(notes);
     matrix.notes.extend(stale_notes);
     if plan.documents.is_empty() {
         return Err(LeakError::Seed("nothing was seeded".to_string()));
@@ -1796,7 +1865,7 @@ pub fn write_outputs(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::leak::{Scope, ScopeKind};
+    use crate::leak::{PlannedProbe, ProbeKind, Scope, ScopeKind};
 
     fn scope(kind: ScopeKind) -> Scope {
         Scope {
@@ -1845,6 +1914,99 @@ mod tests {
             search_body(&scope(ScopeKind::ExternalRef), "q", 7),
             json!({"query": "q", "maxChunks": 7, "externalRefs": ["ref-a"]})
         );
+    }
+
+    fn planned(kind: ProbeKind) -> PlannedProbe {
+        PlannedProbe {
+            arm: Arm::Mcp,
+            kind,
+            scope: 0,
+            query: "q".to_string(),
+            canary_owner: "a".to_string(),
+            positive: false,
+            key_override: None,
+            forbidden: None,
+        }
+    }
+
+    #[test]
+    fn mcp_search_sends_the_same_arguments_as_the_http_search_probe() {
+        // SEC-2d: no more bare {query, maxChunks} through JSON-RPC. The KB,
+        // category, document and external-ref filters all travel with it.
+        for kind in [
+            ScopeKind::Tenant,
+            ScopeKind::KnowledgeBase,
+            ScopeKind::Category,
+            ScopeKind::DocumentIds,
+            ScopeKind::ExternalRef,
+        ] {
+            let s = scope(kind);
+            assert_eq!(
+                mcp_search_arguments(&s, "q", 7),
+                search_body(&s, "q", 7),
+                "{kind:?}"
+            );
+        }
+        let kb_scope = scope(ScopeKind::KnowledgeBase);
+        assert_eq!(
+            mcp_search_arguments(&kb_scope, "q", 7),
+            json!({"query": "q", "maxChunks": 7, "knowledgeBaseIds": ["kb0"]})
+        );
+    }
+
+    #[test]
+    fn the_mcp_row_judges_kb_search_against_the_scope_not_the_tenant() {
+        // The 24 false positives of the live run: a tenant-mate that is not in
+        // this KB scope is legitimately visible to the key and must not be
+        // called a leak. The document-addressed content row keeps the tenant
+        // allowed set and still catches it.
+        let kb_scope = scope(ScopeKind::KnowledgeBase);
+        let by_tenant = vec!["a".to_string(), "b".to_string()];
+        let answer = Answer {
+            documents: vec!["b".to_string()],
+            ..Answer::default()
+        };
+        let mcp = finish(
+            &planned(ProbeKind::Mcp),
+            &kb_scope,
+            answer.clone(),
+            7,
+            &by_tenant,
+        );
+        assert_eq!(mcp.leaked, vec!["b".to_string()]);
+        let example = mcp.example.expect("a leak example");
+        assert_eq!(example.request["tool"], "kb_search");
+        assert_eq!(
+            example.request["arguments"],
+            mcp_search_arguments(&kb_scope, "q", 7)
+        );
+        assert!(!example.request.to_string().contains("kb_read"));
+
+        let content = finish(
+            &planned(ProbeKind::DocumentContent),
+            &kb_scope,
+            answer,
+            7,
+            &by_tenant,
+        );
+        assert!(
+            content.leaked.is_empty(),
+            "document-addressed reads keep the tenant allowed set"
+        );
+
+        // A document outside the tenant is still a leak through either route.
+        let foreign = Answer {
+            documents: vec!["tenant-b-doc".to_string()],
+            ..Answer::default()
+        };
+        let mcp = finish(
+            &planned(ProbeKind::Mcp),
+            &kb_scope,
+            foreign.clone(),
+            7,
+            &by_tenant,
+        );
+        assert_eq!(mcp.leaked, vec!["tenant-b-doc".to_string()]);
     }
 
     #[test]
