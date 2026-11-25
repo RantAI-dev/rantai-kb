@@ -182,11 +182,26 @@ pub async fn get_document_content(
     Path(id): Path<String>,
     Query(query): Query<ContentQuery>,
 ) -> Result<Json<DocumentContentResponse>, ApiError> {
-    if !crate::auth::has_scope(&auth, "kb:read") {
+    Ok(Json(
+        get_document_content_inner(&state, &auth, &id, query).await?,
+    ))
+}
+
+/// The shared body of `GET /v1/documents/{id}/content`.
+///
+/// The MCP `kb_read` tool calls this function, so its visibility check, cursor
+/// validation and stitching are byte-for-byte the same as the HTTP route.
+pub(crate) async fn get_document_content_inner(
+    state: &Arc<AppState>,
+    auth: &kb_ports::AuthContext,
+    id: &str,
+    query: ContentQuery,
+) -> Result<DocumentContentResponse, ApiError> {
+    if !crate::auth::has_scope(auth, "kb:read") {
         return Err(ApiError::missing_scope("kb:read"));
     }
     // Visibility first, as in /structure: no metadata is read before this.
-    let doc = crate::routes::find_visible_document(&state, &auth, &id).await?;
+    let doc = crate::routes::find_visible_document(state, auth, id).await?;
     let scope = state
         .documents
         .build_scope(&ScopeRequest {
@@ -316,7 +331,7 @@ pub async fn get_document_content(
         page_start: emitted.iter().filter_map(|chunk| chunk.page).min(),
         page_end: emitted.iter().filter_map(|chunk| chunk.page).max(),
     };
-    let refs = collect_refs(&state, &auth.tenant_id.0, &doc.id, &emitted, &range).await?;
+    let refs = collect_refs(state, &auth.tenant_id.0, &doc.id, &emitted, &range).await?;
     let mut degrades = Vec::new();
     if stitched.missing_spans {
         degrades.push(MISSING_SPANS_DEGRADE.to_string());
@@ -331,7 +346,7 @@ pub async fn get_document_content(
         .encode()
     });
 
-    Ok(Json(DocumentContentResponse {
+    Ok(DocumentContentResponse {
         document_id: doc.id.0.clone(),
         text: stitched.text,
         range,
@@ -339,7 +354,7 @@ pub async fn get_document_content(
         next_cursor,
         refs,
         degrades,
-    }))
+    })
 }
 
 /// Resolve a section id through the same outline v2 input as `/structure`.

@@ -218,12 +218,26 @@ pub async fn get_document_structure(
     Authed(auth): Authed,
     Path(id): Path<String>,
 ) -> Result<Json<DocumentStructureResponse>, ApiError> {
-    if !crate::auth::has_scope(&auth, "kb:read") {
+    Ok(Json(
+        get_document_structure_inner(&state, &auth, &id).await?,
+    ))
+}
+
+/// The shared body of `GET /v1/documents/{id}/structure`.
+///
+/// The MCP `kb_outline` tool calls this exact function: the same tenant,
+/// knowledge-base and soft-delete check runs on both surfaces.
+pub(crate) async fn get_document_structure_inner(
+    state: &Arc<AppState>,
+    auth: &kb_ports::AuthContext,
+    id: &str,
+) -> Result<DocumentStructureResponse, ApiError> {
+    if !crate::auth::has_scope(auth, "kb:read") {
         return Err(ApiError::missing_scope("kb:read"));
     }
     // Visibility first: the same tenant + KB-limited-key check as the rest of
     // the route. No chunk is listed before this passes.
-    let doc = crate::routes::find_visible_document(&state, &auth, &id).await?;
+    let doc = crate::routes::find_visible_document(state, auth, id).await?;
     let scope = state
         .documents
         .build_scope(&ScopeRequest {
@@ -237,7 +251,7 @@ pub async fn get_document_structure(
         .await
         .map_err(ApiError::from)?
         .narrowed_to(std::slice::from_ref(&doc.id));
-    structure_for(&state, &auth.tenant_id.0, &doc, &scope).await
+    structure_for(state, &auth.tenant_id.0, &doc, &scope).await
 }
 
 async fn structure_for(
@@ -245,7 +259,7 @@ async fn structure_for(
     tenant: &str,
     doc: &DocumentMeta,
     scope: &DocumentScope,
-) -> Result<Json<DocumentStructureResponse>, ApiError> {
+) -> Result<DocumentStructureResponse, ApiError> {
     let tenant_id = kb_ports::TenantId(tenant.to_string());
     let text_units = state
         .index
@@ -363,7 +377,7 @@ async fn structure_for(
         .map(SectionDto::from)
         .collect();
 
-    Ok(Json(DocumentStructureResponse {
+    Ok(DocumentStructureResponse {
         document_id: doc.id.0.clone(),
         external_ref: doc.external_ref.clone(),
         title: doc.title.clone(),
@@ -375,7 +389,7 @@ async fn structure_for(
         sections,
         estimated_chars: estimated_chars(&outline_chunks),
         has_spans: has_spans(&outline_chunks),
-    }))
+    })
 }
 
 /// The page's stored text without the visual description the caption stage

@@ -61,6 +61,8 @@ pub struct AppState {
     /// (`KB_UPLOAD_DEDUPE`). `reject` by default: the same bytes twice cost a
     /// whole ingest and produce a second copy of the same answer.
     pub upload_dedupe: kb_core::policy::UploadDedupe,
+    /// Whether the thin MCP endpoint is mounted (`KB_MCP`, default off).
+    pub mcp_enabled: bool,
     /// Confidence bands fitted per scoring model (`RET-18`).
     pub confidence_table: CalibrationTable,
     /// Model id used for rerank-scored answers.
@@ -288,6 +290,7 @@ impl AppState {
             // The backends the health route probes (`#36`).
             backends: crate::backends::BackendProbe::new(backends),
             upload_dedupe: config.upload_dedupe,
+            mcp_enabled: config.mcp_enabled,
             confidence_table,
             rerank_model_id,
             embedding_model_id,
@@ -338,12 +341,22 @@ impl AppState {
             // endpoints to probe.
             backends: crate::backends::BackendProbe::default(),
             upload_dedupe: parts.upload_dedupe,
+            // A hand-built state has no config: MCP is off unless a test turns
+            // it on explicitly with `with_mcp`.
+            mcp_enabled: false,
             // A hand-built test state has no fitted table and no configured
             // model ids, so it answers honestly `calibrated: false`.
             confidence_table: CalibrationTable::default(),
             rerank_model_id: None,
             embedding_model_id: String::new(),
         }
+    }
+
+    /// Turn the MCP endpoint on or off on a hand-built state (tests).
+    #[must_use]
+    pub fn with_mcp(mut self, enabled: bool) -> Self {
+        self.mcp_enabled = enabled;
+        self
     }
 
     /// Install the calibration table and model ids an operator configured.
