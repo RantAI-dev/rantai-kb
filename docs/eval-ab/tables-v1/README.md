@@ -250,3 +250,77 @@ python3 rust/crates/kb-eval/scripts/score_tables.py \
 Report the failure counts (`query_rejected`, `execution_mismatch`, `column_name_drift`) and the
 `template:code_trap` / `template:subtotal_trap` rows from `report.md`; `execution_remapped.all`
 should now be 0. No live number is claimed here.
+
+## Live re-score after TBL-2 — 2026-11-25 (GB10, `bench/tbl2-quant` @ `aa3f8294`)
+
+**Result: both targets met.** Table-in-top-5 stays **1.000 (386/386)** and exact execution
+rises from the pre-TBL-2 live run's **0.521** to **0.995 [0.987, 1.000]** against the
+v0.9.0 target **≥ 0.95**. Code-trap execution goes **0.133 → 1.000** and subtotal-trap
+execution **0.692 → 1.000**. `query_rejected` and `column_name_drift` are both **0**
+(the 180 `unknown_column` failures are gone); `execution_mismatch` is **2**. No `--agent`
+arm was run (no chat model), so end-to-end numbers remain unmeasured.
+
+Setup: a **fresh** stack `tq` (own ports 28090/25442/26343, own fresh `~/tq/cache` so every
+table was re-extracted by the TBL-2 code) with a release `kb-server` built from this branch
+into `~/kb-target-tq`, run natively on the host against `stack-up.sh`'s Postgres/Qdrant/RustFS
+containers. Embeddings from the already-running `ret8-phase0-nemo35` Nemotron at
+`127.0.0.1:8210` (omniembed `/v2/embed`, 2048-d); the qwen3-rerank-0.6b bakeoff unit was
+started at `127.0.0.1:8122` for this run, breadcrumbs off, page arm off. No paid call.
+All 30 files ingested cleanly (`ready: 30, failed: []`); 29 grids mapped to a `tableId`.
+
+Exact command (wrapper `~/tq/run-m1-tables.sh`, log `~/tq/logs/m1-tables.out`):
+
+```sh
+python3 rust/crates/kb-eval/scripts/score_tables.py \
+  --dataset ~/kbdata/tables-v1 \
+  --base-url http://127.0.0.1:28090 --key "$KEY" \
+  --out ~/tq/m1-tables
+```
+
+### Scores (2000 bootstrap resamples)
+
+| slice | n | table in top 5 | exact execution |
+|---|---:|---:|---:|
+| overall | 386 | **1.000 [1.000, 1.000]** | **0.995 [0.987, 1.000]** |
+| template:cell_lookup | 122 | 1.000 | 1.000 |
+| template:count | 55 | 1.000 | 1.000 |
+| template:sum_filter | 62 | 1.000 | 1.000 |
+| template:top_k | 67 | 1.000 | 1.000 |
+| template:group_max | 39 | 1.000 | 0.949 [0.872, 1.000] |
+| template:subtotal_trap | 26 | 1.000 | **1.000 [1.000, 1.000]** |
+| template:code_trap | 15 | 1.000 | **1.000 [1.000, 1.000]** |
+| lang:en | 193 | 1.000 | 1.000 |
+| lang:id | 193 | 1.000 | 0.990 [0.974, 1.000] |
+| trap:code | 15 | 1.000 | **1.000** |
+| trap:subtotal | 26 | 1.000 | **1.000** |
+
+Failures counted (never dropped): `execution_mismatch 2`; `query_rejected` and
+`column_name_drift` are absent from the failure map (0). Raw examples:
+`q-0237: gold {'label': 'Prambanan', 'value': 28} got [['Bayat', 28]]`,
+`q-0380: gold {'label': 'Bahrain', 'value': 100} got [['Gibraltar', 100]]` — both are
+`group_max` label ties at the same value, not query rejections. The column-remapping
+retry was never exercised (`execution_remapped.all = 0.000`), which is consistent with
+`query_rejected = 0`.
+
+Raw excerpt — `report.md` targets table:
+
+```text
+| table retrieval, top 5 | 0.85 | 1.000 |
+| execution, all | 0.98 | 0.995 |
+| execution, subtotal traps | 0.98 | 1.000 |
+```
+
+Raw excerpt — `results.json` overall scores and failures:
+
+```text
+retrieval.all  n=386 mean=1.0000 [1.0000,1.0000]
+execution.all  n=386 mean=0.9948 [0.9870,1.0000]
+failures: {'execution_mismatch': 2}
+execution_remapped.all  n=386 mean=0.0000
+```
+
+Raw artifacts: `~/tq/m1-tables/{report.md,results.json,per_question.jsonl,ingest.json}`.
+A first attempt that accidentally used the repo's default **debug** binary failed all
+30 ingests on an embedding wire-shape mismatch; it is preserved at
+`~/tq/logs/m1-failed-debug-bin.out` and `~/tq/results/m1-failed-debug-bin/` and is not
+part of the numbers above.
