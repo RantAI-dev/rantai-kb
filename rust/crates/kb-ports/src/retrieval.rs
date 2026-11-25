@@ -182,6 +182,34 @@ pub struct Candidate {
     pub ranks: ArmRanks,
 }
 
+/// An inclusive chunk/page restriction for a vector-free metadata read
+/// (`EVAL-9`). Both halves are ANDed when both are set; a caller that wants one
+/// selector leaves the other `None`. A `None` half is "no restriction", so a
+/// chunk range without a page range reads every chunk in the index range even
+/// when some chunks carry no page.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChunkRange {
+    /// Inclusive `(start, end)` chunk indices.
+    pub chunks: Option<(u32, u32)>,
+    /// Inclusive `(start, end)` zero-based pages.
+    pub pages: Option<(u32, u32)>,
+}
+
+impl ChunkRange {
+    /// Whether one chunk's metadata is inside this range. A chunk with no page
+    /// is outside a page range, matching Qdrant's integer range condition.
+    #[must_use]
+    pub fn allows(&self, meta: &ChunkMeta) -> bool {
+        let in_chunks = self
+            .chunks
+            .is_none_or(|(lo, hi)| meta.chunk_index >= lo && meta.chunk_index <= hi);
+        let in_pages = self
+            .pages
+            .is_none_or(|(lo, hi)| meta.page.is_some_and(|p| p >= lo && p <= hi));
+        in_chunks && in_pages
+    }
+}
+
 /// One chunk's metadata as the outline v2 and content routes need it, with no
 /// vectors and no scores. Ordered by `chunk_index`; the spans are absent for
 /// chunks ingested before `ING-13`, never a misleading zero.
@@ -464,6 +492,41 @@ pub trait RetrievalIndex: Send + Sync {
             .await?;
         let mut out: Vec<ChunkMeta> = units.iter().map(chunk_meta_from_candidate).collect();
         out.sort_by_key(|meta| meta.chunk_index);
+        Ok(out)
+    }
+
+    /// List a bounded slice of one document's chunk metadata, ordered by
+    /// `chunk_index` and **without vectors or scores** (`EVAL-9`).
+    ///
+    /// The reader uses this instead of scrolling the whole document on every
+    /// `/content` call. `limit` caps how many chunks are returned, so a caller
+    /// can stop at its character budget by advancing the chunk lower bound.
+    /// Both halves of `range` are inclusive and ANDed. The scope check is the
+    /// same one [`Self::list_chunk_meta`] performs: a document outside `scope`
+    /// returns an empty list, and a real adapter must repeat it in its override.
+    ///
+    /// The default derives the slice from [`Self::list_chunk_meta`] for fakes
+    /// and small adapters; an adapter with integer indexes overrides it with a
+    /// filtered scroll so it never reads the rest of the document.
+    async fn list_chunk_meta_range(
+        &self,
+        scope: &DocumentScope,
+        document: &DocumentId,
+        range: ChunkRange,
+        limit: usize,
+    ) -> Result<Vec<ChunkMeta>, PortError> {
+        if !scope.allows_document(document) {
+            return Ok(Vec::new());
+        }
+        let mut out: Vec<ChunkMeta> = self
+            .list_chunk_meta(scope, document)
+            .await?
+            .into_iter()
+            .filter(|meta| range.allows(meta))
+            .collect();
+        if limit > 0 {
+            out.truncate(limit);
+        }
         Ok(out)
     }
 

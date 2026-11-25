@@ -12,6 +12,19 @@
   for an operator after ten attempts. `kb-server scope backfill [--tenant T] [--dry-run]`
   gives pre-SEC-2a chunks their payload in place without re-embedding, so operators can turn
   on `KB_SCOPE_ID_LIMIT` safely. Additive migration, additive `/health` `scopeOutbox` field.
+- Disclosure eval (EVAL-9) reports `answer_page_coverage` — at least one gold page fully read,
+  target ≥ 0.80 — as the primary gate, with single-gold-page coverage and the distribution of
+  the first gold hit's rank. The old all-gold-pages coverage (≥ 0.90) is retained as a secondary
+  metric. `per_question.jsonl` now carries `answer_page_hit`, `best_gold_rank`, every search hit
+  with its rank and page, and every budgeted content read with its pages and chunk range.
+
+### Changed
+
+- `GET /v1/documents/:id/content` now reads a bounded `chunkIndex` / `page` range through the
+  integer payload indexes instead of scrolling the whole document on every call. Chunks are
+  fetched in windows of 64 and stitching stops at the character budget; section reads resolve
+  their outline once and cache it by (document id, content hash). The response shape and bytes
+  are unchanged, and tenant scope is still checked before any metadata is read (EVAL-9).
 
 ### Fixed
 

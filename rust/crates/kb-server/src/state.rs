@@ -3,7 +3,8 @@
 //! This is the composition root's only shared value: handlers receive it
 //! through axum's `State` extractor and never build an adapter themselves.
 
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use kb_core::{CalibrationTable, Confidence, ScoreEvidence, ScoreKind};
 use kb_engine::{Engine, EngineInputs, EngineSettings, NoopExpander, QueryExpander};
@@ -73,6 +74,82 @@ pub struct AppState {
     pub rerank_model_id: Option<String>,
     /// Model id used for dense and fused answers.
     pub embedding_model_id: String,
+    /// Resolved section ranges, keyed by (document id, content hash). Resolving
+    /// a section needs the whole outline, so it is the one selector that still
+    /// scans all chunk metadata (`EVAL-9`); this bounded LRU keeps repeated
+    /// reads of the same section from doing it twice.
+    pub section_ranges: Arc<SectionRangeCache>,
+}
+
+/// A bounded LRU of `document id + content hash -> section id -> chunk range`.
+///
+/// The hash is part of the key so a re-ingested document cannot inherit ranges
+/// from its old content. Only section reads consult it: page, chunk, cursor and
+/// whole-document reads go straight to the range scroll.
+pub struct SectionRangeCache {
+    inner: Mutex<CacheInner>,
+    capacity: usize,
+}
+
+#[derive(Default)]
+struct CacheInner {
+    map: HashMap<(String, String), HashMap<String, (u32, u32)>>,
+    order: VecDeque<(String, String)>,
+}
+
+impl SectionRangeCache {
+    /// Build a cache holding at most `capacity` documents.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            inner: Mutex::new(CacheInner::default()),
+            capacity,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, CacheInner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Look up every resolved section range of one document version, promoting
+    /// it to most recently used on a hit. Cloned so the caller can resolve more
+    /// than one section without holding the lock.
+    #[must_use]
+    pub fn get_document(&self, document: &str, hash: &str) -> Option<HashMap<String, (u32, u32)>> {
+        let key = (document.to_string(), hash.to_string());
+        let mut inner = self.lock();
+        let found = inner.map.get(&key).cloned();
+        if found.is_some() {
+            inner.order.retain(|entry| entry != &key);
+            inner.order.push_back(key);
+        }
+        found
+    }
+
+    /// Cache every section range of one document version.
+    pub fn insert(&self, document: &str, hash: &str, ranges: HashMap<String, (u32, u32)>) {
+        let key = (document.to_string(), hash.to_string());
+        let mut inner = self.lock();
+        inner.order.retain(|entry| entry != &key);
+        if self.capacity > 0 {
+            while inner.order.len() >= self.capacity {
+                let Some(oldest) = inner.order.pop_front() else {
+                    break;
+                };
+                inner.map.remove(&oldest);
+            }
+            inner.map.insert(key.clone(), ranges);
+            inner.order.push_back(key);
+        }
+    }
+}
+
+impl Default for SectionRangeCache {
+    fn default() -> Self {
+        Self::new(256)
+    }
 }
 
 /// Adapters a caller supplies. Grouped so tests can build a state from fakes
@@ -303,6 +380,7 @@ impl AppState {
             confidence_table,
             rerank_model_id,
             embedding_model_id,
+            section_ranges: Arc::new(SectionRangeCache::default()),
         })
     }
 
@@ -359,6 +437,7 @@ impl AppState {
             confidence_table: CalibrationTable::default(),
             rerank_model_id: None,
             embedding_model_id: String::new(),
+            section_ranges: Arc::new(SectionRangeCache::default()),
         }
     }
 

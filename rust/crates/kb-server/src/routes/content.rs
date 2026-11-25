@@ -13,6 +13,7 @@
 //! tenant, the key's knowledge-base limit and the soft-delete filter. Nothing
 //! is read from the chunk store before it passes.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -23,7 +24,7 @@ use utoipa::{IntoParams, ToSchema};
 
 use kb_core::content::{ContentCursor, StitchChunk, WindowStart, stitch_from};
 use kb_core::outline::{OutlineChunk, build_outline};
-use kb_ports::{ChunkMeta, ChunkType, DocumentFilter, ScopeRequest};
+use kb_ports::{ChunkMeta, ChunkRange, ChunkType, DocumentFilter, ScopeRequest};
 
 use crate::auth::Authed;
 use crate::error::{ApiError, ErrorBody};
@@ -33,6 +34,11 @@ use crate::state::AppState;
 pub const DEFAULT_MAX_CHARS: usize = 8_000;
 pub const MIN_CHARS: usize = 500;
 pub const MAX_CHARS: usize = 50_000;
+
+/// How many chunks one range scroll asks for before the character budget is
+/// checked again (`EVAL-9`). A large selection is read in several windows; the
+/// whole document is never scrolled to answer a bounded read.
+const FETCH_WINDOW: usize = 64;
 
 /// Degrade emitted when an old chunk has no spans and had to be appended whole.
 pub const MISSING_SPANS_DEGRADE: &str = "content: some chunks have no spans; overlap may repeat";
@@ -229,28 +235,51 @@ pub(crate) async fn get_document_content_inner(
         .clone()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| doc.updated_at.clone());
-    // One vector-free scroll backs every selector, including the outline a
-    // section id resolves through. Nothing is read before visibility passed.
-    let meta = state
-        .index
-        .list_chunk_meta(&scope, &doc.id)
-        .await
-        .map_err(ApiError::from)?;
+    // Resolve the selector before reading anything. Every selector except
+    // `section` goes straight to a bounded range scroll; resolving a section
+    // needs the whole outline, so that one scan is cached by document + hash.
     let selection = selector(&query)?;
-    let (raw_start, raw_end, continuation) = match &selection {
-        Selector::All => (0u32, u32::MAX, false),
-        Selector::Chunks(start, end) => (*start, *end, false),
+    let max_chars = query
+        .max_chars
+        .unwrap_or(DEFAULT_MAX_CHARS)
+        .clamp(MIN_CHARS, MAX_CHARS);
+    let (raw_start, raw_end, continuation, pages) = match &selection {
+        Selector::All => (0u32, u32::MAX, false, None),
+        Selector::Chunks(start, end) => (*start, *end, false, None),
         Selector::Pages(page_start, page_end) => {
             if page_start > page_end {
                 return Err(ApiError::BadRequest(
                     "pageStart must not be greater than pageEnd".to_string(),
                 ));
             }
-            (*page_start, *page_end, false)
+            // A page selection is filtered on the `page` integer index; chunk
+            // indices are resolved from what the range scroll actually served.
+            (0u32, u32::MAX, false, Some((*page_start, *page_end)))
         }
         Selector::Section(section) => {
-            let (start, end) = section_range(&doc, &meta, section)?;
-            (start, end, false)
+            let cached = state.section_ranges.get_document(&doc.id.0, &hash);
+            let ranges = match cached {
+                Some(ranges) => ranges,
+                None => {
+                    // The one selector that legitimately needs all metadata:
+                    // `build_outline` reads every chunk to find section bounds.
+                    let meta = state
+                        .index
+                        .list_chunk_meta(&scope, &doc.id)
+                        .await
+                        .map_err(ApiError::from)?;
+                    let ranges = section_ranges(&doc, &meta);
+                    state
+                        .section_ranges
+                        .insert(&doc.id.0, &hash, ranges.clone());
+                    ranges
+                }
+            };
+            let (start, end) = ranges
+                .get(section)
+                .copied()
+                .ok_or_else(|| ApiError::BadRequest(format!("unknown section: {section}")))?;
+            (start, end, false, None)
         }
         Selector::Cursor(value) => {
             let cursor = ContentCursor::decode(value)
@@ -265,39 +294,36 @@ pub(crate) async fn get_document_content_inner(
                     "document changed since cursor was issued",
                 ));
             }
-            (cursor.n, cursor.e, true)
+            (cursor.n, cursor.e, true, None)
         }
     };
 
-    let selected: Vec<&ChunkMeta> = meta
-        .iter()
-        .filter(|chunk| match &selection {
-            Selector::Pages(page_start, page_end) => chunk
-                .page
-                .is_some_and(|page| page >= *page_start && page <= *page_end),
-            _ => chunk.chunk_index >= raw_start && chunk.chunk_index <= raw_end,
-        })
-        .collect();
-    // Resolve selections to concrete chunk indices, so a cursor always carries
-    // the end of the *original* selection and `range` never reports a page
-    // number in a chunk slot.
-    let last_index = meta.last().map_or(0, |chunk| chunk.chunk_index);
-    let (start, end) = if matches!(&selection, Selector::Pages(..)) {
-        (
-            selected.first().map_or(0, |chunk| chunk.chunk_index),
-            selected.last().map_or(0, |chunk| chunk.chunk_index),
-        )
+    // Read only the requested range, in bounded windows. Stitching the whole
+    // accumulated prefix on each pass keeps the wire text byte-identical to a
+    // one-shot read, and the loop stops as soon as the budget cuts a chunk.
+    let window_start = if continuation {
+        WindowStart::Continuation
     } else {
-        (
-            raw_start,
-            if raw_end == u32::MAX {
-                last_index
-            } else {
-                raw_end
-            },
-        )
+        WindowStart::Selection
     };
-    let stitched = {
+    let mut selected: Vec<ChunkMeta> = Vec::new();
+    let mut lo = raw_start;
+    let (stitched, exhausted) = loop {
+        let range = ChunkRange {
+            chunks: Some((lo, raw_end)),
+            pages,
+        };
+        let batch = state
+            .index
+            .list_chunk_meta_range(&scope, &doc.id, range, FETCH_WINDOW)
+            .await
+            .map_err(ApiError::from)?;
+        if batch.is_empty() {
+            break (stitch_from(&[], max_chars, window_start), true);
+        }
+        let fetched = batch.len();
+        let last_fetched = batch.last().map_or(lo, |chunk| chunk.chunk_index);
+        selected.extend(batch);
         let chunks: Vec<StitchChunk> = selected
             .iter()
             .map(|meta| StitchChunk {
@@ -308,27 +334,39 @@ pub(crate) async fn get_document_content_inner(
                 overlap_prefix_len: meta.overlap_prefix_len,
             })
             .collect();
-        // A window that does not start at chunk 0 must drop the first chunk's
-        // overlap: the chunk it repeats is outside the window. Only a cursor
-        // continuation puts a hard-boundary separator at the very front.
-        let window_start = if continuation {
-            WindowStart::Continuation
-        } else {
-            WindowStart::Selection
-        };
-        stitch_from(
-            &chunks,
-            query
-                .max_chars
-                .unwrap_or(DEFAULT_MAX_CHARS)
-                .clamp(MIN_CHARS, MAX_CHARS),
-            window_start,
+        let stitched = stitch_from(&chunks, max_chars, window_start);
+        if stitched.truncated || fetched < FETCH_WINDOW || last_fetched >= raw_end {
+            break (stitched, fetched < FETCH_WINDOW || last_fetched >= raw_end);
+        }
+        lo = last_fetched.saturating_add(1);
+    };
+
+    // Resolve the selection to concrete chunk indices so a cursor always
+    // carries the end of the original selection and `range` never reports a
+    // page number in a chunk slot.
+    let (start, end) = if pages.is_some() {
+        (
+            selected.first().map_or(0, |chunk| chunk.chunk_index),
+            selected.last().map_or(0, |chunk| chunk.chunk_index),
         )
+    } else if raw_end == u32::MAX {
+        // The whole-document end is only needed for a continuation cursor. If
+        // the budget cut the read short, leave it unbounded so the cursor can
+        // keep reading to the real end instead of inventing one.
+        (
+            raw_start,
+            if exhausted {
+                selected.last().map_or(0, |chunk| chunk.chunk_index)
+            } else {
+                u32::MAX
+            },
+        )
+    } else {
+        (raw_start, raw_end)
     };
 
     let emitted: Vec<&ChunkMeta> = selected
         .iter()
-        .copied()
         .filter(|chunk| chunk.chunk_index <= stitched.last_chunk_index)
         .collect();
     let range = ContentRange {
@@ -363,12 +401,11 @@ pub(crate) async fn get_document_content_inner(
     })
 }
 
-/// Resolve a section id through the same outline v2 input as `/structure`.
-fn section_range(
-    doc: &kb_ports::DocumentMeta,
-    meta: &[ChunkMeta],
-    section: &str,
-) -> Result<(u32, u32), ApiError> {
+/// Resolve every section id through the same outline v2 input as `/structure`.
+///
+/// The result is cached by (document id, content hash) so a second section read
+/// does not pay for the full metadata scan again (`EVAL-9`).
+fn section_ranges(doc: &kb_ports::DocumentMeta, meta: &[ChunkMeta]) -> HashMap<String, (u32, u32)> {
     let chunks: Vec<OutlineChunk> = meta
         .iter()
         .map(|meta| OutlineChunk {
@@ -388,9 +425,8 @@ fn section_range(
         .and_then(|value| serde_json::from_value::<kb_core::Outline>(value.clone()).ok());
     build_outline(&chunks, stored.as_ref())
         .into_iter()
-        .find(|candidate| candidate.id == section)
-        .map(|candidate| (candidate.chunk_start, candidate.chunk_end))
-        .ok_or_else(|| ApiError::BadRequest(format!("unknown section: {section}")))
+        .map(|candidate| (candidate.id, (candidate.chunk_start, candidate.chunk_end)))
+        .collect()
 }
 
 /// Figures come from the chunks we just emitted; tables from the table store,
