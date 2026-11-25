@@ -1199,7 +1199,9 @@ pub fn coverage_note(arm: Arm) -> &'static str {
         }
         Arm::Entity => "GET /v1/documents/:id/intelligence for a document id",
         Arm::Content => "GET /v1/documents/:id/content for a document id: the stitched text",
-        Arm::Structure => "GET /v1/documents/:id/structure for a document id: pages, chunks, outline",
+        Arm::Structure => {
+            "GET /v1/documents/:id/structure for a document id: pages, chunks, outline"
+        }
         Arm::Mcp => {
             "POST /mcp tools/call kb_search and kb_read for a canary/document id; UNTESTED \
              with a reason when the server does not mount /mcp"

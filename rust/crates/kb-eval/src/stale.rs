@@ -48,7 +48,10 @@ pub fn stale_statements() -> [(&'static str, &'static str); 5] {
         (soft_delete_sql(), "soft-delete E without a repair"),
         (set_acl_sql(), "ACL F without a repair"),
         (delete_outbox_sql(), "suppress the outbox repair"),
-        (insert_key_sql(), "mint the KB-limited / principal-less keys"),
+        (
+            insert_key_sql(),
+            "mint the KB-limited / principal-less keys",
+        ),
     ]
 }
 
@@ -67,9 +70,7 @@ pub fn mint_key(tenant: &str, nonce: &str) -> String {
 /// When `/mcp` cannot be probed, say why rather than marking it a pass.
 pub fn mcp_unavailable(status: u16, body: &Value) -> Option<String> {
     if status == 404 || status == 405 {
-        return Some(
-            "/mcp answered 404/405: the endpoint is not mounted (KB_MCP=off)".to_string(),
-        );
+        return Some("/mcp answered 404/405: the endpoint is not mounted (KB_MCP=off)".to_string());
     }
     if let Some(error) = body.get("error") {
         let code = error.get("code").and_then(Value::as_i64).unwrap_or(0);
@@ -105,6 +106,8 @@ pub struct StaleTargets {
     /// Document moved from `moved_from_kb` to another KB in Postgres only (D).
     pub moved: String,
     pub moved_from_kb: String,
+    /// KB D is moved into; it must already exist in D's tenant (foreign key).
+    pub moved_to_kb: String,
     /// Soft-deleted document (E).
     pub deleted: String,
     /// ACL'd document, invisible without a principal (F).
@@ -130,6 +133,11 @@ pub fn pick_targets(documents: &[SeedDocument]) -> Option<StaleTargets> {
     let first_prose = prose(first);
     let moved = *first_prose.first()?;
     let deleted = first_prose.iter().find(|d| d.id != moved.id).copied()?;
+    let moved_to_kb = documents
+        .iter()
+        .find(|d| d.tenant == first && d.knowledge_base_id != moved.knowledge_base_id)?
+        .knowledge_base_id
+        .clone();
     let acl = documents
         .iter()
         .find(|d| d.tenant == second && !d.table_ids.is_empty())
@@ -137,6 +145,7 @@ pub fn pick_targets(documents: &[SeedDocument]) -> Option<StaleTargets> {
     Some(StaleTargets {
         moved: moved.id.clone(),
         moved_from_kb: moved.knowledge_base_id.clone(),
+        moved_to_kb,
         deleted: deleted.id.clone(),
         acl: acl.id.clone(),
         principal: "user:42".to_string(),
@@ -167,19 +176,14 @@ pub struct StaleKeys {
 
 /// Build the targeted matrix: every arm × (D, E, F), each with a positive
 /// control from a sibling the caller may still see.
-pub fn build_stale_plan(
-    base: &SeedPlan,
-    targets: &StaleTargets,
-    keys: &StaleKeys,
-) -> SeedPlan {
+pub fn build_stale_plan(base: &SeedPlan, targets: &StaleTargets, keys: &StaleKeys) -> SeedPlan {
     let mut scopes = base.scopes.clone();
     for scope in &mut scopes {
         scope.allowed.retain(|id| {
             if id == &targets.deleted || id == &targets.acl {
                 return false;
             }
-            !(id == &targets.moved
-                && scope.knowledge_base_ids.contains(&targets.moved_from_kb))
+            !(id == &targets.moved && scope.knowledge_base_ids.contains(&targets.moved_from_kb))
         });
     }
 
@@ -251,8 +255,7 @@ pub fn build_stale_plan(
                 .allowed
                 .iter()
                 .filter_map(|id| base.document(id))
-                .filter(|d| d.id != *target_id && has_the_right_corpus(d, arm))
-                .next()
+                .find(|d| d.id != *target_id && has_the_right_corpus(d, arm))
             {
                 probes.push(PlannedProbe {
                     arm,
@@ -299,7 +302,11 @@ mod tests {
             n_chunks: 2,
             has_figures: false,
             figure_asset_key: None,
-            table_ids: if table { vec![format!("{id}_t0")] } else { Vec::new() },
+            table_ids: if table {
+                vec![format!("{id}_t0")]
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -307,8 +314,13 @@ mod tests {
         let documents = vec![
             doc("a-kb0", "A", "kb0", false),
             doc("a-kb1", "A", "kb1", false),
+            doc("a-kb1b", "A", "kb1", false),
+            doc("a-kb1-table", "A", "kb1", true),
             doc("a-kb0b", "A", "kb0", false),
+            doc("a-kb0-table", "A", "kb0", true),
+            doc("b-kb0", "B", "kb0", false),
             doc("b-kb0-table", "B", "kb0", true),
+            doc("b-kb0-table2", "B", "kb0", true),
             doc("b-kb1", "B", "kb1", false),
         ];
         crate::leak::plan(documents)
@@ -340,23 +352,33 @@ mod tests {
 
     #[test]
     fn an_unmounted_mcp_is_reported_not_counted_as_a_pass() {
-        assert!(mcp_unavailable(404, &serde_json::Value::Null).unwrap().contains("KB_MCP"));
+        assert!(
+            mcp_unavailable(404, &serde_json::Value::Null)
+                .unwrap()
+                .contains("KB_MCP")
+        );
         assert!(mcp_unavailable(405, &serde_json::Value::Null).is_some());
         assert!(mcp_unavailable(
             200,
             &serde_json::json!({"error": {"code": -32601, "message": "Method not found: tools/call"}})
         )
         .is_some());
-        assert!(mcp_unavailable(
-            200,
-            &serde_json::json!({"result": {"structuredContent": {"documentId": "x"}}})
-        )
-        .is_none());
+        assert!(
+            mcp_unavailable(
+                200,
+                &serde_json::json!({"result": {"structuredContent": {"documentId": "x"}}})
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn forbidden_ids_are_classified_once_each() {
-        let answer = vec!["a-kb0".to_string(), "a-kb1".to_string(), "a-kb0".to_string()];
+        let answer = vec![
+            "a-kb0".to_string(),
+            "a-kb1".to_string(),
+            "a-kb0".to_string(),
+        ];
         assert_eq!(
             forbidden_in(&answer, &["a-kb0".to_string(), "a-kb1".to_string()]),
             vec!["a-kb0".to_string(), "a-kb1".to_string()]
@@ -370,6 +392,7 @@ mod tests {
         let targets = pick_targets(&plan.documents).unwrap();
         assert_eq!(targets.moved, "a-kb0");
         assert_eq!(targets.moved_from_kb, "kb0");
+        assert_eq!(targets.moved_to_kb, "kb1");
         assert_eq!(targets.deleted, "a-kb1");
         assert_eq!(targets.acl, "b-kb0-table");
         assert_eq!(targets.principal, "user:42");

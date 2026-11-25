@@ -966,12 +966,11 @@ pub async fn probe(
                 leaked.push(id.clone());
             }
         }
-        if probe.kind == ProbeKind::Mcp {
-            if let Some(note) = &outcome.answer.note
-                && !matrix.notes.contains(note)
-            {
-                matrix.notes.push(note.clone());
-            }
+        if probe.kind == ProbeKind::Mcp
+            && let Some(note) = &outcome.answer.note
+            && !matrix.notes.contains(note)
+        {
+            matrix.notes.push(note.clone());
         }
         matrix.record(Observation {
             arm: probe.arm,
@@ -1533,17 +1532,11 @@ async fn inject_stale(
             .find(|d| d.id == id)
             .map_or_else(String::new, |d| d.tenant.clone())
     };
-    let kb_of = |id: &str| {
-        documents
-            .iter()
-            .find(|d| d.id == id)
-            .map_or_else(String::new, |d| d.knowledge_base_id.clone())
-    };
 
     // (a) D leaves KB-1 in Postgres only; Qdrant still says KB-1.
     sqlx::query(crate::stale::move_kb_sql())
         .bind(&targets.moved)
-        .bind(kb_of(&targets.deleted))
+        .bind(&targets.moved_to_kb)
         .bind(&targets.moved_from_kb)
         .execute(&pool)
         .await?;
@@ -1555,7 +1548,7 @@ async fn inject_stale(
     // (c) F gets an ACL in Postgres only.
     sqlx::query(crate::stale::set_acl_sql())
         .bind(&targets.acl)
-        .bind(&[targets.principal.clone()])
+        .bind(std::slice::from_ref(&targets.principal))
         .execute(&pool)
         .await?;
     // No outbox row may heal any of the three before the probes run.
@@ -1599,7 +1592,7 @@ async fn inject_stale(
         &tenant_of(&targets.moved),
         "kb-limited",
         &["kb:read"],
-        &[targets.moved_from_kb.clone()],
+        std::slice::from_ref(&targets.moved_from_kb),
     )
     .await?;
     let plain_first = mint(
@@ -1621,16 +1614,21 @@ async fn inject_stale(
         plain_first,
         plain_second,
     };
-    let plan = crate::stale::build_stale_plan(&crate::leak::plan(documents.to_vec()), &targets, &keys);
+    let plan =
+        crate::stale::build_stale_plan(&crate::leak::plan(documents.to_vec()), &targets, &keys);
     let notes = vec![
         format!(
-            "stale drift injected in Postgres only: D={} moved {} -> another KB, E={} soft-deleted, F={} ACL'd with {}",
-            targets.moved, targets.moved_from_kb, targets.deleted, targets.acl, targets.principal
+            "stale drift injected in Postgres only: D={} moved {} -> {}, E={} soft-deleted, F={} ACL'd with {}",
+            targets.moved,
+            targets.moved_from_kb,
+            targets.moved_to_kb,
+            targets.deleted,
+            targets.acl,
+            targets.principal
         ),
         "no Qdrant payload was changed and every ScopeOutbox row for D/E/F was deleted".to_string(),
-        format!(
-            "F's tenant has an ACL'd document, so predicate mode is disabled there: its probes exercise the Ids path (KB_SCOPE_ID_LIMIT is ignored)"
-        ),
+        "F's tenant has an ACL'd document, so predicate mode is disabled there: its probes exercise the Ids path (KB_SCOPE_ID_LIMIT is ignored)"
+            .to_string(),
     ];
     Ok((plan, notes))
 }

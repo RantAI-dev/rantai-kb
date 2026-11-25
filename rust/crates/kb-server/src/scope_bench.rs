@@ -10,21 +10,21 @@
 //!
 //! The target is `predicate p95(100k) <= 1.2 x predicate p95(1k)`.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use qdrant_client::Payload;
-use qdrant_client::qdrant::{Condition, DeletePointsBuilder, Filter, MatchValue, Value};
+use qdrant_client::qdrant::{Condition, DeletePointsBuilder, Filter, r#match::MatchValue};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 use sqlx::{PgPool, QueryBuilder, query};
 
 use crate::cli::CliError;
 use crate::config::Config;
-use kb_ports::{ChunkId, ChunkType, DocumentId, IndexUnit, KnowledgeBaseId, RetrievalIndex, TenantId};
+use kb_ports::{
+    ChunkId, ChunkType, DocumentId, IndexUnit, KnowledgeBaseId, RetrievalIndex, TenantId,
+};
 use kb_store_pg::{NewApiKey, PgSettings, connect_pool, generate_api_key, insert_api_key};
-use kb_store_qdrant::payload::{KEY_CHUNK_INDEX, KEY_CONTENT, KEY_DOCUMENT_ID, KEY_KNOWLEDGE_BASE_ID, KEY_PAGE, KEY_TENANT_ID, candidate_from, unit_payload};
+use kb_store_qdrant::payload::KEY_TENANT_ID;
 use kb_store_qdrant::{QdrantIndex, QdrantSettings};
 
 /// Default scope sizes, in documents per synthetic tenant.
@@ -91,7 +91,7 @@ pub fn parse_sizes(raw: &str) -> Result<Vec<usize>, String> {
     if sizes.is_empty() {
         return Err("--sizes cannot be empty".to_string());
     }
-    if sizes.iter().any(|n| *n == 0) {
+    if sizes.contains(&0) {
         return Err("--sizes must contain positive integers".to_string());
     }
     Ok(sizes)
@@ -116,7 +116,7 @@ impl Prng {
         Self(seed | 1)
     }
 
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         let mut x = self.0;
         x ^= x << 13;
         x ^= x >> 7;
@@ -126,7 +126,7 @@ impl Prng {
     }
 
     pub fn below(&mut self, n: usize) -> usize {
-        (self.next() % n as u64) as usize
+        (self.next_u64() % n as u64) as usize
     }
 }
 
@@ -141,7 +141,7 @@ pub fn bench_unit(
     random: &mut Prng,
 ) -> IndexUnit {
     let mut dense: Vec<f32> = (0..dim)
-        .map(|_| (random.next() % 10_000) as f32 / 10_000.0)
+        .map(|_| (random.next_u64() % 10_000) as f32 / 10_000.0)
         .collect();
     let norm = dense.iter().map(|v| v * v).sum::<f32>().sqrt();
     if norm > 0.0 {
@@ -168,14 +168,6 @@ pub fn bench_unit(
     }
 }
 
-/// Read a payload value as a string, for the pure payload test.
-fn payload_string(payload: &HashMap<String, Value>, key: &str) -> Option<String> {
-    match payload.get(key)?.kind.as_ref()? {
-        qdrant_client::qdrant::value::Kind::StringValue(s) => Some(s.clone()),
-        _ => None,
-    }
-}
-
 /// The PASS/MISS/NOT_RUN verdict and its explanation.
 pub fn verdict(results: &ResultsFile) -> (String, String) {
     let predicate: Vec<&BenchRow> = results
@@ -196,7 +188,10 @@ pub fn verdict(results: &ResultsFile) -> (String, String) {
         predicate.iter().find(|r| r.size == small_size),
         predicate.iter().find(|r| r.size == big_size),
     ) else {
-        return ("NOT_RUN".to_string(), "predicate rows are missing".to_string());
+        return (
+            "NOT_RUN".to_string(),
+            "predicate rows are missing".to_string(),
+        );
     };
     if small.size >= big.size || small.p95_ms <= 0.0 {
         return (
@@ -242,7 +237,9 @@ pub fn render_report(results: &ResultsFile) -> String {
     out.push_str("\n## How to run the two passes\n\n");
     out.push_str("1. Start the server with `KB_SCOPE_ID_LIMIT=0`, then run `kb-server eval scope-bench --mode-label ids ...`.\n");
     out.push_str("2. Restart it with `KB_SCOPE_ID_LIMIT=2000`, then run the same command with `--mode-label predicate` against the same `--out` dir.\n");
-    out.push_str("3. Re-read this report: the verdict is only PASS/MISS once both passes have rows.\n");
+    out.push_str(
+        "3. Re-read this report: the verdict is only PASS/MISS once both passes have rows.\n",
+    );
     for note in &results.notes {
         out.push_str(&format!("\n- note: {note}\n"));
     }
@@ -251,7 +248,7 @@ pub fn render_report(results: &ResultsFile) -> String {
 
 /// Parse the CLI. All arguments are `--flag value` pairs; `--keep` is a switch.
 fn parse_args(args: &[String]) -> Result<ScopeBenchConfig, CliError> {
-    let mut value = |name: &str| -> Option<String> {
+    let value = |name: &str| -> Option<String> {
         let idx = args.iter().position(|a| a == name)?;
         let next = args.get(idx + 1)?;
         if next.starts_with("--") || next.trim().is_empty() {
@@ -371,30 +368,42 @@ async fn measure_size(
             r#"INSERT INTO "DocumentGroup" ("id", "documentId", "knowledgeBaseId", "createdAt") "#,
         );
         let mut units = Vec::with_capacity(end - inserted);
+        let mut rows: Vec<(String, String)> = Vec::with_capacity(end - inserted);
         for i in inserted..end {
             let document = format!("bench-{run_id}-{size}-{i}");
             let token = format!("scopebench{run_id}{size}t{i}");
-            docs.push_values(std::iter::once(&i), |mut b, _| {
-                b.push_bind(&document)
-                    .push_bind(&tenant)
-                    .push_bind(&token)
-                    .push_bind(&token)
-                    .push_bind(Vec::<String>::new())
-                    .push_bind("ready")
-                    .push_bind(&token)
-                    .push_bind(chrono::Utc::now().naive_utc())
-                    .push_bind(chrono::Utc::now().naive_utc())
-                    .push_bind(true)
-                    .push_bind(Vec::<String>::new());
-            });
-            groups.push_values(std::iter::once(&i), |mut b, _| {
-                b.push_bind(format!("{document}-g"))
-                    .push_bind(&document)
-                    .push_bind(&kb_id)
-                    .push_bind(chrono::Utc::now().naive_utc());
-            });
-            units.push(bench_unit(&tenant, &document, &kb_id, &token, dim, &mut random));
+            units.push(bench_unit(
+                &tenant,
+                &document,
+                &kb_id,
+                &token,
+                dim,
+                &mut random,
+            ));
+            rows.push((document, token));
         }
+        let now = chrono::Utc::now().naive_utc();
+        // Owned binds: `push_bind` keeps the value, so no per-row borrow can
+        // outlive the batch's QueryBuilder.
+        docs.push_values(rows.iter(), |mut b, (document, token)| {
+            b.push_bind(document.clone())
+                .push_bind(tenant.clone())
+                .push_bind(token.clone())
+                .push_bind(token.clone())
+                .push_bind(Vec::<String>::new())
+                .push_bind("ready")
+                .push_bind(token.clone())
+                .push_bind(now)
+                .push_bind(now)
+                .push_bind(true)
+                .push_bind(Vec::<String>::new());
+        });
+        groups.push_values(rows.iter(), |mut b, (document, _)| {
+            b.push_bind(format!("{document}-g"))
+                .push_bind(document.clone())
+                .push_bind(kb_id.clone())
+                .push_bind(now);
+        });
         docs.build()
             .execute(pool)
             .await
@@ -416,15 +425,18 @@ async fn measure_size(
     let mut errors = 0usize;
     let mut query_random = Prng::new(0xBEEF ^ size as u64 ^ (run_id.len() as u64));
     for _ in 0..config.queries {
-        let token = format!(
-            "scopebench{run_id}{size}t{}",
-            query_random.below(size)
-        );
+        let token = format!("scopebench{run_id}{size}t{}", query_random.below(size));
         let body = json!({"query": token, "maxChunks": 8});
         let start = Instant::now();
         let response = client
-            .post(format!("{}/v1/search", config.base_url.trim_end_matches('/')))
-            .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", key.plaintext))
+            .post(format!(
+                "{}/v1/search",
+                config.base_url.trim_end_matches('/')
+            ))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("Bearer {}", key.plaintext),
+            )
             .json(&body)
             .send()
             .await;
@@ -432,9 +444,7 @@ async fn measure_size(
         match response {
             Ok(response) if response.status().is_success() => {
                 let parsed: Json = response.json().await.unwrap_or(Json::Null);
-                let d = parsed["stats"]["scopeVerifyDropped"]
-                    .as_u64()
-                    .unwrap_or(0) as f64;
+                let d = parsed["stats"]["scopeVerifyDropped"].as_u64().unwrap_or(0) as f64;
                 dropped += d;
                 samples.push(elapsed);
             }
@@ -491,7 +501,7 @@ async fn cleanup_size(
         .delete_points(
             DeletePointsBuilder::new(collection)
                 .wait(true)
-                .filter(filter),
+                .points(filter),
         )
         .await
         .map_err(|e| CliError::Failed(format!("qdrant cleanup: {e}")))?;
@@ -522,7 +532,10 @@ pub async fn run(config: ScopeBenchConfig) -> Result<ResultsFile, CliError> {
 
     let mut rows = Vec::new();
     for size in &config.sizes {
-        eprintln!("scope-bench: seeding {size} documents ({})…", config.mode_label);
+        eprintln!(
+            "scope-bench: seeding {size} documents ({})…",
+            config.mode_label
+        );
         let row = measure_size(
             &pool,
             &index,
@@ -584,7 +597,10 @@ fn merge_results(out_dir: &Path, results: &mut ResultsFile) -> Result<(), CliErr
         return Ok(());
     };
     let Ok(previous) = serde_json::from_str::<ResultsFile>(&text) else {
-        results.notes.push(format!("could not read earlier {}: rows from this pass stand alone", path.display()));
+        results.notes.push(format!(
+            "could not read earlier {}: rows from this pass stand alone",
+            path.display()
+        ));
         return Ok(());
     };
     let mut rows: Vec<BenchRow> = previous
@@ -614,6 +630,22 @@ impl ResultsFile {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use kb_store_qdrant::payload::{
+        KEY_CHUNK_INDEX, KEY_CONTENT, KEY_DOCUMENT_ID, KEY_KNOWLEDGE_BASE_ID, KEY_PAGE,
+        candidate_from, unit_payload,
+    };
+    use qdrant_client::Payload;
+    use qdrant_client::qdrant::Value;
+
+    /// Read a payload value as a string, for the pure payload test.
+    fn payload_string(payload: &HashMap<String, Value>, key: &str) -> Option<String> {
+        match payload.get(key)?.kind.as_ref()? {
+            qdrant_client::qdrant::value::Kind::StringValue(s) => Some(s.clone()),
+            _ => None,
+        }
+    }
 
     #[test]
     fn sizes_parse_as_a_comma_list_and_reject_zero() {
@@ -641,9 +673,12 @@ mod tests {
         let mut a = Prng::new(42);
         let mut b = Prng::new(42);
         for _ in 0..100 {
-            assert_eq!(a.next(), b.next());
+            assert_eq!(a.next_u64(), b.next_u64());
         }
-        assert_ne!(Prng::new(42).below(1000), Prng::new(43).below(1000));
+        assert_ne!(
+            Prng::new(42).next_u64(),
+            Prng::new(0x9E37_79B9_7F4A_7C15).next_u64()
+        );
     }
 
     #[test]
@@ -662,9 +697,18 @@ mod tests {
         assert!((norm - 1.0).abs() < 1e-4, "not normalised: {norm}");
         let payload: Payload = unit_payload(&unit);
         let map: HashMap<String, Value> = payload.into();
-        assert_eq!(payload_string(&map, KEY_TENANT_ID).as_deref(), Some("tenant-a"));
-        assert_eq!(payload_string(&map, KEY_DOCUMENT_ID).as_deref(), Some("doc-1"));
-        assert_eq!(payload_string(&map, KEY_CONTENT).as_deref(), Some("scopebench-token"));
+        assert_eq!(
+            payload_string(&map, KEY_TENANT_ID).as_deref(),
+            Some("tenant-a")
+        );
+        assert_eq!(
+            payload_string(&map, KEY_DOCUMENT_ID).as_deref(),
+            Some("doc-1")
+        );
+        assert_eq!(
+            payload_string(&map, KEY_CONTENT).as_deref(),
+            Some("scopebench-token")
+        );
         assert!(map.contains_key(KEY_KNOWLEDGE_BASE_ID), "kb array written");
         assert!(map.contains_key(KEY_CHUNK_INDEX));
         assert!(map.contains_key(KEY_PAGE));
