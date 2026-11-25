@@ -208,3 +208,113 @@ The three outputs are `results.json` (both coverages, the rank distribution and 
 table), `per_question.jsonl` (the new fields above) and `report.md` (both gates with PASS/MISS).
 Part A's diagnosis — search rank vs. reader choice — is read off those per-question fields; no
 paid call is made by the harness.
+
+## EVAL-9 live run (2026-11-25, GB10)
+
+**Status: measured. Primary target MISSED; `/content` p95 PASS.** Setup: branch
+`bench/v1-measure` @ `231a25bf` (`origin/main`), fresh release kb-server in
+`~/kb-target-v1m` (10m 54s build), run natively on the host against our own
+`stack-up.sh` stack (`KB_STACK_NAME=v1mhr`, kb-server `http://127.0.0.1:28091`,
+Postgres 25443, Qdrant 26345/26346, cache `~/v1m/cache-hr`). The **already running**
+Nemotron at `127.0.0.1:8210` embedded the HR corpus (`omniembed`, 2048-d) and
+qwen3-rerank-0.6B at `127.0.0.1:8122` reranked (`serve.sh up qwen3-rerank-0.6b`).
+The page-image arm was pinned off with `KB_PAGE_EMBEDDING_MODEL=''` after
+`stack-up.sh` wrote `stack.env` (otherwise the studio tier re-enables it);
+breadcrumbs off, no cap, as in the 2026-11-25 baseline. The corpus was re-ingested
+with the new binary into the fresh stack (`~/v1m/results/m1-hr/base/ingest-map.json`,
+`missing_doc = 0`); the harness then read the same 318 labelled questions.
+
+Wrapper `~/v1m/run-m1-disclosure.sh`, stdout `~/v1m/logs/m1-disclosure.out`.
+Raw stdout excerpt:
+
+```text
+disclosure: 318 questions, answer-page coverage 0.522 [0.469, 0.575], all-pages coverage 0.238 [0.206, 0.269], chars read/gold 1.353, content p95 5.5 ms
+targets: answer-page MISS (primary) · chars PASS · all-pages MISS (secondary) · content p95 PASS
+wrote results.json, per_question.jsonl, report.md
+```
+
+| Measure | Value | Target | Verdict |
+|---|---:|---|---|
+| **answer_page_coverage** (318 questions) | **0.522 [0.469, 0.575]** | ≥ 0.80 | **MISS** |
+| single_gold_coverage (71 single-gold questions) | 0.141 [0.070, 0.225] | (diagnostic) | — |
+| coverage, all gold pages (secondary) | 0.238 [0.206, 0.269] | ≥ 0.90 | MISS |
+| chars read / gold chars | 1.353 [1.314, 1.387] | ≤ 1.5× | PASS |
+| `/content` p95 | **5.5 ms** | < 50 ms | PASS |
+
+`best_gold_rank` (top-k=5): rank 1: 178, rank 2: 31, rank 3: 31, rank 4: 20,
+rank 5: 8; no gold in the top 5: 50; mean rank among top-5 hits 1.69. The
+per-question `hits` list is longer than 5 (15 entries): across all 318 questions
+40 have no gold hit at any recorded rank and 10 have their first gold hit at
+rank 8–15.
+
+Per-endpoint client latency (ms, `results.json`; `/structure` n = 14 cached
+documents, `/content` n = 3838 reads, `/v1/search` n = 318):
+
+| endpoint | p50 | p95 | p99 | n |
+|---|---:|---:|---:|---:|
+| `/v1/search` | 10.9 | 19.4 | 23.6 | 318 |
+| `/v1/documents/:id/structure` | 12.9 | 41.1 | 41.2 | 14 |
+| `/v1/documents/:id/content` | 3.6 | **5.5** | 6.2 | 3838 |
+
+`/content` p95 fell from **60.4 ms → 5.5 ms** on the same corpus and question
+set; the answer-page gate still misses (0.522 < 0.80). The first `eval` query
+run warmed the rerank disk cache in `~/v1m/cache-hr` before the disclosure run,
+so the `/v1/search` samples are warm-cache measurements.
+
+### Diagnosis of the 152 questions with `answer_page_hit = 0`
+
+Classified from `per_question.jsonl` (`best_gold_rank` there is over all recorded
+hits, not just the top 5):
+
+- **(a) no gold page among the search hits (`best_gold_rank` null): 36**
+- **(b) a gold page was among the hits but the reader did not read it fully: 116**
+
+Within (b) the first gold hit was rank 1 for 50 questions, rank 2 for 20, rank 3
+for 22, rank 4 for 12, rank 5 for 5, and rank 8–15 for 7. So the dominant cause
+is the reader spending its 1.5× budget on sections that omit the gold page, not
+search failing to surface it. Three verbatim examples of each (full `hits` and
+`pages_read` arrays are in `~/v1m/results/m4-disclosure-eval9/diagnosis.txt`):
+
+```text
+(a) no gold hit
+--- 1: What drives the rise in women's workforce involvement in EU nations such as Germany?
+    covered=0/14 best_gold_rank=None chars_read=68106 chars_ratio=1.138
+    hits: rank1 doc 7565e68d-… page 6 gold=false, rank2 doc f2343726-… page 67 gold=false,
+          rank3/4/5 doc e01449b3-… pages 55/61/13 gold=false (15 hits, all gold=false)
+    pages_read: section:s4 doc 7565e68d-… chunks 13-13 pages 6-6 chars 728;
+                section:s14 doc f2343726-… chunks 418-477 pages 67-72 (5 reads, 37k chars);
+                section:s27/s29/s3 doc e01449b3-… pages 55-57, 61-62, 12-13 (5 reads, 26k chars)
+--- 21: Compare adult learning participation rates between tertiary-educated adults and those with lower education in the EU.
+    covered=0/2 best_gold_rank=None chars_read=12309 chars_ratio=1.500
+    hits: rank1 doc f2343726-… page 55, rank2 doc e01449b3-… page 45, rank3 doc f2343726-… page 57,
+          rank4 rank1 again, rank5 doc e01449b3-… page 12 (15 hits, all gold=false)
+    pages_read: section:s13 doc f2343726-… chunks 292-304 pages 48-50 chars 7737;
+                section:s13 chunks 305-315 pages 50-51 chars 4572
+--- 22: How do the trends in EU citizen mobility compare to those of third-country nationals in terms of inflows and net mobility between 2021 and 2022?
+    covered=0/2 best_gold_rank=None chars_read=5112 chars_ratio=1.500
+    hits: all 10 hits on doc 90abe182-… pages 28/25/25/24/28/… gold=false
+    pages_read: section:s26 chunks 106-109 page 28 chars 2793;
+                section:s24 chunks 90-92 page 24 chars 2129; section:s24 chunks 93-94 pages 24-25 chars 190
+
+(b) gold hit, reader missed
+--- 4: estimated skilled labor needs for EU green transition by 2030
+    covered=0/2 best_gold_rank=3 chars_read=10347 chars_ratio=1.500
+    hits: rank3 and rank10 doc d124a3f7-… page 2 gold=true (15 hits)
+    pages_read: section:s19 chunks 106-117 pages 26-28 chars 7965;
+                section:s19 chunks 118-120 page 29 chars 2062;
+                section:s1 chunks 0-1 pages 0-1 chars 320  (gold page 2 never read)
+--- 6: How might the observed trends in top-end income inequality (S80/S50) relate to broader economic shifts in high-income households during the pandemic recovery?
+    covered=0/1 best_gold_rank=1 chars_read=7218 chars_ratio=1.500
+    hits: rank1/6/7 doc f2343726-… page 96 gold=true; ranks 2/8/9 doc 90abe182-… page 97 gold=false;
+          ranks 3/4/5/10/11/12/13/14 doc e01449b3-… pages 31/39/40 gold=false; rank15 page 41 gold=false
+    pages_read: section:s19 doc f2343726-… chunks 584-594 pages 88-89 chars 7186;
+                section:s19 chunks 595-605 pages 89-91 chars 32 (gold page 96 never read)
+--- 7: difference in labor productivity growth between eu and us in q4 2024 percentage points
+    covered=0/1 best_gold_rank=1 chars_read=5352 chars_ratio=1.500
+    hits: rank1/6/7 doc c47bf43c-… page 6 gold=true; all other 12 hits doc 9b5e7c69-… pages 31/64/32 gold=false
+    pages_read: section:s5 doc c47bf43c-… chunks 18-23 pages 5-6 chars 4922;
+                section:s5 chunks 24-25 page 6 chars 430 (page 6 section truncated before gold text)
+```
+
+Raw artifacts: `~/v1m/results/m4-disclosure-eval9/{results.json,report.md,per_question.jsonl,diagnosis.txt}`.
+No paid call was made. Both missed targets are reported, not hidden.
