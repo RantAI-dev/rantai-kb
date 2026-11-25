@@ -84,7 +84,8 @@ fn the_qdrant_collection_name_is_the_model_and_the_width() {
     let (settings, override_name) = Config::qdrant_from_lookup(
         &|k: &str| (k == "KB_EMBEDDING_DIM").then(|| "8".to_string()),
         "stub",
-    );
+    )
+    .expect("qdrant settings");
     assert_eq!(settings.dense_dims, Some(8));
     assert_eq!(settings.url, "http://127.0.0.1:16334");
     assert_eq!(settings.collection_name(), "chunks__stub__8");
@@ -97,11 +98,33 @@ fn the_qdrant_collection_name_is_the_model_and_the_width() {
                 .or_else(|| (k == "QDRANT_COLLECTION").then(|| "operator_chunks".to_string()))
         },
         "Qwen/Qwen3-Embedding-0.6B",
-    );
+    )
+    .expect("qdrant settings");
     assert_eq!(override_name.as_deref(), Some("operator_chunks"));
     assert_eq!(
         settings.collection_name(),
         "chunks__qwen-qwen3-embedding-0-6b__1024"
+    );
+}
+
+#[test]
+fn quantization_defaults_to_off_and_rejects_unknown_values_at_startup() {
+    let (settings, _) =
+        Config::qdrant_from_lookup(&|_| None, "stub").expect("default qdrant settings");
+    assert_eq!(
+        settings.quantization,
+        kb_store_qdrant::QuantizationMode::Off
+    );
+    assert_eq!(settings.quant_oversampling, 2.0);
+    assert!(settings.quant_rescore);
+
+    let lookup = |key: &str| match key {
+        "KB_QDRANT_QUANTIZATION" => Some("turbo".to_string()),
+        _ => None,
+    };
+    assert!(
+        Config::qdrant_from_lookup(&lookup, "stub").is_err(),
+        "an unknown mode must stop startup, not silently index float32"
     );
 }
 

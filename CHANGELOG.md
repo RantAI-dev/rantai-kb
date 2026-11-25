@@ -56,6 +56,7 @@
 
 ### Added
 
+- **Opt-in Qdrant quantization and the `eval quant-bench` tool (RET-20).** `KB_QDRANT_QUANTIZATION=off|scalar|binary` (default `off`; unknown values fail startup), with `KB_QDRANT_QUANT_OVERSAMPLING` (default 2.0, clamped 1.0..8.0) and `KB_QDRANT_QUANT_RESCORE` (default true). Scalar/binary config is attached to the dense vector **only at collection creation**; existing collections are never reconfigured, and a mismatch logs a warning pointing at a new collection plus `kb-server reindex`. Quantized dense searches set `QuantizationSearchParams { rescore, oversampling }`; with quantization off the search request is unchanged. `kb-server eval quant-bench` creates throwaway collections, measures p50/p95 latency and recall@20 against exact float32, and writes `results.json` / `report.md`. See `docs/eval-ab/quantization/README.md`; the 1M-chunk run has not been executed.
 - **`maxPerDocument` diversity cap on `/v1/search` (RET-17).** An additive body field (integer
   `1..=50`, `400` outside that range) keeps at most N chunks from any one document: the engine
   walks the reranked list after rerank and before the final `maxChunks` cut, drops surplus hits

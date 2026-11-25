@@ -206,6 +206,11 @@ USAGE
     {program} eval ocr --pdfs F --root D --out D  Read the first page of every listed PDF through
                                                  the OCR router and write <out>/<name>.md
                                                  [--html] [--concurrency N]
+    {program} eval quant-bench [--qdrant-url URL] [--collection-prefix qb]
+                                                 [--points N] [--dim N] [--queries N] [--seed N]
+                                                 [--modes off,scalar,binary] --out DIR [--keep]
+                                                 Compare Qdrant quantization modes on throwaway
+                                                 collections; writes results.json and report.md
     {program} bench search --base-url URL --queries F  Closed-loop load test for /v1/search
     {program} openapi [--stateless]            Print the OpenAPI 3.1 document to stdout (the same
                                                document GET /openapi.json serves and the Swagger UI
@@ -465,7 +470,8 @@ async fn apply_schema() -> Result<(), CliError> {
     let model = lookup("KB_EMBEDDING_MODEL")
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| "qwen/qwen3-embedding-8b".to_string());
-    let (settings, collection_override) = Config::qdrant_from_lookup(&lookup, &model);
+    let (settings, collection_override) =
+        Config::qdrant_from_lookup(&lookup, &model).map_err(|e| CliError::Failed(e.to_string()))?;
     let collection = collection_override.unwrap_or_else(|| settings.collection_name());
     let client = settings
         .client()
@@ -514,6 +520,9 @@ async fn eval(args: &[String]) -> Result<(), CliError> {
     // needs `kb-extract` — a crate the black-box `kb-eval` may not link.
     if args.first().map(String::as_str) == Some("ocr") {
         return crate::eval_ocr::run(&args[1..]).await;
+    }
+    if args.first().map(String::as_str) == Some("quant-bench") {
+        return crate::quant_bench::run(&args[1..]).await;
     }
     kb_eval::run(args).await.map_err(|err| match err {
         kb_eval::EvalError::Usage(message) => CliError::Usage(message),

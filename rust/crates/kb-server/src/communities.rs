@@ -721,7 +721,8 @@ fn build_index() -> Result<Arc<dyn RetrievalIndex>, CliError> {
     let model = lookup("KB_EMBEDDING_MODEL")
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "qwen/qwen3-embedding-8b".to_string());
-    let (settings, collection_override) = Config::qdrant_from_lookup(&lookup, &model);
+    let (settings, collection_override) =
+        Config::qdrant_from_lookup(&lookup, &model).map_err(|e| CliError::Failed(e.to_string()))?;
     let collection = collection_override.unwrap_or_else(|| settings.collection_name());
     let index = kb_store_qdrant::QdrantIndex::new_with_collection(settings, collection)?;
     Ok(Arc::new(index))
