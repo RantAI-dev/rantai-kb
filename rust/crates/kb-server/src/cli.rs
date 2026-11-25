@@ -205,6 +205,7 @@ USAGE
                                                 Scripted search -> structure -> content coverage gate
                                                 over page-level qrels (EVAL-7)
     {program} eval calibrate-confidence --base-url URL --answerable FILE --offtopic FILE --out DIR
+    {program} eval scope-bench --base-url URL --database-url URL --out DIR --mode-label ids
                                                 Fit confidence bands; write calibration.json + report.md
     {program} eval classify --queries FILE [--per-query]  Print the query-class distribution of a
                                                   queries.tsv / queries.jsonl file (RET-5)
@@ -528,6 +529,11 @@ async fn eval(args: &[String]) -> Result<(), CliError> {
     }
     if args.first().map(String::as_str) == Some("quant-bench") {
         return crate::quant_bench::run(&args[1..]).await;
+    }
+    // `eval scope-bench` writes synthetic rows to Postgres and Qdrant directly,
+    // which the black-box `kb-eval` crate may not link (boundary rule).
+    if args.first().map(String::as_str) == Some("scope-bench") {
+        return crate::scope_bench::run_cli(&args[1..]).await;
     }
     kb_eval::run(args).await.map_err(|err| match err {
         kb_eval::EvalError::Usage(message) => CliError::Usage(message),

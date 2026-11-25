@@ -25,6 +25,11 @@ chrono = { workspace = true }
 # into fixed-width buckets instead of keeping every sample, so a 30 s run at
 # concurrency 32 costs the same memory as one request.
 hdrhistogram = { version = "7.5", default-features = false }
+# SEC-2c: the stale-payload matrix injects drift straight into Postgres and
+# mints restricted keys there; SHA-256 matches the server's key hashing.
+sqlx = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 # A local axum server for the EVAL-7 end-to-end test: the harness must be

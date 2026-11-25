@@ -89,11 +89,18 @@ pub enum Arm {
     /// still applies), and a table of another tenant's document must answer
     /// 404 — never the table, its manifest or a number computed from it.
     Table,
+    /// `GET /v1/documents/:id/content` (API-4's `kb_read` surface).
+    Content,
+    /// `GET /v1/documents/:id/structure` (API-4's `kb_outline` surface).
+    Structure,
+    /// Thin MCP (`API-4`): `POST /mcp` `kb_search` and `kb_read` over JSON-RPC.
+    /// UNTESTED with a reason when the server does not mount `/mcp`.
+    Mcp,
 }
 
 impl Arm {
     /// Every arm, in the order the report lists them.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 13] = [
         Self::Vector,
         Self::Bm25,
         Self::Neighbour,
@@ -104,6 +111,9 @@ impl Arm {
         Self::Global,
         Self::Table,
         Self::Entity,
+        Self::Content,
+        Self::Structure,
+        Self::Mcp,
     ];
 
     #[must_use]
@@ -119,6 +129,9 @@ impl Arm {
             Self::Global => "global",
             Self::Table => "table",
             Self::Entity => "entity",
+            Self::Content => "content",
+            Self::Structure => "structure",
+            Self::Mcp => "mcp",
         }
     }
 
@@ -138,6 +151,7 @@ impl Arm {
             Self::Global => Some("global"),
             Self::Table => None,
             Self::Entity => None,
+            Self::Content | Self::Structure | Self::Mcp => None,
         }
     }
 
@@ -167,6 +181,9 @@ impl Arm {
         match self {
             Self::Entity => ProbeKind::DocumentIntelligence,
             Self::Table => ProbeKind::Tables,
+            Self::Content => ProbeKind::DocumentContent,
+            Self::Structure => ProbeKind::DocumentStructure,
+            Self::Mcp => ProbeKind::Mcp,
             Self::Figure => ProbeKind::SearchOrAsset,
             Self::Vector
             | Self::Bm25
@@ -208,6 +225,12 @@ pub enum ProbeKind {
     /// `GET /v1/tables?documentId=`, `GET /v1/tables/{id}` and
     /// `POST /v1/tables/{id}/query` for one document's tables (`TBL-1`).
     Tables,
+    /// `GET /v1/documents/:id/content`: a document-addressed read.
+    DocumentContent,
+    /// `GET /v1/documents/:id/structure`: a document-addressed outline.
+    DocumentStructure,
+    /// `POST /mcp` JSON-RPC `tools/call` for `kb_search` and `kb_read` (`API-4`).
+    Mcp,
 }
 
 /// A way a caller narrows what a search may see.
@@ -351,6 +374,14 @@ pub struct PlannedProbe {
     /// outside the scope; for a positive control it is inside.
     pub canary_owner: String,
     pub positive: bool,
+    /// Use a different key from the scope's tenant key (the stale-payload
+    /// matrix mints a KB-limited key and a principal-less key).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_override: Option<String>,
+    /// Ids that must not appear in the answer, even when the scope's `allowed`
+    /// set would permit them (stale-payload targets).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forbidden: Option<Vec<String>>,
 }
 
 /// Everything the probe half of the instrument needs.
@@ -513,6 +544,8 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
                     query: canary_query(outside, arm),
                     canary_owner: outside.id.clone(),
                     positive: false,
+                    key_override: None,
+                    forbidden: None,
                 });
             }
             // One positive control per arm per scope, from a document that this
@@ -528,6 +561,8 @@ pub fn plan(documents: Vec<SeedDocument>) -> SeedPlan {
                     query: canary_query(inside, arm),
                     canary_owner: inside.id.clone(),
                     positive: true,
+                    key_override: None,
+                    forbidden: None,
                 });
             }
         }
@@ -584,6 +619,12 @@ pub fn canary_query(document: &SeedDocument, arm: Arm) -> String {
         // The table routes are addressed by document, like the entity graph.
         Arm::Table => document.id.clone(),
         Arm::Entity => document.id.clone(),
+        // Content and structure are document-addressed too: naming the id in
+        // the answer is the evidence these rows look for.
+        Arm::Content | Arm::Structure => document.id.clone(),
+        // MCP exercises both tools: `kb_search` needs a canary and `kb_read`
+        // is addressed by the probe's `canary_owner`.
+        Arm::Mcp => document.canaries.vector.clone(),
     }
 }
 
@@ -1157,6 +1198,14 @@ pub fn coverage_note(arm: Arm) -> &'static str {
              for a document id: the table record, its manifest and a count computed from it"
         }
         Arm::Entity => "GET /v1/documents/:id/intelligence for a document id",
+        Arm::Content => "GET /v1/documents/:id/content for a document id: the stitched text",
+        Arm::Structure => {
+            "GET /v1/documents/:id/structure for a document id: pages, chunks, outline"
+        }
+        Arm::Mcp => {
+            "POST /mcp tools/call kb_search and kb_read for a canary/document id; UNTESTED \
+             with a reason when the server does not mount /mcp"
+        }
     }
 }
 
