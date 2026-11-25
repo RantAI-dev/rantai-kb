@@ -1,12 +1,12 @@
 # The layout detector behind the Xiaomi-OCR-0 recipe's table fallback.
 #
-# PP-DocLayoutV3 (a PaddleOCR model, Apache-2.0) through transformers. It runs on
-# the CPU by default: on the same GPU as the vLLM OCR server it crashed or hung the
-# engine (docs/kb-tiers.md). The ~130 MB checkpoint is baked in so the container
+# PP-DocLayoutV3 (a PaddleOCR model, Apache-2.0) through transformers. The default
+# build is CPU-only and small; the recommended deployment is the GPU build below, on
+# the same card as the vLLM OCR server with a progress watchdog (docs/kb-tiers.md). The ~130 MB checkpoint is baked in so the container
 # starts offline; LAYOUT_MODEL_DIR can still point at a mounted copy.
 #
 #   docker build --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu130 \
-#       --build-arg LAYOUT_DEVICE=cuda:0 ...   # a GPU build, for a second card
+#       --build-arg LAYOUT_DEVICE=cuda:0 ...   # the GPU build (recommended)
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1

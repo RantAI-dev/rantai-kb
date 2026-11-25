@@ -406,23 +406,40 @@ page region by region when the whole-page answer misses a table the page clearly
 sidecar in `rust/deploy/ocr-layout`: PP-DocLayoutV3 (Apache-2.0) through transformers,
 answering two endpoints.
 
-**Do not put it on the GPU that serves Xiaomi-OCR-0.** Sharing it crashed (`CUDA error: an
-illegal memory access`) or hung the vLLM engine within minutes of a full batch; with the
-detector on CPU (`LAYOUT_DEVICE=cpu`) the full benchmark ran clean. Use a second GPU, or the
-CPU with `KB_OCR_LAYOUT_TIMEOUT_MS` raised (it serves one page at a time, so a batch queues).
-Watch the vLLM server for progress, not `/health`: a hung engine still answers it (see
-[`docs/kb-tiers.md`](../../docs/kb-tiers.md#ocr-recipes-kb_ocr_recipe)).
+**Run it on the GPU** (`LAYOUT_DEVICE=cuda:0`), next to Xiaomi-OCR-0. The figure pass
+(`KB_LAYOUT_FIGURES=on`) asks the detector about every PDF page, and on the GPU it is about 8×
+faster than on the CPU, which serves one page at a time and becomes the bottleneck of an ingest.
+
+Sharing the GPU with vLLM was tested on 2026-11-25 on an NVIDIA GB10:
+- the setup was Xiaomi-OCR-0 under vLLM 0.33 (fp8 weights and cache, `--max-num-seqs 64`, 32
+  pages in flight from the service) plus the detector on `cuda:0`, the Qwen3-VL-2B describer,
+  the Nemotron embedder and the Qwen3 reranker;
+- the load was three textbooks, 808 pages, all OCR'd, with the table fallback and the figure
+  pass both on, in 33 minutes;
+- the result was no CUDA error, no hang and no detector error.
+
+An earlier benchmark (2026-11-16) did fault in that position: two `CUDA error: an illegal memory
+access` and two hangs within minutes of a full batch. Its cause was never found. So keep two
+guards:
+- watch the vLLM server for progress, not `/health`, and restart it when requests are running
+  but `vllm:generation_tokens_total` has not moved for 90 s (see
+  [`docs/kb-tiers.md`](../../docs/kb-tiers.md#ocr-recipes-kb_ocr_recipe));
+- if it faults anyway, fall back to a second GPU or to `LAYOUT_DEVICE=cpu` with
+  `KB_OCR_LAYOUT_TIMEOUT_MS` raised.
 
 ```sh
 # the weights are a download, so the model directory is mounted, not baked in
-docker build -t ocr-layout rust/deploy/ocr-layout
-docker run --rm -p 8193:8193 \
+docker build -t ocr-layout \
+  --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu130 \
+  --build-arg LAYOUT_DEVICE=cuda:0 rust/deploy/ocr-layout
+docker run --rm --gpus all -p 8193:8193 \
   -v /srv/models/pp-doclayoutv3:/models/pp-doclayoutv3:ro \
-  -e LAYOUT_MODEL_DIR=/models/pp-doclayoutv3 -e LAYOUT_DEVICE=cpu \
+  -e LAYOUT_MODEL_DIR=/models/pp-doclayoutv3 -e LAYOUT_DEVICE=cuda:0 \
   ocr-layout
+# CPU only: build without the two --build-arg lines and run with LAYOUT_DEVICE=cpu
 
 curl -s localhost:8193/health
-# {"status":"ok","model":"pp-doclayoutv3","device":"cpu","threshold":0.3}
+# {"status":"ok","model":"pp-doclayoutv3","device":"cuda:0","threshold":0.3}
 ```
 
 Then point the service at it:
@@ -432,7 +449,7 @@ KB_OCR_RECIPE=xiaomi
 KB_OCR_BASE_URL=http://127.0.0.1:8192/v1/chat/completions   # Xiaomi-OCR-0 under vLLM
 KB_OCR_MODEL=xiaomi-ocr-0
 KB_OCR_LAYOUT_URL=http://127.0.0.1:8193
-KB_OCR_LAYOUT_TIMEOUT_MS=900000   # detector on CPU: requests queue behind it
+KB_OCR_LAYOUT_TIMEOUT_MS=900000   # only needed with the detector on CPU: requests queue behind it
 KB_LAYOUT_FIGURES=on              # optional (ING-15): crop figures, vector diagrams included
 ```
 

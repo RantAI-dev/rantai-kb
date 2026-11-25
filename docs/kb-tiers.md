@@ -355,11 +355,20 @@ page at a time.
 **Operating the model server.** Two faults appeared under a full batch, and both need handling
 outside this service:
 
-- **Do not share the GPU with the layout detector.** With PP-DocLayoutV3 on the same GPU as
-  vLLM, the engine died within minutes of a full batch, twice with `CUDA error: an illegal
-  memory access`, and twice hung. With the detector on CPU (`LAYOUT_DEVICE=cpu`), the same
-  1,403 pages ran with no fault. On CPU, raise `KB_OCR_LAYOUT_TIMEOUT_MS`: requests queue
-  behind the one-at-a-time detector, and at the 60 s default 714 of 1,204 timed out.
+- **The layout detector goes on the GPU, with a watchdog.** On 2026-11-16, with PP-DocLayoutV3
+  on the same GPU as vLLM, the engine died within minutes of a full batch: twice with `CUDA
+  error: an illegal memory access`, and twice it hung. The cause was not found. With the
+  detector on CPU (`LAYOUT_DEVICE=cpu`), the same 1,403 pages ran with no fault, but at the
+  60 s default 714 of 1,204 detector requests timed out.
+
+  On 2026-11-25 the shared GPU was tested again (GB10, vLLM 0.33 fp8, `--max-num-seqs 64`, 32
+  pages in flight, with the describer, embedder and reranker on the same card). It ran 808
+  pages, all OCR'd, with the table fallback and the figure pass both on: no CUDA error, no hang
+  and no detector error in 33 minutes. The detector is ~8× faster on the GPU, and the figure
+  pass (`ING-15`) asks it about every page, so the GPU is now the recommended place.
+
+  Keep the progress watchdog below. If it ever fires, move the detector to a second GPU or to
+  the CPU, and raise `KB_OCR_LAYOUT_TIMEOUT_MS` there.
 - **A hung engine still answers `/health`.** vLLM's engine stopped generating with 35 requests
   in flight while `/health` returned 200, so a restart policy never fired and every request
   waited out its timeout. Watch progress, not health: restart the server when

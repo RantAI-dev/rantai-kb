@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.2 — 2026-11-25
+
+### Changed
+
+- **The layout detector runs on the GPU, next to vLLM.** The figure pass (`KB_LAYOUT_FIGURES`)
+  asks the detector about every PDF page, and on the GPU it is about 8× faster than on the CPU.
+  The compose sidecar `ocr-layout` now reserves a GPU and builds with CUDA torch
+  (`KB_OCR_LAYOUT_DEVICE`, `KB_OCR_LAYOUT_TORCH_INDEX`). The published
+  `rantai-kb-ocr-layout` image is the CUDA build; without a GPU it falls back to the CPU by itself.
+  Measured on 2026-11-25 on one NVIDIA GB10: Xiaomi-OCR-0 on vLLM (fp8, 64 seqs), the detector,
+  the Qwen3-VL-2B describer, the embedder and the reranker together ran 808 pages, all OCR'd, in
+  33 minutes, with no CUDA error and no hang. An earlier run in that position (2026-11-16) did
+  fault, so keep the vLLM progress watchdog; the CPU stays the fallback (`docs/kb-tiers.md`).
+
+### Docs
+
+- `docs/whats-new-1.0.md`: a briefing on everything new since 0.8, for integrating engineers.
+
 ## 1.0.1 — 2026-11-25
 
 ### Added
