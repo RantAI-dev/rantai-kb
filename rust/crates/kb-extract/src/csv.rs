@@ -245,6 +245,20 @@ fn finish_row(rows: &mut Vec<Vec<String>>, row: &mut Vec<String>, field: &mut St
 mod tests {
     use super::*;
 
+    /// TBL-2's header search must not move the header of an ordinary CSV whose
+    /// data is all text (no numeric rows to anchor a later candidate).
+    #[test]
+    fn a_text_only_csv_keeps_its_first_row_as_the_header() {
+        let (_, grids) = parse_with_tables(
+            b"Nama,Jabatan,Unit\nAni,Kepala,Keuangan\nBudi,Staf,SDM\n",
+            "staff.csv",
+            None,
+        )
+        .unwrap();
+        assert_eq!(grids[0].header, vec!["Nama", "Jabatan", "Unit"]);
+        assert_eq!(grids[0].rows.len(), 2);
+    }
+
     #[test]
     fn a_comma_csv_is_one_grid_with_a_header() {
         let (content, grids) = parse_with_tables(
