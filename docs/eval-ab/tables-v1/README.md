@@ -122,4 +122,71 @@ fine and the naming differs; a drift that answers wrongly is a real failure. Bot
 
 The live numbers are produced by the reviewer after work packages A (extraction) and B (store and
 API) merge; this directory holds the set and the instrument, not a result. No live run with a
-model was made here, and none is claimed.
+model was made here, and none is claimed. **See the dated re-score section below for the
+2026-11-25 live measurement.**
+
+## Live re-score — 2026-11-25 (GB10, `bench/v09-measure` @ `7d5adbdf`)
+
+**Result: table retrieval is solved, exact execution is not.** Table-in-top-5
+rose from the previous live run's **0.668** to **1.000** (386/386), but exact
+execution is **0.521 [0.469, 0.570]** versus the v0.9.0 target **≥ 0.95**
+(previous live run **0.417**). Subtotal-trap execution is **0.692** and code-trap
+execution **0.133**. **Target MISSED**; reported as measured. No `--agent` arm
+was run (no chat model), so the end-to-end numbers remain unmeasured.
+
+Setup: release kb-server from `~/kb-target-v09m`, run natively on the host
+against `stack-up.sh`'s containers on `127.0.0.1:28080`; the already-running
+Nemotron at `127.0.0.1:8210` supplied embeddings (omniembed `/v2/embed`, 2048-d)
+and the qwen3 reranker at `127.0.0.1:8122` was on with breadcrumbs off. Dataset:
+`~/kbdata/tables-v1` (30 files, 386 questions). All 30 files ingested cleanly
+(`ready: 30, failed: []`); 29 grids mapped to a `tableId`. No paid call.
+
+Exact command (wrapper `~/v09m/run-m5-tables.sh`, log
+`~/v09m/logs/m5-tables.out`):
+
+```sh
+python3 rust/crates/kb-eval/scripts/score_tables.py \
+  --dataset ~/kbdata/tables-v1 \
+  --base-url http://127.0.0.1:28080 --key "$KEY" \
+  --out ~/v09m/results/m5-tables
+```
+
+### Scores (2000 bootstrap resamples)
+
+| slice | n | table in top 5 | exact execution |
+|---|---:|---:|---:|
+| overall | 386 | **1.000 [1.000, 1.000]** | **0.521 [0.469, 0.570]** |
+| template:cell_lookup | 122 | 1.000 | 0.574 [0.492, 0.664] |
+| template:count | 55 | 1.000 | 0.455 [0.327, 0.582] |
+| template:sum_filter | 62 | 1.000 | 0.500 [0.371, 0.629] |
+| template:top_k | 67 | 1.000 | 0.507 [0.388, 0.627] |
+| template:group_max | 39 | 1.000 | 0.538 [0.385, 0.692] |
+| template:subtotal_trap | 26 | 1.000 | **0.692 [0.500, 0.846]** |
+| template:code_trap | 15 | 1.000 | **0.133 [0.000, 0.333]** |
+| lang:en | 193 | 1.000 | 0.518 [0.446, 0.591] |
+| lang:id | 193 | 1.000 | 0.523 [0.456, 0.591] |
+| trap:code | 15 | 1.000 | 0.133 |
+| trap:subtotal | 26 | 1.000 | 0.692 |
+
+Failures counted (never dropped): `query_rejected 180`, `execution_mismatch 5`.
+Examples: `q-0075: unknown_column`, `q-0191: gold 6 got 5`, `q-0234: gold 26 got 27`.
+
+Raw excerpt — `report.md` targets table:
+
+```text
+| table retrieval, top 5 | 0.85 | 1.000 |
+| execution, all | 0.98 | 0.521 |
+| execution, subtotal traps | 0.98 | 0.692 |
+```
+
+Raw excerpt — `results.json` overall scores:
+
+```text
+retrieval.all  n=386 mean=1.0000 [1.0000,1.0000]
+execution.all  n=386 mean=0.5207 [0.4689,0.5699]
+failure_examples: query_rejected ['q-0075: unknown_column', ...], execution_mismatch ['q-0191: gold 6 got 5', ...]
+```
+
+Raw artifacts: `~/v09m/results/m5-tables/{report.md,results.json,per_question.jsonl,ingest.json}`.
+The 180 `unknown_column` rejections are the dominant failure class; the column
+remapping retry helped 0 questions in this run (`execution_remapped.all = 0`).
