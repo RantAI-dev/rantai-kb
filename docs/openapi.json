@@ -2704,6 +2704,40 @@
           "low"
         ]
       },
+      "ConfidenceDto": {
+        "type": "object",
+        "description": "The `confidence` object of a search answer (`RET-18`). Additive.\n\n`band` is `high`/`medium`/`low` when the active model has a fitted entry,\n`none` when nothing passed the floor, and `unknown` when there is no entry\nand no `minScore` to fall back on. `calibrated=false` means the band is a\nhint only — answer on `high`/`medium` only when it is true.",
+        "required": [
+          "scoreKind",
+          "band",
+          "calibrated"
+        ],
+        "properties": {
+          "band": {
+            "type": "string"
+          },
+          "calibrated": {
+            "type": "boolean"
+          },
+          "margin": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          },
+          "scoreKind": {
+            "type": "string"
+          },
+          "topScore": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          }
+        }
+      },
       "ContentRange": {
         "type": "object",
         "description": "The chunk and page range actually returned, both inclusive. Pages are null\nwhen no chunk in the window carries one.",
@@ -4706,6 +4740,17 @@
             "items": {
               "$ref": "#/components/schemas/ChunkDto"
             }
+          },
+          "confidence": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ConfidenceDto",
+                "description": "Additive (`RET-18`): an actionable band computed from the top score and\nthe active scoring model's calibration. Always present on a standard\nor `documentIds` search; absent on the `hybrid: true` stub, which runs\nno search at all."
+              }
+            ]
           },
           "context": {
             "type": [

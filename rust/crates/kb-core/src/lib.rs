@@ -7,6 +7,7 @@
 pub mod boost;
 pub mod chunk;
 pub mod community;
+pub mod confidence;
 pub mod content;
 mod context;
 pub mod figure_assets;
@@ -48,6 +49,10 @@ pub use chunk::{
 pub use community::{
     Community, DetectOptions, assign_chunks, bm25_scores, cooccurrence, detect, hub_entities,
     louvain, rank_summaries, summary_prompt,
+};
+pub use confidence::{
+    Band, CALIBRATIONS, CalibrationEntry, CalibrationTable, Confidence, ScoreEvidence, ScoreKind,
+    confidence,
 };
 pub use content::{ContentCursor, StitchChunk, Stitched, WindowStart, stitch, stitch_from};
 pub use context::{

@@ -64,6 +64,17 @@
   read/list responses carry the version fields, and an answer mixing versions of one
   `docKey` carries `multiVersionWarning`. All fields are additive and the migration is
   nullable/defaulted: unversioned documents stay visible in every search mode.
+- **Additive `confidence` object on `/v1/search` (`RET-18`).** Every standard and
+  `documentIds` answer now carries `{topScore, scoreKind, margin, band, calibrated}`:
+  the top comparable score, the scale it came from (`rerank`, `dense`, `fused`), the
+  gap to the second hit, an actionable band (`high`, `medium`, `low`, `none`,
+  `unknown`) and whether the active model has a fitted table. Answer on `high` or
+  `medium`; treat an uncalibrated band as a hint only. No calibration ships in the
+  binary, so `calibrated` is `false` until an operator installs a fit through
+  `KB_CONFIDENCE_CALIBRATION=/path/calibration.json` (a malformed file is a startup
+  error). `kb-server eval calibrate-confidence` fits one over the RET-2 query sets
+  and writes `calibration.json`, `report.md` and `scores.jsonl`; the live fit is
+  still pending. `hybrid: true` is unchanged and has no confidence object.
 - **`KB_RERANK_BREADCRUMBS=off|on` (RET-12).** With the flag on, the reranker sees
   `"{document title} › {section path or section} · p.{page}\n"` before the chunk content, so a
   bare "berlaku 12 hari kerja" is judged with its "Kebijakan Cuti › Bab IV Cuti Tahunan · p.12"

@@ -128,6 +128,43 @@ than one document with the same `docKey`, the response adds
 `multiVersionWarning: [{docKey, documentIds: [...], versions: [...]}]` so a caller that
 asked for history is warned that it is mixing versions. A default search can never mix.
 
+### Confidence (additive, `RET-18`)
+
+Every standard and `documentIds` search answers with a top-level `confidence` object;
+the `hybrid: true` stub does not, because it runs no search:
+
+```json
+{"topScore": 0.82, "scoreKind": "rerank", "margin": 0.11,
+ "band": "high", "calibrated": true}
+```
+
+- `topScore` — the highest comparable score of the returned hits; `null` when
+  nothing was scored. `scoreKind` is `rerank` when a reranker supplied it,
+  `dense` for the dense cosine, and `fused` for the rank-only fused score when
+  neither arm produced a comparable value.
+- `margin` — `topScore` minus the second-highest score of the same kind; `null`
+  when fewer than two hits were scored. A single hit has no margin to report.
+- `band` — `high`, `medium`, `low`, `none` or `unknown`. With a fitted
+  calibration for the active model, `high`/`medium`/`low` are the fitted
+  thresholds and any lower score is `none`. Without one, `minScore` (request or
+  server default) gives `low` at or above it and `none` below; with no floor at
+  all the band is `unknown`. An answer with no scored hits is always `none`.
+- `calibrated` — `true` only when the active scoring model has a fitted entry.
+  It is `false` by default: no calibration is shipped in the binary because no
+  three-point fit is committed yet.
+
+**How to use it:** answer when `band` is `high` or `medium`; say "I don't know"
+when it is `none` or `unknown`. When `calibrated` is `false`, treat the band as a
+hint only — the thresholds are a relevance floor, not a fitted probability.
+A failed search still reports itself in `degrades`; never treat that as
+`band: none`, which means "nothing was relevant", not "the search failed".
+
+An operator installs a fit with `KB_CONFIDENCE_CALIBRATION=/path/calibration.json`
+(an array of `{modelId, scoreKind, high, medium, low}`). The file is validated at
+startup; a malformed one is a startup error. Fit it with
+`kb-server eval calibrate-confidence` — see
+[`docs/eval-ab/confidence/README.md`](eval-ab/confidence/README.md).
+
 ## Tables
 
 An xlsx, CSV, DOCX or OCR/markdown table is stored as a typed grid (Parquet in the blob
