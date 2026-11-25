@@ -33,7 +33,7 @@ Settings (environment):
     LAYOUT_MODEL_DIR       PP-DocLayoutV3 directory  /app/model in the image
     LAYOUT_HOST            bind address              0.0.0.0
     LAYOUT_PORT            port                      8193
-    LAYOUT_DEVICE          torch device              cpu (keep it off the vLLM GPU)
+    LAYOUT_DEVICE          torch device              cpu (cuda:0 recommended, see docs/kb-tiers.md)
     LAYOUT_THRESHOLD       detection confidence      0.3
     LAYOUT_MAX_IMAGE_BYTES largest decoded image     33554432 (32 MiB)
 """

@@ -140,11 +140,16 @@ jobs:
           - sidecar: ocr-cpu
             dirs: ocr-cpu
             platforms: linux/amd64,linux/arm64
-          # The layout sidecar runs a CUDA model, and the CUDA wheels are
-          # amd64 only.
+            build_args: ""
+          # The layout sidecar runs on the GPU next to vLLM (docs/kb-tiers.md),
+          # so the published image is the CUDA build; without a GPU it falls
+          # back to the CPU by itself. Published for amd64 only.
           - sidecar: ocr-layout
             dirs: ocr-layout
             platforms: linux/amd64
+            build_args: |
+              TORCH_INDEX=https://download.pytorch.org/whl/cu130
+              LAYOUT_DEVICE=cuda:0
     steps:
       - uses: actions/checkout@v4
 
@@ -187,6 +192,7 @@ jobs:
           file: ${{ steps.sidecar.outputs.dir }}/Dockerfile
           push: true
           platforms: ${{ matrix.platforms }}
+          build-args: ${{ matrix.build_args }}
           tags: |
             ${{ steps.meta.outputs.image }}-${{ matrix.sidecar }}:${{ steps.meta.outputs.version }}
             ${{ steps.meta.outputs.image }}-${{ matrix.sidecar }}:latest

@@ -174,15 +174,22 @@ x-vllm-xiaomi-ocr: &vllm-xiaomi-ocr
   # `$$0` is the placeholder after the script.
   entrypoint: ["/bin/sh", "-c"]
 
-# The table pass of the Xiaomi recipe: PP-DocLayoutV3 on the CPU. Keep it off
-# the vLLM GPU: sharing the card crashed or hung the engine (docs/kb-tiers.md).
+# The layout detector of the Xiaomi recipe (table pass, ING-15 figure pass):
+# PP-DocLayoutV3 on the GPU, next to vLLM. Shared-GPU stress test on 2026-11-25:
+# clean. An earlier run faulted, so keep the vLLM progress watchdog
+# (docs/kb-tiers.md). CPU only: KB_OCR_LAYOUT_DEVICE=cpu and
+# KB_OCR_LAYOUT_TORCH_INDEX=https://download.pytorch.org/whl/cpu.
 x-ocr-layout: &ocr-layout
+  <<: *gpu
   image: ${KB_OCR_LAYOUT_IMAGE:-rantai-kb-ocr-layout:${KB_IMAGE_TAG:-dev}}
   build:
     context: ./ocr-layout
+    args:
+      TORCH_INDEX: ${KB_OCR_LAYOUT_TORCH_INDEX:-https://download.pytorch.org/whl/cu130}
+      LAYOUT_DEVICE: ${KB_OCR_LAYOUT_DEVICE:-cuda:0}
   restart: unless-stopped
   environment:
-    LAYOUT_DEVICE: cpu
+    LAYOUT_DEVICE: ${KB_OCR_LAYOUT_DEVICE:-cuda:0}
   cpus: ${KB_OCR_LAYOUT_CPUS:-4.0}
   healthcheck:
     test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8193/health"]

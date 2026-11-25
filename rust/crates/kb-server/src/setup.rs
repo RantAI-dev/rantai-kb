@@ -1859,7 +1859,7 @@ MODEL ROLES (each defaults to the tier's own local model)
     --ocr-recipe <xiaomi|paddle>  Prompt/postprocessing for --ocr <URL> (default xiaomi)
     --ocr-key-env <NAME>          Read the --ocr <URL> server's key from $NAME
     --ocr-tables <fast|accurate>  accurate adds the layout table pass (GPU tiers; ~+10
-                                  points on tables, slower; detector on the CPU)
+                                  points on tables, detector on the GPU)
     --embedders <one|two>         One embedder for text and pages (DEP-6) or two; one is a re-index
     --embed-precision <nvfp4|bf16> Which build of the embedder runs. nvfp4 is the same model in
                                    4-bit and needs a Blackwell card (FP4 tensor cores); bf16
@@ -2477,7 +2477,7 @@ fn env_changes(
         changes.push(
             EnvChange::plain("KB_OCR_LAYOUT_URL", "http://ocr-layout:8193").with_comment(
                 "--ocr-tables accurate: re-read a page region by region when the layout \
-                 detector sees a table the whole-page answer missed (detector on the CPU).",
+                 detector sees a table the whole-page answer missed (detector on the GPU).",
             ),
         );
     }
