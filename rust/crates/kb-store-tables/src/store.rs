@@ -684,7 +684,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.columns, vec!["total"]);
-        assert_eq!(result.rows, vec![vec![Value::from(30.0)]]);
+        // Whole results are JSON integers, not `30.0` (TBL-2).
+        assert_eq!(result.rows, vec![vec![Value::from(30)]]);
         assert_eq!(result.rows_matched, 3);
         assert_eq!(result.excluded_derived_rows, 1);
         assert!(result.warnings.iter().any(|w| w.contains("subtotal")));

@@ -13,6 +13,10 @@
   gives pre-SEC-2a chunks their payload in place without re-embedding, so operators can turn
   on `KB_SCOPE_ID_LIMIT` safely. Additive migration, additive `/health` `scopeOutbox` field.
 
+### Fixed
+
+- **Tables: headers are named as the sheet shows them and codes are never summed (`TBL-2`).** The extractor now skips a World Bank preamble before the header, keeps year headers as text, flattens two- and three-level headers as `Parent / Child`, drops BPS column-number and source-note rows, and stops putting a merged title over a header row when the used range does not start at A1. A long all-digit identifier (NIP/NIK) stays text, so a sum refuses it and a distinct count works. Whole numbers in query results are returned as JSON integers (`2013`, not `2013.0`). **Stored tables need re-extraction to pick this up: run `kb-server reindex` after upgrading** (it rebuilds grids, manifests and Parquet from the originals). Offline `tables-v1` column drift fell from 180 to 0 queries with an unknown column; all 15 code traps now match offline.
+
 ## 0.9.0 — 2026-11-25
 
 The v0.9 and v0.10 roadmap in one release ([`docs/core/specs/v1-roadmap.md`](docs/core/specs/v1-roadmap.md)).
