@@ -21,6 +21,9 @@
 | `QDRANT_GRPC_URL` | Qdrant gRPC endpoint (e.g. `http://127.0.0.1:16334`) | `http://127.0.0.1:16334` |
 | `QDRANT_URL` | Alternative Qdrant URL if gRPC URL is unset | `http://127.0.0.1:16334` |
 | `QDRANT_API_KEY` | Optional Qdrant API key | `None` |
+| `KB_QDRANT_QUANTIZATION` | Opt-in dense-vector quantization (`off`/`scalar`/`binary`); applied at collection creation only, unknown values fail startup | `off` |
+| `KB_QDRANT_QUANT_OVERSAMPLING` | Quantized-search oversampling factor, clamped to 1.0..8.0 | `2.0` |
+| `KB_QDRANT_QUANT_RESCORE` | Re-score quantized candidates with the original float vectors | `true` |
 | `KB_QDRANT_CONTRACT` | Set to `1` to run the `RetrievalIndex` contract test suite against live Qdrant | `None` |
 
 ---

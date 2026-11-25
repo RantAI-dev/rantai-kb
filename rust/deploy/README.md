@@ -350,6 +350,37 @@ docker compose -f rust/deploy/compose.yaml -p rantai-kb-dev --profile desk \
   stop tei-embed-desk tei-rerank-desk
 ```
 
+## Qdrant quantization (opt-in)
+
+Dense float32 vectors are the dominant Qdrant RAM cost at scale: 2048-dim
+cosine vectors take roughly 8 GB at 1M chunks. `KB_QDRANT_QUANTIZATION` can cut
+that substantially, but it is **off by default** and never applied to a
+collection that already exists.
+
+```sh
+KB_QDRANT_QUANTIZATION=scalar  # int8, quantile 0.99, quantized vectors pinned in RAM
+KB_QDRANT_QUANTIZATION=binary  # one bit per dimension, pinned in RAM
+KB_QDRANT_QUANTIZATION=off     # default: float32; search requests are unchanged
+KB_QDRANT_QUANT_OVERSAMPLING=2.0  # clamp 1.0..8.0
+KB_QDRANT_QUANT_RESCORE=true      # re-score candidates with the original vectors
+```
+
+An unknown mode (or a non-boolean `RESCORE`) is a startup error: the server
+refuses to start rather than silently indexing a format it cannot honour.
+Quantization is applied only at collection creation, to the named `dense`
+vector. The page-image collection inherits the same setting when it is created,
+so a re-index into a new page collection uses it too.
+
+**Re-index note.** Flipping this setting does **not** reconfigure a live
+collection — Qdrant cannot change quantization in place, and the server logs a
+warning if the setting differs from what it finds. To switch an existing
+deployment, create a **new collection** (change `KB_QDRANT_MODEL` /
+`KB_EMBEDDING_DIM`, or point `QDRANT_COLLECTION` at a new name), let the server
+create it with the new setting, then run `kb-server reindex` to rebuild it from
+the S3 originals. Only move the `chunks__active` alias once the new collection
+is green. Measure recall and latency first with the bench in
+[`docs/eval-ab/quantization/README.md`](../../../docs/eval-ab/quantization/README.md).
+
 ## The layout sidecar (Xiaomi-OCR-0)
 
 The Xiaomi-OCR-0 recipe can ask a **layout detector** where a page's regions are, and re-read a
