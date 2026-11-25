@@ -332,7 +332,9 @@ async fn upsert_points(
 /// quantized collection needs its quantized index built before a search means
 /// anything.
 async fn wait_green(client: &Qdrant, name: &str) -> Result<(), BenchError> {
-    for _ in 0..600 {
+    // A 1M x 2048 float32 collection can spend >600 s building HNSW on this
+    // box; the poll window is a measurement-enabling wait, not a result.
+    for _ in 0..3600 {
         let status = client
             .collection_info(name)
             .await
@@ -345,7 +347,7 @@ async fn wait_green(client: &Qdrant, name: &str) -> Result<(), BenchError> {
         tokio::time::sleep(Duration::from_millis(1_000)).await;
     }
     Err(BenchError::Failed(format!(
-        "collection {name} did not become green within 600 s"
+        "collection {name} did not become green within 3600 s"
     )))
 }
 
