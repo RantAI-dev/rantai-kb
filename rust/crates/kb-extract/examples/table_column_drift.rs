@@ -32,6 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("kbdata/tables-v1")
     });
     let show_headers = std::env::args().any(|arg| arg == "--headers");
+    let show_grids = std::env::args().any(|arg| arg == "--grids");
 
     let raw = std::fs::read_to_string(dataset.join("queries.jsonl"))?;
     let questions: Vec<serde_json::Value> = raw
@@ -98,6 +99,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_default()
     };
 
+    if show_grids {
+        for (file, grids) in &extracted {
+            println!("GRIDS {file}: {}", grids.len());
+            for (i, (grid, manifest)) in grids.iter().enumerate() {
+                println!(
+                    "  [{i}] sheet={:?} title={:?} rows={} header_rows={} header={:?} roles={:?}",
+                    grid.sheet,
+                    grid.title,
+                    grid.rows.len(),
+                    grid.header_rows,
+                    grid.header,
+                    manifest.columns.iter().map(|c| c.role).collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
     if show_headers {
         for (file, header) in &gold_headers {
             let got = extracted
@@ -150,7 +168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // a manifest column: the compiler validates it against select aliases.
 
         let grids = extracted.get(file).map(Vec::as_slice).unwrap_or(&[]);
-        let chosen = pick_grid(grids, question);
+        let chosen = pick_grid(grids, question, gold_headers.get(file));
         if chosen.is_none() {
             no_grid.insert(format!("{qid} {file}"));
         }
@@ -227,21 +245,47 @@ struct Mismatch {
     questions: Vec<String>,
 }
 
+/// Mirror `score_tables.map_tables`: the same sheet, the same index, then the
+/// largest overlap with the dataset's gold header decides which stored grid a
+/// question queries. A harness that always took grid 0 would grade junk title
+/// regions the live scorer never selects.
 fn pick_grid<'a>(
     grids: &'a [(TableGrid, TableManifest)],
     question: &serde_json::Value,
+    gold_header: Option<&Vec<String>>,
 ) -> Option<&'a (TableGrid, TableManifest)> {
     let wanted = question["sheet_or_index"].as_str();
-    if let Some(sheet) = wanted {
-        if let Some(grid) = grids
-            .iter()
-            .find(|(g, _)| g.sheet.as_deref() == Some(sheet))
-        {
-            return Some(grid);
+    let index = question["grid_index"].as_u64().unwrap_or(0) as usize;
+    let gold: BTreeSet<String> = gold_header
+        .map(|header| header.iter().map(|name| fold_whitespace(name)).collect())
+        .unwrap_or_default();
+    let mut best: Option<(f64, &'a (TableGrid, TableManifest))> = None;
+    for (i, grid) in grids.iter().enumerate() {
+        let mut score = 0.0;
+        if wanted.is_some_and(|sheet| grid.0.sheet.as_deref() == Some(sheet)) {
+            score += 1.0;
+        }
+        if i == index {
+            score += 0.5;
+        }
+        if !gold.is_empty() {
+            let names: BTreeSet<String> = grid
+                .1
+                .columns
+                .iter()
+                .map(|column| fold_whitespace(&column.name))
+                .collect();
+            score += names.intersection(&gold).count() as f64 / gold.len() as f64;
+        }
+        if best.is_none_or(|(previous, _)| score > previous) {
+            best = Some((score, grid));
         }
     }
-    let index = question["grid_index"].as_u64().unwrap_or(0) as usize;
-    grids.get(index).or_else(|| grids.first())
+    best.map(|(_, grid)| grid)
+}
+
+fn fold_whitespace(text: &str) -> String {
+    collapse_whitespace(&text.to_lowercase())
 }
 
 /// The closest name by token overlap, with a case-folded edit-distance
