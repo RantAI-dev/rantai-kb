@@ -47,6 +47,60 @@ pub fn normalize_header_name(text: &str) -> String {
     collapse_whitespace(text)
 }
 
+/// Join the non-empty parts of a multi-level header with `" / "`, dropping a
+/// part repeated by a merged cell above it (`Kangkung` spread over three rows
+/// must not become `Kangkung / Kangkung / Luas Panen`).
+#[must_use]
+pub fn flatten_header_parts(parts: &[String]) -> String {
+    let mut flattened: Vec<String> = Vec::with_capacity(parts.len());
+    for part in parts {
+        let name = normalize_header_name(part);
+        if !name.is_empty()
+            && flattened
+                .last()
+                .is_none_or(|previous| previous.as_str() != name)
+        {
+            flattened.push(name);
+        }
+    }
+    flattened.join(" / ")
+}
+
+/// True for a BPS column-number row such as `(1) (2) (3)` or `1 2 3`: it is
+/// furniture under a multi-level header, not data and not a header name.
+#[must_use]
+pub fn is_column_number_row(row: &[Cell]) -> bool {
+    let mut numbers = Vec::new();
+    for cell in row {
+        let text = match cell {
+            Cell::Text(text) | Cell::Date(text) => text.trim(),
+            Cell::Number(number) if number.fract() == 0.0 => {
+                let value = *number as i64;
+                if !(0..=999).contains(&value) {
+                    return false;
+                }
+                numbers.push(value);
+                continue;
+            }
+            Cell::Empty => continue,
+            _ => return false,
+        };
+        let digits = text
+            .strip_prefix('(')
+            .unwrap_or(text)
+            .strip_suffix(')')
+            .unwrap_or(text);
+        let Ok(value) = digits.parse::<i64>() else {
+            return false;
+        };
+        if !(0..=999).contains(&value) {
+            return false;
+        }
+        numbers.push(value);
+    }
+    numbers.len() >= 3 && numbers.windows(2).all(|pair| pair[0] < pair[1])
+}
+
 /// Normalise every header name, name an empty one `Column N` (1-based), and
 /// keep the names unique with a ` (2)`, ` (3)`… suffix.
 #[must_use]
@@ -148,6 +202,10 @@ mod tests {
         Cell::Text(value.to_string())
     }
 
+    fn number(value: f64) -> Cell {
+        Cell::Number(value)
+    }
+
     fn row(values: &[&str]) -> Vec<Cell> {
         values.iter().map(|value| text(value)).collect()
     }
@@ -166,6 +224,43 @@ mod tests {
         );
         assert_eq!(collapse_whitespace("2023\u{202f}/  Q1"), "2023 / Q1");
         assert_eq!(collapse_whitespace("\t\n "), "");
+    }
+
+    #[test]
+    fn a_multi_level_header_joins_parts_and_drops_merged_repeats() {
+        let parts: Vec<String> = ["Kangkung ", "Kangkung", "Luas Panen\n", " ( Ha ) "]
+            .iter()
+            .map(|part| (*part).to_string())
+            .collect();
+        assert_eq!(
+            flatten_header_parts(&parts),
+            "Kangkung / Luas Panen / ( Ha )"
+        );
+        assert_eq!(
+            flatten_header_parts(&["Bayam".into(), "Luas Panen ( Ha )".into(), "".into()]),
+            "Bayam / Luas Panen ( Ha )"
+        );
+    }
+
+    #[test]
+    fn a_column_number_row_is_header_furniture() {
+        assert!(is_column_number_row(&[
+            text("(1)"),
+            text("(2)"),
+            text("(3)"),
+            text("(4)")
+        ]));
+        assert!(is_column_number_row(&[
+            number(1.0),
+            number(2.0),
+            number(3.0)
+        ]));
+        assert!(!is_column_number_row(&[
+            text("2018"),
+            text("2019"),
+            text("2020")
+        ]));
+        assert!(!is_column_number_row(&[text("(1)"), text("(3)")]));
     }
 
     #[test]

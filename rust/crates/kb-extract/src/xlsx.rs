@@ -19,9 +19,9 @@ use calamine::{
     open_workbook_auto_from_rs,
 };
 use kb_core::tables::{
-    Cell, MAX_TABLE_ROWS, TableGrid, TableSource, cell_from_text, is_placeholder,
-    normalize_header_name, placeholder_note, render_table_markdown, single_distinct_value,
-    take_title_rows, unique_header_names,
+    Cell, MAX_TABLE_ROWS, TableGrid, TableSource, cell_from_text, flatten_header_parts,
+    is_column_number_row, is_placeholder, placeholder_note, render_table_markdown,
+    single_distinct_value, take_title_rows, unique_header_names,
 };
 
 use crate::ExtractError;
@@ -212,24 +212,66 @@ fn render_sheet(sheet_name: &str, grids: &[TableGrid]) -> String {
 fn grids_for_sheet(source: TableSource, sheet: &RawSheet) -> Vec<TableGrid> {
     let (matrix, placeholders) = sheet_matrix(&sheet.range);
     let formula_cells = formula_cells(&sheet.formulas);
+    let offset = (
+        sheet.range.start().map_or(0, |(row, _)| row as usize),
+        sheet.range.start().map_or(0, |(_, column)| column as usize),
+    );
     let mut grids: Vec<TableGrid> = Vec::new();
     // A title row alone between blank rows belongs to the table below it, not
     // to a one-column table of its own.
     let mut carried_titles: Vec<String> = Vec::new();
 
+    // A BPS sheet separates a multi-level header from its data with blank rows:
+    // the title, the parent header and the child header arrive as regions with
+    // no numbers. Keep those fragments for the next region that has data.
+    let any_numbers = matrix
+        .iter()
+        .flatten()
+        .any(|cell| matches!(cell, Cell::Number(_)));
     let regions = regions(&matrix);
+    let mut pending: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut pending_columns: Option<std::ops::Range<usize>> = None;
     for (index, (rows, columns)) in regions.iter().enumerate() {
         let more_regions = index + 1 < regions.len();
+        let has_numbers = rows.clone().any(|row| {
+            matrix[row]
+                .iter()
+                .any(|cell| matches!(cell, Cell::Number(_)))
+        });
+        if any_numbers && !has_numbers {
+            if more_regions {
+                pending.push(rows.clone());
+                pending_columns = Some(match pending_columns.take() {
+                    Some(previous) => {
+                        previous.start.min(columns.start)..previous.end.max(columns.end)
+                    }
+                    None => columns.clone(),
+                });
+            }
+            continue;
+        }
+        let (combined_rows, combined_columns) = if pending.is_empty() {
+            (rows.clone(), columns.clone())
+        } else {
+            let start = pending.first().map_or(rows.start, |first| first.start);
+            let parent = pending_columns.take().unwrap_or_else(|| columns.clone());
+            pending.clear();
+            (
+                start..rows.end,
+                parent.start.min(columns.start)..parent.end.max(columns.end),
+            )
+        };
         let Some(mut grid) = region_grid(
             source,
             &sheet.name,
             &matrix,
             &placeholders,
-            rows,
-            columns,
+            &combined_rows,
+            &combined_columns,
             &sheet.merges,
             &formula_cells,
             more_regions,
+            offset,
             &mut carried_titles,
         ) else {
             continue;
@@ -355,13 +397,14 @@ fn region_grid(
     merges: &[Dimensions],
     formula_cells: &[(u32, u32)],
     more_regions: bool,
+    offset: (usize, usize),
     carried_titles: &mut Vec<String>,
 ) -> Option<TableGrid> {
     let mut cells: Vec<Vec<Cell>> = rows
         .clone()
         .map(|row| matrix[row][columns.clone()].to_vec())
         .collect();
-    spread_merges(&mut cells, rows, columns, merges);
+    spread_merges(&mut cells, rows, columns, merges, offset);
 
     let mut titles = std::mem::take(carried_titles);
     let taken = take_title_rows(&mut cells);
@@ -396,9 +439,9 @@ fn region_grid(
         .collect();
 
     let formula_rows = formula_rows(
-        rows.start + title_rows,
+        offset.0 + rows.start + title_rows,
         header_rows,
-        columns.start,
+        offset.1 + columns.start,
         &grid_rows,
         formula_cells,
     );
@@ -442,12 +485,19 @@ fn spread_merges(
     rows: &std::ops::Range<usize>,
     columns: &std::ops::Range<usize>,
     merges: &[Dimensions],
+    offset: (usize, usize),
 ) {
     for merged in merges {
-        let start_row = merged.start.0 as usize;
-        let start_column = merged.start.1 as usize;
-        let end_row = merged.end.0 as usize;
-        let end_column = merged.end.1 as usize;
+        // Merge coordinates are absolute sheet positions; `rows`/`columns` and
+        // `cells` are relative to the used range, which need not start at A1.
+        let Some(start_row) = (merged.start.0 as usize).checked_sub(offset.0) else {
+            continue;
+        };
+        let Some(start_column) = (merged.start.1 as usize).checked_sub(offset.1) else {
+            continue;
+        };
+        let end_row = (merged.end.0 as usize).saturating_sub(offset.0);
+        let end_column = (merged.end.1 as usize).saturating_sub(offset.1);
         if !rows.contains(&start_row) || !columns.contains(&start_column) {
             continue;
         }
@@ -463,55 +513,77 @@ fn spread_merges(
     }
 }
 
-/// Decide how many leading rows are headers and flatten them.
+/// Decide how many leading rows are headers and flatten them. A multi-level
+/// header may have three levels (`Kangkung / Luas Panen / ( Kw )`) and a
+/// `(1) (2) (3)` furniture row underneath, all separated by blank rows.
 fn header_and_rows(cells: &[Vec<Cell>]) -> (usize, Vec<String>) {
     if cells.is_empty() {
         return (0, Vec::new());
     }
     let width = cells.iter().map(Vec::len).max().unwrap_or(0);
-    let mut header_rows = 1usize;
-    if cells.len() >= 3 {
-        let first = &cells[0];
-        let adjacent_duplicates = first
-            .windows(2)
-            .any(|pair| pair[0] != Cell::Empty && pair[0] == pair[1]);
-        let first_gap_filled = (0..width).any(|column| {
-            first.get(column).is_none_or(|cell| *cell == Cell::Empty)
-                && cells[1]
-                    .get(column)
-                    .is_some_and(|cell| *cell != Cell::Empty)
-        });
-        // A year row is a header level too: a year read as a number is a
-        // label, not data. Any other number in the second row means the row
-        // below the first is data.
-        let second_row_labels = cells[1].iter().all(|cell| match cell {
-            Cell::Empty | Cell::Text(_) | Cell::Date(_) | Cell::Bool(_) => true,
-            Cell::Number(number) => number.fract() == 0.0 && (1900.0..=2100.0).contains(number),
-        });
-        let third_row_data = cells[2].iter().any(|cell| matches!(cell, Cell::Number(_)));
-        if (adjacent_duplicates || first_gap_filled) && second_row_labels && third_row_data {
-            header_rows = 2;
+    let is_label = |cell: &Cell| match cell {
+        Cell::Number(number) => number.fract() == 0.0 && (1900.0..=2100.0).contains(number),
+        Cell::Empty | Cell::Text(_) | Cell::Date(_) | Cell::Bool(_) => true,
+    };
+    let non_empty = |row: &Vec<Cell>| row.iter().filter(|cell| **cell != Cell::Empty).count();
+    let labelled = |row: &Vec<Cell>| row.iter().filter(|cell| is_label(cell)).count();
+    let has_data = |row: &Vec<Cell>| {
+        row.iter().any(|cell| {
+            matches!(cell, Cell::Number(number) if !(number.fract() == 0.0 && (1900.0..=2100.0).contains(number)))
+        })
+    };
+
+    let mut start = 0usize;
+    while start < cells.len() && non_empty(&cells[start]) == 0 {
+        start += 1;
+    }
+    if start == cells.len() {
+        return (cells.len(), vec![String::new(); width]);
+    }
+    let first = &cells[start];
+    let adjacent_duplicates = first
+        .windows(2)
+        .any(|pair| pair[0] != Cell::Empty && pair[0] == pair[1]);
+    let first_gap_filled = (0..width).any(|column| {
+        first.get(column).is_none_or(|cell| *cell == Cell::Empty)
+            && cells
+                .get(start + 1)
+                .is_some_and(|row| row.get(column).is_some_and(|cell| *cell != Cell::Empty))
+    });
+    let mut end = start + 1;
+    // Without a merged parent or a gap there is only one header level: a row
+    // of labels followed by data must stay one header, even when the data is
+    // all text (a staff profile) or a year (a period column).
+    if adjacent_duplicates || first_gap_filled {
+        while end < cells.len() && end < start + 3 {
+            let row = &cells[end];
+            if is_column_number_row(row) {
+                end += 1;
+                break;
+            }
+            if non_empty(row) == 0 {
+                end += 1;
+                continue;
+            }
+            if has_data(row) || labelled(row) < (non_empty(row) * 7 / 10).max(1) {
+                break;
+            }
+            end += 1;
         }
     }
 
     let header: Vec<String> = (0..width)
         .map(|column| {
-            let mut parts: Vec<String> = Vec::new();
-            for row in cells.iter().take(header_rows) {
-                let text = row.get(column).map_or(String::new(), cell_text);
-                let text = normalize_header_name(&text);
-                if !text.is_empty()
-                    && parts
-                        .last()
-                        .is_none_or(|previous| previous.as_str() != text)
-                {
-                    parts.push(text);
-                }
-            }
-            parts.join(" / ")
+            let parts: Vec<String> = cells
+                .iter()
+                .take(end)
+                .filter(|row| !is_column_number_row(row))
+                .map(|row| row.get(column).map_or(String::new(), cell_text))
+                .collect();
+            flatten_header_parts(&parts)
         })
         .collect();
-    (header_rows, unique_header_names(&header))
+    (end, unique_header_names(&header))
 }
 
 /// Data-row indices whose numeric cells carry a formula (absolute sheet rows).

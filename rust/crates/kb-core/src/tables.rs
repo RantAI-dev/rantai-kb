@@ -20,8 +20,8 @@ mod manifest;
 mod markdown;
 
 pub use header::{
-    collapse_whitespace, normalize_header_name, single_distinct_value, take_title_rows,
-    unique_header_names,
+    collapse_whitespace, flatten_header_parts, is_column_number_row, normalize_header_name,
+    single_distinct_value, take_title_rows, unique_header_names,
 };
 pub use manifest::{
     build_manifest, cell_from_text, is_derived_label, is_placeholder, locale_number,

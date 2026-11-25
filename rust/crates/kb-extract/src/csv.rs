@@ -5,8 +5,8 @@
 //! fields may hold the delimiter or a newline, as RFC 4180 allows.
 
 use kb_core::tables::{
-    Cell, TableGrid, TableSource, cell_from_text, is_placeholder, placeholder_note,
-    render_table_markdown, unique_header_names,
+    Cell, TableGrid, TableSource, cell_from_text, flatten_header_parts, is_placeholder,
+    placeholder_note, render_table_markdown, unique_header_names,
 };
 
 use crate::ExtractError;
@@ -26,17 +26,23 @@ pub fn parse_with_tables(
     delimiter: Option<char>,
 ) -> Result<(String, Vec<TableGrid>), ExtractError> {
     let text = to_utf8(bytes);
-    let delimiter = delimiter.unwrap_or_else(|| sniff_delimiter(&text));
-    let mut rows = parse_rows(&text, delimiter);
+    // A World Bank export starts with a UTF-8 BOM before `"Data Source"`;
+    // without stripping it the first header name keeps the quote characters.
+    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+    let delimiter = delimiter.unwrap_or_else(|| sniff_delimiter(text));
+    let rows = parse_rows(text, delimiter);
     if rows.is_empty() {
         return Ok((String::new(), Vec::new()));
     }
-    let header_row = rows.remove(0);
-    let width = header_row.len();
+    let (header_index, levels) = find_header(&rows);
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let header_row = &rows[header_index];
     let raw_rows: Vec<Vec<String>> = rows
-        .into_iter()
+        .iter()
+        .skip(header_index + levels)
         .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
-        .map(|mut row| {
+        .map(|row| {
+            let mut row = row.clone();
             row.resize(width, String::new());
             row.truncate(width);
             row
@@ -44,7 +50,9 @@ pub fn parse_with_tables(
         .collect();
     let keep: Vec<usize> = (0..width)
         .filter(|column| {
-            !header_row[*column].trim().is_empty()
+            !header_row
+                .get(*column)
+                .is_some_and(|cell| cell.trim().is_empty())
                 || raw_rows.iter().any(|row| !row[*column].trim().is_empty())
         })
         .collect();
@@ -53,7 +61,15 @@ pub fn parse_with_tables(
     }
     let names: Vec<String> = keep
         .iter()
-        .map(|column| header_row[*column].clone())
+        .map(|column| {
+            let parts: Vec<String> = rows
+                .iter()
+                .skip(header_index)
+                .take(levels)
+                .map(|row| row.get(*column).cloned().unwrap_or_default())
+                .collect();
+            flatten_header_parts(&parts)
+        })
         .collect();
     let header = unique_header_names(&names);
     let mut placeholders = 0usize;
@@ -92,6 +108,71 @@ pub fn parse_with_tables(
     };
     let content = render_table_markdown(&grid, usize::MAX).join("\n\n");
     Ok((content, vec![grid]))
+}
+
+/// Find the header row and how many levels it spans.
+///
+/// The World Bank's downloads put `"Data Source", ...` and
+/// `"Last Updated Date", ...` above the real header, separated by blank lines;
+/// taking the first row as the header names those columns `Column N`. Score
+/// the candidate rows by how many labels they hold, and require numeric data
+/// underneath. One export repeats the country name and code under the header
+/// before its data: that second label row is a header level, flattened as
+/// `Country Name / Aruba`.
+fn find_header(rows: &[Vec<String>]) -> (usize, usize) {
+    let label = |cell: &str| {
+        let text = cell.trim();
+        if text.is_empty() {
+            return true;
+        }
+        match cell_from_text(text) {
+            Cell::Number(number) => number.fract() == 0.0 && (1900.0..=2100.0).contains(&number),
+            Cell::Text(_) | Cell::Date(_) | Cell::Bool(_) => true,
+            Cell::Empty => true,
+        }
+    };
+    let non_empty = |row: &Vec<String>| row.iter().filter(|cell| !cell.trim().is_empty()).count();
+    let labels = |row: &Vec<String>| {
+        row.iter()
+            .filter(|cell| !cell.trim().is_empty() && label(cell))
+            .count()
+    };
+    let numbers = |row: &Vec<String>| {
+        row.iter()
+            .filter(|cell| matches!(cell_from_text(cell), Cell::Number(number) if !(number.fract() == 0.0 && (1900.0..=2100.0).contains(&number))))
+            .count()
+    };
+
+    let mut best: Option<(f64, usize)> = None;
+    for (index, row) in rows.iter().enumerate().take(25) {
+        let filled = non_empty(row);
+        if filled < 2 || labels(row) < (2 * filled).div_ceil(3) {
+            continue;
+        }
+        if !rows
+            .iter()
+            .skip(index + 1)
+            .take(4)
+            .any(|following| numbers(following) >= 2)
+        {
+            continue;
+        }
+        let score = 2.0 * filled as f64 + labels(row) as f64 - 0.6 * index as f64;
+        if best.is_none_or(|(previous, _)| score > previous) {
+            best = Some((score, index));
+        }
+    }
+    let header = best.map_or(0, |(_, index)| index);
+    let mut levels = 1usize;
+    if let Some(next) = rows.get(header + 1) {
+        let filled = non_empty(next);
+        if filled >= 2 && numbers(next) == 0 && labels(next) >= (7 * filled).div_ceil(10) {
+            if rows.get(header + 2).is_some_and(|row| numbers(row) >= 2) {
+                levels = 2;
+            }
+        }
+    }
+    (header, levels)
 }
 
 /// Which candidate delimiter appears most often on the first non-empty line.
@@ -232,6 +313,50 @@ mod tests {
         assert_eq!(grids[0].rows[0].len(), 5);
         assert_eq!(grids[0].rows[1][4], Cell::Number(31.0));
         assert!(!content.contains("|  |"), "{content}");
+    }
+
+    #[test]
+    fn a_world_bank_preamble_is_skipped_and_year_headers_stay_text() {
+        let csv = b"\xEF\xBB\xBF\"Data Source\",\"World Development Indicators\",\n\n\
+                    \"Last Updated Date\",\"2026-11-11\",\n\n\
+                    \"Country Name\",\"Country Code\",\"Indicator Name\",\"1960\",\"2024\",\n\
+                    \"Aruba\",\"ABW\",\"Population, total\",\"10\",\"20\",\n\
+                    \"Indonesia\",\"IDN\",\"Population, total\",\"30\",\"40\",\n";
+        let (_, grids) = parse_with_tables(csv, "wb.csv", None).unwrap();
+        assert_eq!(grids.len(), 1);
+        assert_eq!(
+            grids[0].header,
+            vec![
+                "Country Name",
+                "Country Code",
+                "Indicator Name",
+                "1960",
+                "2024"
+            ]
+        );
+        assert_eq!(grids[0].rows.len(), 2);
+        assert_eq!(grids[0].rows[0][0], Cell::Text("Aruba".to_string()));
+    }
+
+    #[test]
+    fn a_second_label_row_is_flattened_into_the_header() {
+        let csv = b"\"Data Source\",\"World Development Indicators\",\n\n\
+                    \"Country Name\",\"Country Code\",\"Indicator Name\",\"1960\",\"2024\",\n\
+                    \"Aruba\",\"ABW\",\"Unemployment, total\",\"\",\"\",\n\
+                    \"Indonesia\",\"IDN\",\"Unemployment, total\",\"12\",\"15\",\n";
+        let (_, grids) = parse_with_tables(csv, "wb.csv", None).unwrap();
+        assert_eq!(
+            grids[0].header,
+            vec![
+                "Country Name / Aruba",
+                "Country Code / ABW",
+                "Indicator Name / Unemployment, total",
+                "1960",
+                "2024"
+            ]
+        );
+        assert_eq!(grids[0].rows.len(), 1);
+        assert_eq!(grids[0].rows[0][4], Cell::Number(15.0));
     }
 
     #[test]
