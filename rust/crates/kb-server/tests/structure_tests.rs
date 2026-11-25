@@ -69,6 +69,7 @@ async fn seed(h: &Harness) {
             effective_from: None,
             effective_to: None,
             is_latest: true,
+            acl_principals: Vec::new(),
             metadata: Some(serde_json::json!({"figures": [
                 {
                     "assetKey": "documents/tenant-a/doc-1/assets/fig-p1-1.png",

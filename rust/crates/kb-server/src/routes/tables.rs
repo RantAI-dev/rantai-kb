@@ -237,7 +237,12 @@ pub(crate) async fn query_table_inner(
     // gone with it.
     let meta = state
         .documents
-        .find_meta_by_id(&auth.tenant_id, &record.document_id, false)
+        .find_visible_meta_by_id(
+            &auth.tenant_id,
+            &record.document_id,
+            false,
+            &auth.principals,
+        )
         .await
         .map_err(ApiError::from)?
         .ok_or(ApiError::NotFound)?;
@@ -303,7 +308,12 @@ async fn visible_table(
     // knowledge-base limit, and it must answer 404, not 403.
     let meta = state
         .documents
-        .find_meta_by_id(&auth.tenant_id, &record.document_id, false)
+        .find_visible_meta_by_id(
+            &auth.tenant_id,
+            &record.document_id,
+            false,
+            &auth.principals,
+        )
         .await
         .map_err(ApiError::from)?
         .ok_or(ApiError::NotFound)?;

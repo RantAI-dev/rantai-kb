@@ -149,15 +149,25 @@ impl VerifySpec {
 ///   payload can express it; and
 /// - the tenant has no versioned documents (RET-16), because the payload has no
 ///   `is_latest` key and the default `isLatest` filter would be unenforceable
-///   index-side.
+///   index-side;
+/// - the tenant has no ACL'd documents (SEC-3), because the payload carries no
+///   `aclPrincipals` key and a coarse filter could return an ACL'd document
+///   that the caller may not read. The Postgres verify would drop it, but a
+///   coarse filter that cannot see ACLs would waste top-k on invisible hits.
 #[must_use]
 pub fn predicate_spec_for(
     req: &ScopeRequest,
     visible_count: usize,
     limit: usize,
     tenant_has_versioned_documents: bool,
+    tenant_has_acl_documents: bool,
 ) -> Option<PredicateSpec> {
-    if limit == 0 || visible_count <= limit || req.force_ids || tenant_has_versioned_documents {
+    if limit == 0
+        || visible_count <= limit
+        || req.force_ids
+        || tenant_has_versioned_documents
+        || tenant_has_acl_documents
+    {
         return None;
     }
     // Filters the payload cannot express keep the id list. RET-16's `asOf` and
@@ -559,7 +569,19 @@ mod tests {
                 filter,
                 force_ids: false,
             };
-            assert!(predicate_spec_for(&req, 10_000, 1, false).is_none());
+            assert!(predicate_spec_for(&req, 10_000, 1, false, false).is_none());
         }
+    }
+
+    #[test]
+    fn an_acl_in_the_tenant_keeps_the_id_list() {
+        let req = ScopeRequest {
+            tenant: TenantId::new_unchecked("t"),
+            filter: DocumentFilter::default(),
+            force_ids: false,
+        };
+        // The payload has no ACL key, so predicate mode cannot express SEC-3.
+        assert!(predicate_spec_for(&req, 10_000, 1, false, true).is_none());
+        assert!(predicate_spec_for(&req, 10_000, 1, false, false).is_some());
     }
 }

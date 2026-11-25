@@ -1145,3 +1145,28 @@ applies it** (the same `_prisma_migrations` bookkeeping the Bun release used), s
 running both binaries during cutover does not need a separate Prisma step. Old clients keep
 working: every new request/response field is optional, and every unversioned document stays
 visible in all three search modes.
+
+## 11. Document access lists (SEC-3)
+
+Documents may now carry `aclPrincipals`, a text array of principals that are allowed to read
+them. The app that knows its users asserts them per request with
+`X-KB-Principals: user:42,group:hr` (or the `principals` field of a `/v1/search` body). Only a
+key holding the new `kb:assert-principals` scope may assert principals; an ordinary
+`kb:read`/`kb:write` key that tries gets a `403`. A document with an ACL is visible only when
+the asserted set overlaps it, and a request with no principals sees none of them
+(**default-deny**). A document with an empty ACL is visible exactly as before, so this is not
+a behaviour change for existing tenants or keys.
+
+**The migration is additive.**
+`prisma/migrations/20261125120000_document_acl_principals/migration.sql` adds
+`"aclPrincipals" TEXT[] NOT NULL DEFAULT '{}'` and a GIN index; no existing row is backfilled
+or rewritten. `kb-server migrate` applies it like every other Prisma migration.
+
+**Operational notes.** The enforcement lives in the same Postgres visibility query that
+scopes every retrieval arm, plus the by-id lookup used by every document route. Qdrant carries
+no ACL payload, so a tenant with any ACL'd document keeps the id-list scope (SEC-2a predicate
+mode is disabled for it); the SEC-2a verify applies the ACL too. To grant the new scope:
+`kb-server create-api-key <tenant> --scopes kb:read,kb:assert-principals` (or include it in the
+comma-separated `--scopes` list; a key with no scope list already has every scope). Clients that
+never assert principals keep working unchanged, except that ACL'd documents are intentionally
+hidden from them.

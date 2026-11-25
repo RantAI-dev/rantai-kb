@@ -150,6 +150,11 @@ pub struct SearchRequestDto {
     /// Additive (`RET-15`): an outline v2 section id inside one document.
     #[serde(default)]
     pub section: Option<String>,
+    /// Additive (`SEC-3`): principals asserted for this search. Requires the
+    /// `kb:assert-principals` scope; combined with `X-KB-Principals` when both
+    /// are present. Absent means no assertion.
+    #[serde(default)]
+    pub principals: Option<Vec<String>>,
 }
 
 /// An inclusive page window. Valid only with exactly one `documentIds` entry.
