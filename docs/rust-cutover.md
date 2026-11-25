@@ -1214,10 +1214,15 @@ This is a checklist for a deployment on 0.8.x moving to 1.0. The sections above 
 schema change is additive, and every new behaviour that could surprise an existing caller is
 listed here.
 
-**1. Migrate.** `kb-server migrate` applies three additive migrations: document versions
-(`20261124120000_document_versions`, §10), access lists
-(`20261125120000_document_acl_principals`, §11) and the scope outbox
-(`20261124130000_scope_outbox`, §12). Existing rows stay valid without a backfill.
+**1. Migrate.** `kb-server migrate` applies four additive migrations:
+- document versions (`20261124120000_document_versions`, §10);
+- the scope outbox (`20261124130000_scope_outbox`, §12);
+- access lists (`20261125120000_document_acl_principals`, §11);
+- an index plus expression statistics for the access-list tenant check
+  (`20261125180000_document_acl_tenant_index`, SEC-2d).
+
+Existing rows stay valid without a backfill. **PostgreSQL 14 or newer is required** for the
+expression statistics. The compose stack ships 16.
 
 **2. Re-index where the data changed shape.** `kb-server reindex` rebuilds from the stored
 originals. Run it for:

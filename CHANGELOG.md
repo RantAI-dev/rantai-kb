@@ -1,6 +1,38 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 — 2026-11-25
+
+**The `/v1/*` HTTP API and the Postgres tables that calling apps rely on are now stable.**
+From here on, changes are additive. See [`docs/api.md`](docs/api.md#stability-v10) for the rules
+and [`docs/rust-cutover.md` §13](docs/rust-cutover.md) for the 0.8 → 1.0 upgrade checklist.
+
+**Since 0.9.0**
+- **Scope at scale:**
+  - the scope outbox reconciler and `kb-server scope backfill` (SEC-2b);
+  - predicate scope that no longer reads every id (SEC-2d), with a faster scope SQL and an
+    indexed ACL tenant check;
+  - instruments for 100k-document scope and stale-payload leaks (SEC-2c).
+- **Exact tables:** headers, CSV preambles and code columns are read correctly (TBL-2).
+- **Faster reading:** `/content` reads only the range it needs (EVAL-9).
+- **CI:** the Postgres contracts (versions, outbox, ACL, graph, scope-limit) run on every PR
+  (REL-7a).
+
+**Measured on a GB10** (Nemotron-3.5-Embed-1B + Qwen3-Reranker-0.6B; raw output under `docs/eval-ab/`):
+
+| What | Result | Target |
+|---|---|---|
+| Tables, exact execution (TBL-2) | **0.995** (was 0.521); code and subtotal traps 1.000 | ≥ 0.95 ✓ |
+| `/content` p95 (EVAL-9) | **5.5 ms** (was 60.4) | < 50 ms ✓ |
+| Leak matrix, clean tenants, `/mcp` on (SEC-2c/2d) | **0 leaks**: 724 probes normal, 54 with stale payloads (KB move, soft delete, ACL) | 0 ✓ |
+| Predicate scope p95, 1k → 100k documents (SEC-2d) | 62 → 500 ms (8.1×); id-list mode 2380 ms at 100k | ≤ 1.2× **missed** |
+| Disclosure, answer page read (EVAL-9) | 0.522: in 116 of 152 misses the gold page was a search hit and the scripted reader missed it | ≥ 0.80 **missed** |
+| Quantization at 1M vectors (RET-20) | scalar p95 4.9 ms (float32 10.8 ms); recall cannot be judged on random vectors | p95 < 20 ms ✓ |
+
+**Known gaps:**
+- the remaining Qdrant-side growth of predicate scope, i.e. a tenant payload index (SEC-2e);
+- a page-first disclosure reader (EVAL-10);
+- quantization recall on real embeddings (RET-20);
+- the in-domain eval set, which waits on the owner's documents (EVAL-8).
 
 ### Added
 
@@ -35,6 +67,13 @@
 
 ### Fixed
 
+- **Faster scope SQL (SEC-2d).** The visibility query no longer uses `LEFT JOIN … DISTINCT`;
+  the knowledge-base limit is an `EXISTS` semi-join, so `LIMIT` can stop early. Same rows, and
+  every Postgres contract passes. On 100k documents (EXPLAIN ANALYZE) the tenant-wide query
+  went from 194 ms to 0.7 ms. A new additive migration
+  (`20261125180000_document_acl_tenant_index`) adds a partial index and expression statistics,
+  so the "tenant holds ACL'd documents" check is an index-only scan: 26 ms → 0.12 ms.
+  PostgreSQL 14+ is required.
 - **Predicate scope no longer materialises every visible id (SEC-2d).** `build_scope` first
   runs the scope query with a server-side `LIMIT KB_SCOPE_ID_LIMIT + 1`. At most `limit`
   rows are the complete id list; over the limit, the tenant's versioned/ACL checks decide
