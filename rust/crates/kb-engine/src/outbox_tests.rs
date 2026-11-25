@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use kb_ports::{DocumentId, DocumentStore, OutboxOp, TenantId};
+use kb_ports::{DocumentId, OutboxOp, ScopeOutbox, TenantId};
 
 use crate::fakes::{FakeChunkPayload, FakeChunkStore, FakeDocumentStore, FakeScopeOutbox};
 use crate::{CancelToken, OutboxReconciler};

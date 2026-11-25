@@ -112,10 +112,10 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_or_garbled_interval_uses_the_default() {
-        assert_eq!(DEFAULT_OUTBOX_INTERVAL_MS, 2_000);
+    fn the_documented_defaults_are_compile_time_constants() {
         // No environment mutation in a parallel test run: the pure default is
-        // what the constant promises to an operator who leaves the var unset.
-        assert!(DEFAULT_OUTBOX_MAX_ATTEMPTS > 0);
+        // what the constants promise to an operator who leaves the var unset.
+        const { assert!(DEFAULT_OUTBOX_INTERVAL_MS == 2_000) };
+        const { assert!(DEFAULT_OUTBOX_MAX_ATTEMPTS == 10) };
     }
 }

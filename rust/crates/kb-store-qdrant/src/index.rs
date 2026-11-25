@@ -350,7 +350,7 @@ impl RetrievalIndex for QdrantIndex {
         self.client
             .set_payload(
                 SetPayloadPointsBuilder::new(&self.collection, payload)
-                    .points(filter)
+                    .points_selector(filter)
                     .wait(true),
             )
             .await

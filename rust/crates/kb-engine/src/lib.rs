@@ -71,6 +71,8 @@ mod ingest_concurrency_tests;
 #[cfg(test)]
 mod ingest_tests;
 #[cfg(test)]
+mod outbox_tests;
+#[cfg(test)]
 mod page_arm_tests;
 #[cfg(test)]
 mod processor_tests;

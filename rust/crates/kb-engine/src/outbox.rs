@@ -217,5 +217,3 @@ impl OutboxReconciler {
     }
 }
 
-#[cfg(test)]
-mod outbox_tests;

@@ -17,6 +17,8 @@ pub type ProgressCall = (String, String, u32);
 /// `(job_id, step, progress, step_current, step_total)` recorded by
 /// [`FakeJobStore::update_detailed`].
 pub type DetailedProgressCall = (String, String, u32, Option<u32>, Option<u32>);
+/// `(document, kb ids)` passed to the reconciler's payload repair (SEC-2b).
+pub type KbPayloadWrite = (DocumentId, Vec<String>);
 
 /// Timestamp the fakes stamp on every row they create.
 const FAKE_TIMESTAMP: &str = "2026-01-01T00:00:00.000Z";
@@ -905,7 +907,7 @@ pub struct FakeChunkStore {
     /// SEC-2b: documents whose points were removed, in call order.
     pub deleted_documents: Arc<RwLock<Vec<DocumentId>>>,
     /// SEC-2b: `(document, kb ids)` pairs handed to `set_document_kb_payload`.
-    pub kb_payload_writes: Arc<RwLock<Vec<(DocumentId, Vec<String>)>>>,
+    pub kb_payload_writes: Arc<RwLock<Vec<KbPayloadWrite>>>,
 }
 
 impl FakeChunkStore {

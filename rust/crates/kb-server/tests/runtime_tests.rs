@@ -93,6 +93,7 @@ async fn serve_stops_the_listener_and_then_the_worker_on_cancel() {
         listener,
         Some(worker),
         Some(maintenance),
+        None,
         cancel.clone(),
     ));
 
@@ -127,6 +128,7 @@ async fn serve_works_without_a_worker() {
     let server = tokio::spawn(serve(
         harness.app.clone(),
         listener,
+        None,
         None,
         None,
         cancel.clone(),

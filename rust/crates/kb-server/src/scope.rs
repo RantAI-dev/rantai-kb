@@ -77,7 +77,8 @@ pub async fn run(args: &[String]) -> Result<(), CliError> {
     let parsed = BackfillArgs::parse(&args[1..])?;
 
     let lookup = |key: &str| std::env::var(key).ok();
-    let pg = Config::pg_from_lookup(&lookup).map_err(|e| CliError::Failed(e.to_string()))?;
+    let pg = Config::pg_from_lookup(|key| std::env::var(key).ok())
+        .map_err(|e| CliError::Failed(e.to_string()))?;
     let pool = kb_store_pg::connect_pool(&pg).await?;
     let documents: Arc<dyn DocumentStore> = Arc::new(PgDocumentStore::from_pool(pool.clone()));
     let tenants = match parsed.tenant.as_deref() {
