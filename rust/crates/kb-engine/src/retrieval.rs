@@ -290,6 +290,11 @@ pub struct RetrievalOutcome {
     /// pool was scored (the floor compares every hit against its score), so
     /// the count is the scored pool, not the head.
     pub reranked_count: Option<usize>,
+    /// SEC-2a: candidates whose document failed the Postgres visibility verify
+    /// (stale KB/tenant payload, deleted document, or an out-of-scope document
+    /// an arm still returned). Present only in predicate mode; `Ids` mode has
+    /// no verify and keeps the earlier response shape byte-for-byte.
+    pub scope_verify_dropped: Option<usize>,
     /// The comparable scores the confidence band is fitted on (RET-18).
     ///
     /// The engine knows which score the ranked hits carry; the server knows
@@ -970,7 +975,18 @@ async fn execute_pipeline_with_plan(
     let total_sw = Stopwatch::start(clock);
     let mut timings = StageTimings::default();
     let mut degrades: Vec<RetrievalDegrade> = Vec::new();
-    let pool_size = opts.candidate_pool_size.clamp(1, 100);
+    let is_predicate = scope.is_predicate();
+    // SEC-2a: a coarse index filter can return candidates the filter excludes.
+    // Over-fetch 1.5× so the verify dropping them does not cut recall. Ids mode
+    // keeps the exact old pool size.
+    let base_pool = opts.candidate_pool_size.clamp(1, 100);
+    let pool_size = if is_predicate {
+        base_pool.saturating_mul(3).div_ceil(2).min(100)
+    } else {
+        base_pool
+    };
+    let mut verified: Option<HashSet<DocumentId>> = None;
+    let mut scope_verify_dropped = 0usize;
 
     // 0. The page-image arm runs alongside everything below: its query embedding
     // is a second round trip to a different model, and it must not add to the
@@ -1353,6 +1369,35 @@ async fn execute_pipeline_with_plan(
         timings.global_arm_ms = stopwatch.elapsed_ms();
     }
 
+    // SEC-2a: the authoritative Postgres verify. Every arm has now returned its
+    // candidates — dense, BM25, expansion variants, graph, tree and global — so
+    // this is the last point before fusion/rerank at which a whole candidate can
+    // be dropped. The index filter was only a coarse optimisation: a chunk whose
+    // payload is stale still arrives here, and must not become a hit.
+    if is_predicate {
+        let spec = scope.verify_spec().ok_or_else(|| {
+            EngineError::RetrievalFailed("predicate scope has no verify spec".to_string())
+        })?;
+        let ids: Vec<DocumentId> = {
+            let mut seen = HashSet::with_capacity(candidates.len());
+            candidates
+                .iter()
+                .filter(|candidate| seen.insert(candidate.document_id.clone()))
+                .map(|candidate| candidate.document_id.clone())
+                .collect()
+        };
+        // Fail closed: a verify error is an error, never unverified hits and
+        // never an empty answer that looks like "no matches".
+        let visible = doc_store
+            .verify_visible(&spec.request(), &ids)
+            .await
+            .map_err(|e| EngineError::RetrievalFailed(format!("scope verify failed: {e}")))?;
+        let before = candidates.len();
+        candidates.retain(|candidate| visible.contains(&candidate.document_id));
+        scope_verify_dropped += before - candidates.len();
+        verified = Some(visible);
+    }
+
     let mut hits: Vec<SearchHit> = candidates.into_iter().map(candidate_to_hit).collect();
 
     // A tree hit is one the outline brought in; the text arms never scored it.
@@ -1677,6 +1722,7 @@ async fn execute_pipeline_with_plan(
                     // The rerank ran, and the floor kept nothing: no returned
                     // hit carries a score, because there is no returned hit.
                     reranked_count: rerank_ran.then_some(0),
+                    scope_verify_dropped: is_predicate.then_some(scope_verify_dropped),
                     confidence_scores,
                     // The diversity cap runs after the floor, so it never ran here.
                     per_document_capped: None,
@@ -1713,6 +1759,7 @@ async fn execute_pipeline_with_plan(
                 )
                 .await;
                 reranked_hits = outcome.hits;
+                scope_verify_dropped += retain_verified(&mut reranked_hits, &verified);
                 if outcome.rerank_failed {
                     degrades.push(RetrievalDegrade::RerankUnavailable);
                 }
@@ -1859,6 +1906,7 @@ async fn execute_pipeline_with_plan(
         if neighbour_failed {
             degrades.push(RetrievalDegrade::NeighboursPartial);
         }
+        scope_verify_dropped += retain_verified(&mut all_neighbours, &verified);
         // The neighbour weave runs after the cut and its chunks appear in the
         // `chunks` list as reading context. With a cap on, they must not let a
         // document regain the chunks the cap just removed: count them against
@@ -1940,6 +1988,7 @@ async fn execute_pipeline_with_plan(
                     .into_iter()
                     .map(|c| candidate_to_hit_from(c, ProvenanceArm::Figure))
                     .collect();
+                scope_verify_dropped += retain_verified(&mut figures, &verified);
                 if let Some(gate) = &opts.figure_gate {
                     if !figures.is_empty() {
                         let gate_candidates: Vec<FigureGateCandidate> = figures
@@ -2023,6 +2072,7 @@ async fn execute_pipeline_with_plan(
         tree: tree_stats,
         global_arm: global_stats,
         reranked_count,
+        scope_verify_dropped: is_predicate.then_some(scope_verify_dropped),
         confidence_scores,
         per_document_capped,
         timings,
@@ -2063,6 +2113,19 @@ pub fn apply_max_per_document(hits: Vec<SearchHit>, limit: u32) -> (Vec<SearchHi
 /// How many of the hits carry a rerank score.
 fn count_reranked(hits: &[SearchHit]) -> usize {
     hits.iter().filter(|h| h.rerank_score.is_some()).count()
+}
+
+/// Drop hits an arm attached after the main verify (page images, neighbours,
+/// figures) whose document is not in the verified set. These arms run after
+/// rerank, so they cannot be part of the single pre-fusion verify call; using
+/// the same set keeps them on the authoritative side of the fence.
+fn retain_verified(hits: &mut Vec<SearchHit>, verified: &Option<HashSet<DocumentId>>) -> usize {
+    let Some(visible) = verified else {
+        return 0;
+    };
+    let before = hits.len();
+    hits.retain(|hit| visible.contains(&hit.chunk.document_id));
+    before - hits.len()
 }
 
 /// The two top scores of the answer, from the score the pipeline actually used.

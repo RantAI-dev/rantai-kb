@@ -113,20 +113,71 @@ pub const PAYLOAD_KEYS: &[&str] = &[
 /// alone is not one either (document ids are tenant-unique only inside a
 /// tenant).
 ///
-/// The document list is a `match any` keyword list. Qdrant pushes it into the
-/// payload index rather than scanning; `docs/eval-baseline.md` §6 measures the
-/// worst case (every document in a 2,933-document corpus) against a 10-document
-/// scope.
+/// In Ids mode the document list is a `match any` keyword list. Qdrant pushes it
+/// into the payload index rather than scanning; `docs/eval-baseline.md` §6
+/// measures the worst case (every document in a 2,933-document corpus) against a
+/// 10-document scope. In Predicate mode (SEC-2a) the list is replaced by the
+/// tenant / knowledge-base / category conditions and a narrower `document_id`
+/// condition only when the scope was explicitly narrowed by `documentIds`.
+/// The index filter is an optimisation: the engine verifies every candidate
+/// against Postgres before it can be returned.
 #[must_use]
 pub fn scope_filter(scope: &DocumentScope) -> Filter {
-    let documents: Vec<String> = scope
-        .document_ids()
-        .iter()
-        .map(|d| d.as_str().to_string())
-        .collect();
-    let mut filter = document_filter(scope.tenant(), &documents);
+    let mut filter = if let Some(predicate) = scope.predicate() {
+        let mut conditions = vec![Condition::matches(
+            KEY_TENANT_ID,
+            MatchValue::Keyword(scope.tenant().as_str().to_string()),
+        )];
+        if let Some(kb_ids) = &predicate.kb_ids {
+            conditions.push(any_of(
+                KEY_KNOWLEDGE_BASE_ID,
+                kb_ids.iter().map(|kb| kb.0.clone()).collect(),
+            ));
+        }
+        if let Some(category) = &predicate.category {
+            conditions.push(Condition::matches(
+                KEY_CATEGORY,
+                MatchValue::Keyword(category.clone()),
+            ));
+        }
+        if let Some(ids) = scope.restricted_ids() {
+            conditions.push(any_of(
+                KEY_DOCUMENT_ID,
+                ids.iter().map(|id| id.as_str().to_string()).collect(),
+            ));
+        }
+        Filter::must(conditions)
+    } else {
+        let documents: Vec<String> = scope
+            .document_ids()
+            .iter()
+            .map(|d| d.as_str().to_string())
+            .collect();
+        document_filter(scope.tenant(), &documents)
+    };
     append_unit_range(&mut filter, scope.unit_range());
     filter
+}
+
+/// Add a predicate scope's knowledge-base and category conditions to a filter
+/// that already names its tenant and one document. The document-id condition is
+/// the primary fence; these repeat the coarse conditions so an index that
+/// returns a stale payload cannot widen a predicate search before the verify.
+fn append_predicate_conditions(filter: &mut Filter, scope: &DocumentScope) {
+    if let Some(predicate) = scope.predicate() {
+        if let Some(kb_ids) = &predicate.kb_ids {
+            filter.must.push(any_of(
+                KEY_KNOWLEDGE_BASE_ID,
+                kb_ids.iter().map(|kb| kb.0.clone()).collect(),
+            ));
+        }
+        if let Some(category) = &predicate.category {
+            filter.must.push(Condition::matches(
+                KEY_CATEGORY,
+                MatchValue::Keyword(category.clone()),
+            ));
+        }
+    }
 }
 
 /// Add the RET-15 range as index conditions, not as a post-filter.
@@ -177,6 +228,7 @@ pub fn figures_filter(scope: &DocumentScope, documents: &[String]) -> Filter {
         ),
         Condition::matches(KEY_CHUNK_TYPE, MatchValue::Keyword("figure".to_string())),
     ]);
+    append_predicate_conditions(&mut filter, scope);
     append_unit_range(&mut filter, scope.unit_range());
     filter
 }
@@ -245,6 +297,7 @@ pub fn chunk_range_filter(
             },
         ),
     ]);
+    append_predicate_conditions(&mut filter, scope);
     append_unit_range(&mut filter, scope.unit_range());
     filter
 }
@@ -293,6 +346,7 @@ pub fn pages_filter(scope: &DocumentScope, document: &DocumentId, pages: &[u32])
             }),
         ),
     ]);
+    append_predicate_conditions(&mut filter, scope);
     append_unit_range(&mut filter, scope.unit_range());
     filter
 }
@@ -304,7 +358,14 @@ pub fn unit_payload(unit: &IndexUnit) -> Payload {
     payload.insert(KEY_UNIT_ID, unit.id.as_str());
     payload.insert(KEY_TENANT_ID, unit.tenant.as_str());
     payload.insert(KEY_DOCUMENT_ID, unit.document_id.as_str());
-    if let Some(kb) = &unit.knowledge_base_id {
+    // A document may sit in several knowledge bases. Ingest writes the whole
+    // list into `metadata.knowledgeBaseIds`; the singular `IndexUnit` field is
+    // kept for callers that have only one. Qdrant stores a keyword array under
+    // the same key, which `any_of` matches in either shape.
+    let kb_ids = knowledge_base_ids_from_metadata(&unit.metadata);
+    if !kb_ids.is_empty() {
+        payload.insert(KEY_KNOWLEDGE_BASE_ID, kb_ids);
+    } else if let Some(kb) = &unit.knowledge_base_id {
         payload.insert(KEY_KNOWLEDGE_BASE_ID, kb.as_str());
     }
     if let Some(category) = &unit.category {
@@ -334,6 +395,24 @@ pub fn unit_payload(unit: &IndexUnit) -> Payload {
     }
     payload.insert(KEY_METADATA, unit.metadata.clone());
     payload
+}
+
+/// Every knowledge base id the engine wrote for this unit. Old units (and the
+/// stateless path) carry none; the singular `IndexUnit::knowledge_base_id` is
+/// then the only source.
+#[must_use]
+pub fn knowledge_base_ids_from_metadata(metadata: &serde_json::Value) -> Vec<String> {
+    metadata
+        .get("knowledgeBaseIds")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Read a unit back out of a point's payload, or `None` when the payload is not
@@ -457,8 +536,8 @@ pub fn any_of(field: &str, values: Vec<String>) -> Condition {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use kb_engine::fakes::make_fake_scope;
-    use kb_ports::KnowledgeBaseId;
+    use kb_engine::fakes::{make_fake_predicate_scope, make_fake_scope};
+    use kb_ports::{DocumentFilter, KnowledgeBaseId, PredicateSpec, VerifySpec};
 
     fn test_scope(docs: &[&str]) -> DocumentScope {
         make_fake_scope(
@@ -639,6 +718,61 @@ mod tests {
         let debug = format!("{filter:?}");
         assert!(!debug.contains(KEY_PAGE));
         assert!(!debug.contains(KEY_CHUNK_INDEX));
+    }
+
+    fn predicate_scope(kb_ids: Option<Vec<&str>>, category: Option<&str>) -> DocumentScope {
+        make_fake_predicate_scope(
+            TenantId::new_unchecked("tenant-a"),
+            PredicateSpec {
+                kb_ids: kb_ids.map(|ids| {
+                    ids.into_iter()
+                        .map(KnowledgeBaseId::new_unchecked)
+                        .collect()
+                }),
+                category: category.map(str::to_string),
+                verify: VerifySpec {
+                    tenant: TenantId::new_unchecked("tenant-a"),
+                    filter: DocumentFilter::default(),
+                    restricted_ids: None,
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn a_predicate_filter_has_no_id_list_and_names_tenant_kb_and_category() {
+        let scope = predicate_scope(Some(vec!["kb-1", "kb-2"]), Some("cat-1"));
+        let filter = scope_filter(&scope);
+        let debug = format!("{filter:?}");
+        assert!(!debug.contains(KEY_DOCUMENT_ID), "{debug}");
+        assert!(debug.contains(KEY_TENANT_ID), "{debug}");
+        assert!(debug.contains(KEY_KNOWLEDGE_BASE_ID), "{debug}");
+        assert!(debug.contains("kb-1"), "{debug}");
+        assert!(debug.contains("kb-2"), "{debug}");
+        assert!(debug.contains(KEY_CATEGORY), "{debug}");
+        assert!(debug.contains("cat-1"), "{debug}");
+    }
+
+    #[test]
+    fn a_narrowed_predicate_filter_adds_the_requested_documents_back() {
+        let scope = predicate_scope(None, None).narrowed_to(&[DocumentId::new_unchecked("doc-a")]);
+        let debug = format!("{:?}", scope_filter(&scope));
+        assert!(debug.contains(KEY_DOCUMENT_ID), "{debug}");
+        assert!(debug.contains("doc-a"), "{debug}");
+        assert!(!debug.contains(KEY_KNOWLEDGE_BASE_ID), "{debug}");
+    }
+
+    #[test]
+    fn knowledge_base_ids_from_metadata_cover_a_document_in_several_kbs() {
+        let mut unit = unit("tenant-a", "doc-a", 0);
+        unit.metadata = serde_json::json!({"knowledgeBaseIds": ["kb-1", "kb-2"]});
+        let payload = unit_payload(&unit);
+        let map: std::collections::HashMap<String, Value> = payload.into();
+        assert_eq!(
+            knowledge_base_ids_from_metadata(&unit.metadata),
+            vec!["kb-1", "kb-2"]
+        );
+        assert!(map.contains_key(KEY_KNOWLEDGE_BASE_ID));
     }
 
     #[test]

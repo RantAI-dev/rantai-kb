@@ -118,7 +118,7 @@ impl TreeArm {
         scope: &DocumentScope,
         query: &str,
     ) -> Result<TreeRanking, PortError> {
-        if scope.document_ids().is_empty() {
+        if scope.is_empty() {
             return Ok(TreeRanking::default());
         }
         let outlines = documents.outlines(scope).await?;
@@ -126,7 +126,7 @@ impl TreeArm {
             .into_iter()
             // Belt and braces: the adapter promises this, and the arm does not
             // depend on the promise to stay scoped.
-            .filter(|(id, _)| scope.document_ids().contains(id))
+            .filter(|(id, _)| scope.allows_document(id))
             .collect();
         if outlines.is_empty() {
             return Ok(TreeRanking::default());

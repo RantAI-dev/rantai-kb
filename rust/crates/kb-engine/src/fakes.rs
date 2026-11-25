@@ -4,7 +4,7 @@
 //!
 //! Suitable for unit tests and in-process HTTP tests without network dependencies.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{
     Arc, RwLock,
     atomic::{AtomicBool, Ordering},
@@ -31,15 +31,16 @@ fn next_id() -> u64 {
 use kb_ports::{
     ArmRanks, ArmScores, AuthContext, BlobStore, Candidate, CategoryRecord, Chunk, ChunkId,
     ChunkMeta, ChunkMetadata, ChunkStore, ChunkToStore, ChunkType, CreateCategory, CreateJobInput,
-    CreateKnowledgeBase, DocumentDownloadMeta, DocumentId, DocumentIntelligenceData, DocumentMeta,
-    DocumentPage, DocumentScope, DocumentStore, Embedder, Entity, EntityExtractor, EntityStore,
-    ExtractionOptions, ExtractionResult, Extractor, FigureGate, FigureGateCandidate, Fusion,
-    HybridQuery, IndexCapabilities, IndexUnit, JobRecord, JobStore, JobView, KnowledgeBaseId,
-    KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor, NewDocument, PatchCategory,
-    PatchDocument, PatchKnowledgeBase, PortError, ProgressSink, QueryEmbedding, ReapableJob,
-    Relation, RerankCandidate, RerankResult, Reranker, RetrievalIndex, RetryJobOutcome,
-    ScopeRequest, SearchHit, StoredChunk, TableId, TableQueryFailure, TableRecord, TableStore,
-    TenantId, adapter::ScopeToken, sort_candidates,
+    CreateKnowledgeBase, DocumentDownloadMeta, DocumentFilter, DocumentId,
+    DocumentIntelligenceData, DocumentMeta, DocumentPage, DocumentScope, DocumentStore, Embedder,
+    Entity, EntityExtractor, EntityStore, ExtractionOptions, ExtractionResult, Extractor,
+    FigureGate, FigureGateCandidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit, JobRecord,
+    JobStore, JobView, KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary, NeighbourAnchor,
+    NewDocument, PatchCategory, PatchDocument, PatchKnowledgeBase, PortError, PredicateSpec,
+    ProgressSink, QueryEmbedding, ReapableJob, Relation, RerankCandidate, RerankResult, Reranker,
+    RetrievalIndex, RetryJobOutcome, ScopeRequest, SearchHit, StoredChunk, TableId,
+    TableQueryFailure, TableRecord, TableStore, TenantId, adapter::ScopeToken, predicate_spec_for,
+    scope_id_limit_from_env, sort_candidates,
 };
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
@@ -122,6 +123,13 @@ pub fn make_fake_scope(tenant: TenantId, doc_ids: Vec<DocumentId>) -> DocumentSc
     DocumentScope::new(&token, tenant, doc_ids)
 }
 
+/// Helper to create a fake predicate scope (SEC-2a).
+#[must_use]
+pub fn make_fake_predicate_scope(tenant: TenantId, spec: PredicateSpec) -> DocumentScope {
+    let token = ScopeToken::new_for_adapter();
+    DocumentScope::new_predicate(&token, tenant, spec)
+}
+
 /// A JSON scalar as Postgres `->>` renders it: strings unquoted, numbers and
 /// booleans as their text, everything else unmatchable.
 fn json_scalar_text(value: &serde_json::Value) -> Option<String> {
@@ -159,6 +167,64 @@ fn metadata_key_matches(metadata: Option<&serde_json::Value>, key: &str, value: 
     metadata_values_match(metadata, key, &[value.to_string()])
 }
 
+/// The fake's copy of the Postgres scope predicate. `build_scope` and
+/// `verify_visible` both call it, so the verify cannot disagree with the scope
+/// it is checking — the same property the SQL adapter gets from `scope_sql`.
+fn meta_matches_filter(meta: &DocumentMeta, filter: &DocumentFilter) -> bool {
+    if !filter.knowledge_base_ids.is_empty()
+        && !meta
+            .knowledge_base_ids
+            .iter()
+            .any(|kb| filter.knowledge_base_ids.iter().any(|k| k.0 == *kb))
+    {
+        return false;
+    }
+    if let Some(cat) = &filter.category
+        && !meta.categories.contains(cat)
+    {
+        return false;
+    }
+    if let Some(refs) = &filter.external_refs
+        && !meta
+            .external_ref
+            .as_ref()
+            .is_some_and(|r| refs.iter().any(|allowed| allowed == r))
+    {
+        return false;
+    }
+    if let Some(language) = &filter.language
+        && !metadata_key_matches(meta.metadata.as_ref(), "language", language)
+    {
+        return false;
+    }
+    // RET-16 version scope. KEEP IN SYNC with `scope_sql_inner` in
+    // `kb-store-pg/src/store.rs`: the same three modes, after every other
+    // clause, so a version filter can only narrow the caller's scope. Being in
+    // this shared predicate, it also governs the SEC-2a verify.
+    if let Some(as_of) = &filter.as_of {
+        // `asOf` wins over `includeHistory` and ignores isLatest.
+        if meta
+            .effective_from
+            .as_ref()
+            .is_some_and(|from| from.as_str() > as_of.as_str())
+        {
+            return false;
+        }
+        if meta
+            .effective_to
+            .as_ref()
+            .is_some_and(|to| to.as_str() <= as_of.as_str())
+        {
+            return false;
+        }
+    } else if !filter.include_history && meta.doc_key.is_some() && !meta.is_latest {
+        return false;
+    }
+    filter.metadata.iter().all(|predicate| {
+        metadata_values_match(meta.metadata.as_ref(), &predicate.key, &predicate.values)
+    })
+}
+
 /// Fake in-memory document store.
 #[derive(Clone, Default)]
 pub struct FakeDocumentStore {
@@ -169,6 +235,12 @@ pub struct FakeDocumentStore {
     pub categories: Arc<RwLock<HashMap<TenantId, Vec<CategoryRecord>>>>,
     pub download_metas: Arc<RwLock<HashMap<(TenantId, DocumentId), DocumentDownloadMeta>>>,
     pub fail_scope: Arc<AtomicBool>,
+    /// Fail the SEC-2a verify without failing `build_scope`, so a test can
+    /// prove that a search fails closed when Postgres cannot verify.
+    pub fail_verify: Arc<AtomicBool>,
+    /// Test-only override for `KB_SCOPE_ID_LIMIT`. `None` reads the environment
+    /// exactly as the Postgres adapter does.
+    pub scope_id_limit: Option<usize>,
     /// Section outlines by document, for the tree arm (DEC-4).
     pub outlines: Arc<RwLock<HashMap<DocumentId, kb_core::tree::Outline>>>,
     /// Force [`DocumentStore::outlines`] to fail, so a test can assert the
@@ -229,64 +301,41 @@ impl DocumentStore for FakeDocumentStore {
         let map = self.docs.read().unwrap();
         let list = map.get(&req.tenant).cloned().unwrap_or_default();
         let filtered: Vec<DocumentId> = list
-            .into_iter()
-            .filter(|d| {
-                if !req.filter.knowledge_base_ids.is_empty()
-                    && !d
-                        .knowledge_base_ids
-                        .iter()
-                        .any(|kb| req.filter.knowledge_base_ids.iter().any(|k| k.0 == *kb))
-                {
-                    return false;
-                }
-                if let Some(cat) = &req.filter.category {
-                    if !d.categories.contains(cat) {
-                        return false;
-                    }
-                }
-                if let Some(refs) = &req.filter.external_refs
-                    && !d
-                        .external_ref
-                        .as_ref()
-                        .is_some_and(|r| refs.iter().any(|allowed| allowed == r))
-                {
-                    return false;
-                }
-                if let Some(language) = &req.filter.language
-                    && !metadata_key_matches(d.metadata.as_ref(), "language", language)
-                {
-                    return false;
-                }
-                // RET-16 version scope. KEEP IN SYNC with `scope_sql` in
-                // `kb-store-pg/src/store.rs`: the fake must mirror the SQL, or
-                // a test could pass here and fail against Postgres. Both apply
-                // the same three modes, after all the tenant/KB/meta clauses,
-                // so a version filter can only narrow the caller's scope.
-                if let Some(as_of) = &req.filter.as_of {
-                    // `asOf` wins over `includeHistory` and ignores isLatest.
-                    if d.effective_from
-                        .as_ref()
-                        .is_some_and(|from| from.as_str() > as_of.as_str())
-                    {
-                        return false;
-                    }
-                    if d.effective_to
-                        .as_ref()
-                        .is_some_and(|to| to.as_str() <= as_of.as_str())
-                    {
-                        return false;
-                    }
-                } else if !req.filter.include_history && d.doc_key.is_some() && !d.is_latest {
-                    return false;
-                }
-                req.filter.metadata.iter().all(|predicate| {
-                    metadata_values_match(d.metadata.as_ref(), &predicate.key, &predicate.values)
-                })
-            })
-            .map(|d| d.id)
+            .iter()
+            .filter(|d| meta_matches_filter(d, &req.filter))
+            .map(|d| d.id.clone())
             .collect();
         let token = ScopeToken::new_for_adapter();
+        let limit = self.scope_id_limit.unwrap_or_else(scope_id_limit_from_env);
+        if let Some(spec) = predicate_spec_for(req, filtered.len(), limit, false) {
+            return Ok(DocumentScope::new_predicate(
+                &token,
+                req.tenant.clone(),
+                spec,
+            ));
+        }
         Ok(DocumentScope::new(&token, req.tenant.clone(), filtered))
+    }
+
+    async fn verify_visible(
+        &self,
+        req: &ScopeRequest,
+        document_ids: &[DocumentId],
+    ) -> Result<HashSet<DocumentId>, PortError> {
+        if document_ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        if self.fail_verify.load(Ordering::Relaxed) {
+            return Err(PortError::Unavailable("forced verify failure".to_string()));
+        }
+        let map = self.docs.read().unwrap();
+        let list = map.get(&req.tenant).cloned().unwrap_or_default();
+        let wanted: HashSet<&DocumentId> = document_ids.iter().collect();
+        Ok(list
+            .into_iter()
+            .filter(|d| wanted.contains(&d.id) && meta_matches_filter(d, &req.filter))
+            .map(|d| d.id)
+            .collect())
     }
 
     async fn find_by_id(
@@ -294,7 +343,7 @@ impl DocumentStore for FakeDocumentStore {
         scope: &DocumentScope,
         id: &DocumentId,
     ) -> Result<Option<DocumentMeta>, PortError> {
-        if !scope.document_ids().contains(id) {
+        if !scope.allows_document(id) {
             return Ok(None);
         }
         let map = self.docs.read().unwrap();
@@ -398,6 +447,23 @@ impl DocumentStore for FakeDocumentStore {
             return Ok(outlines
                 .iter()
                 .map(|(id, outline)| (id.clone(), outline.clone()))
+                .collect());
+        }
+        if let Some(verify) = scope.verify_spec() {
+            // Predicate mode has no id list to enumerate: use the same document
+            // rows and the same filter the verify uses, so a document moved out
+            // of the KB in Postgres loses its outline even with a stale payload.
+            let docs = self.docs.read().unwrap();
+            let list = docs.get(&verify.tenant).cloned().unwrap_or_default();
+            return Ok(list
+                .into_iter()
+                .filter(|doc| scope.allows_document(&doc.id))
+                .filter(|doc| meta_matches_filter(doc, &verify.filter))
+                .filter_map(|doc| {
+                    outlines
+                        .get(&doc.id)
+                        .map(|outline| (doc.id.clone(), outline.clone()))
+                })
                 .collect());
         }
         Ok(scope
@@ -873,6 +939,16 @@ impl DocumentStore for FakeDocumentStore {
     }
 }
 
+/// The coarse payload a fake chunk carries. Deliberately independent of the
+/// document store: a test can move a document between KBs, or give a chunk a
+/// wrong tenant, without touching the index payload (SEC-2a stale payload).
+#[derive(Clone, Debug, Default)]
+pub struct FakeChunkPayload {
+    pub tenant: Option<String>,
+    pub knowledge_base_ids: Vec<String>,
+    pub category: Option<String>,
+}
+
 /// Fake in-memory chunk store.
 #[derive(Clone, Default)]
 pub struct FakeChunkStore {
@@ -880,6 +956,10 @@ pub struct FakeChunkStore {
     pub bm25_hits: Arc<RwLock<Vec<SearchHit>>>,
     pub neighbour_hits: Arc<RwLock<Vec<SearchHit>>>,
     pub figure_hits: Arc<RwLock<Vec<SearchHit>>>,
+    /// Payload per document, keyed exactly like Qdrant's keyword fields.
+    /// A document with no entry has an unknown payload, so predicate mode lets
+    /// the candidate through and leaves the decision to the Postgres verify.
+    pub payloads: Arc<RwLock<HashMap<DocumentId, FakeChunkPayload>>>,
     /// Chunks written through `store_chunks`, keyed by document id. Also
     /// backs `chunk_counts`, so tests see the same numbers a real store would.
     pub stored_chunks: Arc<RwLock<HashMap<DocumentId, Vec<ChunkToStore>>>>,
@@ -888,6 +968,54 @@ pub struct FakeChunkStore {
     pub fail_bm25: Arc<AtomicBool>,
     pub fail_neighbours: Arc<AtomicBool>,
     pub fail_figures: Arc<AtomicBool>,
+}
+
+impl FakeChunkStore {
+    /// Set the payload the index holds for a document (SEC-2a test hook).
+    pub fn set_payload(&self, document: &DocumentId, payload: FakeChunkPayload) {
+        self.payloads
+            .write()
+            .unwrap()
+            .insert(document.clone(), payload);
+    }
+
+    /// Would the index's coarse predicate filter keep this document's chunks?
+    /// Ids mode has no payload conditions: the id list is the whole filter.
+    fn payload_allows(&self, scope: &DocumentScope, document: &DocumentId) -> bool {
+        if !scope.is_predicate() {
+            return true;
+        }
+        let Some(predicate) = scope.predicate() else {
+            return true;
+        };
+        let map = self.payloads.read().unwrap();
+        let Some(payload) = map.get(document) else {
+            return true;
+        };
+        if payload
+            .tenant
+            .as_ref()
+            .is_some_and(|tenant| tenant != scope.tenant().as_str())
+        {
+            return false;
+        }
+        if predicate.kb_ids.as_ref().is_some_and(|wanted| {
+            !wanted
+                .iter()
+                .any(|kb| payload.knowledge_base_ids.iter().any(|id| id == &kb.0))
+        }) {
+            return false;
+        }
+        predicate
+            .category
+            .as_ref()
+            .is_none_or(|cat| payload.category.as_ref() == Some(cat))
+    }
+
+    /// Both the scope's id rule and the index's coarse payload rule.
+    fn scope_allows(&self, scope: &DocumentScope, document: &DocumentId) -> bool {
+        scope.allows_document(document) && self.payload_allows(scope, document)
+    }
 }
 
 #[async_trait]
@@ -976,10 +1104,9 @@ impl ChunkStore for FakeChunkStore {
             return Err(PortError::Unavailable("forced vector failure".to_string()));
         }
         let list = self.vector_hits.read().unwrap();
-        let allowed = scope.document_ids();
         let filtered: Vec<SearchHit> = list
             .iter()
-            .filter(|h| allowed.contains(&h.chunk.document_id))
+            .filter(|h| self.scope_allows(scope, &h.chunk.document_id))
             .take(limit as usize)
             .cloned()
             .collect();
@@ -996,10 +1123,9 @@ impl ChunkStore for FakeChunkStore {
             return Err(PortError::Unavailable("forced bm25 failure".to_string()));
         }
         let list = self.bm25_hits.read().unwrap();
-        let allowed = scope.document_ids();
         let filtered: Vec<SearchHit> = list
             .iter()
-            .filter(|h| allowed.contains(&h.chunk.document_id))
+            .filter(|h| self.scope_allows(scope, &h.chunk.document_id))
             .take(limit as usize)
             .cloned()
             .collect();
@@ -1018,10 +1144,9 @@ impl ChunkStore for FakeChunkStore {
             ));
         }
         let list = self.neighbour_hits.read().unwrap();
-        let allowed = scope.document_ids();
         let filtered: Vec<SearchHit> = list
             .iter()
-            .filter(|h| allowed.contains(&h.chunk.document_id))
+            .filter(|h| self.scope_allows(scope, &h.chunk.document_id))
             .cloned()
             .collect();
         Ok(filtered)
@@ -1040,10 +1165,9 @@ impl ChunkStore for FakeChunkStore {
             return Err(PortError::Unavailable("forced figures failure".to_string()));
         }
         let list = self.figure_hits.read().unwrap();
-        let allowed = scope.document_ids();
         let filtered: Vec<SearchHit> = list
             .iter()
-            .filter(|h| allowed.contains(&h.chunk.document_id))
+            .filter(|h| self.scope_allows(scope, &h.chunk.document_id))
             .take(limit as usize)
             .cloned()
             .collect();
@@ -1150,7 +1274,6 @@ impl RetrievalIndex for FakeChunkStore {
             return Err(PortError::Unavailable("forced bm25 failure".to_string()));
         }
 
-        let allowed = scope.document_ids();
         let range = scope.unit_range();
         let in_range = |h: &SearchHit| {
             range.is_none_or(|r| {
@@ -1171,7 +1294,7 @@ impl RetrievalIndex for FakeChunkStore {
             let v_list = self.vector_hits.read().unwrap();
             for h in v_list
                 .iter()
-                .filter(|h| allowed.contains(&h.chunk.document_id) && in_range(h))
+                .filter(|h| self.scope_allows(scope, &h.chunk.document_id) && in_range(h))
             {
                 out.push(Candidate {
                     unit_id: h.chunk.id.clone(),
@@ -1208,7 +1331,7 @@ impl RetrievalIndex for FakeChunkStore {
             let b_list = self.bm25_hits.read().unwrap();
             for h in b_list
                 .iter()
-                .filter(|h| allowed.contains(&h.chunk.document_id) && in_range(h))
+                .filter(|h| self.scope_allows(scope, &h.chunk.document_id) && in_range(h))
             {
                 out.push(Candidate {
                     unit_id: h.chunk.id.clone(),
@@ -1255,16 +1378,18 @@ impl RetrievalIndex for FakeChunkStore {
         scope: &DocumentScope,
         ids: &[ChunkId],
     ) -> Result<Vec<Candidate>, PortError> {
-        if ids.is_empty() || scope.document_ids().is_empty() {
+        if ids.is_empty() || scope.is_empty() {
             return Ok(Vec::new());
         }
         let wanted: std::collections::HashSet<&str> = ids.iter().map(|id| id.0.as_str()).collect();
         let stored = self.stored_chunks.read().unwrap();
         let mut out: Vec<Candidate> = Vec::new();
-        for document_id in scope.document_ids() {
-            let Some(chunks) = stored.get(document_id) else {
+        // Predicate mode has no materialised id list: walk the stored documents
+        // and let the scope's id rule plus the index payload rule decide.
+        for (document_id, chunks) in stored.iter() {
+            if !self.scope_allows(scope, document_id) {
                 continue;
-            };
+            }
             for chunk in chunks {
                 let unit_id = format!("{}_{}", document_id.0, chunk.chunk_index);
                 if !wanted.contains(unit_id.as_str()) {
@@ -1307,8 +1432,7 @@ impl RetrievalIndex for FakeChunkStore {
             ));
         }
         let list = self.neighbour_hits.read().unwrap();
-        let allowed = scope.document_ids();
-        if !allowed.contains(document_id) {
+        if !self.scope_allows(scope, document_id) {
             return Ok(Vec::new());
         }
         let range = scope.unit_range();
@@ -1353,11 +1477,10 @@ impl RetrievalIndex for FakeChunkStore {
             return Err(PortError::Unavailable("forced figures failure".to_string()));
         }
         let list = self.figure_hits.read().unwrap();
-        let allowed = scope.document_ids();
         let range = scope.unit_range();
         let mut out = Vec::new();
         for h in list.iter() {
-            if allowed.contains(&h.chunk.document_id)
+            if self.scope_allows(scope, &h.chunk.document_id)
                 && document_ids.contains(&h.chunk.document_id)
                 && range.is_none_or(|r| {
                     r.allows(
@@ -1397,12 +1520,12 @@ impl RetrievalIndex for FakeChunkStore {
         pages: &[(DocumentId, u32)],
         per_page: usize,
     ) -> Result<Vec<Candidate>, PortError> {
-        if pages.is_empty() || per_page == 0 || scope.document_ids().is_empty() {
+        if pages.is_empty() || per_page == 0 || scope.is_empty() {
             return Ok(Vec::new());
         }
         let wanted: std::collections::HashSet<(DocumentId, u32)> = pages
             .iter()
-            .filter(|(document, _)| scope.document_ids().contains(document))
+            .filter(|(document, _)| self.scope_allows(scope, document))
             .cloned()
             .collect();
         let stored = self.stored_chunks.read().unwrap();
@@ -1410,7 +1533,7 @@ impl RetrievalIndex for FakeChunkStore {
         let mut counts: std::collections::HashMap<(DocumentId, u32), usize> =
             std::collections::HashMap::new();
         for (document, chunks) in stored.iter() {
-            if !scope.document_ids().contains(document) {
+            if !self.scope_allows(scope, document) {
                 continue;
             }
             for c in chunks {
@@ -1503,7 +1626,7 @@ impl RetrievalIndex for FakeChunkStore {
         scope: &DocumentScope,
         document: &DocumentId,
     ) -> Result<Vec<ChunkMeta>, PortError> {
-        if !scope.document_ids().contains(document) {
+        if !self.scope_allows(scope, document) {
             return Ok(Vec::new());
         }
         let stored = self.stored_chunks.read().unwrap();

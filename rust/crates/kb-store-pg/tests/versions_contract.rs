@@ -82,6 +82,7 @@ async fn scope_ids(store: &PgDocumentStore, filter: DocumentFilter) -> Vec<Strin
         .build_scope(&ScopeRequest {
             tenant: TenantId(TENANT.to_string()),
             filter,
+            force_ids: false,
         })
         .await
         .unwrap()
@@ -179,4 +180,44 @@ async fn postgres_supersedes_and_scopes_versions() {
         .await,
         ["plain", "v1", "v2"]
     );
+
+    // SEC-2a × RET-16: the predicate-mode verify runs the same SQL with an id
+    // restriction. With `asOf` it must number its parameters correctly and
+    // keep only the version in force — proven here against real Postgres.
+    let candidates = [
+        DocumentId("v1".into()),
+        DocumentId("v2".into()),
+        DocumentId("plain".into()),
+    ];
+    let verified = |filter: DocumentFilter| {
+        let store = &store;
+        let candidates = &candidates;
+        async move {
+            let mut ids: Vec<String> = store
+                .verify_visible(
+                    &ScopeRequest {
+                        tenant: TenantId(TENANT.to_string()),
+                        filter,
+                        force_ids: false,
+                    },
+                    candidates,
+                )
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|id| id.0)
+                .collect();
+            ids.sort();
+            ids
+        }
+    };
+    assert_eq!(
+        verified(DocumentFilter {
+            as_of: Some("2024-06-01T00:00:00Z".into()),
+            ..DocumentFilter::default()
+        })
+        .await,
+        ["plain", "v1"]
+    );
+    assert_eq!(verified(DocumentFilter::default()).await, ["plain", "v2"]);
 }

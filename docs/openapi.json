@@ -4920,6 +4920,14 @@
             "description": "Additive (issue #31): how many of the returned chunks carry a\n`rerankScore` — that is, how many of them the reranker scored.\n\nWithout a relevance floor that is the reranked head: the chunks ordered\nby the rerank score, followed by the rest in the fused order without\none. With a relevance floor (`minScore`) the whole pool was scored (the\nfloor compares every hit against its score), so it can be the whole\nanswer.\n\nAbsent when no reranker ran, so a search without a reranker keeps\nexactly the earlier shape.",
             "minimum": 0
           },
+          "scopeVerifyDropped": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "SEC-2a: candidates dropped because Postgres did not verify their\ndocument. Absent in Ids mode, so an old client sees the earlier shape.",
+            "minimum": 0
+          },
           "skippedArms": {
             "type": [
               "array",
