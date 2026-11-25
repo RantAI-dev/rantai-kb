@@ -2,17 +2,49 @@
 
 ## Unreleased
 
+### Fixed
+
+- **Tables: headers are named as the sheet shows them and codes are never summed (`TBL-2`).** The extractor now skips a World Bank preamble before the header, keeps year headers as text, flattens two- and three-level headers as `Parent / Child`, drops BPS column-number and source-note rows, and stops putting a merged title over a header row when the used range does not start at A1. A long all-digit identifier (NIP/NIK) stays text, so a sum refuses it and a distinct count works. Whole numbers in query results are returned as JSON integers (`2013`, not `2013.0`). **Stored tables need re-extraction to pick this up: run `kb-server reindex` after upgrading** (it rebuilds grids, manifests and Parquet from the originals). Offline `tables-v1` column drift fell from 180 to 0 queries with an unknown column; all 15 code traps now match offline.
+
+## 0.9.0 — 2026-11-25
+
+The v0.9 and v0.10 roadmap in one release ([`docs/core/specs/v1-roadmap.md`](docs/core/specs/v1-roadmap.md)).
+Every API and schema change is additive. Migrations: `kb-server migrate` applies the document
+versions and access-list columns. Re-index `lite` corpora for the ING-9 prefix fix.
+
+**Highlights**
+- **Correct citations and scoped search.** Same-titled documents keep separate sources
+  (RET-10). `documentIds` searches run the full pipeline (RET-11), and `pageRange`/`section`
+  restrict every arm (RET-15).
+- **Progressive disclosure for agents.** Outline v2 on `/structure` (RET-13), with
+  BAB/Bagian/Pasal markers. Byte-exact `GET /v1/documents/:id/content` with hash-bound cursors
+  (RET-14). Chunk spans (ING-13). Stateless parity (ING-14).
+- **Document versions.** `docKey`, `asOf`, `includeHistory` and `multiVersionWarning`
+  (RET-16).
+- **Search controls.** `maxPerDocument` (RET-17), a `confidence` band with honest
+  `calibrated` (RET-18), and an opt-in reranker breadcrumb (RET-12).
+- **Scale and agents.** Opt-in predicate scope with a fail-closed Postgres verify (SEC-2a).
+  Thin `/mcp` behind `KB_MCP` (API-4). Opt-in Qdrant quantization (RET-20). Per-document
+  access lists with default-deny, behind the `kb:assert-principals` scope (SEC-3).
+- **Deprecated:** `KB_GRAPH_ARM` / `KB_GLOBAL_ARM` (DEC-6).
+
+**Measured on a GB10** (Nemotron-3.5-Embed-1B + Qwen3-Reranker-0.6B; `docs/eval-ab/`).
+Numbers that missed their target are listed as missed.
+
+| What | Result | Target |
+|---|---|---|
+| Reranker breadcrumbs (RET-12) | MIRACL Δ −0.0006 [−0.010, +0.010]; HR Δ +0.0094 [−0.006, +0.025] | ≥ +0.01, CI > 0 → **stays off** |
+| `maxPerDocument=3` (RET-17) | nDCG Δ +0.0000 on MIRACL-id-200 | ≥ −0.005 ✓ |
+| Confidence calibration (RET-18) | off-topic `none` 85.7%, answerable `none` 0% | ≥ 90% **missed** / ≤ 5% ✓ |
+| Disclosure coverage (EVAL-7) | 0.238; chars ratio 1.35; `/content` p95 60.4 ms | 0.90 **missed** / ≤ 1.5 ✓ / < 50 ms **missed** |
+| Tables (TBL-1) | table in top 5 1.000; exact execution 0.521 | 0.85 ✓ / 0.95 **missed** |
+| One-embedder ingest (DEP-7) | 522 pages in 257 s (2.03 p/s), 0 failed | — |
+
+**Known gaps, tracked for 1.0:** table column naming (TBL-2), the disclosure gate and the
+`/content` latency (EVAL-9), and the scope outbox reconciler (SEC-2b).
+
 ### Added
 
-- **Predicate scope with a fail-closed Postgres verify (SEC-2a).** When a tenant has more
-  visible documents than `KB_SCOPE_ID_LIMIT` (opt-in: default `0` = off until old chunks carry a `knowledge_base_id` payload; enable after `kb-server reindex`, e.g. `2000`), the search no
-  longer sends every document id to Qdrant: the index filters on the `tenant_id`,
-  `knowledge_base_id` and `category` payload, arms over-fetch 1.5×, and every candidate is
-  verified against the same Postgres visibility rule before fusion. Unverified candidates are
-  dropped and counted in the additive `stats.scopeVerifyDropped`; a failed verify fails the
-  search instead of returning unverified hits. Filters the payload cannot express (metadata,
-  language, external refs, `documentIds` narrowing with unit ranges, RET-16 versions) keep the
-  id-list path.
 - **Per-document access lists (`SEC-3`).** Documents can carry `aclPrincipals`, set on upload
   (`aclPrincipals` multipart field) or `PATCH /v1/documents/:id` and returned additively by the
   document read/list routes. Requests assert their principals with `X-KB-Principals:
@@ -25,38 +57,15 @@
   carries no ACL. The additive migration adds `"aclPrincipals" TEXT[] NOT NULL DEFAULT '{}'`
   with a GIN index.
 
-### Fixed
-
-- **Tables: headers are named as the sheet shows them and codes are never summed (`TBL-2`).** The extractor now skips a World Bank preamble before the header, keeps year headers as text, flattens two- and three-level headers as `Parent / Child`, drops BPS column-number and source-note rows, and stops putting a merged title over a header row when the used range does not start at A1. A long all-digit identifier (NIP/NIK) stays text, so a sum refuses it and a distinct count works. Whole numbers in query results are returned as JSON integers (`2013`, not `2013.0`). **Stored tables need re-extraction to pick this up: run `kb-server reindex` after upgrading** (it rebuilds grids, manifests and Parquet from the originals). Offline `tables-v1` column drift fell from 180 to 0 queries with an unknown column; all 15 code traps now match offline.
-- **Passage prefixes are applied on the batch path (`ING-9`).** `embed_many` (used by ingest and
-  stateless `/v1/process`) now sends every text through the same prefix rule as the single-text
-  path: models that need it see `passage: ` before each chunk, so `/v1/encode mode=passage` and
-  `/v1/process` produce vectors in the same space. Prefixes are applied exactly once, and providers
-  whose instruction travels out of band (`input_type`, Voyage / OmniEmbed) still send no text
-  prefix; the embedding disk cache keys only the prefixes actually applied.
-  **Corpora indexed with `lite` (e5-small) before this fix are missing the prefix and must be
-  re-indexed with `kb-server reindex`** to get the fix. Queries and other tiers are unaffected.
-  The embedding disk cache (`KB_CACHE_DIR`) no longer reuses passage vectors cached under a
-  non-empty passage prefix (they were stored unprefixed), so that re-index really re-embeds.
-  One query-side change: a custom config that sets `KB_EMBEDDING_QUERY_PREFIX` **and** sends the
-  instruction out of band (`KB_EMBEDDING_INPUT_TYPE=true` or `KB_EMBEDDING_FORMAT=omniembed`) no
-  longer prefixes queries either. No shipped tier preset combines the two.
-- **RET-10 — citations keep documents apart.** `source_dedupe_key` now keys text sources by `doc:{documentId}|{section}` when a document id is present, so documents sharing a title (e.g. a 2023 and 2024 "Kebijakan Cuti") stay separate sources with their own `documentId` and page. Sources without a document id keep the legacy `documentTitle-section` key; figures stay keyed by asset.
-
-### Changed
-
-- **`documentIds` searches now run the full retrieval pipeline (RET-11).** A search that names
-  documents previously answered from a private dense-only branch: no BM25, reranker, page, tree,
-  neighbour or figure arms. It now passes the same narrowed scope into the standard retrieval
-  pipeline as any other search, so a caller searching inside chosen documents gets the same
-  answer quality. The scope is still the intersection of the requested ids and what the key may
-  see; it can never widen the key's tenant, knowledge-base or metadata limits. The response still
-  carries `chunks`, and now also carries `sources` and `context` in the standard format (previously
-  `sources` was absent and `context` was a plain `"[i] content"` list, and only when
-  `format: "context"` was requested). `hybrid: true` is unchanged.
-
-### Added
-
+- **Predicate scope with a fail-closed Postgres verify (SEC-2a).** When a tenant has more
+  visible documents than `KB_SCOPE_ID_LIMIT` (opt-in: default `0` = off until old chunks carry a `knowledge_base_id` payload; enable after `kb-server reindex`, e.g. `2000`), the search no
+  longer sends every document id to Qdrant: the index filters on the `tenant_id`,
+  `knowledge_base_id` and `category` payload, arms over-fetch 1.5×, and every candidate is
+  verified against the same Postgres visibility rule before fusion. Unverified candidates are
+  dropped and counted in the additive `stats.scopeVerifyDropped`; a failed verify fails the
+  search instead of returning unverified hits. Filters the payload cannot express (metadata,
+  language, external refs, `documentIds` narrowing with unit ranges, RET-16 versions) keep the
+  id-list path.
 - **Opt-in Qdrant quantization and the `eval quant-bench` tool (RET-20).** `KB_QDRANT_QUANTIZATION=off|scalar|binary` (default `off`; unknown values fail startup), with `KB_QDRANT_QUANT_OVERSAMPLING` (default 2.0, clamped 1.0..8.0) and `KB_QDRANT_QUANT_RESCORE` (default true). Scalar/binary config is attached to the dense vector **only at collection creation**; existing collections are never reconfigured, and a mismatch logs a warning pointing at a new collection plus `kb-server reindex`. Quantized dense searches set `QuantizationSearchParams { rescore, oversampling }`; with quantization off the search request is unchanged. `kb-server eval quant-bench` creates throwaway collections, measures p50/p95 latency and recall@20 against exact float32, and writes `results.json` / `report.md`. See `docs/eval-ab/quantization/README.md`; the 1M-chunk run has not been executed.
 - **`maxPerDocument` diversity cap on `/v1/search` (RET-17).** An additive body field (integer
   `1..=50`, `400` outside that range) keeps at most N chunks from any one document: the engine
@@ -146,6 +155,41 @@
   query — dense, BM25, page-image, figure, neighbour and tree — so no arm spends top-k on, or
   returns, a unit outside the part. A section resolves through the outline v2 from
   `list_chunk_meta` + `build_outline`; an unknown section id is a `400`.
+
+### Fixed
+
+- **`GET /v1/tables` lists only tables of visible documents.** Without `documentId` it used to
+  name every table of the tenant (title, manifest, sample values), ignoring the key's knowledge
+  bases and access lists. It now keeps only tables whose document passes the same visibility
+  check as search.
+- **An older version is readable by id.** `/content` and `/structure` no longer apply the
+  latest-version search filter to a document the caller chose by id (RET-14 × RET-16).
+- **Passage prefixes are applied on the batch path (`ING-9`).** `embed_many` (used by ingest and
+  stateless `/v1/process`) now sends every text through the same prefix rule as the single-text
+  path: models that need it see `passage: ` before each chunk, so `/v1/encode mode=passage` and
+  `/v1/process` produce vectors in the same space. Prefixes are applied exactly once, and providers
+  whose instruction travels out of band (`input_type`, Voyage / OmniEmbed) still send no text
+  prefix; the embedding disk cache keys only the prefixes actually applied.
+  **Corpora indexed with `lite` (e5-small) before this fix are missing the prefix and must be
+  re-indexed with `kb-server reindex`** to get the fix. Queries and other tiers are unaffected.
+  The embedding disk cache (`KB_CACHE_DIR`) no longer reuses passage vectors cached under a
+  non-empty passage prefix (they were stored unprefixed), so that re-index really re-embeds.
+  One query-side change: a custom config that sets `KB_EMBEDDING_QUERY_PREFIX` **and** sends the
+  instruction out of band (`KB_EMBEDDING_INPUT_TYPE=true` or `KB_EMBEDDING_FORMAT=omniembed`) no
+  longer prefixes queries either. No shipped tier preset combines the two.
+- **RET-10 — citations keep documents apart.** `source_dedupe_key` now keys text sources by `doc:{documentId}|{section}` when a document id is present, so documents sharing a title (e.g. a 2023 and 2024 "Kebijakan Cuti") stay separate sources with their own `documentId` and page. Sources without a document id keep the legacy `documentTitle-section` key; figures stay keyed by asset.
+
+### Changed
+
+- **`documentIds` searches now run the full retrieval pipeline (RET-11).** A search that names
+  documents previously answered from a private dense-only branch: no BM25, reranker, page, tree,
+  neighbour or figure arms. It now passes the same narrowed scope into the standard retrieval
+  pipeline as any other search, so a caller searching inside chosen documents gets the same
+  answer quality. The scope is still the intersection of the requested ids and what the key may
+  see; it can never widen the key's tenant, knowledge-base or metadata limits. The response still
+  carries `chunks`, and now also carries `sources` and `context` in the standard format (previously
+  `sources` was absent and `context` was a plain `"[i] content"` list, and only when
+  `format: "context"` was requested). `hybrid: true` is unchanged.
 
 ### Deprecated
 
