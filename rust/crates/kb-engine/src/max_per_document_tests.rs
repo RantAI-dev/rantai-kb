@@ -37,6 +37,7 @@ fn doc(id: &str) -> DocumentMeta {
         effective_from: None,
         effective_to: None,
         is_latest: true,
+        acl_principals: Vec::new(),
         id: DocumentId(id.into()),
         title: format!("Title {id}"),
         categories: vec![],

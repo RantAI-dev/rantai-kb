@@ -62,6 +62,24 @@ fn a_migration_checksum_is_the_sha256_of_the_file_on_disk() {
 }
 
 #[test]
+fn create_api_key_can_grant_the_principal_assertion_scope() {
+    // SEC-3: asserting principals is a separate, privileged key scope. The CLI
+    // already accepts an arbitrary comma-separated scope list, so no scope
+    // allow-list has to be widened; this pins that the new scope travels intact.
+    let args = vec![
+        "acme".to_string(),
+        "hr".to_string(),
+        "--scopes".to_string(),
+        "kb:read,kb:assert-principals".to_string(),
+    ];
+    let parsed = kb_server::cli::CreateKeyArgs::parse(&args).expect("parse create-api-key args");
+    assert_eq!(
+        parsed.scopes,
+        ["kb:read".to_string(), "kb:assert-principals".to_string()]
+    );
+}
+
+#[test]
 fn the_qdrant_collection_name_is_the_model_and_the_width() {
     let (settings, override_name) = Config::qdrant_from_lookup(
         &|k: &str| (k == "KB_EMBEDDING_DIM").then(|| "8".to_string()),

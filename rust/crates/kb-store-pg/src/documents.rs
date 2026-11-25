@@ -31,6 +31,9 @@ pub fn row_to_doc_meta(row: &sqlx::postgres::PgRow) -> Result<DocumentMeta, sqlx
     let effective_from: Option<String> = row.try_get("effective_from").ok().flatten();
     let effective_to: Option<String> = row.try_get("effective_to").ok().flatten();
     let is_latest: bool = row.try_get("is_latest").ok().unwrap_or(true);
+    // SEC-3: tolerant like the version fields — a statement that predates the
+    // ACL column yields no ACL, which means "visible as before".
+    let acl_principals: Vec<String> = row.try_get("acl_principals").unwrap_or_default();
     Ok(DocumentMeta {
         id: DocumentId(id),
         title,
@@ -54,5 +57,6 @@ pub fn row_to_doc_meta(row: &sqlx::postgres::PgRow) -> Result<DocumentMeta, sqlx
         effective_from,
         effective_to,
         is_latest,
+        acl_principals,
     })
 }

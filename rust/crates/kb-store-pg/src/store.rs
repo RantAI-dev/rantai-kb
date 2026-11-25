@@ -25,8 +25,8 @@ use crate::queries::{
     SELECT_CATEGORY_BY_ID_TENANT, SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB,
     SELECT_DUPLICATE_BY_SHA256, SELECT_EXISTS_FOR_PATCH, SELECT_FOR_DOWNLOAD,
     SELECT_KB_BY_ID_TENANT, SELECT_KB_MEMBER_DOCUMENTS, SELECT_KNOWLEDGE_BASES,
-    SELECT_LATEST_BY_DOC_KEY, SELECT_OUTLINES, SELECT_OWNED_KB_IDS, SET_DOCUMENT_STATUS,
-    UPDATE_CATEGORY, UPDATE_DOCUMENT_PATCH, UPDATE_DOCUMENT_VERSION_PATCH,
+    SELECT_LATEST_BY_DOC_KEY, SELECT_OUTLINES, SELECT_OWNED_KB_IDS, SELECT_VISIBLE_BY_ID,
+    SET_DOCUMENT_STATUS, UPDATE_CATEGORY, UPDATE_DOCUMENT_PATCH, UPDATE_DOCUMENT_VERSION_PATCH,
     UPDATE_EXTRACTED_CONTENT, UPDATE_KNOWLEDGE_BASE, UPDATE_METADATA,
 };
 
@@ -286,6 +286,16 @@ fn scope_sql_inner(
         });
         next += 2;
     }
+    // SEC-3: document access lists. The empty-principals case binds `'{}'`, so
+    // `&&` is false and every ACL'd document is hidden (default-deny); a
+    // document with an empty ACL keeps the old behaviour. This is the ONE
+    // visibility clause for every retrieval arm, the id-list path, the
+    // predicate-mode verify and the by-id predicate SQL.
+    query.push_str(&format!(
+        " AND (cardinality(d.\"aclPrincipals\") = 0 OR d.\"aclPrincipals\" && ${next}::text[])"
+    ));
+    binds.push(ScopeBind::TextArray(filter.principals.clone()));
+    next += 1;
     if let Some(ids) = restrict_ids {
         query.push_str(&format!(" AND d.id = ANY(${next}::text[])"));
         binds.push(ScopeBind::TextArray(
@@ -325,25 +335,46 @@ const SELECT_TENANT_HAS_VERSIONED: &str = r#"
     ) AS versioned
 "#;
 
+/// SEC-3 hook. The Qdrant payload has no `aclPrincipals`, so a tenant with
+/// **any** ACL'd document must keep the id-list path: predicate mode would let
+/// the index propose an ACL'd document the caller may not read. The verify
+/// would drop it, but the coarse filter would waste top-k on invisible hits.
+const SELECT_TENANT_HAS_ACL: &str = r#"
+    SELECT EXISTS (
+        SELECT 1 FROM "Document"
+         WHERE "tenantId" = $1 AND cardinality("aclPrincipals") > 0 AND "deletedAt" IS NULL
+    ) AS has_acl
+"#;
+
 #[async_trait]
 impl DocumentStore for PgDocumentStore {
     async fn build_scope(&self, req: &ScopeRequest) -> Result<DocumentScope, PortError> {
         let ids = self.resolve_filter(&req.tenant, &req.filter).await?;
         let token = ScopeToken::new_for_adapter();
         let limit = scope_id_limit_from_env();
-        // Only ask about versions when predicate mode is otherwise possible.
-        let versioned = if limit > 0 && ids.len() > limit {
-            sqlx::query(SELECT_TENANT_HAS_VERSIONED)
+        // Only ask about versions/ACLs when predicate mode is otherwise
+        // possible. Both checks are tenant-wide: this filtered request may see
+        // few ids while the tenant still holds versioned or ACL'd documents.
+        let (versioned, has_acl) = if limit > 0 && ids.len() > limit {
+            let versioned = sqlx::query(SELECT_TENANT_HAS_VERSIONED)
                 .bind(req.tenant.0.as_str())
                 .fetch_one(&self.pool)
                 .await
                 .map_err(|e| PortError::Unavailable(format!("pg versioned tenant: {e}")))?
                 .try_get::<bool, _>("versioned")
-                .map_err(|e| PortError::Unavailable(format!("pg versioned tenant: {e}")))?
+                .map_err(|e| PortError::Unavailable(format!("pg versioned tenant: {e}")))?;
+            let has_acl = sqlx::query(SELECT_TENANT_HAS_ACL)
+                .bind(req.tenant.0.as_str())
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| PortError::Unavailable(format!("pg acl tenant: {e}")))?
+                .try_get::<bool, _>("has_acl")
+                .map_err(|e| PortError::Unavailable(format!("pg acl tenant: {e}")))?;
+            (versioned, has_acl)
         } else {
-            false
+            (false, false)
         };
-        if let Some(spec) = predicate_spec_for(req, ids.len(), limit, versioned) {
+        if let Some(spec) = predicate_spec_for(req, ids.len(), limit, versioned, has_acl) {
             return Ok(DocumentScope::new_predicate(
                 &token,
                 req.tenant.clone(),
@@ -435,6 +466,38 @@ impl DocumentStore for PgDocumentStore {
             .fetch_optional(&self.pool)
             .await
             .map_err(|e| PortError::Unavailable(format!("pg find_meta_by_id: {e}")))?;
+        match row {
+            Some(row) => row_to_doc_meta(&row)
+                .map(Some)
+                .map_err(|e| PortError::Unavailable(format!("pg row: {e}"))),
+            None => Ok(None),
+        }
+    }
+
+    async fn find_visible_meta_by_id(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+        include_deleted: bool,
+        principals: &[String],
+    ) -> Result<Option<DocumentMeta>, PortError> {
+        // The hard-delete lookup sees soft-deleted rows too; it gets the same
+        // ACL predicate appended to that statement, never an ACL-free read.
+        let statement = if include_deleted {
+            format!(
+                "{SELECT_BY_ID_WITH_DELETED} AND \
+                 (cardinality(d.\"aclPrincipals\") = 0 OR d.\"aclPrincipals\" && $3::text[])"
+            )
+        } else {
+            SELECT_VISIBLE_BY_ID.to_string()
+        };
+        let row = sqlx::query(&statement)
+            .bind(id.as_str())
+            .bind(tenant.as_str())
+            .bind(principals)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg find_visible_meta_by_id: {e}")))?;
         match row {
             Some(row) => row_to_doc_meta(&row)
                 .map(Some)
@@ -604,6 +667,7 @@ impl DocumentStore for PgDocumentStore {
         knowledge_base_ids: &[KnowledgeBaseId],
         external_ref: Option<&str>,
         cursor: Option<&kb_core::pagination::Cursor>,
+        principals: &[String],
     ) -> Result<DocumentPage, PortError> {
         let limit = limit.clamp(1, MAX_LIMIT);
         // One row more than the page holds: that is how the adapter learns
@@ -621,6 +685,7 @@ impl DocumentStore for PgDocumentStore {
                 .bind(external_ref)
                 .bind(cursor_ts)
                 .bind(cursor_id)
+                .bind(principals)
                 .fetch_all(&self.pool)
                 .await
         } else {
@@ -632,6 +697,7 @@ impl DocumentStore for PgDocumentStore {
                 .bind(external_ref)
                 .bind(cursor_ts)
                 .bind(cursor_id)
+                .bind(principals)
                 .fetch_all(&self.pool)
                 .await
         }
@@ -672,6 +738,7 @@ impl DocumentStore for PgDocumentStore {
             sqlx::query(COUNT_DOCS_TENANT_ONLY)
                 .bind(tenant.0.as_str())
                 .bind(external_ref)
+                .bind(principals)
                 .fetch_one(&self.pool)
                 .await
         } else {
@@ -680,6 +747,7 @@ impl DocumentStore for PgDocumentStore {
                 .bind(tenant.0.as_str())
                 .bind(&ids)
                 .bind(external_ref)
+                .bind(principals)
                 .fetch_one(&self.pool)
                 .await
         }
@@ -841,6 +909,7 @@ impl DocumentStore for PgDocumentStore {
             .bind(doc.effective_from.as_deref())
             .bind(doc.effective_to.as_deref())
             .bind(previous_id.as_deref())
+            .bind(&doc.acl_principals)
             .execute(&mut *tx)
             .await
             .map_err(|e| PortError::Unavailable(format!("pg insert document: {e}")))?;
@@ -900,7 +969,11 @@ impl DocumentStore for PgDocumentStore {
             .await
             .map_err(|e| PortError::Unavailable(format!("pg tx begin: {e}")))?;
 
-        if patch.title.is_some() || patch.categories.is_some() || patch.subcategory.is_some() {
+        if patch.title.is_some()
+            || patch.categories.is_some()
+            || patch.subcategory.is_some()
+            || patch.acl_principals.is_some()
+        {
             let no_categories: Vec<String> = Vec::new();
             sqlx::query(UPDATE_DOCUMENT_PATCH)
                 .bind(id.as_str())
@@ -910,6 +983,8 @@ impl DocumentStore for PgDocumentStore {
                 .bind(patch.categories.as_deref().unwrap_or(&no_categories))
                 .bind(patch.subcategory.is_some())
                 .bind(patch.subcategory.as_ref().and_then(|s| s.as_deref()))
+                .bind(patch.acl_principals.is_some())
+                .bind(patch.acl_principals.as_deref().unwrap_or(&[]))
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| PortError::Unavailable(format!("pg update document patch: {e}")))?;
@@ -1237,11 +1312,11 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_filter_binds_only_the_tenant() {
+    fn an_empty_filter_binds_only_the_tenant_and_an_empty_acl_set() {
         let (sql, binds) = scope_sql(&DocumentFilter::default());
-        assert!(binds.is_empty());
+        assert_eq!(binds, vec![ScopeBind::TextArray(vec![])]);
         assert!(sql.contains("d.\"tenantId\" = $1"));
-        assert!(!sql.contains("$2"));
+        assert!(!sql.contains("$3"));
     }
 
     #[test]
@@ -1266,6 +1341,7 @@ mod tests {
             ],
             include_history: false,
             as_of: None,
+            principals: vec!["group:hr".into()],
         };
         let (sql, binds) = scope_sql(&filter);
 
@@ -1284,13 +1360,15 @@ mod tests {
                     key: "draft".into(),
                     values: vec!["true".into()],
                 },
+                ScopeBind::TextArray(vec!["group:hr".into()]),
             ]
         );
 
         // Two parameters per metadata predicate, one for everything else, and
         // the tenant is $1. The highest placeholder must equal the bind count.
         assert!(sql.contains("$9::text[]"), "{sql}");
-        assert!(!sql.contains("$10"), "{sql}");
+        assert!(sql.contains("$10::text[]"), "{sql}");
+        assert!(!sql.contains("$11"), "{sql}");
 
         // Caller-supplied text is never part of the statement.
         for value in ["kb-1", "cat-1", "ku-1", "\"year\"", "2024", "draft"] {
@@ -1311,10 +1389,10 @@ mod tests {
     #[test]
     fn predicate_mode_is_chosen_only_above_the_limit() {
         let req = request(DocumentFilter::default(), false);
-        assert!(predicate_spec_for(&req, 2000, 2000, false).is_none());
-        assert!(predicate_spec_for(&req, 2001, 2000, false).is_some());
+        assert!(predicate_spec_for(&req, 2000, 2000, false, false).is_none());
+        assert!(predicate_spec_for(&req, 2001, 2000, false, false).is_some());
         // 0 disables predicate mode at any size.
-        assert!(predicate_spec_for(&req, 100_000, 0, false).is_none());
+        assert!(predicate_spec_for(&req, 100_000, 0, false, false).is_none());
     }
 
     #[test]
@@ -1324,7 +1402,7 @@ mod tests {
             category: Some("cat-1".into()),
             ..DocumentFilter::default()
         };
-        let spec = predicate_spec_for(&request(base.clone(), false), 10, 1, false).unwrap();
+        let spec = predicate_spec_for(&request(base.clone(), false), 10, 1, false, false).unwrap();
         assert_eq!(spec.kb_ids.unwrap().len(), 1);
         assert_eq!(spec.category.as_deref(), Some("cat-1"));
 
@@ -1345,16 +1423,16 @@ mod tests {
                 ..base.clone()
             },
         ] {
-            assert!(predicate_spec_for(&request(filter, false), 10, 1, false).is_none());
+            assert!(predicate_spec_for(&request(filter, false), 10, 1, false, false).is_none());
         }
         // A RET-15 range is signalled by the route before build_scope.
-        assert!(predicate_spec_for(&request(base, true), 10, 1, false).is_none());
+        assert!(predicate_spec_for(&request(base, true), 10, 1, false, false).is_none());
     }
 
     #[test]
     fn a_versioned_tenant_forces_ids_mode() {
         let req = request(DocumentFilter::default(), false);
-        assert!(predicate_spec_for(&req, 10_000, 1, true).is_none());
+        assert!(predicate_spec_for(&req, 10_000, 1, true, false).is_none());
     }
 
     #[test]
@@ -1363,8 +1441,14 @@ mod tests {
             &DocumentFilter::default(),
             Some(&[DocumentId::new_unchecked("doc-a")]),
         );
-        assert!(sql.contains("d.id = ANY($2::text[])"), "{sql}");
-        assert_eq!(binds, vec![ScopeBind::TextArray(vec!["doc-a".to_string()])]);
+        assert!(sql.contains("d.id = ANY($3::text[])"), "{sql}");
+        assert_eq!(
+            binds,
+            vec![
+                ScopeBind::TextArray(vec![]),
+                ScopeBind::TextArray(vec!["doc-a".to_string()]),
+            ]
+        );
     }
 
     /// SEC-2a × RET-16: the verify's id restriction and the `asOf` clause
@@ -1378,12 +1462,13 @@ mod tests {
             },
             Some(&[DocumentId::new_unchecked("doc-a")]),
         );
-        assert!(sql.contains("d.id = ANY($2::text[])"), "{sql}");
-        assert!(sql.contains("<= $3::timestamptz"), "{sql}");
-        assert!(sql.contains("> $3::timestamptz"), "{sql}");
+        assert!(sql.contains("d.id = ANY($3::text[])"), "{sql}");
+        assert!(sql.contains("<= $4::timestamptz"), "{sql}");
+        assert!(sql.contains("> $4::timestamptz"), "{sql}");
         assert_eq!(
             binds,
             vec![
+                ScopeBind::TextArray(vec![]),
                 ScopeBind::TextArray(vec!["doc-a".to_string()]),
                 ScopeBind::Text("2024-06-01T00:00:00Z".into()),
             ]
@@ -1393,7 +1478,7 @@ mod tests {
     #[test]
     fn the_default_scope_selects_only_latest_or_unversioned_documents() {
         let (sql, binds) = scope_sql(&DocumentFilter::default());
-        assert!(binds.is_empty());
+        assert_eq!(binds, vec![ScopeBind::TextArray(vec![])]);
         assert!(
             sql.contains("d.\"isLatest\" = true OR d.\"docKey\" IS NULL"),
             "{sql}"
@@ -1407,7 +1492,7 @@ mod tests {
             include_history: true,
             ..DocumentFilter::default()
         });
-        assert!(binds.is_empty());
+        assert_eq!(binds, vec![ScopeBind::TextArray(vec![])]);
         assert!(!sql.contains("isLatest"), "{sql}");
         assert!(!sql.contains("effectiveFrom"), "{sql}");
     }
@@ -1419,15 +1504,54 @@ mod tests {
             include_history: true, // asOf wins over this
             ..DocumentFilter::default()
         });
-        assert_eq!(binds, vec![ScopeBind::Text("2024-06-01T00:00:00Z".into())]);
+        assert_eq!(
+            binds,
+            vec![
+                ScopeBind::TextArray(vec![]),
+                ScopeBind::Text("2024-06-01T00:00:00Z".into()),
+            ]
+        );
         assert!(
-            sql.contains("d.\"effectiveFrom\" <= $2::timestamptz"),
+            sql.contains("d.\"effectiveFrom\" <= $3::timestamptz"),
             "{sql}"
         );
-        assert!(sql.contains("d.\"effectiveTo\" > $2::timestamptz"), "{sql}");
+        assert!(sql.contains("d.\"effectiveTo\" > $3::timestamptz"), "{sql}");
         assert!(sql.contains("d.\"effectiveFrom\" IS NULL"), "{sql}");
         assert!(sql.contains("d.\"effectiveTo\" IS NULL"), "{sql}");
         assert!(!sql.contains("isLatest"), "{sql}");
         assert!(!sql.contains("2024-06-01"), "{sql}"); // never interpolated
+    }
+
+    /// SEC-3: the ACL clause is always present and bound, even with no
+    /// principals. The empty bind is what makes an ACL'd document default-deny.
+    #[test]
+    fn the_scope_always_binds_an_acl_overlap_clause() {
+        let (sql, binds) = scope_sql(&DocumentFilter::default());
+        assert!(
+            sql.contains("cardinality(d.\"aclPrincipals\") = 0"),
+            "{sql}"
+        );
+        assert!(sql.contains("d.\"aclPrincipals\" && $2::text[]"), "{sql}");
+        assert_eq!(binds, vec![ScopeBind::TextArray(vec![])]);
+
+        let filter = DocumentFilter {
+            principals: vec!["user:42".into(), "group:hr".into()],
+            ..DocumentFilter::default()
+        };
+        let (sql, binds) = scope_sql(&filter);
+        assert!(sql.contains("d.\"aclPrincipals\" && $2::text[]"), "{sql}");
+        assert_eq!(
+            binds,
+            vec![ScopeBind::TextArray(vec![
+                "user:42".to_string(),
+                "group:hr".to_string(),
+            ])]
+        );
+    }
+
+    #[test]
+    fn an_acl_tenant_forces_ids_mode() {
+        let req = request(DocumentFilter::default(), false);
+        assert!(predicate_spec_for(&req, 10_000, 1, false, true).is_none());
     }
 }

@@ -670,6 +670,24 @@ pub(crate) async fn search_inner(
     let boost = parse_boost(body.boost.as_ref())?;
     let (include_history, as_of) = parse_search_versions(&body)?;
 
+    // SEC-3: the body may assert principals in addition to (or instead of) the
+    // header. Both go through the same validation and the same privileged
+    // scope check, so a leaked key cannot grant itself a principal by moving
+    // the assertion from the header into the body.
+    let body_principals =
+        crate::auth::validate_principals(body.principals.clone().unwrap_or_default())?;
+    if !body_principals.is_empty() && !crate::auth::can_assert_principals(auth) {
+        return Err(ApiError::missing_scope(
+            crate::auth::ASSERT_PRINCIPALS_SCOPE,
+        ));
+    }
+    let mut principals = auth.principals.clone();
+    for principal in body_principals {
+        if !principals.contains(&principal) {
+            principals.push(principal);
+        }
+    }
+
     // RET-15: both forms name one part of one document. Validate before any
     // arm runs, so a bad request never spends top-k and never gets an empty
     // answer that looks like a legitimate "no matches".
@@ -726,6 +744,7 @@ pub(crate) async fn search_inner(
         metadata: metadata_filter,
         include_history,
         as_of,
+        principals,
     };
 
     // Branch 1: documentIds filtering (TypeScript api.ts:139)
@@ -1471,6 +1490,10 @@ pub struct DocumentSummary {
     /// True for the current version; unversioned documents are current too.
     #[serde(rename = "isLatest")]
     pub is_latest: bool,
+    /// Additive (`SEC-3`): principals allowed to read this document. Empty
+    /// means no access list. Serialised as `aclPrincipals`.
+    #[serde(rename = "aclPrincipals")]
+    pub acl_principals: Vec<String>,
 }
 
 /// List the caller's documents.
@@ -1563,6 +1586,7 @@ pub(crate) async fn list_documents_inner(
             &kb_filter,
             q.external_ref.as_deref(),
             cursor.as_ref(),
+            &auth.principals,
         )
         .await
         .map_err(ApiError::from)?;
@@ -1592,6 +1616,7 @@ pub(crate) async fn list_documents_inner(
                 effective_from: d.effective_from,
                 effective_to: d.effective_to,
                 is_latest: d.is_latest,
+                acl_principals: d.acl_principals,
             }
         })
         .collect();
@@ -1785,6 +1810,10 @@ pub struct DocumentDetail {
     /// True for the current version; unversioned documents are current too.
     #[serde(rename = "isLatest")]
     pub is_latest: bool,
+    /// Additive (`SEC-3`): principals allowed to read this document. Empty
+    /// means no access list. Serialised as `aclPrincipals`.
+    #[serde(rename = "aclPrincipals")]
+    pub acl_principals: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1882,6 +1911,7 @@ pub async fn get_document(
             effective_from: meta.effective_from,
             effective_to: meta.effective_to,
             is_latest: meta.is_latest,
+            acl_principals: meta.acl_principals,
         },
         chunks: chunk_views,
     }))
@@ -1908,6 +1938,10 @@ pub struct PatchDocumentBody {
     pub effective_from: Option<String>,
     #[serde(rename = "effectiveTo")]
     pub effective_to: Option<String>,
+    /// Additive (`SEC-3`): replace the document's access list. Absent leaves it
+    /// alone; `[]` removes the ACL. At most 100 valid principals.
+    #[serde(rename = "aclPrincipals", default)]
+    pub acl_principals: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1963,6 +1997,10 @@ pub struct PatchedDocument {
     /// True for the current version; unversioned documents are current too.
     #[serde(rename = "isLatest")]
     pub is_latest: bool,
+    /// Additive (`SEC-3`): principals allowed to read this document. Empty
+    /// means no access list. Serialised as `aclPrincipals`.
+    #[serde(rename = "aclPrincipals")]
+    pub acl_principals: Vec<String>,
 }
 
 /// Change a document's metadata.
@@ -2007,6 +2045,7 @@ pub async fn patch_document(
         version: None,
         effective_from: None,
         effective_to: None,
+        acl_principals: None,
     }));
 
     let knowledge_base_ids = match body.knowledge_base_ids {
@@ -2035,6 +2074,12 @@ pub async fn patch_document(
     // half-patched state. Absent fields keep whatever the row already had.
     let effective_from = parse_version_date("effectiveFrom", body.effective_from.as_deref())?;
     let effective_to = parse_version_date("effectiveTo", body.effective_to.as_deref())?;
+    // SEC-3: a bad access list is a 400 before any write, and the patch can only
+    // be made by a `kb:write` key (checked at the top of this handler).
+    let acl_principals = match body.acl_principals {
+        None => None,
+        Some(values) => Some(crate::auth::validate_principals(values)?),
+    };
     let patch = kb_ports::PatchDocument {
         title: body.title,
         categories: body.categories,
@@ -2044,6 +2089,7 @@ pub async fn patch_document(
         version: body.version,
         effective_from,
         effective_to,
+        acl_principals,
     };
     let updated = state
         .documents
@@ -2071,6 +2117,7 @@ pub async fn patch_document(
             effective_from: updated.effective_from,
             effective_to: updated.effective_to,
             is_latest: updated.is_latest,
+            acl_principals: updated.acl_principals,
         },
     }))
 }
@@ -2247,7 +2294,9 @@ pub(crate) async fn find_visible_document(
 /// knowledge bases, and a document outside them must answer exactly the same
 /// 404 as a document in another tenant, so the limit never leaks an id's
 /// existence. A document in no knowledge base is outside every limited key,
-/// matching how search and the document list already treat it.
+/// matching how search and the document list already treat it. Since SEC-3 the
+/// lookup also applies the document's access list: an ACL'd document without a
+/// matching asserted principal answers the same 404.
 pub(crate) async fn find_document(
     state: &AppState,
     auth: &AuthContext,
@@ -2256,10 +2305,11 @@ pub(crate) async fn find_document(
 ) -> Result<kb_ports::DocumentMeta, ApiError> {
     let doc = state
         .documents
-        .find_meta_by_id(
+        .find_visible_meta_by_id(
             &auth.tenant_id,
             &DocumentId::new_unchecked(id),
             include_deleted,
+            &auth.principals,
         )
         .await
         .map_err(ApiError::from)?

@@ -88,6 +88,7 @@ fn doc(id: &str, title: &str, kb: &str, category: &str) -> DocumentMeta {
         effective_from: None,
         effective_to: None,
         is_latest: true,
+        acl_principals: Vec::new(),
         id: DocumentId(id.to_string()),
         title: title.to_string(),
         categories: vec![category.to_string()],

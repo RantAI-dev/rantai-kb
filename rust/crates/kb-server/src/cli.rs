@@ -180,6 +180,9 @@ USAGE
     {program} status                           GET /health on the running stack
     {program} key <tenant> [name]              Create and print an API key
     {program} create-api-key <tenantId> [name] [--scopes a,b] [--kb id,id]
+                                                Scopes include kb:read, kb:write and the
+                                                privileged kb:assert-principals (SEC-3),
+                                                which lets the key assert X-KB-Principals.
     {program} apply-schema                     Create the Qdrant collections at the configured width
     {program} migrate                          Apply prisma/migrations in order
     {program} reindex [--tenant <id>] [--dry-run]
