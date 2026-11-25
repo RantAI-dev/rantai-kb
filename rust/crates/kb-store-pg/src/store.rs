@@ -344,9 +344,8 @@ fn scope_sql_inner(
 ) -> (String, Vec<ScopeBind>) {
     let mut query = String::from(
         r#"
-            SELECT DISTINCT d.id
+            SELECT d.id
               FROM "Document" d
-         LEFT JOIN "DocumentGroup" dg ON dg."documentId" = d.id
              WHERE d."tenantId" = $1
                AND d."deletedAt" IS NULL
         "#,
@@ -355,8 +354,15 @@ fn scope_sql_inner(
     let mut next = 2usize;
 
     if !filter.knowledge_base_ids.is_empty() {
+        // SEC-2d: a semi-join, not `LEFT JOIN … DISTINCT`. The join made
+        // Postgres sort and de-duplicate every visible row before `LIMIT`
+        // could stop it (194 ms vs 0.7 ms for 100k documents, EXPLAIN
+        // ANALYZE); `EXISTS` keeps the same meaning — a document is visible
+        // when one of its groups is in the list — and lets the limit stop early.
         query.push_str(&format!(
-            " AND dg.\"knowledgeBaseId\" = ANY(${next}::text[])"
+            " AND EXISTS (SELECT 1 FROM \"DocumentGroup\" dg \
+               WHERE dg.\"documentId\" = d.id \
+                 AND dg.\"knowledgeBaseId\" = ANY(${next}::text[]))"
         ));
         binds.push(ScopeBind::TextArray(
             filter
@@ -1600,6 +1606,28 @@ mod tests {
                 ScopeBind::Text("2024-06-01T00:00:00Z".into()),
             ]
         );
+    }
+
+    /// SEC-2d: the knowledge-base limit is a semi-join. `LEFT JOIN … DISTINCT`
+    /// made Postgres sort every visible row before `LIMIT` could stop it.
+    #[test]
+    fn the_scope_has_no_join_and_limits_knowledge_bases_with_exists() {
+        let (sql, _) = scope_sql(&DocumentFilter::default());
+        assert!(!sql.contains("DISTINCT"), "{sql}");
+        assert!(!sql.contains("JOIN"), "{sql}");
+        let (sql, binds) = scope_sql(&DocumentFilter {
+            knowledge_base_ids: vec![KnowledgeBaseId("kb-1".into())],
+            ..DocumentFilter::default()
+        });
+        assert!(
+            sql.contains("EXISTS (SELECT 1 FROM \"DocumentGroup\" dg"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("dg.\"knowledgeBaseId\" = ANY($2::text[])"),
+            "{sql}"
+        );
+        assert_eq!(binds[0], ScopeBind::TextArray(vec!["kb-1".to_string()]));
     }
 
     #[test]
