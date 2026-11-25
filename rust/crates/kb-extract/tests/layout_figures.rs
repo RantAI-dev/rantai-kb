@@ -55,6 +55,7 @@ fn vector_figure_pdf() -> Vec<u8> {
     )
     .unwrap();
     page.objects_mut().add_path_object(line).unwrap();
+    write_body(&mut page, font);
     page.objects_mut()
         .create_text_object(
             PdfPoints::new(100.0),
@@ -69,20 +70,35 @@ fn vector_figure_pdf() -> Vec<u8> {
         .pages_mut()
         .create_page_at_end(PdfPagePaperSize::a4())
         .unwrap();
-    second
-        .objects_mut()
-        .create_text_object(
-            PdfPoints::new(40.0),
-            PdfPoints::new(780.0),
-            "a page of text with no figure on it at all",
-            font,
-            PdfPoints::new(12.0),
-        )
-        .unwrap();
+    write_body(&mut second, font);
 
     let mut cursor = std::io::Cursor::new(Vec::new());
     document.save_to_writer(&mut cursor).unwrap();
     cursor.into_inner()
+}
+
+/// A line of body text: a page needs about a hundred characters, or the PDF
+/// reads as a scan.
+const BODY: [&str; 3] = [
+    "Bab 1 Fungsi kuadrat. Grafik fungsi kuadrat",
+    "berbentuk parabola pada bidang koordinat Kartesius,",
+    "dengan sumbu simetri dan titik puncak yang dapat dihitung.",
+];
+
+fn write_body(page: &mut PdfPage<'_>, font: PdfFontToken) {
+    for (line, text) in BODY.iter().enumerate() {
+        #[allow(clippy::cast_precision_loss)]
+        let y = 780.0 - 16.0 * line as f32;
+        page.objects_mut()
+            .create_text_object(
+                PdfPoints::new(40.0),
+                PdfPoints::new(y),
+                *text,
+                font,
+                PdfPoints::new(12.0),
+            )
+            .unwrap();
+    }
 }
 
 /// A4 is 595 × 842 pt; the detector's boxes are 0–1000 from the top left.
@@ -90,8 +106,9 @@ fn per_mille(x: f64, y_from_bottom: f64) -> (f64, f64) {
     (x / 595.0 * 1000.0, (842.0 - y_from_bottom) / 842.0 * 1000.0)
 }
 
-/// Answers like PP-DocLayoutV3 for page 1 (an image and its caption) and
-/// with one text region for every other page. Fails every call when `fail`.
+/// Answers like PP-DocLayoutV3: an image and its caption for the page that
+/// shows the blue figure, one text region for any other page. Fails every
+/// call when `fail`.
 struct FakeDetector {
     calls: AtomicU32,
     fail: bool,
@@ -115,7 +132,8 @@ impl LayoutDetector for FakeDetector {
         if self.fail {
             return Err(PortError::Unavailable("layout http 503".to_string()));
         }
-        if call > 0 {
+        let _ = call;
+        if drawn_pixels(image_bytes) == 0 {
             return Ok(PageLayout {
                 regions: vec![LayoutBox {
                     label: "text".to_string(),
@@ -274,7 +292,7 @@ async fn the_production_extractor_adds_layout_figures_only_when_figures_are_aske
         )
         .await
         .unwrap();
-    assert!(with.error.is_none());
+    assert!(with.error.is_none(), "{:?}", with.error);
     assert!(
         with.content.contains("Gambar 1.1"),
         "the text layer is untouched"

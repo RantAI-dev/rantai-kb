@@ -109,6 +109,10 @@ pub struct LayoutFigureReport {
     /// The pages the detector or the renderer failed on (1-based).
     #[serde(default)]
     pub failed_pages: Vec<u32>,
+    /// How many crops were dropped as page furniture: the same picture on
+    /// three or more pages (section icons, chapter banners, logos).
+    #[serde(default)]
+    pub repeated: u32,
     /// How many pages were past the page cap and not looked at.
     #[serde(default)]
     pub skipped_pages: u32,

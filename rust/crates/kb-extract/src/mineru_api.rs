@@ -316,6 +316,7 @@ impl MineruApiExtractor {
         }
 
         Ok(ExtractionResult {
+            layout_figures: None,
             tables: Vec::new(),
             ocr: None,
             content: md_text,

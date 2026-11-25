@@ -188,6 +188,7 @@ pub fn extract_pdf_text_layer(
     let outline = crate::outline::extract_outline(pdfium, pdf_bytes, &page_texts);
 
     Ok(ExtractionResult {
+        layout_figures: None,
         tables: Vec::new(),
         ocr: None,
         content,

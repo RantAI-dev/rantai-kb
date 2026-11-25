@@ -109,6 +109,7 @@ impl MistralOcrExtractor {
         }
 
         Ok(ExtractionResult {
+            layout_figures: None,
             tables: Vec::new(),
             ocr: None,
             content: text,

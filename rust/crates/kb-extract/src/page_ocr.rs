@@ -425,6 +425,7 @@ pub(crate) fn paged_result(texts: Vec<String>, file_type: &str) -> ExtractionRes
     }
 
     ExtractionResult {
+        layout_figures: None,
         tables: Vec::new(),
         ocr: None,
         content: content_pages.join("\n\n"),

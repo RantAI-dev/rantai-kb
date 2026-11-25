@@ -433,6 +433,7 @@ KB_OCR_BASE_URL=http://127.0.0.1:8192/v1/chat/completions   # Xiaomi-OCR-0 under
 KB_OCR_MODEL=xiaomi-ocr-0
 KB_OCR_LAYOUT_URL=http://127.0.0.1:8193
 KB_OCR_LAYOUT_TIMEOUT_MS=900000   # detector on CPU: requests queue behind it
+KB_LAYOUT_FIGURES=on              # optional (ING-15): crop figures, vector diagrams included
 ```
 
 `POST /v1/layout` takes `{"image": "<base64 png>", "mime": "image/png"}` and answers

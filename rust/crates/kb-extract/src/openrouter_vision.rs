@@ -78,6 +78,7 @@ impl OpenRouterVisionProvider {
         let content = format!("[Image: {filename}]\n\n{clean_text}");
 
         Ok(ExtractionResult {
+            layout_figures: None,
             tables: Vec::new(),
             ocr: None,
             content,
@@ -129,6 +130,7 @@ impl OpenRouterVisionProvider {
         let combined = page_texts.join("\n\n---\n\n");
 
         Ok(ExtractionResult {
+            layout_figures: None,
             tables: Vec::new(),
             ocr: None,
             content: combined,

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.1 — 2026-11-25
+
+### Added
+
+- **Figures cut from rendered PDF pages (ING-15).** With `KB_LAYOUT_FIGURES=on` and a layout
+  detector at `KB_OCR_LAYOUT_URL`, every PDF page is rendered and its `image` and `chart`
+  regions are cropped from the render. Vector diagrams (function graphs, number lines, concept
+  maps), which have no image object, and the labels and arrows drawn over a picture are now kept.
+  Before, a PDF's own image objects were raw bitmaps taken before those overlays, and the local
+  Xiaomi-OCR recipe returned no crops. A nearby `figure_title` region becomes the caption, read
+  from the text layer. A picture repeated on three or more pages is dropped as page furniture.
+  The pass runs whatever the OCR mode, skips pages that already have figures from another
+  extractor, and reports in the additive `metadata.layoutFigures`. Off by default; the extraction
+  cache key includes it, so turning it on re-extracts on `kb-server reindex`. Measured on the
+  first 60 pages of two BSE textbooks: 34 and 66 figures kept, 20 and 8 icons dropped, about
+  2.2 s per page with the detector on CPU (`docs/kb-tiers.md`).
+
 ## 1.0.0 — 2026-11-25
 
 **The `/v1/*` HTTP API and the Postgres tables that calling apps rely on are now stable.**

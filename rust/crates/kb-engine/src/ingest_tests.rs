@@ -1462,6 +1462,7 @@ async fn a_paged_pdf_is_chunked_page_by_page() {
         .join("\n\n");
     let h = harness(Arc::new(FakeExtractor::returning_result(
         ExtractionResult {
+            layout_figures: None,
             tables: Vec::new(),
             ocr: None,
             content,
@@ -1529,6 +1530,7 @@ async fn page_furniture_is_stripped_from_chunks_but_not_from_the_document() {
             chunks.clone(),
             blobs.clone(),
             Arc::new(FakeExtractor::returning_result(ExtractionResult {
+                layout_figures: None,
                 tables: Vec::new(),
                 ocr: None,
                 content,
@@ -1617,6 +1619,7 @@ async fn test_ingest_worker_end_to_end_full_pipeline() {
     }];
 
     let extract_result = ExtractionResult {
+        layout_figures: None,
         tables: Vec::new(),
         ocr: None,
         content: "Section one explains the quarter in detail with all financial figures.

@@ -213,9 +213,74 @@ impl LayoutFigurePass {
             figures.extend(cut);
         }
 
+        let before = figures.len();
+        let figures = tokio::task::spawn_blocking(move || drop_repeated(figures))
+            .await
+            .map_err(|e| ExtractError::Container(format!("layout figure dedupe task: {e}")))?;
+        report.repeated = u32::try_from(before - figures.len()).unwrap_or(u32::MAX);
         report.figures = u32::try_from(figures.len()).unwrap_or(u32::MAX);
         Ok((figures, report))
     }
+}
+
+/// How many pages the same picture may appear on before it is page furniture.
+const FURNITURE_PAGES: usize = 3;
+
+/// How many of the 64 hash bits two crops may differ in and still be the same
+/// picture.
+const SAME_PICTURE_BITS: u32 = 6;
+
+/// A 64-bit difference hash of a picture: its 9 × 8 grey thumbnail, one bit
+/// per horizontal neighbour pair. Rendering the same icon at another place of
+/// another page changes a few pixels, not the hash.
+#[must_use]
+pub fn picture_hash(png: &[u8]) -> Option<u64> {
+    let grey = image::load_from_memory(png)
+        .ok()?
+        .resize_exact(9, 8, image::imageops::FilterType::Triangle)
+        .to_luma8();
+    let mut hash = 0u64;
+    for y in 0..8 {
+        for x in 0..8 {
+            hash <<= 1;
+            if grey.get_pixel(x, y)[0] < grey.get_pixel(x + 1, y)[0] {
+                hash |= 1;
+            }
+        }
+    }
+    Some(hash)
+}
+
+/// Drop the pictures a book repeats on many pages: section icons, chapter
+/// banners, logos. A picture whose look appears on [`FURNITURE_PAGES`] or more
+/// pages of one document is the page's furniture, not its content, and
+/// describing it once per page would cost a vision call each time.
+#[must_use]
+pub fn drop_repeated(figures: Vec<ExtractedFigure>) -> Vec<ExtractedFigure> {
+    let hashes: Vec<Option<u64>> = figures
+        .iter()
+        .map(|f| picture_hash(&f.image_bytes))
+        .collect();
+    let furniture: Vec<bool> = hashes
+        .iter()
+        .map(|hash| {
+            let Some(hash) = hash else { return false };
+            let pages: HashSet<u32> = hashes
+                .iter()
+                .zip(&figures)
+                .filter(|(other, _)| {
+                    other.is_some_and(|other| (other ^ hash).count_ones() <= SAME_PICTURE_BITS)
+                })
+                .map(|(_, figure)| figure.page)
+                .collect();
+            pages.len() >= FURNITURE_PAGES
+        })
+        .collect();
+    figures
+        .into_iter()
+        .zip(furniture)
+        .filter_map(|(figure, furniture)| (!furniture).then_some(figure))
+        .collect()
 }
 
 /// The figures of one page's layout, each with its caption box.
@@ -269,9 +334,9 @@ fn nearest_caption(figure: [f64; 4], captions: &[[f64; 4]]) -> Option<[f64; 4]> 
             }
             let below = cy1 - fy2;
             let above = fy1 - cy2;
-            let gap = if below >= -10.0 && below <= CAPTION_GAP {
+            let gap = if (-10.0..=CAPTION_GAP).contains(&below) {
                 below.max(0.0)
-            } else if above >= -10.0 && above <= CAPTION_GAP {
+            } else if (-10.0..=CAPTION_GAP).contains(&above) {
                 above.max(0.0)
             } else {
                 return None;
@@ -468,6 +533,52 @@ mod tests {
         );
         assert_eq!(pixel_rect([0.0, 0.0, 10.0, 10.0], 1000, 1000), None);
         assert_eq!(pixel_rect([500.0, 500.0, 400.0, 900.0], 1000, 1000), None);
+    }
+
+    fn png(draw: impl Fn(u32, u32) -> u8) -> Vec<u8> {
+        let image = image::GrayImage::from_fn(900, 800, |x, y| image::Luma([draw(x, y)]));
+        let mut bytes = Vec::new();
+        image::DynamicImage::ImageLuma8(image)
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+        bytes
+    }
+
+    fn figure(page: u32, bytes: Vec<u8>) -> ExtractedFigure {
+        ExtractedFigure {
+            kind: "image".to_string(),
+            page,
+            bbox: [0.0, 0.0, 1.0, 1.0],
+            caption: None,
+            image_bytes: bytes,
+            id: None,
+        }
+    }
+
+    #[test]
+    fn a_picture_on_three_pages_is_furniture_and_dropped() {
+        let icon = || png(|x, _| if x < 450 { 20 } else { 230 });
+        // The same icon, a pixel off, as a render at another place gives.
+        let shifted = png(|x, _| if x < 452 { 20 } else { 230 });
+        let diagram = png(|x, y| u8::try_from((x / 4 + y / 3) % 255).unwrap());
+        let kept = drop_repeated(vec![
+            figure(1, icon()),
+            figure(4, diagram.clone()),
+            figure(7, icon()),
+            figure(9, shifted),
+        ]);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].page, 4);
+
+        let twice = drop_repeated(vec![
+            figure(1, icon()),
+            figure(2, icon()),
+            figure(3, diagram),
+        ]);
+        assert_eq!(twice.len(), 3, "a picture on two pages is still content");
     }
 
     #[test]

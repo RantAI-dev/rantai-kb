@@ -87,6 +87,7 @@ impl VisionLlmExtractor {
         if page_count == 0 || page_count <= self.segment_pages {
             let text = self.extract_single_call(pdf_bytes, "document.pdf").await?;
             return Ok(ExtractionResult {
+                layout_figures: None,
                 tables: Vec::new(),
                 ocr: None,
                 content: text,
@@ -129,6 +130,7 @@ impl VisionLlmExtractor {
 
         let combined = results.join("\n\n");
         Ok(ExtractionResult {
+            layout_figures: None,
             tables: Vec::new(),
             ocr: None,
             content: combined,

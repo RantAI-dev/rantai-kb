@@ -298,6 +298,29 @@ A layout detector that is down does not fail the page: the whole-page answer is 
 page is reported as degraded — `metadata.ocr.layoutFailed` — and it is **not cached**, so the
 next run, with the detector back, reads it properly.
 
+**Layout figure crops (`KB_LAYOUT_FIGURES=on`, ING-15).** The same detector can also cut a PDF's
+figures out of the **rendered** page, the way MinerU and Mistral OCR do. Every page is rendered at
+150 dpi; each `image` or `chart` region is cropped with a small margin, so a vector diagram (a
+function graph, a number line, a concept map) and the labels and arrows drawn over a photo are
+kept. A `figure_title` region next to the figure gives its caption, read from the text layer. A
+picture that appears on three or more pages (section icons, chapter banners) is dropped as page
+furniture. The crops go to the visual pipeline (ING-5) like any other figure. The pass runs on
+every page, whether or not the page went to OCR, skips pages another extractor already returned
+figures for, and reports in `metadata.layoutFigures` (`pages`, `figures`, `repeated`,
+`failedPages`, `skippedPages`). It needs `KB_OCR_LAYOUT_URL`; without it the server logs a
+warning and the pass stays off.
+
+| Setting | Meaning | Default |
+|---|---|---|
+| `KB_LAYOUT_FIGURES` | `on` crops figures from rendered PDF pages with the layout detector | `off` |
+| `KB_LAYOUT_FIGURES_MAX_PAGES` | most pages of one PDF the pass looks at | 1000 |
+
+**Measured (2026-11-25, GB10, detector on 6 CPU cores):** the first 60 pages of two BSE
+textbooks. Matematika XII: 34 figures kept, 20 repeated icons dropped, 7 captioned; the concept
+maps, number-line patterns and formula diagrams are vector drawings with no image object. IPA IX:
+66 kept, 8 dropped, 9 captioned; the eye, ear, neuron and skin diagrams keep their labels.
+2.2 s per page. Crops are cached with the extraction, so a re-upload does not pay again.
+
 | Setting | Meaning | Default |
 |---|---|---|
 | `KB_OCR_RECIPE` | `paddle` or `xiaomi`; anything else is a configuration error | `paddle` |

@@ -48,6 +48,7 @@ impl Extractor for HybridExtractor {
             (Ok(struct_val), Ok(tl_val)) => {
                 let merged = merge_structural_with_text_layer(&struct_val.content, &tl_val.content);
                 Ok(ExtractionResult {
+                    layout_figures: None,
                     tables: Vec::new(),
                     ocr: None,
                     content: merged,
