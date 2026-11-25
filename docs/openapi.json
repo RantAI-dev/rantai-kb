@@ -3522,6 +3522,17 @@
             "type": "boolean",
             "description": "True when every dependency answered. False means at least one is down;\nthe `checks` say which."
           },
+          "scope_outbox": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ScopeOutboxHealth",
+                "description": "Additive (SEC-2b): pending payload repairs and the age of the oldest\none. `null` when no database is configured. A failed lag query is\nreported as `null`, never as a failed health check: it does not affect\nwhether the service can answer a search."
+              }
+            ]
+          },
           "tier": {
             "type": [
               "string",
@@ -4382,6 +4393,28 @@
           "jobId": {
             "type": "string",
             "description": "The job that was requeued."
+          }
+        }
+      },
+      "ScopeOutboxHealth": {
+        "type": "object",
+        "description": "The additive outbox lag reported by `/health` and `/v1/health`.",
+        "required": [
+          "pending"
+        ],
+        "properties": {
+          "oldest_pending_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           }
         }
       },

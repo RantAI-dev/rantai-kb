@@ -101,6 +101,10 @@ impl OutboxReconciler {
         let mut completed = Vec::with_capacity(items.len());
 
         for item in items {
+            // A `kb_changed` row can converge to a delete: the document was
+            // hard-deleted after the row was written. Count what happened, not
+            // what the row was originally named.
+            let mut converged_to_delete = false;
             let result = match item.op {
                 OutboxOp::KbChanged => {
                     // Postgres has the final word. `include_deleted = true`
@@ -124,6 +128,7 @@ impl OutboxReconciler {
                         Ok(None) => {
                             // Hard-deleted between write and repair: removing
                             // points is idempotent, so doing it twice is safe.
+                            converged_to_delete = true;
                             self.index
                                 .delete_document(&item.tenant, &item.document)
                                 .await
@@ -142,10 +147,10 @@ impl OutboxReconciler {
             match result {
                 Ok(()) => {
                     completed.push(item.id);
-                    if item.op == OutboxOp::KbChanged {
-                        report.repaired += 1;
-                    } else {
+                    if converged_to_delete || item.op == OutboxOp::Deleted {
                         report.deleted += 1;
+                    } else {
+                        report.repaired += 1;
                     }
                 }
                 Err(err) => {
@@ -189,6 +194,12 @@ impl OutboxReconciler {
         let mut cancelled = cancel.subscribe();
         self.drain_once().await;
         loop {
+            // `changed()` only reports changes *after* subscribe: a cancel
+            // that arrived before this task was scheduled must still be seen,
+            // otherwise the worker would keep polling a stopping process.
+            if *cancelled.borrow() {
+                return;
+            }
             tokio::select! {
                 () = tokio::time::sleep(self.interval) => self.drain_once().await,
                 _ = cancelled.changed() => {
@@ -216,4 +227,3 @@ impl OutboxReconciler {
         }
     }
 }
-

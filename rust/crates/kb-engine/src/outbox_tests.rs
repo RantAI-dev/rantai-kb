@@ -209,7 +209,7 @@ async fn a_kb_changed_row_for_a_hard_deleted_document_removes_its_points() {
 
     assert_eq!(
         report.deleted, 1,
-        "no document to read: converge by deleting"
+        "no document to read: converge by deleting; report={report:?}"
     );
     assert_eq!(
         f.index.deleted_documents.read().unwrap().as_slice(),
