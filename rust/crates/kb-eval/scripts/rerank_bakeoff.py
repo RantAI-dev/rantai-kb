@@ -166,7 +166,7 @@ async def rerank_openrouter(client: httpx.AsyncClient, model: str, query: str, d
     """
     body = {"model": model, "query": query, "documents": documents}
     last = ""
-    for attempt in range(8):
+    for attempt in range(10):
         resp = await client.post(
             "https://openrouter.ai/api/v1/rerank",
             headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"},
@@ -179,7 +179,7 @@ async def rerank_openrouter(client: httpx.AsyncClient, model: str, query: str, d
             usage = out.get("usage") or {}
             return order, scores, float(usage.get("cost") or 0.0), usage.get("total_tokens")
         last = f"{resp.status_code} {resp.text[:200]}"
-        if resp.status_code in (429, 500, 502, 503, 529):
+        if resp.status_code in (408, 429, 500, 502, 503, 520, 524, 529):
             reset = resp.headers.get("x-ratelimit-reset")
             delay = 15.0
             if reset and reset.isdigit():
