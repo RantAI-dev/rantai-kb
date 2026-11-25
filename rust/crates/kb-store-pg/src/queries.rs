@@ -18,6 +18,7 @@ pub const SELECT_BY_ID: &str = r#"
            to_char(d."effectiveFrom" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_from,
            to_char(d."effectiveTo" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_to,
            d."isLatest" AS is_latest,
+           d."aclPrincipals" AS acl_principals,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
@@ -42,6 +43,7 @@ pub const SELECT_BY_ID_WITH_DELETED: &str = r#"
            to_char(d."effectiveFrom" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_from,
            to_char(d."effectiveTo" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_to,
            d."isLatest" AS is_latest,
+           d."aclPrincipals" AS acl_principals,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
@@ -51,6 +53,34 @@ pub const SELECT_BY_ID_WITH_DELETED: &str = r#"
       FROM "Document" d
      WHERE d.id = $1 AND d."tenantId" = $2
 "#;
+
+/// `SELECT_BY_ID` with the SEC-3 access-list predicate. Every document-addressed
+/// route uses this: `$3` is the caller's asserted principals, and an ACL'd
+/// document is returned only when it overlaps that list. The same clause as
+/// `scope_sql_inner`; an empty `$3` hides every ACL'd document.
+pub const SELECT_VISIBLE_BY_ID: &str = r#"
+    SELECT d.id, d.title, d.categories, d."subcategory", d.status,
+           d."externalRef" AS external_ref,
+           d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
+           d."s3Key" AS s3_key,
+           d."sha256" AS sha256,
+           d."docKey" AS doc_key,
+           d."version" AS version,
+           d."supersedesDocumentId" AS supersedes_document_id,
+           to_char(d."effectiveFrom" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_from,
+           to_char(d."effectiveTo" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_to,
+           d."isLatest" AS is_latest,
+           d."aclPrincipals" AS acl_principals,
+           d.metadata,
+           to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+           to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
+           COALESCE((SELECT array_agg(g2."knowledgeBaseId" ORDER BY g2."knowledgeBaseId")
+                       FROM "DocumentGroup" g2 WHERE g2."documentId" = d.id), '{}') AS knowledge_base_ids,
+           0::bigint AS chunk_count
+      FROM "Document" d
+     WHERE d.id = $1 AND d."tenantId" = $2 AND d."deletedAt" IS NULL
+       AND (cardinality(d."aclPrincipals") = 0 OR d."aclPrincipals" && $3::text[])
+ "#;
 
 pub const SELECT_ALIVE_BY_IDS: &str = r#"
     SELECT d.id, d.title, d.categories, d."subcategory", d.status,
@@ -64,6 +94,7 @@ pub const SELECT_ALIVE_BY_IDS: &str = r#"
            to_char(d."effectiveFrom" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_from,
            to_char(d."effectiveTo" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_to,
            d."isLatest" AS is_latest,
+           d."aclPrincipals" AS acl_principals,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
@@ -116,6 +147,7 @@ pub const SELECT_DOCS_TENANT_ONLY: &str = r#"
            to_char(d."effectiveFrom" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_from,
            to_char(d."effectiveTo" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_to,
            d."isLatest" AS is_latest,
+           d."aclPrincipals" AS acl_principals,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            d."createdAt" AS created_at_ts,
@@ -127,6 +159,7 @@ pub const SELECT_DOCS_TENANT_ONLY: &str = r#"
      WHERE d."tenantId" = $1 AND d."deletedAt" IS NULL
        AND ($3::text IS NULL OR d."externalRef" = $3)
        AND ($4::timestamp IS NULL OR (d."createdAt", d.id) < ($4::timestamp, $5::text))
+        AND (cardinality(d."aclPrincipals") = 0 OR d."aclPrincipals" && $6::text[])
      ORDER BY d."createdAt" DESC, d.id DESC
      LIMIT $2
 "#;
@@ -146,6 +179,7 @@ pub const SELECT_DOCS_WITH_KB: &str = r#"
            to_char(d."effectiveFrom" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_from,
            to_char(d."effectiveTo" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_to,
            d."isLatest" AS is_latest,
+           d."aclPrincipals" AS acl_principals,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            d."createdAt" AS created_at_ts,
@@ -160,6 +194,7 @@ pub const SELECT_DOCS_WITH_KB: &str = r#"
        AND EXISTS (SELECT 1 FROM "DocumentGroup" gf
                     WHERE gf."documentId" = d.id AND gf."knowledgeBaseId" = ANY($2::text[]))
        AND ($5::timestamp IS NULL OR (d."createdAt", d.id) < ($5::timestamp, $6::text))
+        AND (cardinality(d."aclPrincipals") = 0 OR d."aclPrincipals" && $7::text[])
      ORDER BY d."createdAt" DESC, d.id DESC
      LIMIT $3
 "#;
@@ -172,6 +207,7 @@ pub const COUNT_DOCS_TENANT_ONLY: &str = r#"
     SELECT COUNT(*) FROM "Document" d
      WHERE d."tenantId" = $1 AND d."deletedAt" IS NULL
        AND ($2::text IS NULL OR d."externalRef" = $2)
+       AND (cardinality(d."aclPrincipals") = 0 OR d."aclPrincipals" && $3::text[])
 "#;
 
 /// The same count, restricted to documents in one of the caller's knowledge
@@ -183,6 +219,7 @@ pub const COUNT_DOCS_WITH_KB: &str = r#"
        AND ($3::text IS NULL OR d."externalRef" = $3)
        AND EXISTS (SELECT 1 FROM "DocumentGroup" gf
                     WHERE gf."documentId" = d.id AND gf."knowledgeBaseId" = ANY($2::text[]))
+       AND (cardinality(d."aclPrincipals") = 0 OR d."aclPrincipals" && $4::text[])
 "#;
 
 /// The document that already holds these bytes, if any.
@@ -429,10 +466,10 @@ pub const INSERT_DOCUMENT: &str = r#"
         id, "tenantId", title, content, categories, "subcategory",
         "s3Key", "fileSize", "mimeType", status, "externalRef", metadata,
         sha256, "docKey", "version", "effectiveFrom", "effectiveTo",
-        "supersedesDocumentId", "isLatest", "createdAt", "updatedAt"
+        "supersedesDocumentId", "isLatest", "aclPrincipals", "createdAt", "updatedAt"
     ) VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-        $16::timestamptz, $17::timestamptz, $18, true, now(), now()
+        $16::timestamptz, $17::timestamptz, $18, true, $19::text[], now(), now()
     )
 "#;
 
@@ -493,6 +530,7 @@ pub const UPDATE_DOCUMENT_PATCH: &str = r#"
        SET title = CASE WHEN $2::boolean THEN $3 ELSE title END,
            categories = CASE WHEN $4::boolean THEN $5::text[] ELSE categories END,
            "subcategory" = CASE WHEN $6::boolean THEN $7 ELSE "subcategory" END,
+           "aclPrincipals" = CASE WHEN $8::boolean THEN $9::text[] ELSE "aclPrincipals" END,
            "updatedAt" = now()
      WHERE id = $1
 "#;

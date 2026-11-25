@@ -4,7 +4,7 @@
 
 The v0.9 and v0.10 roadmap in one release ([`docs/core/specs/v1-roadmap.md`](docs/core/specs/v1-roadmap.md)).
 Every API and schema change is additive. Migrations: `kb-server migrate` applies the document
-versions columns. Re-index `lite` corpora for the ING-9 prefix fix.
+versions and access-list columns. Re-index `lite` corpora for the ING-9 prefix fix.
 
 **Highlights**
 - **Correct citations and scoped search.** Same-titled documents keep separate sources
@@ -18,7 +18,8 @@ versions columns. Re-index `lite` corpora for the ING-9 prefix fix.
 - **Search controls.** `maxPerDocument` (RET-17), a `confidence` band with honest
   `calibrated` (RET-18), and an opt-in reranker breadcrumb (RET-12).
 - **Scale and agents.** Opt-in predicate scope with a fail-closed Postgres verify (SEC-2a).
-  Thin `/mcp` behind `KB_MCP` (API-4). Opt-in Qdrant quantization (RET-20).
+  Thin `/mcp` behind `KB_MCP` (API-4). Opt-in Qdrant quantization (RET-20). Per-document
+  access lists with default-deny, behind the `kb:assert-principals` scope (SEC-3).
 - **Deprecated:** `KB_GRAPH_ARM` / `KB_GLOBAL_ARM` (DEC-6).
 
 **Measured on a GB10** (Nemotron-3.5-Embed-1B + Qwen3-Reranker-0.6B; `docs/eval-ab/`).
@@ -34,9 +35,21 @@ Numbers that missed their target are listed as missed.
 | One-embedder ingest (DEP-7) | 522 pages in 257 s (2.03 p/s), 0 failed | — |
 
 **Known gaps, tracked for 1.0:** table column naming (TBL-2), the disclosure gate and the
-`/content` latency (EVAL-9), the outbox reconciler (SEC-2b) and access lists (SEC-3).
+`/content` latency (EVAL-9), and the scope outbox reconciler (SEC-2b).
 
 ### Added
+
+- **Per-document access lists (`SEC-3`).** Documents can carry `aclPrincipals`, set on upload
+  (`aclPrincipals` multipart field) or `PATCH /v1/documents/:id` and returned additively by the
+  document read/list routes. Requests assert their principals with `X-KB-Principals:
+  user:42,group:hr` (or the new `principals` field of a `/v1/search` body), which requires the
+  new privileged `kb:assert-principals` scope (`403` without it). An ACL'd document is visible
+  only when the sets overlap and is hidden by default when no principals are asserted; an empty
+  ACL keeps the old behaviour. The clause lives in the same Postgres visibility SQL that scopes
+  every retrieval arm and the SEC-2a verify, and in the by-id lookup used by every document and
+  table route. A tenant with any ACL'd document stays in Ids mode because the Qdrant payload
+  carries no ACL. The additive migration adds `"aclPrincipals" TEXT[] NOT NULL DEFAULT '{}'`
+  with a GIN index.
 
 - **Predicate scope with a fail-closed Postgres verify (SEC-2a).** When a tenant has more
   visible documents than `KB_SCOPE_ID_LIMIT` (opt-in: default `0` = off until old chunks carry a `knowledge_base_id` payload; enable after `kb-server reindex`, e.g. `2000`), the search no
@@ -139,6 +152,12 @@ Numbers that missed their target are listed as missed.
 
 ### Fixed
 
+- **`GET /v1/tables` lists only tables of visible documents.** Without `documentId` it used to
+  name every table of the tenant (title, manifest, sample values), ignoring the key's knowledge
+  bases and access lists. It now keeps only tables whose document passes the same visibility
+  check as search.
+- **An older version is readable by id.** `/content` and `/structure` no longer apply the
+  latest-version search filter to a document the caller chose by id (RET-14 × RET-16).
 - **Passage prefixes are applied on the batch path (`ING-9`).** `embed_many` (used by ingest and
   stateless `/v1/process`) now sends every text through the same prefix rule as the single-text
   path: models that need it see `passage: ` before each chunk, so `/v1/encode mode=passage` and

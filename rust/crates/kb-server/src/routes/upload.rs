@@ -71,6 +71,30 @@ fn parse_upload_metadata(value: Option<&str>) -> Result<Option<serde_json::Value
     Ok(Some(parsed))
 }
 
+/// The `aclPrincipals` multipart field (SEC-3): a JSON array such as
+/// `["user:42","group:hr"]`, or the comma-separated shorthand
+/// `user:42,group:hr`. Both go through the same validator as every other
+/// principal list, so an invalid entry is the upload's own 400.
+fn parse_upload_principals(value: Option<&str>) -> Result<Vec<String>, ApiError> {
+    let Some(raw) = value.filter(|v| !v.trim().is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let values: Vec<String> = if raw.trim_start().starts_with('[') {
+        serde_json::from_str(raw).map_err(|e| {
+            ApiError::BadRequest(format!(
+                "Invalid 'aclPrincipals': expected a JSON array: {e}"
+            ))
+        })?
+    } else {
+        raw.split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    crate::auth::validate_principals(values)
+}
+
 /// Accepted extension check, including the extensionless case: `slice(lastIndexOf("."))`
 /// returns the whole name when there is no dot, so "README" is tested as "readme".
 pub(crate) fn is_accepted_extension(file_name: &str) -> bool {
@@ -149,6 +173,11 @@ pub struct UploadForm {
     /// Additive (`RET-16`): when this version stops being in force (exclusive).
     #[schema(value_type = Option<String>, rename = "effectiveTo")]
     pub effective_to: Option<String>,
+    /// Additive (`SEC-3`): principals allowed to read this document, as a JSON
+    /// array (`["user:42","group:hr"]`) or a comma-separated list. Empty means
+    /// no access list. Requires the `kb:write` scope like the rest of the form.
+    #[schema(value_type = Option<String>, rename = "aclPrincipals")]
+    pub acl_principals: Option<String>,
 }
 
 /// Upload a document.
@@ -255,6 +284,7 @@ pub async fn ingest_document(
         crate::routes::parse_version_date("effectiveFrom", upload.field("effectiveFrom"))?;
     let effective_to =
         crate::routes::parse_version_date("effectiveTo", upload.field("effectiveTo"))?;
+    let acl_principals = parse_upload_principals(upload.field("aclPrincipals"))?;
     let figure_mode = parse_figure_mode(upload.field("figures"));
     let knowledge_base_ids = requested_knowledge_bases(&auth, upload.field("knowledgeBaseIds"));
     // Every requested knowledge base must belong to the caller's tenant. Without
@@ -345,6 +375,7 @@ pub async fn ingest_document(
                 version,
                 effective_from,
                 effective_to,
+                acl_principals,
             },
             &knowledge_base_ids,
         )

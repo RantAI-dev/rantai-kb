@@ -100,6 +100,7 @@ Interactive Swagger UI is always served at [`http://127.0.0.1:8080/docs`](http:/
 - **Progressive disclosure for agents:** `GET /v1/documents/:id/structure` returns an outline (headings, and `BAB`/`Bagian`/`Pasal` in Indonesian regulations) with page and chunk ranges. `GET /v1/documents/:id/content` reads a section or page range byte-exact under a `maxChars` budget, with a cursor that fails with `409` if the document changed. `pageRange`/`section` search inside one document.
 - **Versioned documents:** upload a new version under the same `docKey` and search answers from the current one. `asOf` gives the version in force on a date, and `includeHistory` returns every version with a `multiVersionWarning`.
 - **Answers a caller can act on:** citations stay per document, `maxPerDocument` caps one document's share, and `confidence` reports a band and whether it is calibrated for the active model.
+- **Per-user access lists:** a document can carry `aclPrincipals`. The calling app asserts its user's principals (`X-KB-Principals`, scope `kb:assert-principals`), and a document with an ACL stays hidden from everyone else in every retrieval arm and every route. Documents without an ACL behave as before.
 - **MCP for agents:** `KB_MCP=on` mounts `/mcp` with `kb_search`, `kb_outline`, `kb_read`, `kb_list_documents` and `kb_query_table`, under the same keys and scopes.
 - **Stage-seated concurrency:** `KB_SEATS` bounds local extraction and bulk embedding so VMs and model servers stay saturated without thrashing; remote OCR handoff releases local `extract` seats early, and live search queries run on a fast lane.
 
@@ -216,7 +217,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for guidelines.
 
 Tagging `v*` builds and publishes multi-arch images (`amd64`/`arm64`) to `ghcr.io/rantai-dev/rantai-kb` alongside OCR sidecars, packages Linux (`x86_64`, `aarch64`) and macOS (`arm64`) binaries with checksums, cuts a GitHub Release, and smoke-tests `install.sh`.
 
-- **Current release:** `v0.9.0`: progressive disclosure (outline v2, byte-exact `/content`, in-document search), document versions (`docKey`/`asOf`), `maxPerDocument`, calibrated `confidence`, `/mcp`, opt-in predicate scope and Qdrant quantization. Measured numbers, including the targets missed, are in [`CHANGELOG.md`](CHANGELOG.md#090--2026-11-25).
+- **Current release:** `v0.9.0`: progressive disclosure (outline v2, byte-exact `/content`, in-document search), document versions (`docKey`/`asOf`), `maxPerDocument`, calibrated `confidence`, `/mcp`, per-document access lists, opt-in predicate scope and Qdrant quantization. Measured numbers, including the targets missed, are in [`CHANGELOG.md`](CHANGELOG.md#090--2026-11-25).
 - **Previous:** `v0.8.0`: stateless processor-only mode (`/v1/process`, `/v1/encode`, `/v1/rerank`).
 - **Legacy Bun release:** `v0.1.0` ([migration guide](docs/rust-cutover.md)).
 

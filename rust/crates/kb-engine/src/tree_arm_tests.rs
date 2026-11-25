@@ -33,6 +33,7 @@ fn doc_meta(id: &str, title: &str) -> DocumentMeta {
         effective_from: None,
         effective_to: None,
         is_latest: true,
+        acl_principals: Vec::new(),
         id: DocumentId(id.into()),
         title: title.into(),
         categories: vec![],

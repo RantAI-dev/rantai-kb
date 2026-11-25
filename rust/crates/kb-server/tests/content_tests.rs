@@ -444,3 +444,44 @@ async fn an_unknown_section_and_a_malformed_cursor_are_a_400() {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{uri}");
     }
 }
+
+/// RET-16 × RET-14: a superseded version is still readable by its id. The
+/// by-id route chose the document, so the default "latest only" search filter
+/// must not empty its chunk read.
+#[tokio::test]
+async fn a_superseded_version_is_still_readable_by_id() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    let fixture = long_fixture("old-version", 4);
+    let mut meta = doc_meta("old-version", "Kebijakan Cuti 2024");
+    meta.sha256 = None;
+    meta.doc_key = Some("cuti".to_string());
+    meta.is_latest = false;
+    h.documents.insert_doc(TenantId(TENANT.to_string()), meta);
+    h.chunks.upsert(fixture.units.clone()).await.unwrap();
+
+    let response = h
+        .send(
+            "GET",
+            "/v1/documents/old-version/content?maxChars=50000",
+            &tenant_key(TENANT),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["text"], fixture.expected);
+
+    let response = h
+        .send(
+            "GET",
+            "/v1/documents/old-version/structure",
+            &tenant_key(TENANT),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert!(
+        !body["sections"].as_array().unwrap().is_empty(),
+        "an old version keeps its outline: {body}"
+    );
+}

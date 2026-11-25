@@ -64,6 +64,12 @@ pub struct DocumentFilter {
     /// undated documents always visible.
     #[serde(default)]
     pub as_of: Option<String>,
+    /// Principals asserted by the caller (SEC-3), validated at the HTTP layer.
+    /// Applied in `scope_sql_inner` alongside the other narrowing clauses: an
+    /// ACL'd document matches only when this list intersects its ACL, so an
+    /// empty list hides every ACL'd document (default-deny).
+    #[serde(default)]
+    pub principals: Vec<String>,
 }
 
 /// One top-level JSONB metadata predicate: `metadata[key]` equals one of
@@ -142,6 +148,22 @@ pub trait DocumentStore: Send + Sync {
         include_deleted: bool,
     ) -> Result<Option<DocumentMeta>, PortError>;
 
+    /// By-id lookup that also enforces the document access list (SEC-3).
+    ///
+    /// Every document-addressed route uses this instead of `find_meta_by_id`:
+    /// the same `(cardinality(aclPrincipals) = 0 OR aclPrincipals && $principals)`
+    /// predicate that `scope_sql_inner` applies, so a by-id route cannot see an
+    /// ACL'd document the search would hide. An empty `principals` slice is the
+    /// default-deny case. Writes (patch, delete, post-ingest reads) keep using
+    /// `find_meta_by_id`, which is deliberately ACL-free.
+    async fn find_visible_meta_by_id(
+        &self,
+        tenant: &TenantId,
+        id: &DocumentId,
+        include_deleted: bool,
+        principals: &[String],
+    ) -> Result<Option<DocumentMeta>, PortError>;
+
     /// Soft delete: sets `deletedAt`. Returns `false` when no live document matched.
     async fn soft_delete(&self, tenant: &TenantId, id: &DocumentId) -> Result<bool, PortError>;
 
@@ -207,6 +229,9 @@ pub trait DocumentStore: Send + Sync {
     ///
     /// The store clamps `limit` to its own cap and returns the page it
     /// actually served; `next_cursor` is `None` on the last page.
+    ///
+    /// `principals` is the SEC-3 access-list filter, applied to both the rows
+    /// and the total count; an empty slice hides every ACL'd document.
     async fn list_page(
         &self,
         tenant: &TenantId,
@@ -214,6 +239,7 @@ pub trait DocumentStore: Send + Sync {
         knowledge_base_ids: &[KnowledgeBaseId],
         external_ref: Option<&str>,
         cursor: Option<&kb_core::pagination::Cursor>,
+        principals: &[String],
     ) -> Result<DocumentPage, PortError>;
 
     /// List knowledge bases visible to the tenant.

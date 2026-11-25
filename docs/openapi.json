@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "rantai-kb API",
-    "description": "Upload documents, search them, and read back what was found.\n\nEvery route under `/v1` needs an API key: send it as `Authorization: Bearer <key>` or as `X-API-Key: <key>`. The key decides the tenant, the scopes (`kb:read`, `kb:write`) and, when it is limited, the knowledge bases the caller may see.",
+    "description": "Upload documents, search them, and read back what was found.\n\nEvery route under `/v1` needs an API key: send it as `Authorization: Bearer <key>` or as `X-API-Key: <key>`. The key decides the tenant, the scopes (`kb:read`, `kb:write`, or the privileged `kb:assert-principals`) and, when it is limited, the knowledge bases the caller may see.\n\nDocuments can carry an access list (`aclPrincipals`). To read an ACL'd document, assert the caller's principals with `X-KB-Principals: user:42,group:hr` (or the search body's `principals` field) using a key with the `kb:assert-principals` scope. With no assertion, ACL'd documents are hidden (default-deny).",
     "license": {
       "name": "Apache-2.0",
       "identifier": "Apache-2.0"
@@ -2935,9 +2935,17 @@
           "chunkCount",
           "figures",
           "degrades",
-          "isLatest"
+          "isLatest",
+          "aclPrincipals"
         ],
         "properties": {
+          "aclPrincipals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additive (`SEC-3`): principals allowed to read this document. Empty\nmeans no access list. Serialised as `aclPrincipals`."
+          },
           "categories": {
             "type": "array",
             "items": {
@@ -3236,9 +3244,17 @@
           "createdAt",
           "knowledgeBaseIds",
           "degrades",
-          "isLatest"
+          "isLatest",
+          "aclPrincipals"
         ],
         "properties": {
+          "aclPrincipals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additive (`SEC-3`): principals allowed to read this document. Empty\nmeans no access list. Serialised as `aclPrincipals`."
+          },
           "categories": {
             "type": "array",
             "items": {
@@ -4106,6 +4122,16 @@
       "PatchDocumentBody": {
         "type": "object",
         "properties": {
+          "aclPrincipals": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Additive (`SEC-3`): replace the document's access list. Absent leaves it\nalone; `[]` removes the ACL. At most 100 valid principals."
+          },
           "categories": {
             "type": [
               "array",
@@ -4177,9 +4203,17 @@
           "createdAt",
           "updatedAt",
           "knowledgeBaseIds",
-          "isLatest"
+          "isLatest",
+          "aclPrincipals"
         ],
         "properties": {
+          "aclPrincipals": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additive (`SEC-3`): principals allowed to read this document. Empty\nmeans no access list. Serialised as `aclPrincipals`."
+          },
           "categories": {
             "type": "array",
             "items": {
@@ -4716,6 +4750,16 @@
                 "description": "Additive (`RET-15`): an inclusive page window inside one document."
               }
             ]
+          },
+          "principals": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Additive (`SEC-3`): principals asserted for this search. Requires the\n`kb:assert-principals` scope; combined with `X-KB-Principals` when both\nare present. Absent means no assertion."
           },
           "query": {
             "description": "Left as raw JSON: the TypeScript route rejects a non-string query with\nits own 400, which a typed field would turn into a parser error."
@@ -5613,6 +5657,13 @@
           "file"
         ],
         "properties": {
+          "aclPrincipals": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`SEC-3`): principals allowed to read this document, as a JSON\narray (`[\"user:42\",\"group:hr\"]`) or a comma-separated list. Empty means\nno access list. Requires the `kb:write` scope like the rest of the form."
+          },
           "categories": {
             "type": [
               "string",

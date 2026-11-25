@@ -290,3 +290,55 @@ async fn the_search_answer_is_unchanged_without_tables() {
     );
     assert!(body["chunks"][0].get("tableId").is_none());
 }
+
+/// A listing without `documentId` names only tables whose document the caller
+/// may see: an ACL'd document's table stays hidden without its principal, and
+/// a KB-limited key does not see tables from other knowledge bases.
+#[tokio::test]
+async fn the_table_listing_hides_tables_of_documents_the_key_cannot_see() {
+    let h = Harness::new();
+    h.with_tenant("tenant-a");
+    let tenant = TenantId::new_unchecked("tenant-a");
+    let mut open = doc_meta("doc-open", "Open report");
+    open.knowledge_base_ids = vec!["kb-1".to_string()];
+    h.documents.insert_doc(tenant.clone(), open);
+    let mut hr = doc_meta("doc-hr", "HR salaries");
+    hr.acl_principals = vec!["group:hr".to_string()];
+    hr.knowledge_base_ids = vec!["kb-1".to_string()];
+    h.documents.insert_doc(tenant.clone(), hr);
+    let mut other = doc_meta("doc-other", "Other KB report");
+    other.knowledge_base_ids = vec!["kb-2".to_string()];
+    h.documents.insert_doc(tenant.clone(), other);
+    for doc in ["doc-open", "doc-hr", "doc-other"] {
+        h.tables.seed(record("tenant-a", doc));
+    }
+    h.documents.insert_api_key_with_scopes(
+        "kb1-key",
+        tenant.clone(),
+        vec!["kb:read".into()],
+        vec![kb_ports::KnowledgeBaseId("kb-1".into())],
+    );
+
+    let ids = |body: serde_json::Value| {
+        let mut ids: Vec<String> = body
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["documentId"].as_str().unwrap_or_default().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let all = json_body(h.send("GET", "/v1/tables", &tenant_key("tenant-a")).await).await;
+    assert_eq!(
+        ids(all),
+        ["doc-open", "doc-other"],
+        "the ACL'd table is hidden"
+    );
+    let limited = json_body(h.send("GET", "/v1/tables", "kb1-key").await).await;
+    assert_eq!(
+        ids(limited),
+        ["doc-open"],
+        "a KB-limited key sees only its KB"
+    );
+}

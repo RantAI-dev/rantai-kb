@@ -165,6 +165,48 @@ startup; a malformed one is a startup error. Fit it with
 `kb-server eval calibrate-confidence` — see
 [`docs/eval-ab/confidence/README.md`](eval-ab/confidence/README.md).
 
+## Access lists (SEC-3)
+
+A document may carry an **access list** of principals. rantai-kb does not know the
+calling app's users or groups; the app asserts the principals the caller holds on
+each request, and rantai-kb shows an ACL'd document only when the two sets overlap.
+
+- **Set it** with the multipart field `aclPrincipals` on upload, or the JSON field
+  `aclPrincipals` on `PATCH /v1/documents/:id`. Both accept an array such as
+  `["user:42","group:hr"]` (the upload form also accepts `user:42,group:hr`).
+  Each entry is non-empty, at most 200 characters and matches
+  `^[A-Za-z0-9_.:@-]+$`; at most 100 entries. A violation is a `400`. Setting an
+  ACL needs the `kb:write` scope, like uploads. `GET /v1/documents/:id` and
+  `GET /v1/documents` return `aclPrincipals` additively; `[]` means no ACL.
+- **Assert them** with the header `X-KB-Principals: user:42,group:hr` on search,
+  the document list, `GET /v1/documents/:id` and its `/raw`, `/structure`,
+  `/content`, `/assets` and `/intelligence` sub-resources, `/v1/tables` and the
+  thin `/mcp` tools (`KB_MCP=on`). `POST /v1/search` also accepts a body field
+  `principals: ["user:42","group:hr"]`;
+  the header and body sets are combined. Supplying either **requires the
+  `kb:assert-principals` scope** — a leaked ordinary `kb:read`/`kb:write` key
+  cannot claim `group:admin`. Without it the request is a `403`.
+- **Default-deny:** a document with a non-empty ACL is invisible to a request
+  that asserts no principals, in *every* retrieval arm and on every by-id route
+  (it answers `404`). An un-ACL'd document behaves exactly as before. Because
+  the Qdrant payload has no ACL, a tenant with any ACL'd document stays on the
+  Postgres-backed id-list scope; the SEC-2a verify applies the same predicate.
+
+```sh
+# Store HR files for the hr group only (kb:write key):
+curl -F file=@salaries.pdf -F 'aclPrincipals=["group:hr"]' \
+     -H 'Authorization: Bearer WRITE_KEY' /v1/documents
+
+# An app with the privileged key asserts what this caller holds:
+curl -H 'Authorization: Bearer KEY_WITH_ASSERT_SCOPE' \
+     -H 'X-KB-Principals: user:42,group:hr' \
+     -H 'Content-Type: application/json' \
+     -d '{"query":"salary bands"}' /v1/search
+```
+
+Create the privileged key with
+`kb-server create-api-key <tenant> --scopes kb:read,kb:assert-principals`.
+
 ## Tables
 
 An xlsx, CSV, DOCX or OCR/markdown table is stored as a typed grid (Parquet in the blob
