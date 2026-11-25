@@ -359,7 +359,6 @@ impl AppState {
         self
     }
 
-
     /// Install the calibration table and model ids an operator configured.
     /// Used by the HTTP tests that exercise a loaded override file.
     #[must_use]

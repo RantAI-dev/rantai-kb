@@ -52,12 +52,22 @@ impl Default for Harness {
 
 impl Harness {
     pub fn new() -> Self {
-        Self::build(BackendTargets::default(), UploadDedupe::default(), false, None)
+        Self::build(
+            BackendTargets::default(),
+            UploadDedupe::default(),
+            false,
+            None,
+        )
     }
 
     /// A harness with the thin MCP endpoint mounted (`KB_MCP=on`).
     pub fn with_mcp() -> Self {
-        Self::build(BackendTargets::default(), UploadDedupe::default(), true, None)
+        Self::build(
+            BackendTargets::default(),
+            UploadDedupe::default(),
+            true,
+            None,
+        )
     }
 
     /// A harness with a fitted calibration table and model ids installed, for
