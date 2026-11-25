@@ -23,6 +23,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
+use kb_core::ScoreEvidence;
 use kb_core::outline::{OutlineChunk, build_outline};
 use kb_core::policy::MimeRegistry;
 use kb_core::versions::normalise_timestamp;
@@ -36,8 +37,8 @@ use utoipa::{IntoParams, ToSchema};
 
 use crate::auth::Authed;
 use crate::dto::{
-    BoostStatsDto, SearchRequestDto, SearchResponseDto, SearchStatsDto, StageTimingsDto,
-    splice_json_member,
+    BoostStatsDto, ConfidenceDto, SearchRequestDto, SearchResponseDto, SearchStatsDto,
+    StageTimingsDto, splice_json_member,
 };
 use crate::error::{ApiError, ErrorBody};
 use crate::state::AppState;
@@ -661,6 +662,7 @@ pub async fn search(
                 "chunks": [],
                 "context": "",
                 "note": "API key is not bound to any of the requested knowledge bases",
+                "confidence": empty_confidence(&state, &body),
             }))
             .into_response());
         }
@@ -702,6 +704,7 @@ pub async fn search(
             return Ok(Json(serde_json::json!({
                 "chunks": [],
                 "context": "",
+                "confidence": empty_confidence(&state, &body),
             }))
             .into_response());
         }
@@ -778,6 +781,9 @@ pub async fn search(
                 // so the stub degrades visibly instead of answering silently.
                 degrades: vec![HYBRID_STUB_DEGRADE.to_string()],
                 tables: Vec::new(),
+                // No search ran, so there is no score to calibrate. The key is
+                // absent here, unlike on every real search branch.
+                confidence: None,
                 multi_version_warning: Vec::new(),
             },
             route_sw,
@@ -904,7 +910,14 @@ async fn retrieve_and_finish(tail: SearchTail<'_>) -> Result<Response, ApiError>
         )
         .await
         .map_err(ApiError::from)?;
-    let mut response = SearchResponseDto::from(outcome);
+    // Take the evidence before the outcome is consumed. The model id and the
+    // fitted table live on the composition root, not on the engine, so the
+    // band is attached here once both halves are available.
+    let evidence = outcome.confidence_scores;
+    let mut response = SearchResponseDto::from(outcome).with_confidence(state.confidence(
+        &evidence,
+        body.min_score.or(state.engine.settings.min_score),
+    ));
     if let Some(stats) = response.stats.as_mut() {
         // The route knows two stages the engine does not: building the scope,
         // and everything above it in the handler.
@@ -912,6 +925,17 @@ async fn retrieve_and_finish(tail: SearchTail<'_>) -> Result<Response, ApiError>
     }
     tables::attach_tables(state, &auth.tenant_id, &mut response).await;
     Ok(finish_search(response, route_sw))
+}
+
+/// The confidence object for an answer with no scored hits at all (an empty
+/// scope, or a key bound to no knowledge bases). `kb-core` reports `none`
+/// without inventing a top score; `calibrated` still says whether the active
+/// model has a fitted entry.
+fn empty_confidence(state: &AppState, body: &SearchRequestDto) -> ConfidenceDto {
+    ConfidenceDto::from(state.confidence(
+        &ScoreEvidence::default(),
+        body.min_score.or(state.engine.settings.min_score),
+    ))
 }
 
 /// What the `hybrid: true` stub reports. The standard search already fuses the
