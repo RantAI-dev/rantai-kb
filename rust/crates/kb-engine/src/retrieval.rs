@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use kb_core::{
-    ArmPlan, BoostConfig, ContextItem, QueryClass, RecencyField, RrfOptions, SkippedArm,
-    SourceEntry, authority_factor, authority_value, base_from_rank, base_from_rerank_in,
-    breadcrumb, build_context_and_sources, classify_query, date_value, normalise_authority,
-    parse_date, recency_factor, reciprocal_rank_fusion_with, rerank_scores_are_probabilities,
-    weave_neighbours_with,
+    ArmPlan, BoostConfig, ContextItem, QueryClass, RecencyField, RrfOptions, ScoreEvidence,
+    ScoreKind, SkippedArm, SourceEntry, authority_factor, authority_value, base_from_rank,
+    base_from_rerank_in, breadcrumb, build_context_and_sources, classify_query, date_value,
+    normalise_authority, parse_date, recency_factor, reciprocal_rank_fusion_with,
+    rerank_scores_are_probabilities, weave_neighbours_with,
 };
 use kb_ports::{
     Candidate, Chunk, ChunkId, ChunkMetadata, DocumentId, DocumentMeta, DocumentScope,
@@ -290,6 +290,12 @@ pub struct RetrievalOutcome {
     /// pool was scored (the floor compares every hit against its score), so
     /// the count is the scored pool, not the head.
     pub reranked_count: Option<usize>,
+    /// The comparable scores the confidence band is fitted on (RET-18).
+    ///
+    /// The engine knows which score the ranked hits carry; the server knows
+    /// which model produced it and which calibration table is in force. Only
+    /// the top two are kept: a margin needs a second score, nothing else does.
+    pub confidence_scores: ScoreEvidence,
     /// How many hits the per-document diversity cap dropped (`stats.perDocumentCapped`).
     /// `None` when the cap was off, so a search that never asked for one keeps
     /// exactly the earlier response shape; `Some(0)` when it ran but dropped
@@ -1641,6 +1647,20 @@ async fn execute_pipeline_with_plan(
                 }
                 timings.total_ms = total_sw.elapsed_ms();
                 timings.engine_total_ms = timings.total_ms;
+                // The floor removed everything: no hit carries a score, but
+                // the answer still says which scale the (missing) score would
+                // have been on. `calibrated` is decided by the server for the
+                // model behind that scale.
+                let confidence_scores = ScoreEvidence {
+                    top: None,
+                    second: None,
+                    score_kind: match floor_stats.map(|floor| floor.score_kind) {
+                        Some(FloorScoreKind::Rerank) => ScoreKind::Rerank,
+                        Some(FloorScoreKind::Dense) => ScoreKind::Dense,
+                        None if rerank_ran => ScoreKind::Rerank,
+                        None => ScoreKind::Dense,
+                    },
+                };
                 return Ok(RetrievalOutcome {
                     chunks: Vec::new(),
                     sources: Vec::new(),
@@ -1657,6 +1677,7 @@ async fn execute_pipeline_with_plan(
                     // The rerank ran, and the floor kept nothing: no returned
                     // hit carries a score, because there is no returned hit.
                     reranked_count: rerank_ran.then_some(0),
+                    confidence_scores,
                     // The diversity cap runs after the floor, so it never ran here.
                     per_document_capped: None,
                     timings,
@@ -1983,8 +2004,15 @@ async fn execute_pipeline_with_plan(
     // the whole scored pool.
     let reranked_count = rerank_ran.then(|| count_reranked(&reranked_hits));
 
+    let chunks = ranked_first(reranked_hits, &ranked_ids);
+    let confidence_scores = confidence_evidence(
+        &chunks,
+        rerank_ran,
+        floor_stats.map(|floor| floor.score_kind),
+    );
+
     Ok(RetrievalOutcome {
-        chunks: ranked_first(reranked_hits, &ranked_ids),
+        chunks,
         sources,
         context,
         degrades,
@@ -1995,6 +2023,7 @@ async fn execute_pipeline_with_plan(
         tree: tree_stats,
         global_arm: global_stats,
         reranked_count,
+        confidence_scores,
         per_document_capped,
         timings,
     })
@@ -2034,6 +2063,40 @@ pub fn apply_max_per_document(hits: Vec<SearchHit>, limit: u32) -> (Vec<SearchHi
 /// How many of the hits carry a rerank score.
 fn count_reranked(hits: &[SearchHit]) -> usize {
     hits.iter().filter(|h| h.rerank_score.is_some()).count()
+}
+
+/// The two top scores of the answer, from the score the pipeline actually used.
+///
+/// A reranked answer is read from `rerank_score`, a dense-only one from
+/// `dense_score`, and an answer with no comparable score from `similarity`
+/// (the fused, rank-only value). Hits from the neighbour, figure or page arms
+/// that carry no score of the chosen kind are skipped rather than counted as
+/// zero: an absent score is not evidence of relevance.
+fn confidence_evidence(
+    hits: &[SearchHit],
+    rerank_ran: bool,
+    floor_kind: Option<FloorScoreKind>,
+) -> ScoreEvidence {
+    let dense_or_fused = || {
+        let dense: Vec<f32> = hits.iter().filter_map(|h| h.dense_score).collect();
+        if dense.is_empty() {
+            ScoreEvidence::from_scores(hits.iter().map(|h| h.similarity), ScoreKind::Fused)
+        } else {
+            ScoreEvidence::from_scores(dense, ScoreKind::Dense)
+        }
+    };
+    let wants_rerank = match floor_kind {
+        Some(FloorScoreKind::Rerank) => true,
+        Some(FloorScoreKind::Dense) => false,
+        None => rerank_ran,
+    };
+    if wants_rerank {
+        let reranked: Vec<f32> = hits.iter().filter_map(|h| h.rerank_score).collect();
+        if !reranked.is_empty() {
+            return ScoreEvidence::from_scores(reranked, ScoreKind::Rerank);
+        }
+    }
+    dense_or_fused()
 }
 
 /// The ranked hits first, in rank order; then everything added for context

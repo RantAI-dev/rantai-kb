@@ -142,6 +142,10 @@ pub struct Config {
     /// What the upload route does with a file the tenant already has
     /// (`KB_UPLOAD_DEDUPE`). `reject` by default.
     pub upload_dedupe: kb_core::policy::UploadDedupe,
+    /// Confidence bands fitted per scoring model (`RET-18`). Loaded from
+    /// `KB_CONFIDENCE_CALIBRATION` at startup; a bad file is a startup error.
+    /// Empty by default, so every answer is honestly `calibrated: false`.
+    pub confidence_table: kb_core::CalibrationTable,
 }
 
 /// The table store (`TBL-1`). On by default: a document with no tables is
@@ -878,6 +882,24 @@ impl Config {
             bail!("KB_MIN_SCORE must be a finite number");
         }
 
+        // Confidence bands (RET-18). An operator who has run
+        // `kb-server eval calibrate-confidence` points here at its
+        // `calibration.json`. Refusing a malformed file at boot keeps a bad fit
+        // from quietly turning every answer into an uncalibrated hint.
+        let confidence_table = match lookup("KB_CONFIDENCE_CALIBRATION")
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+        {
+            None => kb_core::CalibrationTable::built_in(),
+            Some(path) => {
+                let text = std::fs::read_to_string(&path).map_err(|err| {
+                    anyhow::anyhow!("KB_CONFIDENCE_CALIBRATION: read {path}: {err}")
+                })?;
+                kb_core::CalibrationTable::from_json(&text)
+                    .map_err(|err| anyhow::anyhow!("KB_CONFIDENCE_CALIBRATION ({path}): {err}"))?
+            }
+        };
+
         let engine = EngineSettings {
             candidate_pool_size: rerank_initial_k,
             rrf_k,
@@ -1321,7 +1343,28 @@ impl Config {
             request_timeout: Duration::from_secs(30),
             tier: tier_plan,
             upload_dedupe,
+            confidence_table,
         })
+    }
+
+    /// The id to match against a calibration entry when reranking ran.
+    /// `None` when there is no reranker: a dense answer must be matched by the
+    /// embedding model id instead.
+    #[must_use]
+    pub fn rerank_model_id(&self) -> Option<&str> {
+        match &self.reranker {
+            RerankerConfig::Disabled => None,
+            RerankerConfig::Llm { model, .. }
+            | RerankerConfig::Tei { model, .. }
+            | RerankerConfig::Vllm { model, .. }
+            | RerankerConfig::Cohere { model, .. } => Some(model.as_str()),
+        }
+    }
+
+    /// The embedding model id, used for dense and fused answers.
+    #[must_use]
+    pub fn embedding_model_id(&self) -> &str {
+        &self.embedder.model
     }
 
     /// Print one INFO line describing what `KB_TIER` filled. A no-op without a
@@ -1611,6 +1654,49 @@ mod tests {
         map.insert("KB_MIN_SCORE", "not-a-number");
         let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
         assert!(err.to_string().contains("KB_MIN_SCORE"), "{err}");
+    }
+
+    fn confidence_test_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("kb-ret18-{}-{name}.json", std::process::id()))
+    }
+
+    #[test]
+    fn test_confidence_calibration_file_loads_at_startup() {
+        let path = confidence_test_path("valid");
+        std::fs::write(
+            &path,
+            r#"[{"modelId":"m","scoreKind":"rerank","high":0.8,"medium":0.6,"low":0.42}]"#,
+        )
+        .expect("write calibration");
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        let path_str = path.to_string_lossy().into_owned();
+        map.insert("KB_CONFIDENCE_CALIBRATION", path_str.as_str());
+        map.insert("KB_RERANK_ENABLED", "true");
+        map.insert("KB_RERANK_MODEL", "m");
+        let config = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(config.confidence_table.entries.len(), 1);
+        assert_eq!(config.rerank_model_id(), Some("m"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_bad_confidence_calibration_file_is_a_startup_error() {
+        let path = confidence_test_path("invalid");
+        std::fs::write(&path, r#"{"not":"an array"}"#).expect("write calibration");
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        let path_str = path.to_string_lossy().into_owned();
+        map.insert("KB_CONFIDENCE_CALIBRATION", path_str.as_str());
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        assert!(
+            err.to_string().contains("KB_CONFIDENCE_CALIBRATION"),
+            "{err}"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
