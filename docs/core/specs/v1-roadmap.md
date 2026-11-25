@@ -48,7 +48,7 @@ PR. The planner re-runs every gate before merging.
      delete it when you finish. Never share one between branches.
    - Build with `-j2` (`export CARGO_BUILD_JOBS=2`). The box has 6 cores and other agents.
    - libpdfium is at `/home/shiro/rantai-kb/rust/.vendor/pdfium`: set
-     `PDFIUM_DYNAMIC_LIB_PATH=/home/shiro/rantai-kb/rust/.vendor/pdfium/lib` before
+     `PDFIUM_DYNAMIC_LIB_PATH=/home/shiro/rantai-kb/rust/.vendor/pdfium/lib/libpdfium.so` (the file, not the directory) before
      `cargo test`.
 3. **Gates, run before each commit that touches Rust:**
    - `cargo fmt --all --manifest-path rust/Cargo.toml --check`

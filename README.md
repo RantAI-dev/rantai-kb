@@ -97,6 +97,10 @@ Interactive Swagger UI is always served at [`http://127.0.0.1:8080/docs`](http:/
 - **Format-native extraction (55 extensions):** PDFs use pdfium for text layers with layout parsing or OCR for scans; Office Open XML (`.docx`, `.xlsx`, `.pptx`), OpenDocument, Markdown, plain text, code, CSV/TSV/JSON/YAML, HTML/XML, RTF, and EPUB take native paths. `GET /v1/formats` lists every accepted extension and the size limit (256 MiB default).
 - **Table- and code-aware chunking:** Spreadsheets and tables are never cut mid-row; tables are structured into typed grids with inferred manifests (`table_summary` + `table_row` chunks) and can be queried via typed aggregations in full mode (see [`docs/api.md`](docs/api.md#tables)).
 - **Hybrid vectors & reranking:** Every chunk carries a Qdrant-compatible BM25 sparse vector (FNV-1a hashed, server-side IDF) alongside optional dense embeddings and cross-encoder reranking.
+- **Progressive disclosure for agents:** `GET /v1/documents/:id/structure` returns an outline (headings, and `BAB`/`Bagian`/`Pasal` in Indonesian regulations) with page and chunk ranges. `GET /v1/documents/:id/content` reads a section or page range byte-exact under a `maxChars` budget, with a cursor that fails with `409` if the document changed. `pageRange`/`section` search inside one document.
+- **Versioned documents:** upload a new version under the same `docKey` and search answers from the current one. `asOf` gives the version in force on a date, and `includeHistory` returns every version with a `multiVersionWarning`.
+- **Answers a caller can act on:** citations stay per document, `maxPerDocument` caps one document's share, and `confidence` reports a band and whether it is calibrated for the active model.
+- **MCP for agents:** `KB_MCP=on` mounts `/mcp` with `kb_search`, `kb_outline`, `kb_read`, `kb_list_documents` and `kb_query_table`, under the same keys and scopes.
 - **Stage-seated concurrency:** `KB_SEATS` bounds local extraction and bulk embedding so VMs and model servers stay saturated without thrashing; remote OCR handoff releases local `extract` seats early, and live search queries run on a fast lane.
 
 ---
@@ -157,7 +161,7 @@ Every local model is Apache-2.0 or MIT (details in [`docs/model-licences.md`](do
 
 All `/v1/*` routes take `Authorization: Bearer <key>` or `X-API-Key: <key>`. Health (`/health`, `/v1/health`), formats (`/v1/formats`), and OpenAPI (`/openapi.json`, `/docs`) are unauthenticated.
 
-- **Full service:** `POST /v1/documents`, `GET /v1/jobs/:id`, `POST /v1/search`, `GET /v1/tables`, `POST /v1/tables/:id/query`, `GET /v1/documents/:id/structure`, knowledge bases, categories, SSE events.
+- **Full service:** `POST /v1/documents`, `GET /v1/jobs/:id`, `POST /v1/search`, `GET /v1/documents/:id/structure`, `GET /v1/documents/:id/content`, `GET /v1/tables`, `POST /v1/tables/:id/query`, knowledge bases, categories, SSE events, and `/mcp` (`KB_MCP=on`).
 - **Stateless processor:** `POST /v1/process`, `POST /v1/encode`, `POST /v1/rerank` (inspect contract anytime via `rantai-kb openapi --stateless`).
 
 Full endpoint reference, options, and schemas: [`docs/api.md`](docs/api.md).
@@ -212,7 +216,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for guidelines.
 
 Tagging `v*` builds and publishes multi-arch images (`amd64`/`arm64`) to `ghcr.io/rantai-dev/rantai-kb` alongside OCR sidecars, packages Linux (`x86_64`, `aarch64`) and macOS (`arm64`) binaries with checksums, cuts a GitHub Release, and smoke-tests `install.sh`.
 
-- **Current release:** `v0.8.0` — stateless processor-only microservice mode (`--stateless` / `KB_MODE=stateless`) with `/v1/process`, `/v1/encode` (query fast-lane), `/v1/rerank` (local & cloud), and `KB_STATELESS_MAX_INFLIGHT` load shedding.
+- **Current release:** `v0.9.0`: progressive disclosure (outline v2, byte-exact `/content`, in-document search), document versions (`docKey`/`asOf`), `maxPerDocument`, calibrated `confidence`, `/mcp`, opt-in predicate scope and Qdrant quantization. Measured numbers, including the targets missed, are in [`CHANGELOG.md`](CHANGELOG.md#090--2026-11-25).
+- **Previous:** `v0.8.0`: stateless processor-only mode (`/v1/process`, `/v1/encode`, `/v1/rerank`).
 - **Legacy Bun release:** `v0.1.0` ([migration guide](docs/rust-cutover.md)).
 
 ---
