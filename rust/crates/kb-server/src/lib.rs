@@ -19,6 +19,7 @@ pub mod quant_bench;
 pub mod routes;
 pub mod runtime;
 pub mod scope;
+pub mod scope_bench;
 pub mod setup;
 pub mod stack;
 pub mod state;
