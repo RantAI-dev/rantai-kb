@@ -318,7 +318,7 @@ fn classify(
     // name it as such instead of calling each one "no_similar_name".
     let title_row =
         first.starts_with("Tabel") && gold_header.is_some_and(|h| h.len() > names.len() + 2);
-    let data_row = first.chars().next().is_some_and(char::is_ascii_digit);
+    let data_row = first.chars().next().is_some_and(|ch| ch.is_ascii_digit());
     let preamble = closest.starts_with("Column ")
         || first.starts_with('\u{feff}')
         || first.contains("Data Source");
