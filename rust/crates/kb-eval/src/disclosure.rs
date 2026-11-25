@@ -37,7 +37,11 @@ use crate::report::redact_secret;
 pub const BOOTSTRAP_RESAMPLES: usize = 2000;
 /// Fixed seed: two runs over the same answers give the same interval.
 pub const BOOTSTRAP_SEED: u64 = 0x5EED_0000_0000_0007;
-/// Coverage required by the roadmap.
+/// Primary target (EVAL-9): at least one gold page fully read. ViDoRe HR has a
+/// median of 3 and up to 30 gold pages per question, so demanding *every* page
+/// measured the dataset more than the API.
+pub const ANSWER_PAGE_COVERAGE_TARGET: f64 = 0.80;
+/// Secondary target (EVAL-7, retained for continuity): every gold page read.
 pub const COVERAGE_TARGET: f64 = 0.90;
 /// Maximum mean chars read / gold chars.
 pub const CHARS_RATIO_TARGET: f64 = 1.5;
@@ -78,11 +82,53 @@ pub struct GoldPage {
     pub page_1based: u32,
 }
 
+/// One `/v1/search` hit as the reader saw it (EVAL-9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HitRecord {
+    /// 1-based rank in the search response.
+    pub rank: usize,
+    pub document_id: String,
+    /// 0-based page, exactly as the API reported it (`null` when absent).
+    pub page: Option<u32>,
+    /// Whether this (document, page) is one of the question's gold pages.
+    pub gold: bool,
+}
+
+/// One budgeted `/content` read as the reader made it (EVAL-9). Recording these
+/// separates "search ranked the gold page low" from "the reader read the wrong
+/// page" in `per_question.jsonl`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageReadRecord {
+    pub document_id: String,
+    /// `section:s3`, `pages:4-6` or `cursor`, so a reviewer can see the selector.
+    pub selector: String,
+    pub chunk_start: u32,
+    pub chunk_end: u32,
+    pub page_start: Option<u32>,
+    pub page_end: Option<u32>,
+    /// Characters kept from this read under the budget.
+    pub chars: u64,
+}
+
+/// Distribution of the first gold hit's rank across questions (EVAL-9).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RankDistribution {
+    /// `(1-based rank, question count)` for every rank that occurred, sorted.
+    pub counts: Vec<(usize, usize)>,
+    /// Questions with a gold page in the top-k.
+    pub any: usize,
+    /// Questions with no gold page in the top-k.
+    pub none: usize,
+    /// Mean rank among questions that had a gold hit; 0 when none did.
+    pub mean: f64,
+}
+
 /// The result for one question.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuestionResult {
     pub query_id: String,
     pub query: String,
+    /// EVAL-7: fraction of *all* gold pages fully read. Secondary now.
     pub coverage: f64,
     pub covered: usize,
     pub gold_pages: usize,
@@ -90,8 +136,17 @@ pub struct QuestionResult {
     pub gold_chars: u64,
     pub chars_read: u64,
     pub chars_ratio: f64,
+    /// EVAL-9 primary: 1 when at least one gold page was fully read.
+    pub answer_page_hit: u8,
+    /// 1-based rank of the first search hit on a gold page, `null` if none in
+    /// the top-k.
+    pub best_gold_rank: Option<usize>,
     pub covered_pages: Vec<String>,
     pub missed_pages: Vec<String>,
+    /// Every hit the reader saw, with rank, page and goldness.
+    pub hits: Vec<HitRecord>,
+    /// Every budgeted `/content` read the reader made, in order.
+    pub pages_read: Vec<PageReadRecord>,
     /// Visible failures (HTTP errors, cursor loops, …). Never folded away.
     pub errors: Vec<String>,
 }
@@ -107,8 +162,11 @@ pub struct LatencyByEndpoint {
 /// PASS/MISS markers. A miss is reported, never hidden or retried away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Targets {
-    pub coverage_pass: bool,
+    /// Primary (EVAL-9): answer-page coverage.
+    pub answer_page_coverage_pass: bool,
     pub chars_ratio_pass: bool,
+    /// Secondary, kept for continuity (EVAL-7): all-gold-pages coverage.
+    pub coverage_pass: bool,
     pub content_p95_pass: bool,
 }
 
@@ -122,7 +180,14 @@ pub struct DisclosureReport {
     pub bootstrap_seed: u64,
     pub n_questions: usize,
     pub missing_doc: usize,
+    /// Primary (EVAL-9): mean answer-page hit, with a bootstrap CI.
+    pub answer_page_coverage: Aggregate,
+    /// Secondary (EVAL-7): mean fraction of *all* gold pages read, with a CI.
     pub coverage: Aggregate,
+    /// Coverage restricted to questions with exactly one gold page.
+    pub single_gold_coverage: Aggregate,
+    /// Where the first gold hit ranked in the top-k.
+    pub best_gold_rank: RankDistribution,
     pub chars_ratio: Aggregate,
     pub chars_read_total: u64,
     pub gold_chars_total: u64,
@@ -193,6 +258,56 @@ pub fn coverage(gold_texts: &[String], read_parts: &[String]) -> Coverage {
             covered as f64 / total as f64
         },
         flags,
+    }
+}
+
+/// EVAL-9 primary signal: at least one gold page was fully read.
+#[must_use]
+pub fn answer_page_hit(flags: &[bool]) -> u8 {
+    u8::from(flags.iter().any(|&yes| yes))
+}
+
+/// The 1-based rank of the first search hit that lands on a gold page.
+///
+/// `gold` holds `(document id, 0-based page)` pairs resolved through the ingest
+/// map. A hit without a page cannot be a gold-page hit. `None` means no gold
+/// page appeared in the top-k, which is a fact about search, not the reader.
+#[must_use]
+pub fn best_gold_rank(
+    hits: &[(String, Option<u32>)],
+    gold: &HashSet<(String, u32)>,
+) -> Option<usize> {
+    hits.iter()
+        .position(|(document, page)| {
+            page.is_some_and(|page| gold.contains(&(document.clone(), page)))
+        })
+        .map(|position| position + 1)
+}
+
+/// Count how often the first gold hit appeared at each rank, plus the misses.
+#[must_use]
+pub fn rank_distribution(values: &[Option<usize>], k: usize) -> RankDistribution {
+    let mut by_rank: HashMap<usize, usize> = HashMap::new();
+    let mut any = 0usize;
+    let mut sum = 0usize;
+    for value in values.iter().flatten() {
+        if *value >= 1 && *value <= k {
+            *by_rank.entry(*value).or_default() += 1;
+            any += 1;
+            sum += *value;
+        }
+    }
+    let mut counts: Vec<(usize, usize)> = by_rank.into_iter().collect();
+    counts.sort_unstable_by_key(|(rank, _)| *rank);
+    RankDistribution {
+        counts,
+        any,
+        none: values.len() - any,
+        mean: if any == 0 {
+            0.0
+        } else {
+            sum as f64 / any as f64
+        },
     }
 }
 
@@ -274,6 +389,18 @@ pub enum ReadSelector {
     Cursor(String),
 }
 
+impl ReadSelector {
+    /// Short, stable label written to `per_question.jsonl`.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Section(id) => format!("section:{id}"),
+            Self::Pages(start, end) => format!("pages:{start}-{end}"),
+            Self::Cursor(_) => "cursor".to_string(),
+        }
+    }
+}
+
 /// Tracks selections and served chunk ranges so no chunk range is fetched twice.
 ///
 /// Both keys include the document id: `s1` in document A and `s1` in document B
@@ -305,12 +432,19 @@ impl ReadLedger {
     }
 }
 
-/// Evaluate the three roadmap targets.
+/// Evaluate the EVAL-9 gate: answer-page coverage at a bounded char ratio, with
+/// the old all-pages coverage and `/content` p95 kept as secondary diagnostics.
 #[must_use]
-pub fn evaluate_targets(coverage_mean: f64, chars_ratio: f64, content_p95_ms: f64) -> Targets {
+pub fn evaluate_targets(
+    answer_page_coverage: f64,
+    coverage_mean: f64,
+    chars_ratio: f64,
+    content_p95_ms: f64,
+) -> Targets {
     Targets {
-        coverage_pass: coverage_mean >= COVERAGE_TARGET,
+        answer_page_coverage_pass: answer_page_coverage >= ANSWER_PAGE_COVERAGE_TARGET,
         chars_ratio_pass: chars_ratio <= CHARS_RATIO_TARGET,
+        coverage_pass: coverage_mean >= COVERAGE_TARGET,
         content_p95_pass: content_p95_ms < CONTENT_P95_TARGET_MS,
     }
 }
@@ -319,19 +453,24 @@ pub fn evaluate_targets(coverage_mean: f64, chars_ratio: f64, content_p95_ms: f6
 #[must_use]
 pub fn render_report(report: &DisclosureReport, questions: &[QuestionResult]) -> String {
     let mut out = String::new();
-    out.push_str("# EVAL-7 — progressive-disclosure coverage\n\n");
+    out.push_str("# EVAL-9 — answer-page disclosure coverage (EVAL-7 metrics retained)\n\n");
     out.push_str(&format!(
         "Dataset `{}`, top-k {}, budget factor {}, {} questions.\n\n",
         report.dataset, report.top_k, report.budget_factor, report.n_questions
     ));
     out.push_str(
-        "| query | coverage | covered/gold | missing doc | chars read | gold chars | ratio |\n",
+        "| query | answer hit | best gold rank | coverage | covered/gold | missing doc | chars read | gold chars | ratio |\n",
     );
-    out.push_str("|---|---:|---:|---:|---:|---:|---:|\n");
+    out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|\n");
     for q in questions {
+        let rank = q
+            .best_gold_rank
+            .map_or_else(|| "none".to_string(), |rank| rank.to_string());
         out.push_str(&format!(
-            "| {} | {:.3} | {}/{} | {} | {} | {} | {:.3} |\n",
+            "| {} | {} | {} | {:.3} | {}/{} | {} | {} | {} | {:.3} |\n",
             q.query_id,
+            q.answer_page_hit,
+            rank,
             q.coverage,
             q.covered,
             q.gold_pages,
@@ -342,12 +481,37 @@ pub fn render_report(report: &DisclosureReport, questions: &[QuestionResult]) ->
         ));
     }
     out.push_str(&format!(
-        "\nMean coverage **{:.3}** [{:.3}, {:.3}] ({} bootstrap resamples, seed {}).\n",
-        report.coverage.mean,
-        report.coverage.ci_low,
-        report.coverage.ci_high,
+        "\nAnswer-page coverage **{:.3}** [{:.3}, {:.3}] (n={}), single-gold-page coverage **{:.3}** [{:.3}, {:.3}] (n={}) ({} bootstrap resamples, seed {}).\n",
+        report.answer_page_coverage.mean,
+        report.answer_page_coverage.ci_low,
+        report.answer_page_coverage.ci_high,
+        report.answer_page_coverage.n,
+        report.single_gold_coverage.mean,
+        report.single_gold_coverage.ci_low,
+        report.single_gold_coverage.ci_high,
+        report.single_gold_coverage.n,
         report.bootstrap_resamples,
         report.bootstrap_seed
+    ));
+    let ranks: Vec<String> = report
+        .best_gold_rank
+        .counts
+        .iter()
+        .map(|(rank, count)| format!("rank {rank}: {count}"))
+        .collect();
+    out.push_str(&format!(
+        "Best gold rank: {}; no gold in top-k: {}; mean rank among hits {:.2}.\n",
+        if ranks.is_empty() {
+            "no gold hits".to_string()
+        } else {
+            ranks.join(", ")
+        },
+        report.best_gold_rank.none,
+        report.best_gold_rank.mean
+    ));
+    out.push_str(&format!(
+        "All-gold-pages coverage (secondary) **{:.3}** [{:.3}, {:.3}].\n",
+        report.coverage.mean, report.coverage.ci_low, report.coverage.ci_high
     ));
     out.push_str(&format!(
         "Mean chars read / gold chars **{:.3}** [{:.3}, {:.3}]; totals {} / {}.\n",
@@ -377,16 +541,22 @@ pub fn render_report(report: &DisclosureReport, questions: &[QuestionResult]) ->
     out.push_str("## Targets\n\n");
     out.push_str("| Target | Measured | Result |\n|---|---:|---|\n");
     out.push_str(&format!(
-        "| coverage ≥ {:.2} | {:.3} | {} |\n",
-        COVERAGE_TARGET,
-        report.coverage.mean,
-        verdict(report.targets.coverage_pass)
+        "| **answer-page coverage ≥ {:.2} (primary)** | {:.3} | {} |\n",
+        ANSWER_PAGE_COVERAGE_TARGET,
+        report.answer_page_coverage.mean,
+        verdict(report.targets.answer_page_coverage_pass)
     ));
     out.push_str(&format!(
         "| chars read / gold chars ≤ {:.1} | {:.3} | {} |\n",
         CHARS_RATIO_TARGET,
         report.chars_ratio.mean,
         verdict(report.targets.chars_ratio_pass)
+    ));
+    out.push_str(&format!(
+        "| all-gold-pages coverage ≥ {:.2} (secondary) | {:.3} | {} |\n",
+        COVERAGE_TARGET,
+        report.coverage.mean,
+        verdict(report.targets.coverage_pass)
     ));
     out.push_str(&format!(
         "| /content p95 < {:.0} ms | {:.1} ms | {} |\n",
@@ -655,6 +825,8 @@ async fn fetch_structure(
 pub struct ContentPage {
     pub text: String,
     pub chunk_range: (u32, u32),
+    /// Inclusive 0-based page range the server reported, when it had one.
+    pub page_range: (Option<u32>, Option<u32>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -677,6 +849,10 @@ struct ContentRangeAnswer {
     chunk_start: u32,
     #[serde(rename = "chunkEnd", default)]
     chunk_end: u32,
+    #[serde(rename = "pageStart", default)]
+    page_start: Option<u32>,
+    #[serde(rename = "pageEnd", default)]
+    page_end: Option<u32>,
 }
 
 /// Read a selector from `/content`, following `nextCursor` to the end.
@@ -739,6 +915,7 @@ async fn content_pages(
         pages.push(ContentPage {
             text: answer.text,
             chunk_range: (answer.range.chunk_start, answer.range.chunk_end),
+            page_range: (answer.range.page_start, answer.range.page_end),
         });
         if !answer.truncated {
             return Ok(pages);
@@ -814,6 +991,15 @@ async fn score_question(
     let mut gold_texts: Vec<String> = Vec::new();
     let mut missing_doc = 0usize;
     let mut gold_chars = 0u64;
+    // (document id, 0-based page) of every gold page we could resolve through
+    // the ingest map. Used to tell a low-ranked gold hit from a reader miss.
+    let gold_pages_set: HashSet<(String, u32)> = gold_pages
+        .iter()
+        .filter_map(|page| {
+            let document = ingest_map.get(&page.doc_key)?;
+            Some((document.clone(), page.page_1based.saturating_sub(1)))
+        })
+        .collect();
 
     // Gold first: the budget depends on it, and the reads are not the reader's.
     for page in gold_pages {
@@ -848,6 +1034,18 @@ async fn score_question(
             Vec::new()
         }
     };
+    let hit_records: Vec<HitRecord> = hits
+        .iter()
+        .enumerate()
+        .map(|(index, (document, page))| HitRecord {
+            rank: index + 1,
+            document_id: document.clone(),
+            page: *page,
+            gold: page.is_some_and(|page| gold_pages_set.contains(&(document.clone(), page))),
+        })
+        .collect();
+    let first_gold_rank = best_gold_rank(&hits, &gold_pages_set);
+    let mut pages_read: Vec<PageReadRecord> = Vec::new();
     let mut ledger = ReadLedger::default();
     for (document_id, pages) in group_hits_by_document(&hits) {
         if budget == 0 {
@@ -918,6 +1116,15 @@ async fn score_question(
                         ledger.record_range(&document_id, page.chunk_range);
                         let kept = take_chars(&page.text, budget);
                         let used = kept.chars().count() as u64;
+                        pages_read.push(PageReadRecord {
+                            document_id: document_id.clone(),
+                            selector: selector.label(),
+                            chunk_start: page.chunk_range.0,
+                            chunk_end: page.chunk_range.1,
+                            page_start: page.page_range.0,
+                            page_end: page.page_range.1,
+                            chars: used,
+                        });
                         chars_read += used;
                         budget = budget.saturating_sub(used);
                         parts.push(kept);
@@ -933,6 +1140,7 @@ async fn score_question(
     errors.extend(notes);
 
     let scored = coverage(&gold_texts, &parts);
+    let answer_hit = answer_page_hit(&scored.flags);
     let covered_pages: Vec<String> = gold_pages
         .iter()
         .zip(scored.flags.iter())
@@ -959,8 +1167,12 @@ async fn score_question(
         } else {
             chars_read as f64 / gold_chars as f64
         },
+        answer_page_hit: answer_hit,
+        best_gold_rank: first_gold_rank,
         covered_pages,
         missed_pages,
+        hits: hit_records,
+        pages_read,
         errors,
     }
 }
@@ -1023,10 +1235,25 @@ pub async fn run(config: DisclosureConfig) -> Result<DisclosureReport, RunError>
             .await,
         );
     }
+    let answer_values: Vec<f64> = results
+        .iter()
+        .map(|q| f64::from(q.answer_page_hit))
+        .collect();
     let coverage_values: Vec<f64> = results.iter().map(|q| q.coverage).collect();
+    let single_values: Vec<f64> = results
+        .iter()
+        .filter(|q| q.gold_pages == 1)
+        .map(|q| q.coverage)
+        .collect();
     let ratio_values: Vec<f64> = results.iter().map(|q| q.chars_ratio).collect();
+    let answer_page_coverage = bootstrap_ci(&answer_values, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED);
     let coverage = bootstrap_ci(&coverage_values, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED);
+    let single_gold_coverage = bootstrap_ci(&single_values, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED);
     let chars_ratio = bootstrap_ci(&ratio_values, BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED);
+    let best_gold_rank = rank_distribution(
+        &results.iter().map(|q| q.best_gold_rank).collect::<Vec<_>>(),
+        usize::try_from(config.top_k).unwrap_or(usize::MAX),
+    );
     let latency_ms = LatencyByEndpoint {
         search: latency_report(state.search_ms),
         structure: latency_report(state.structure_ms),
@@ -1040,11 +1267,19 @@ pub async fn run(config: DisclosureConfig) -> Result<DisclosureReport, RunError>
         bootstrap_seed: BOOTSTRAP_SEED,
         n_questions: results.len(),
         missing_doc: results.iter().map(|q| q.missing_doc).sum(),
+        answer_page_coverage,
         coverage,
+        single_gold_coverage,
+        best_gold_rank,
         chars_ratio,
         chars_read_total: results.iter().map(|q| q.chars_read).sum(),
         gold_chars_total: results.iter().map(|q| q.gold_chars).sum(),
-        targets: evaluate_targets(coverage.mean, chars_ratio.mean, latency_ms.content.p95),
+        targets: evaluate_targets(
+            answer_page_coverage.mean,
+            coverage.mean,
+            chars_ratio.mean,
+            latency_ms.content.p95,
+        ),
         latency_ms,
     };
     write_outputs(&config, &report, &results)?;
@@ -1167,9 +1402,13 @@ pub async fn run_cli(args: &[String]) -> Result<(), EvalError> {
     let report = run(config)
         .await
         .map_err(|err| EvalError::Failed(err.to_string()))?;
+    let verdict = |pass: bool| if pass { "PASS" } else { "MISS" };
     println!(
-        "disclosure: {} questions, coverage {:.3} [{:.3}, {:.3}], chars read/gold {:.3}, content p95 {:.1} ms",
+        "disclosure: {} questions, answer-page coverage {:.3} [{:.3}, {:.3}], all-pages coverage {:.3} [{:.3}, {:.3}], chars read/gold {:.3}, content p95 {:.1} ms",
         report.n_questions,
+        report.answer_page_coverage.mean,
+        report.answer_page_coverage.ci_low,
+        report.answer_page_coverage.ci_high,
         report.coverage.mean,
         report.coverage.ci_low,
         report.coverage.ci_high,
@@ -1177,22 +1416,11 @@ pub async fn run_cli(args: &[String]) -> Result<(), EvalError> {
         report.latency_ms.content.p95
     );
     println!(
-        "targets: coverage {} · chars {} · content p95 {}",
-        if report.targets.coverage_pass {
-            "PASS"
-        } else {
-            "MISS"
-        },
-        if report.targets.chars_ratio_pass {
-            "PASS"
-        } else {
-            "MISS"
-        },
-        if report.targets.content_p95_pass {
-            "PASS"
-        } else {
-            "MISS"
-        }
+        "targets: answer-page {} (primary) · chars {} · all-pages {} (secondary) · content p95 {}",
+        verdict(report.targets.answer_page_coverage_pass),
+        verdict(report.targets.chars_ratio_pass),
+        verdict(report.targets.coverage_pass),
+        verdict(report.targets.content_p95_pass)
     );
     println!("wrote results.json, per_question.jsonl, report.md");
     Ok(())
@@ -1359,15 +1587,21 @@ mod tests {
     #[test]
     fn targets_report_a_miss_instead_of_hiding_it() {
         assert_eq!(
-            evaluate_targets(0.91, 1.4, 49.0),
+            evaluate_targets(0.91, 0.89, 1.4, 49.0),
             Targets {
-                coverage_pass: true,
+                answer_page_coverage_pass: true,
+                coverage_pass: false,
                 chars_ratio_pass: true,
                 content_p95_pass: true
             }
         );
-        let miss = evaluate_targets(0.89, 1.6, 51.0);
-        assert!(!miss.coverage_pass && !miss.chars_ratio_pass && !miss.content_p95_pass);
+        let miss = evaluate_targets(0.79, 0.89, 1.6, 51.0);
+        assert!(
+            !miss.answer_page_coverage_pass
+                && !miss.coverage_pass
+                && !miss.chars_ratio_pass
+                && !miss.content_p95_pass
+        );
         let text = render_report(
             &DisclosureReport {
                 dataset: "d".to_string(),
@@ -1377,7 +1611,10 @@ mod tests {
                 bootstrap_seed: BOOTSTRAP_SEED,
                 n_questions: 1,
                 missing_doc: 0,
+                answer_page_coverage: bootstrap_ci(&[0.79], BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED),
                 coverage: bootstrap_ci(&[0.89], BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED),
+                single_gold_coverage: bootstrap_ci(&[0.5], BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED),
+                best_gold_rank: rank_distribution(&[None], 5),
                 chars_ratio: bootstrap_ci(&[1.6], BOOTSTRAP_RESAMPLES, BOOTSTRAP_SEED),
                 chars_read_total: 16,
                 gold_chars_total: 10,
@@ -1392,6 +1629,34 @@ mod tests {
         );
         assert!(text.contains("MISS"));
         assert!(text.contains("Target"));
+        assert!(text.contains("answer-page coverage"));
+        assert!(text.contains("all-gold-pages coverage"));
+    }
+
+    #[test]
+    fn answer_page_hit_and_best_gold_rank_separate_search_from_reader() {
+        assert_eq!(answer_page_hit(&[false, false]), 0);
+        assert_eq!(answer_page_hit(&[false, true, false]), 1);
+
+        let gold = HashSet::from([("doc-a".to_string(), 3u32), ("doc-b".to_string(), 0u32)]);
+        let hits = vec![
+            ("doc-x".to_string(), Some(0)),
+            ("doc-a".to_string(), None),
+            ("doc-a".to_string(), Some(3)),
+            ("doc-b".to_string(), Some(0)),
+        ];
+        assert_eq!(best_gold_rank(&hits, &gold), Some(3));
+        assert_eq!(best_gold_rank(&hits[..2], &gold), None);
+
+        let distribution = rank_distribution(&[Some(1), Some(3), Some(3), None], 5);
+        assert_eq!(
+            distribution.counts,
+            vec![(1, 1), (3, 2)],
+            "rank histogram is sorted by rank"
+        );
+        assert_eq!(distribution.any, 3);
+        assert_eq!(distribution.none, 1);
+        assert!((distribution.mean - 7.0 / 3.0).abs() < 1e-12);
     }
 
     /// A three-page mock stack: two documents, labelled pages and an agent loop.
@@ -1518,6 +1783,10 @@ mod tests {
         assert_eq!(report.n_questions, 1);
         assert_eq!(report.missing_doc, 0);
         assert!((report.coverage.mean - 1.0).abs() < 1e-12);
+        assert!((report.answer_page_coverage.mean - 1.0).abs() < 1e-12);
+        assert!((report.single_gold_coverage.mean).abs() < 1e-12); // no single-gold question
+        assert_eq!(report.best_gold_rank.any, 1, "first hit is on a gold page");
+        assert!((report.best_gold_rank.mean - 1.0).abs() < 1e-12);
         assert!(report.chars_ratio.mean <= 1.5);
         assert_eq!(*state.search_calls.lock().unwrap(), 1);
         assert_eq!(*state.structure_calls.lock().unwrap(), 2);
@@ -1529,6 +1798,11 @@ mod tests {
         assert_eq!(results["n_questions"], 1);
         let lines = fs::read_to_string(out.join("per_question.jsonl")).unwrap();
         assert_eq!(lines.lines().count(), 1);
+        let line: Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+        assert_eq!(line["answer_page_hit"], 1);
+        assert_eq!(line["best_gold_rank"], 1);
+        assert_eq!(line["hits"].as_array().unwrap().len(), 2);
+        assert!(!line["pages_read"].as_array().unwrap().is_empty());
         let md = fs::read_to_string(out.join("report.md")).unwrap();
         assert!(md.contains("PASS") || md.contains("MISS"));
         server.abort();
