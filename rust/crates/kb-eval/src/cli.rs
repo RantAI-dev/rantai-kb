@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::dataset::parse_qrels;
+use crate::disclosure;
 use crate::leak::{Arm, ScopeKind};
 use crate::leak_http::{self, LeakConfig};
 use crate::metrics::Gain;
@@ -51,7 +52,9 @@ pub async fn run(args: &[String]) -> Result<(), EvalError> {
         }
         Some("score") => score(&args[1..]),
         Some("leak") => leak(&args[1..]).await,
+        Some("disclosure") => disclosure::run_cli(&args[1..]).await,
         Some("compare") => compare(&args[1..]),
+        Some("calibrate-confidence") => crate::calibrate_confidence::run(&args[1..]).await,
         _ => eval(args).await,
     }
 }
@@ -64,7 +67,10 @@ USAGE
     kb-server eval --base-url URL --dataset DIR [flags]
     kb-server eval score --qrels FILE --run FILE [--k N] [--gain G]
     kb-server eval leak --base-url URL [--api-key KEY] [--peer-key KEY]
+    kb-server eval disclosure --base-url URL --dataset DIR --out DIR [--key KEY]
     kb-server eval compare --baseline FILE --current FILE [--max-drop 0.02] [--metric ndcg,hit1,recall]
+    kb-server eval calibrate-confidence --base-url URL --answerable FILE --offtopic FILE
+        --out DIR [--api-key KEY] [--holdout 0.5] [--seed 42] [--model-id ID]
 
 RUN FLAGS
     --base-url URL      kb-server to measure against (required)
@@ -110,6 +116,19 @@ LEAK FLAGS
     --docx              seed the corpus as .docx files with a picture whose alt text
                         is the figure canary, so the figure arm has something to find
 
+DISCLOSURE FLAGS (EVAL-7)
+    --base-url URL      kb-server to measure against (required)
+    --dataset DIR       page-qrels dataset directory (required)
+    --out DIR           output directory (default eval-out/disclosure)
+    --key KEY           API key; defaults to $KB_API_KEY (or $KB_EVAL_API_KEY)
+    --top-k N           chunks requested per search (default 5)
+    --budget-factor N   char budget = N x gold-page chars (default 1.5)
+    --limit N           measure only the first N questions
+    --ingest-map FILE   doc-key -> documentId map (default: --out/ingest-map.json
+                        or <dataset>/ingest-map.json)
+    --queries FILE      override the auto-discovered queries.jsonl
+    --qrels FILE        override the auto-discovered qrels file
+
 OUTPUTS (in --out)
     metrics.json  every metric with a 95% bootstrap CI, plus latency
     latency.json  one record per query: id, client latency, status, and the
@@ -123,11 +142,33 @@ LEAK OUTPUTS (in --out)
     leak-report.md   the arm x scope matrix, with every leak's evidence
     leak.json        the same, machine-readable, plus the seeded corpus
 
+DISCLOSURE OUTPUTS (in --out)
+    results.json      coverage + 95% bootstrap CI, chars ratio, per-endpoint
+                      latency percentiles, question count and missing_doc count
+    per_question.jsonl  one scored question per line
+    report.md         the same, as a table with PASS/MISS targets
+
 COMPARE FLAGS
     --baseline FILE     baseline metrics.json to compare against (required)
     --current FILE      current metrics.json to compare against (required)
     --max-drop DROP     maximum allowed absolute drop for strict means (default 0.02)
-    --metric LIST       comma-separated metric list (default ndcg,hit1,recall)"
+    --metric LIST       comma-separated metric list (default ndcg,hit1,recall)
+
+CALIBRATE-CONFIDENCE FLAGS
+    --base-url URL      kb-server to measure against (required)
+    --answerable FILE   queries.jsonl of answerable questions (required)
+    --offtopic FILE     queries.jsonl of unanswerable questions (required)
+    --out DIR           output directory (default eval-out/confidence)
+    --api-key KEY       defaults to $KB_EVAL_API_KEY
+    --holdout FRACTION  fraction kept out of the fit (default 0.5)
+    --seed N            deterministic split seed (default 42)
+    --model-id ID       model to name in calibration.json; defaults to
+                        KB_RERANK_MODEL or KB_EMBEDDING_MODEL from the tool's env
+
+CALIBRATE OUTPUTS (in --out)
+    calibration.json  one entry in the KB_CONFIDENCE_CALIBRATION format
+    report.md         fitted thresholds and hold-out rates against the targets
+    scores.jsonl      per-query top score, score kind, model and split"
     );
 }
 

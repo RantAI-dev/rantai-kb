@@ -212,13 +212,26 @@ pub async fn query_table(
     Path(id): Path<String>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    if !crate::auth::has_scope(&auth, "kb:read") {
+    query_table_inner(&state, &auth, &id, body).await
+}
+
+/// The shared body of `POST /v1/tables/{id}/query`.
+///
+/// The MCP `kb_query_table` tool calls it with the same key, so table privacy
+/// and the document visibility check are the same on both surfaces.
+pub(crate) async fn query_table_inner(
+    state: &Arc<AppState>,
+    auth: &kb_ports::AuthContext,
+    id: &str,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    if !crate::auth::has_scope(auth, "kb:read") {
         return Err(ApiError::missing_scope("kb:read"));
     }
-    let Some(store) = store(&state)? else {
+    let Some(store) = store(state)? else {
         return Err(ApiError::NotFound);
     };
-    let record = visible_table(&state, &auth, &store, &id).await?;
+    let record = visible_table(state, auth, &store, id).await?;
     // The document's privacy setting decides whether this table accepts plain
     // rows at all. A deleted document has no policy to read, and its table is
     // gone with it.
@@ -228,7 +241,7 @@ pub async fn query_table(
         .await
         .map_err(ApiError::from)?
         .ok_or(ApiError::NotFound)?;
-    if !crate::routes::key_can_see_document(&auth, &meta) {
+    if !crate::routes::key_can_see_document(auth, &meta) {
         return Err(ApiError::NotFound);
     }
     let policy = query_policy(meta.metadata.as_ref());

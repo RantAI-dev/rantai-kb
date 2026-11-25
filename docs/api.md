@@ -34,10 +34,31 @@ because the contract has to be readable before the caller has one.
 
 **Ingest options** (multipart fields): `title`, `categories`, `subcategory`,
 `knowledgeBaseIds`, `externalRef`, `figures` — `auto` (default), `force` or `skip` — and
-`tablePrivacy` — `open` (default) or `aggregate-only`.
+`tablePrivacy` — `open` (default) or `aggregate-only`. Versioned documents add `docKey`,
+`version`, `effectiveFrom` and `effectiveTo` (see "Versioned documents" below); the two date
+fields accept `YYYY-MM-DD` or a full ISO timestamp and a bad date is a `400`.
 
-**Search options** (JSON): `query` (required), `maxChunks`, `knowledgeBaseIds`,
-`documentIds`, `category`, `hybrid`, `format`, `minScore`, `pageRange`, `section`.
+**Search options** (JSON): `query` (required), `maxChunks`, `maxPerDocument`, `knowledgeBaseIds`,
+`documentIds`, `category`, `hybrid`, `format`, `minScore`, `pageRange`, `section`, `includeHistory`
+(default `false`) and `asOf` (`YYYY-MM-DD` or a full ISO timestamp; a bad date is a `400`).
+
+`maxPerDocument` (additive, RET-17) caps how many chunks one document may contribute to an
+answer. It is an integer in `1..=50`; `0` or a value above `50` is a `400`. The cap is applied
+after rerank and before the final `maxChunks` cut: hits that exceed it are dropped (not moved
+to the end), so the survivors keep their rerank order. When the cap is on, the response's
+`stats.perDocumentCapped` reports how many hits it dropped; when it is off, that field is
+absent. Figures are attached after the cap and are not counted, and neighbour chunks are
+counted against the same cap so a capped document cannot regain chunks as context. The
+server default is `KB_MAX_PER_DOCUMENT` (unset or `0` = off).
+
+```json
+POST /v1/search
+{"query": "compare vendor proposals", "maxChunks": 8, "maxPerDocument": 2}
+```
+
+With ten chunks from vendor A and two from vendor B at the top, a cap of `2` and
+`maxChunks: 4` returns `A, A, B, B` — rather than four chunks from A — and reports
+`"perDocumentCapped": 8` in `stats`.
 
 `documentIds` restricts a search to the named documents using the full pipeline — BM25,
 reranker, page/tree/neighbour and figure arms all run — inside the caller's visible scope. It
@@ -74,7 +95,81 @@ operators should run it before opting into predicate mode.
 
 `chunks[].content`, `documentTitle`, `page` and `similarity` carry the results; `degrades`
 is non-empty when an arm failed, because a failed arm is reported rather than silently
-dropped.
+dropped. Each chunk and source may also carry `docKey`, `version`, `effectiveFrom` and
+`effectiveTo`; these are absent for documents uploaded before versioning.
+
+## Versioned documents (RET-16)
+
+Upload several versions of one policy under a stable `docKey`:
+
+```sh
+curl -F file=@cuti-2024.txt -F 'title=Kebijakan Cuti' \
+     -F docKey=cuti -F version=2024 -F effectiveFrom=2024-01-01 \
+     -H 'Authorization: Bearer KEY' /v1/documents
+curl -F file=@cuti-2025.txt -F 'title=Kebijakan Cuti' \
+     -F docKey=cuti -F version=2025 -F effectiveFrom=2025-01-01 \
+     -H 'Authorization: Bearer KEY' /v1/documents
+```
+
+The second upload makes `2025` the current version in one transaction: it sets the old
+row's `isLatest=false`, closes its `effectiveTo` at `2025-01-01` (or at the upload time
+when the new version has no `effectiveFrom`) and records the old id in the new row's
+`supersedesDocumentId`. Deleting the latest version does **not** promote the previous
+one — upload that version again under the same `docKey` to restore it.
+
+`PATCH /v1/documents/:id` accepts `docKey`, `version`, `effectiveFrom` and `effectiveTo`;
+absent fields are left alone. `GET /v1/documents/:id` and `GET /v1/documents` report
+`docKey`, `version`, `supersedesDocumentId`, `effectiveFrom`, `effectiveTo` and `isLatest`.
+
+**Search modes** (all narrow the tenant/KB scope; none can widen it):
+
+| Body | Documents searched |
+|---|---|
+| default | only current versions (`isLatest=true`) and every unversioned document (`docKey` null) |
+| `includeHistory: true` | all versions |
+| `asOf: "2024-06-01"` | versions with `effectiveFrom <= asOf < effectiveTo`; null bounds are unbounded, undated documents stay visible, `isLatest` ignored |
+
+`asOf` takes precedence if both fields are sent. When an answer contains chunks from more
+than one document with the same `docKey`, the response adds
+`multiVersionWarning: [{docKey, documentIds: [...], versions: [...]}]` so a caller that
+asked for history is warned that it is mixing versions. A default search can never mix.
+
+### Confidence (additive, `RET-18`)
+
+Every standard and `documentIds` search answers with a top-level `confidence` object;
+the `hybrid: true` stub does not, because it runs no search:
+
+```json
+{"topScore": 0.82, "scoreKind": "rerank", "margin": 0.11,
+ "band": "high", "calibrated": true}
+```
+
+- `topScore` — the highest comparable score of the returned hits; `null` when
+  nothing was scored. `scoreKind` is `rerank` when a reranker supplied it,
+  `dense` for the dense cosine, and `fused` for the rank-only fused score when
+  neither arm produced a comparable value.
+- `margin` — `topScore` minus the second-highest score of the same kind; `null`
+  when fewer than two hits were scored. A single hit has no margin to report.
+- `band` — `high`, `medium`, `low`, `none` or `unknown`. With a fitted
+  calibration for the active model, `high`/`medium`/`low` are the fitted
+  thresholds and any lower score is `none`. Without one, `minScore` (request or
+  server default) gives `low` at or above it and `none` below; with no floor at
+  all the band is `unknown`. An answer with no scored hits is always `none`.
+- `calibrated` — `true` only when the active scoring model has a fitted entry.
+  It is `false` by default: no calibration is shipped in the binary because no
+  three-point fit is committed yet.
+
+**How to use it:** answer when `band` is `high` or `medium`; say "I don't know"
+when it is `none` or `unknown`. When `calibrated` is `false`, treat the band as a
+hint only — the thresholds are a relevance floor, not a fitted probability.
+A failed search still reports itself in `degrades`; never treat that as
+`band: none`, which means "nothing was relevant", not "the search failed".
+
+An operator installs a fit with `KB_CONFIDENCE_CALIBRATION=/path/calibration.json`
+(an array of `{modelId, scoreKind, high, medium, low}`). The file is validated at
+startup; a malformed one is a startup error. Fit it with
+`kb-server eval calibrate-confidence` — see
+[`docs/eval-ab/confidence/README.md`](eval-ab/confidence/README.md).
 
 ## Tables
 
@@ -193,6 +288,65 @@ GET  /v1/documents/:id/content?section=s3&maxChars=8000
 GET  /v1/documents/:id/content?cursor=<nextCursor>&maxChars=8000  ->  repeat until truncated=false
 ```
 
+## MCP
+
+When `KB_MCP=on` (default **off**), the same port also serves a thin
+Streamable-HTTP MCP endpoint at `POST /mcp`. It takes JSON-RPC 2.0 requests and
+answers `application/json` — there are no sessions and no SSE stream, so a GET
+on the endpoint answers `405`. With the flag off, `/mcp` is an unknown path and
+answers `404` like any other unmatched route.
+
+Authentication is identical to `/v1/*`: `Authorization: Bearer <key>` or
+`X-Api-Key`. No key is `401`; the tools need `kb:read`, and table queries use
+the same table-route authorisation. A tool failure (404, 400, 409) is a
+`tools/call` result with `isError: true` and the API's own error message — not
+a JSON-RPC protocol error and never a response containing another tenant's
+content.
+
+Supported methods: `initialize`, `notifications/initialized`, `ping`,
+`tools/list` and `tools/call`. The server echoes the client's
+`protocolVersion` when it is one of `2025-06-18`, `2025-03-26` or
+`2024-11-05`; otherwise it answers `2025-06-18`.
+
+A generic MCP client (Streamable HTTP) config:
+
+```json
+{
+  "mcpServers": {
+    "rantai-kb": {
+      "type": "http",
+      "url": "https://kb.example.com/mcp",
+      "headers": {"Authorization": "Bearer <your-api-key>"}
+    }
+  }
+}
+```
+
+For Claude Code, the equivalent is:
+
+```bash
+claude mcp add --transport http rantai-kb https://kb.example.com/mcp \
+  --header "Authorization: Bearer <your-api-key>"
+```
+
+The tools, with the arguments they take:
+
+| Tool | Arguments | Use it for |
+|---|---|---|
+| `kb_search` | `query`, `maxChunks?`, `documentIds?`, `pageRange?`, `section?` | The search response: chunks with `documentId`, `page`, `section`, `content`, `sources` and `context`. Start here. |
+| `kb_list_documents` | `knowledgeBaseId?`, `limit?`, `cursor?` | Discover `id`, `title`, `pages`, `status`, `knowledgeBaseIds` and `externalRef` when you have no search hit. |
+| `kb_outline` | `documentId` | The `/structure` sections (ids, titles, page/chunk ranges). |
+| `kb_read` | `documentId`, plus one of `section`, `pageStart`+`pageEnd` or `cursor`, and `maxChars?` | The `/content` text of one document without re-searching; follow `nextCursor` while `truncated`. |
+| `kb_query_table` | `tableId`, `query` | The `/v1/tables/:id/query` rows and receipt for exact numbers in a stored table. |
+
+The intended **reading loop** is `kb_search` → `kb_outline` → `kb_read`
+(repeating with `nextCursor`), with `kb_query_table` when the answer lives in a
+table. A successful result is
+`{content: [{type: "text", text: "<the JSON>"}], structuredContent: <the JSON>}`.
+
+Each tool calls the same shared handler function as its `/v1` route, so tenant
+scope, knowledge-base limits, versions and visible degradations are identical.
+
 ## Keys
 
 `rantai-kb key <tenant>` (or `kb-dev.sh key`) mints an unrestricted key. For anything
@@ -243,4 +397,13 @@ and `returnDocuments` (boolean, default `false`). Configured via `KB_RERANK_*` o
 `KB_RERANK_BREADCRUMBS=off|on` (`false|true` also accepted, default `off`) prepends the
 document title, section and page to the text the search reranker sees; it does not change the
 response shape and needs no re-index (`docs/core/specs/v1-roadmap.md` RET-12).
+
+`KB_MAX_PER_DOCUMENT` (default `0` = off, clamped to `50`) is the server-wide default for the
+search field `maxPerDocument`: it caps the chunks one document may contribute, after rerank and
+before the `maxChunks` cut (`docs/core/specs/v1-roadmap.md` RET-17). A request field overrides
+it for that search.
+
+**Deprecated (DEC-6):** `KB_GRAPH_ARM` and `KB_GLOBAL_ARM` are frozen and deprecated; enabling
+either logs a startup warning naming the evidence (HotpotQA −8.5 pp R@5 and +400 ms p95,
+`docs/eval-baseline.md`, `EVAL-3`). They may be removed after v1.0. The arms still work today.
 

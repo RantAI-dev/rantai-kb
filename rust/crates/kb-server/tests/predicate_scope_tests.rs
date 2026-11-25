@@ -42,6 +42,12 @@ fn engine_settings() -> EngineSettings {
 
 fn doc(_tenant: &str, id: &str, kb: &str) -> DocumentMeta {
     DocumentMeta {
+        doc_key: None,
+        version: None,
+        supersedes_document_id: None,
+        effective_from: None,
+        effective_to: None,
+        is_latest: true,
         sha256: None,
         id: DocumentId(id.to_string()),
         title: id.to_string(),

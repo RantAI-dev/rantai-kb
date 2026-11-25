@@ -198,6 +198,11 @@ USAGE
     {program} eval --base-url URL --dataset DIR  Measure retrieval quality
     {program} eval score --qrels F --run F       Score an existing run offline
     {program} eval compare --baseline F --current F  Compare two runs against a baseline
+    {program} eval disclosure --base-url URL --dataset DIR --out DIR
+                                                Scripted search -> structure -> content coverage gate
+                                                over page-level qrels (EVAL-7)
+    {program} eval calibrate-confidence --base-url URL --answerable FILE --offtopic FILE --out DIR
+                                                Fit confidence bands; write calibration.json + report.md
     {program} eval classify --queries FILE [--per-query]  Print the query-class distribution of a
                                                   queries.tsv / queries.jsonl file (RET-5)
     {program} eval ocr --pdfs F --root D --out D  Read the first page of every listed PDF through

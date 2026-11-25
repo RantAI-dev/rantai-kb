@@ -1002,6 +1002,10 @@ Two of the five profile guesses were wrong and measurement replaced both:
 
 ### 6.4 Graph retrieval arm (L.3b)
 
+**Deprecated (DEC-6):** `KB_GRAPH_ARM` and `KB_GLOBAL_ARM` stay off and are deprecated; enabling
+either logs a startup warning naming this section's evidence (HotpotQA −8.5 pp R@5 and +400 ms
+p95; `EVAL-3`) and noting they may be removed after v1.0. Behaviour is unchanged — warning only.
+
 Step L.3b connects the Postgres entity graph built in L.3a to ingest and search,
 and measures whether an entity-graph retrieval arm (`KB_GRAPH_ARM=1`) improves
 multi-hop retrieval on a held-out test split without regressing single-fact lookup.
@@ -1192,6 +1196,8 @@ and `baseline-rerank-on`) broke down latency across server stages:
      with no re-index. The A/B is pending; `docs/core/specs/v1-roadmap.md` RET-12.
    - `KB_RERANK_TIMEOUT_MS` (default 20000, the reranker client's own ceiling; a timeout is a
      visible `rerank_unavailable` degrade with the fused order kept)
+   - `KB_MAX_PER_DOCUMENT` (default `0` = off; `1..=50`) caps the chunks one document may
+     contribute after rerank and before the final answer cut (RET-17).
 
    *Reviewer note (2026-10-18):* the runner shipped 10 / 350 / 3000 as defaults, which would
    have cut every production rerank (GPU or hosted) to 10 candidates of 350 chars. The

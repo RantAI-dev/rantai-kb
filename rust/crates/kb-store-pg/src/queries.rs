@@ -12,6 +12,12 @@ pub const SELECT_BY_ID: &str = r#"
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
            d."sha256" AS sha256,
+           d."docKey" AS doc_key,
+           d."version" AS version,
+           d."supersedesDocumentId" AS supersedes_document_id,
+           to_char(d."effectiveFrom" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_from,
+           to_char(d."effectiveTo" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_to,
+           d."isLatest" AS is_latest,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
@@ -30,6 +36,12 @@ pub const SELECT_BY_ID_WITH_DELETED: &str = r#"
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
            d."sha256" AS sha256,
+           d."docKey" AS doc_key,
+           d."version" AS version,
+           d."supersedesDocumentId" AS supersedes_document_id,
+           to_char(d."effectiveFrom" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_from,
+           to_char(d."effectiveTo" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_to,
+           d."isLatest" AS is_latest,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
@@ -46,6 +58,12 @@ pub const SELECT_ALIVE_BY_IDS: &str = r#"
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
            d."sha256" AS sha256,
+           d."docKey" AS doc_key,
+           d."version" AS version,
+           d."supersedesDocumentId" AS supersedes_document_id,
+           to_char(d."effectiveFrom" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_from,
+           to_char(d."effectiveTo" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_to,
+           d."isLatest" AS is_latest,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            to_char(d."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS updated_at,
@@ -92,6 +110,12 @@ pub const SELECT_DOCS_TENANT_ONLY: &str = r#"
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
            d."sha256" AS sha256,
+           d."docKey" AS doc_key,
+           d."version" AS version,
+           d."supersedesDocumentId" AS supersedes_document_id,
+           to_char(d."effectiveFrom" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_from,
+           to_char(d."effectiveTo" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_to,
+           d."isLatest" AS is_latest,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            d."createdAt" AS created_at_ts,
@@ -116,6 +140,12 @@ pub const SELECT_DOCS_WITH_KB: &str = r#"
            d."fileType" AS file_type, d."fileSize" AS file_size, d."mimeType" AS mime_type,
            d."s3Key" AS s3_key,
            d."sha256" AS sha256,
+           d."docKey" AS doc_key,
+           d."version" AS version,
+           d."supersedesDocumentId" AS supersedes_document_id,
+           to_char(d."effectiveFrom" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_from,
+           to_char(d."effectiveTo" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS effective_to,
+           d."isLatest" AS is_latest,
            d.metadata,
            to_char(d."createdAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
            d."createdAt" AS created_at_ts,
@@ -398,10 +428,48 @@ pub const INSERT_DOCUMENT: &str = r#"
     INSERT INTO "Document" (
         id, "tenantId", title, content, categories, "subcategory",
         "s3Key", "fileSize", "mimeType", status, "externalRef", metadata,
-        sha256, "createdAt", "updatedAt"
+        sha256, "docKey", "version", "effectiveFrom", "effectiveTo",
+        "supersedesDocumentId", "isLatest", "createdAt", "updatedAt"
     ) VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now()
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+        $16::timestamptz, $17::timestamptz, $18, true, now(), now()
     )
+"#;
+
+/// The current version of one `docKey` in this tenant, locked for the whole
+/// create transaction (`FOR UPDATE`) so two concurrent uploads cannot both
+/// believe they are the latest. Undated and unversioned rows are unaffected.
+pub const SELECT_LATEST_BY_DOC_KEY: &str = r#"
+    SELECT id FROM "Document"
+     WHERE "tenantId" = $1 AND "docKey" = $2
+       AND "isLatest" = true AND "deletedAt" IS NULL
+     ORDER BY "createdAt" DESC, id DESC
+     LIMIT 1 FOR UPDATE
+"#;
+
+/// Retire the previous version in the same transaction as the insert. Its
+/// effective interval closes at the new version's `effectiveFrom` (or now when
+/// the caller gave no date), but only when it had no `effectiveTo` already:
+/// a caller-set end date must not be overwritten by an upload.
+pub const RETIRE_PREVIOUS_VERSION: &str = r#"
+    UPDATE "Document"
+       SET "isLatest" = false,
+           "effectiveTo" = COALESCE("effectiveTo", COALESCE($2::timestamptz, now())),
+           "updatedAt" = now()
+     WHERE id = $1 AND "tenantId" = $3
+"#;
+
+/// PATCH for the RET-16 columns. Each value is guarded by a presence boolean,
+/// so an absent field leaves the column exactly as it was. The tenant is
+/// checked in the WHERE clause as well as by the route's existence check.
+pub const UPDATE_DOCUMENT_VERSION_PATCH: &str = r#"
+    UPDATE "Document"
+       SET "docKey" = CASE WHEN $2::boolean THEN $3 ELSE "docKey" END,
+           "version" = CASE WHEN $4::boolean THEN $5 ELSE "version" END,
+           "effectiveFrom" = CASE WHEN $6::boolean THEN $7::timestamptz ELSE "effectiveFrom" END,
+           "effectiveTo" = CASE WHEN $8::boolean THEN $9::timestamptz ELSE "effectiveTo" END,
+           "updatedAt" = now()
+     WHERE id = $1 AND "tenantId" = $10
 "#;
 
 pub const INSERT_DOCUMENT_GROUP: &str = r#"

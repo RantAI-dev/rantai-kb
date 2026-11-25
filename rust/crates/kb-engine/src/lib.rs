@@ -70,6 +70,7 @@ mod in_memory_index_tests;
 mod ingest_concurrency_tests;
 #[cfg(test)]
 mod ingest_tests;
+mod max_per_document_tests;
 #[cfg(test)]
 mod outbox_tests;
 #[cfg(test)]
@@ -104,7 +105,7 @@ pub use processor::{
 };
 pub use retrieval::{
     AdaptiveStats, BoostStats, FloorScoreKind, FloorStats, RetrievalOptions, RetrievalOutcome,
-    apply_boosts, apply_boosts_now, enrich_titles, execute_pipeline,
+    apply_boosts, apply_boosts_now, apply_max_per_document, enrich_titles, execute_pipeline,
 };
 pub use seats::{SeatCapacity, SeatGuard, SeatPriority, Seats, StageSeats};
 pub use timing::{Clock, ManualClock, StageTimings, Stopwatch, SystemClock};
@@ -141,6 +142,10 @@ pub struct EngineSettings {
     pub rerank_max_k: u32,
     /// Default chunk cap when the request has none (`KB_DEFAULT_MAX_CHUNKS`).
     pub max_chunks: u32,
+    /// Default per-document diversity cap (`KB_MAX_PER_DOCUMENT`, RET-17).
+    /// `0` (the default) leaves the ranking unchanged; a request's
+    /// `maxPerDocument` overrides this for that request.
+    pub max_per_document: u32,
     /// Minimum similarity score for vector-only hits (`KB_MIN_SIMILARITY`).
     pub min_similarity: f32,
     /// Default relevance floor (`KB_MIN_SCORE`). `None` means no floor, which
@@ -182,6 +187,7 @@ impl Default for EngineSettings {
             rerank_final_k: 5,
             rerank_max_k: 10,
             max_chunks: 8,
+            max_per_document: 0,
             min_similarity: 0.30,
             min_score: None,
             neighbour_window: 1,
@@ -327,6 +333,7 @@ impl Engine {
             request_min_score,
             request_boost,
             None,
+            None,
         )
         .await
     }
@@ -348,6 +355,7 @@ impl Engine {
             scope,
             request_max_chunks,
             request_min_score,
+            None,
             None,
             None,
         )
@@ -375,13 +383,18 @@ impl Engine {
             request_min_score,
             None,
             request_adaptive_arms,
+            None,
         )
         .await
     }
 
-    /// Every per-request option at once: floor (`RET-2`), boosts (`RET-4`) and
-    /// the adaptive-arm override (`RET-5`). The narrower `retrieve_*` methods
-    /// are this with the other options left at their defaults.
+    /// Every per-request option at once: floor (`RET-2`), boosts (`RET-4`),
+    /// the adaptive-arm override (`RET-5`) and the diversity cap (`RET-17`).
+    /// The narrower `retrieve_*` methods are this with the other options left
+    /// at their defaults.
+    // The flat list is the public entry point every caller already uses; a
+    // struct would be a breaking change to all of them for one more option.
+    #[allow(clippy::too_many_arguments)]
     pub async fn retrieve_inner(
         &self,
         query: &str,
@@ -390,6 +403,7 @@ impl Engine {
         request_min_score: Option<f32>,
         request_boost: Option<kb_core::BoostConfig>,
         request_adaptive_arms: Option<bool>,
+        request_max_per_document: Option<u32>,
     ) -> Result<RetrievalOutcome, EngineError> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
@@ -404,9 +418,11 @@ impl Engine {
                 adaptive: None,
                 tree: None,
                 global_arm: None,
-                // An empty query never reaches the reranker.
+                // An empty query never reaches the reranker or the cap.
                 reranked_count: None,
                 scope_verify_dropped: None,
+                confidence_scores: kb_core::ScoreEvidence::default(),
+                per_document_capped: None,
                 timings: StageTimings::default(),
             });
         }
@@ -417,6 +433,9 @@ impl Engine {
 
         let opts = RetrievalOptions {
             max_chunks,
+            max_per_document: request_max_per_document
+                .unwrap_or(self.settings.max_per_document)
+                .min(50),
             min_similarity: self.settings.min_similarity,
             min_score: request_min_score.or(self.settings.min_score),
             candidate_pool_size: self.settings.candidate_pool_size,

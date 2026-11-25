@@ -1,5 +1,6 @@
 | `KB_MAX_FILE_BYTES` | Largest accepted upload, in bytes. A `413` names this variable, the limit in bytes and the limit in MiB | `268435456` (256 MiB) |
 | `KB_UPLOAD_DEDUPE` | What an upload of a file the tenant already has does: `reject` answers `409` with the id of the document that already holds the bytes, `off` stores the file again. The scope is the tenant's, so another tenant's identical file is never a duplicate | `reject` |
+| `KB_MCP` | Mount the thin Streamable-HTTP MCP endpoint at `POST /mcp` (`docs/api.md#mcp`). Off means `/mcp` is an unknown path (404) | `off` |
 | `KB_FIGURE_VLM_TOPN` | Top candidate figures evaluated by figure gate | `5` |
 | `KB_FIGURE_VLM_MAX` | Maximum number of candidate figures accepted | `2` |
 | `KB_FIGURE_VLM_TIMEOUT_MS` | Figure gate evaluation timeout in ms | `15000` |
@@ -8,7 +9,8 @@
 | `KB_TREE_ARM` | Navigate a document's section outline for questions the classifier labels `structural` (DEC-4). Contributed chunks carry `retrieval.arms: ["tree"]` and `stats.treeArm` reports `{nodes, pages}`. Ingest always stores `Document.metadata.outline`; this switch gates only the search arm | `false` |
 | `KB_TREE_ARM_WEIGHT` | RRF weight of the tree arm's page list when it is fused with the text candidates | `0.5` |
 | `KB_TREE_ARM_NODES` | Outline nodes the tree arm keeps per query (the best-scoring sections) | `5` |
-| `KB_GLOBAL_ARM` | Global community-summary arm (`DEC-5`) for aggregative queries. **A measured loss in EVAL-3; off by default.** Needs `KB_GRAPH_STORE=pg` and communities built by `kb-server communities build` | `false` |
+| `KB_GLOBAL_ARM` | **Deprecated (DEC-6); enabling it logs a startup warning and it may be removed after v1.0.** Global community-summary arm (`DEC-5`) for aggregative queries. A measured loss in EVAL-3; off by default. Needs `KB_GRAPH_STORE=pg` and communities built by `kb-server communities build` | `false` |
+| `KB_GRAPH_ARM` | **Deprecated (DEC-6); enabling it logs a startup warning and it may be removed after v1.0.** Entity-graph retrieval arm, off by default; needs `KB_GRAPH_STORE=pg`. Behaviour is unchanged — warning only | `false` |
 | `KB_GLOBAL_ARM_COMMUNITIES` | Communities selected per aggregative query | `3` |
 | `KB_GLOBAL_ARM_WEIGHT` | RRF weight of the global arm's chunk list | `0.5` |
 | `KB_GLOBAL_ARM_CHUNKS` | Chunks the global arm may contribute per query | `200` |

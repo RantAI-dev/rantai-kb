@@ -54,6 +54,44 @@
 
 ### Added
 
+- **`maxPerDocument` diversity cap on `/v1/search` (RET-17).** An additive body field (integer
+  `1..=50`, `400` outside that range) keeps at most N chunks from any one document: the engine
+  walks the reranked list after rerank and before the final `maxChunks` cut, drops surplus hits
+  instead of deferring them, and preserves the survivors' order. `KB_MAX_PER_DOCUMENT` supplies
+  the server default (unset or `0` = off); a request field wins. Figures are attached after the
+  cap and are not counted, and neighbour chunks are counted against the same budget so a capped
+  document cannot regain chunks as context. `stats.perDocumentCapped` reports the number dropped
+  when the cap is on and is absent when it is off.
+- **Stateless parity is pinned by tests (`API-5`).** `/v1/encode` query/passage dense vectors, BM25 sparse vectors and `/v1/rerank` order/scores are now tested bit-for-bit against full mode with the same fake embedding and reranking backend; no API shape changed. The stateless guide now states the guarantees and documents the one deliberate difference: with `KB_RERANK_BREADCRUMBS=on` full mode prepends a breadcrumb that `/v1/rerank` cannot know, so the client must prepend the same `kb_core::rerank::breadcrumb(...)` text for parity.
+- **Document versions and point-in-time search (`RET-16`).** Upload and PATCH accept
+  `docKey`, `version`, `effectiveFrom` and `effectiveTo`. Uploading a new version retires
+  the previous one in one transaction (`isLatest=false`, its `effectiveTo` closed at the
+  new `effectiveFrom` or now, and `supersedesDocumentId` set on the new row); deleting the
+  latest version does not promote an older one. `POST /v1/search` adds `includeHistory`
+  and `asOf` and defaults to current versions only, applied in the Postgres scope so every
+  retrieval arm inherits it; a bad `asOf` is a 400. Chunks, sources, and the document
+  read/list responses carry the version fields, and an answer mixing versions of one
+  `docKey` carries `multiVersionWarning`. All fields are additive and the migration is
+  nullable/defaulted: unversioned documents stay visible in every search mode.
+- **Additive `confidence` object on `/v1/search` (`RET-18`).** Every standard and
+  `documentIds` answer now carries `{topScore, scoreKind, margin, band, calibrated}`:
+  the top comparable score, the scale it came from (`rerank`, `dense`, `fused`), the
+  gap to the second hit, an actionable band (`high`, `medium`, `low`, `none`,
+  `unknown`) and whether the active model has a fitted table. Answer on `high` or
+  `medium`; treat an uncalibrated band as a hint only. No calibration ships in the
+  binary, so `calibrated` is `false` until an operator installs a fit through
+  `KB_CONFIDENCE_CALIBRATION=/path/calibration.json` (a malformed file is a startup
+  error). `kb-server eval calibrate-confidence` fits one over the RET-2 query sets
+  and writes `calibration.json`, `report.md` and `scores.jsonl`; the live fit is
+  still pending. `hybrid: true` is unchanged and has no confidence object.
+- **Thin Streamable-HTTP MCP endpoint at `POST /mcp` (`API-4`).** With `KB_MCP=on`
+  (default **off**), an AI agent can use rantai-kb as an MCP server on the same port and with the
+  same `Bearer` / `X-Api-Key` auth and `kb:read` scope. The five tools — `kb_search`,
+  `kb_list_documents`, `kb_outline`, `kb_read` and `kb_query_table` — each call the same shared
+  handler function as their `/v1` route, so tenant scope, knowledge-base limits, versions and
+  visible degradations are identical. JSON-RPC 2.0 in, `application/json` out; no sessions and no
+  SSE. An API error is an `isError: true` tool result, never a protocol error. With the flag off
+  `/mcp` is an unknown path (404). See `docs/api.md#mcp`.
 - **`KB_RERANK_BREADCRUMBS=off|on` (RET-12).** With the flag on, the reranker sees
   `"{document title} › {section path or section} · p.{page}\n"` before the chunk content, so a
   bare "berlaku 12 hari kerja" is judged with its "Kebijakan Cuti › Bab IV Cuti Tahunan · p.12"
@@ -61,6 +99,11 @@
   breadcrumb is never clipped. `false`/`true` are accepted too, an unknown value is a startup
   error, and the **default is `off`** until the A/B (`docs/core/specs/v1-roadmap.md` RET-12).
   additive: the response shapes and chunk content are unchanged and no re-index is needed.
+- **`kb-server eval disclosure` (`EVAL-7`).** A deterministic, no-LLM reader that walks
+  `search → structure → content` over page-level qrels under a 1.5× gold-char budget and writes
+  coverage with a 95% bootstrap CI, chars-read/gold-chars, per-endpoint latency and PASS/MISS
+  targets to `results.json`, `per_question.jsonl` and `report.md`. No live number is claimed yet;
+  the run procedure is in `docs/eval-ab/disclosure-v1/README.md`.
 - **`GET /v1/documents/:id/content` (`RET-14`).** Bounded, byte-exact reading of one
   document by section, page range, chunk range or an opaque continuation cursor, without
   re-searching. `maxChars` defaults to 8000 (clamped 500..50000); text is stitched from
@@ -99,6 +142,13 @@
   query — dense, BM25, page-image, figure, neighbour and tree — so no arm spends top-k on, or
   returns, a unit outside the part. A section resolves through the outline v2 from
   `list_chunk_meta` + `build_outline`; an unknown section id is a `400`.
+
+### Deprecated
+
+- **`KB_GRAPH_ARM` and `KB_GLOBAL_ARM` (DEC-6).** Both arms stay off by default and are now
+  deprecated: starting the server with either enabled logs one warning naming the evidence
+  (HotpotQA −8.5 pp R@5 and +400 ms p95, `docs/eval-baseline.md`, `EVAL-3`) and noting they may be
+  removed after v1.0. Behaviour is unchanged — this is a warning only.
 
 ## 0.8.0 — 2026-11-23
 
