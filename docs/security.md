@@ -21,9 +21,21 @@ who may see what and hands out keys or knowledge-base filters to match.
 - **The stores are not the API.** Postgres, Qdrant and the blob store hold no per-request
   identity: they are addressed by the server, on the caller's behalf, with the tenant filter
   already applied. Exposing them to a caller is a deployment mistake, not a design option.
-- **What it does not do.** There are no users, groups, roles or folders, and no
-  per-document permissions inside a knowledge base. See
-  [`docs/core/PRODUCT.md` §3](core/PRODUCT.md#3-what-it-does-not-do).
+- **Per-document access lists (`SEC-3`, v0.9.0).** A document can carry `aclPrincipals`
+  (for example `["group:hr"]`). rantai-kb does not know your users; the calling app asserts
+  the current user's principals per request with `X-KB-Principals`, and only a key with the
+  privileged scope `kb:assert-principals` may do that (any other key gets `403`), so a
+  leaked ordinary key cannot claim `group:admin`. An ACL'd document is visible only when the
+  asserted principals overlap its list, and is hidden when none are asserted
+  (**default-deny**). The rule lives in the one Postgres visibility statement that scopes
+  every retrieval arm, the document list, every by-ID route, tables and `/mcp`.
+- **Postgres is the authority, Qdrant is a cache.** With predicate scope on
+  (`KB_SCOPE_ID_LIMIT`, opt-in, `SEC-2a`) Qdrant pre-filters on payload, but every candidate
+  is re-verified against Postgres before it can be returned, and a failed verify fails the
+  search. A stale payload can cost recall, never visibility.
+- **What it does not do.** There are no users, groups, roles or folders managed *inside*
+  rantai-kb: principals are opaque strings asserted by the calling app, which owns identity.
+  See [`docs/core/PRODUCT.md` §3](core/PRODUCT.md#3-what-it-does-not-do).
 
 Tenant isolation is covered by tests rather than by review: the retrieval scope gate fails
 CI on a cross-tenant hit, and the by-ID limit has its own regression test
