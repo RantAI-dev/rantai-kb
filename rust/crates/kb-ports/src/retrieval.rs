@@ -437,7 +437,7 @@ pub trait RetrievalIndex: Send + Sync {
         scope: &DocumentScope,
         document: &DocumentId,
     ) -> Result<Vec<ChunkMeta>, PortError> {
-        if !scope.document_ids().contains(document) {
+        if !scope.allows_document(document) {
             return Ok(Vec::new());
         }
         let units = self

@@ -231,7 +231,7 @@ impl PageArm {
         scope: &DocumentScope,
         query: &str,
     ) -> Result<Vec<RankedPage>, PortError> {
-        if scope.document_ids().is_empty() {
+        if scope.is_empty() {
             return Ok(Vec::new());
         }
         let vector = self.embedder.embed_query(query).await?;

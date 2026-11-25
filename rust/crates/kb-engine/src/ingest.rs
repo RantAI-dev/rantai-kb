@@ -1242,6 +1242,7 @@ impl IngestWorker {
         if chunks.is_empty() {
             return Ok(0);
         }
+        let params = job.params.clone().unwrap_or_else(|| json!({}));
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
         // The text embedded for a chunk: the document's title, the chunk's
         // heading path when the chunker found one, and the chunk's content.
@@ -1340,7 +1341,7 @@ impl IngestWorker {
                     chunk_type,
                     content: chunk.content.clone(),
                     contextual_prefix: chunk.metadata.contextual_prefix.clone(),
-                    metadata: storage_metadata(&chunk.metadata),
+                    metadata: storage_metadata_with_kbs(&chunk.metadata, &params),
                     dense,
                     sparse,
                 }
@@ -1435,6 +1436,7 @@ impl IngestWorker {
         first_index: usize,
         priority: &crate::seats::SeatPriority,
     ) {
+        let params = job.params.clone().unwrap_or_else(|| json!({}));
         let contents: Vec<(u32, String)> = descriptions
             .iter()
             .map(|(page, description)| (*page, format!("[Visual] {description}")))
@@ -1498,7 +1500,7 @@ impl IngestWorker {
                     sparse: kb_core::sparse::encode_document(&content),
                     content,
                     contextual_prefix: None,
-                    metadata: storage_metadata(&metadata),
+                    metadata: storage_metadata_with_kbs(&metadata, &params),
                     dense,
                 }
             })
@@ -2609,6 +2611,35 @@ fn role_word(role: kb_core::tables::ColumnRole) -> &'static str {
 /// The metadata object stored on each chunk, with the field names the Bun
 /// chunker writes. An absent value is left out rather than written as null,
 /// matching how an `undefined` property drops out of the TS object.
+/// The document's knowledge bases, copied into every chunk's metadata so the
+/// Qdrant payload can carry the whole list (a document may sit in several KBs).
+/// SEC-2a predicate mode filters on this payload; the Postgres verify remains
+/// authoritative if it is stale.
+fn knowledge_base_ids_of(params: &Value) -> Vec<String> {
+    params
+        .get("knowledgeBaseIds")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn storage_metadata_with_kbs(meta: &ChunkMetadata, params: &Value) -> Value {
+    let mut value = storage_metadata(meta);
+    let kb_ids = knowledge_base_ids_of(params);
+    if !kb_ids.is_empty()
+        && let Some(map) = value.as_object_mut()
+    {
+        map.insert("knowledgeBaseIds".to_string(), json!(kb_ids));
+    }
+    value
+}
+
 fn storage_metadata(meta: &ChunkMetadata) -> Value {
     let mut map = Map::new();
     map.insert("documentTitle".to_string(), json!(meta.document_title));

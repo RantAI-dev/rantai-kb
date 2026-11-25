@@ -716,13 +716,14 @@ pub async fn search(
             .build_scope(&ScopeRequest {
                 tenant: auth.tenant_id.clone(),
                 filter: filter.clone(),
+                force_ids: body.page_range.is_some() || body.section.is_some(),
             })
             .await
             .map_err(ApiError::from)?;
         let mut scope = filtered_scope.narrowed_to(&requested);
         // RET-15: the range lives on the scope, so every arm inherits it from
         // the same object that carries the tenant and document visibility.
-        if scope.document_ids().len() == 1 {
+        if scope.visible_document_count() == Some(1) {
             if let Some(range) = body.page_range.as_ref() {
                 scope = scope.with_unit_range(UnitRange {
                     pages: Some((range.start, range.end)),
@@ -797,6 +798,7 @@ pub async fn search(
         .build_scope(&ScopeRequest {
             tenant: auth.tenant_id.clone(),
             filter,
+            force_ids: body.page_range.is_some() || body.section.is_some(),
         })
         .await
         .map_err(ApiError::from)?;
@@ -982,6 +984,7 @@ fn search_stats(
         // Only the standard branch runs a reranker, and it builds its stats
         // from the engine's outcome, which carries the count.
         reranked_count: None,
+        scope_verify_dropped: None,
         per_document_capped: None,
     }
 }
@@ -1041,6 +1044,7 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
         tree_arm,
         global_arm,
         reranked_count,
+        scope_verify_dropped,
         per_document_capped,
         ..
     } = stats;
@@ -1051,6 +1055,7 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
         tree_arm,
         global_arm,
         reranked_count,
+        scope_verify_dropped,
         per_document_capped,
         ..search_stats(
             stages,

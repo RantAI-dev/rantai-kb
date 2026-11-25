@@ -341,7 +341,7 @@ impl RetrievalIndex for QdrantIndex {
         query: &HybridQuery,
         scope: &DocumentScope,
     ) -> Result<Vec<Candidate>, PortError> {
-        if scope.document_ids().is_empty() {
+        if scope.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -606,7 +606,7 @@ impl RetrievalIndex for QdrantIndex {
         scope: &DocumentScope,
         ids: &[ChunkId],
     ) -> Result<Vec<Candidate>, PortError> {
-        if ids.is_empty() || scope.document_ids().is_empty() {
+        if ids.is_empty() || scope.is_empty() {
             return Ok(Vec::new());
         }
         let filter = crate::payload::scoped_ids_filter(scope, ids);
@@ -638,7 +638,7 @@ impl RetrievalIndex for QdrantIndex {
         document_id: &DocumentId,
         chunk_indices: &[u32],
     ) -> Result<Vec<Candidate>, PortError> {
-        if chunk_indices.is_empty() || !scope.document_ids().contains(document_id) {
+        if chunk_indices.is_empty() || !scope.allows_document(document_id) {
             return Ok(Vec::new());
         }
 
@@ -692,7 +692,7 @@ impl RetrievalIndex for QdrantIndex {
     ) -> Result<Vec<Candidate>, PortError> {
         let matching_docs: Vec<String> = document_ids
             .iter()
-            .filter(|d| scope.document_ids().contains(d))
+            .filter(|d| scope.allows_document(d))
             .map(|d| d.as_str().to_string())
             .collect();
         if matching_docs.is_empty() {
@@ -725,7 +725,7 @@ impl RetrievalIndex for QdrantIndex {
         pages: &[(DocumentId, u32)],
         per_page: usize,
     ) -> Result<Vec<Candidate>, PortError> {
-        if pages.is_empty() || per_page == 0 || scope.document_ids().is_empty() {
+        if pages.is_empty() || per_page == 0 || scope.is_empty() {
             return Ok(Vec::new());
         }
         // Group the request by document so one filter and one scroll window
@@ -735,7 +735,7 @@ impl RetrievalIndex for QdrantIndex {
         let mut by_document: std::collections::HashMap<&DocumentId, Vec<u32>> =
             std::collections::HashMap::new();
         for (document, page) in pages {
-            if scope.document_ids().contains(document) {
+            if scope.allows_document(document) {
                 by_document.entry(document).or_default().push(*page);
             }
         }
@@ -889,7 +889,7 @@ impl RetrievalIndex for QdrantIndex {
         // The caller checked visibility; repeat the scope test here so a
         // document outside the caller's visible set is never read, even if a
         // future caller forgets.
-        if !scope.document_ids().contains(document) {
+        if !scope.allows_document(document) {
             return Ok(Vec::new());
         }
         let filter = crate::payload::one_document_filter(scope.tenant(), document);

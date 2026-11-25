@@ -362,6 +362,14 @@ pub struct SearchStatsDto {
         default
     )]
     pub reranked_count: Option<usize>,
+    /// SEC-2a: candidates dropped because Postgres did not verify their
+    /// document. Absent in Ids mode, so an old client sees the earlier shape.
+    #[serde(
+        rename = "scopeVerifyDropped",
+        skip_serializing_if = "Option::is_none",
+        default
+    )]
+    pub scope_verify_dropped: Option<usize>,
     /// Additive (`RET-17`): how many hits the per-document diversity cap
     /// dropped. Present whenever the cap ran (even when it dropped nothing);
     /// absent when it was off, so an old client's shape is unchanged.
@@ -750,6 +758,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
             tree: outcome_tree,
             global_arm: outcome_global_arm,
             reranked_count: outcome_reranked_count,
+            scope_verify_dropped: outcome_scope_verify_dropped,
             confidence_scores: outcome_confidence,
             per_document_capped: outcome_per_document_capped,
             timings: outcome_timings,
@@ -886,6 +895,7 @@ impl From<RetrievalOutcome> for SearchResponseDto {
                 chunks: stats.chunks,
             }),
             reranked_count: outcome_reranked_count,
+            scope_verify_dropped: outcome_scope_verify_dropped,
             per_document_capped: outcome_per_document_capped,
         };
         SearchResponseDto {
@@ -1383,6 +1393,7 @@ mod tests {
             tree_arm: None,
             global_arm: None,
             reranked_count: None,
+            scope_verify_dropped: None,
             per_document_capped: None,
         };
         let value = serde_json::to_value(&stats).unwrap();
@@ -1430,6 +1441,7 @@ mod tests {
             boost: None,
             tree_arm: None,
             global_arm: None,
+            scope_verify_dropped: None,
             reranked_count: None,
             per_document_capped: None,
         };
@@ -1472,6 +1484,7 @@ mod tests {
             skipped_arms: None,
             arm_plan_fallback: None,
             global_arm: None,
+            scope_verify_dropped: None,
             tree_arm: None,
             reranked_count: None,
             per_document_capped: None,
@@ -1514,6 +1527,7 @@ mod tests {
             query_class: None,
             skipped_arms: None,
             arm_plan_fallback: None,
+            scope_verify_dropped: None,
             global_arm: None,
             tree_arm: None,
             reranked_count: None,
@@ -1556,6 +1570,7 @@ mod tests {
             tree_arm: None,
             reranked_count: None,
             per_document_capped: None,
+            scope_verify_dropped: None,
         };
         let off = serde_json::to_value(&stats).unwrap();
         assert!(off.get("perDocumentCapped").is_none());

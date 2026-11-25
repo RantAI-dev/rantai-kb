@@ -195,6 +195,7 @@ pub async fn get_document_content(
                 knowledge_base_ids: auth.knowledge_base_ids.clone(),
                 ..DocumentFilter::default()
             },
+            force_ids: false,
         })
         .await
         .map_err(ApiError::from)?

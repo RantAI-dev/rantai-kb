@@ -504,6 +504,11 @@ impl GraphStore for PgGraphStore {
     }
 
     async fn load_tenant_graph(&self, scope: &DocumentScope) -> Result<TenantGraph, PortError> {
+        // SEC-2a: these reads are `ANY(ids)` lookups. A predicate scope has no
+        // id list, so the arm stays off instead of running unfiltered.
+        if scope.is_predicate() {
+            return Ok(TenantGraph::empty());
+        }
         let document_ids: Vec<String> = scope
             .document_ids()
             .iter()
@@ -546,6 +551,11 @@ impl GraphStore for PgGraphStore {
             .filter(|term| !term.is_empty())
             .collect();
         if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        // SEC-2a: these reads are `ANY(ids)` lookups. A predicate scope has no
+        // id list, so the arm stays off instead of running unfiltered.
+        if scope.is_predicate() {
             return Ok(Vec::new());
         }
         let document_ids: Vec<String> = scope
@@ -605,6 +615,11 @@ impl GraphStore for PgGraphStore {
         scope: &DocumentScope,
         key: &str,
     ) -> Result<Vec<ChunkId>, PortError> {
+        // SEC-2a: these reads are `ANY(ids)` lookups. A predicate scope has no
+        // id list, so the arm stays off instead of running unfiltered.
+        if scope.is_predicate() {
+            return Ok(Vec::new());
+        }
         let document_ids: Vec<String> = scope
             .document_ids()
             .iter()
