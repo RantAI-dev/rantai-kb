@@ -164,7 +164,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             drifted = true;
-            let (closest, cause) = classify(&gold, &manifest_names, grids, gold_headers.get(file));
+            let (closest, cause) = classify(&gold, &manifest_names, chosen, gold_headers.get(file));
             let entry = mismatches
                 .entry((file.to_string(), gold.clone()))
                 .or_insert_with(|| Mismatch {
@@ -307,12 +307,21 @@ fn strip_suffix(text: &str) -> &str {
 fn classify(
     gold: &str,
     names: &[String],
-    grids: &[(TableGrid, TableManifest)],
+    grid: Option<&(TableGrid, TableManifest)>,
     gold_header: Option<&Vec<String>>,
 ) -> (String, String) {
     let closest = closest_name(gold, names);
     let a = collapse_whitespace(gold);
     let b = collapse_whitespace(closest);
+    let first = names.first().map_or("", String::as_str);
+    // A whole header read from the wrong row explains most columns at once;
+    // name it as such instead of calling each one "no_similar_name".
+    let title_row =
+        first.starts_with("Tabel") && gold_header.is_some_and(|h| h.len() > names.len() + 2);
+    let data_row = first.chars().next().is_some_and(char::is_ascii_digit);
+    let preamble = closest.starts_with("Column ")
+        || first.starts_with('\u{feff}')
+        || first.contains("Data Source");
     let cause = if names.is_empty() {
         "no_columns_in_manifest"
     } else if a.eq_ignore_ascii_case(&b) {
@@ -321,6 +330,12 @@ fn classify(
         "whitespace_or_line_break"
     } else if fold(gold) == fold(closest) {
         "separator_or_punctuation"
+    } else if title_row {
+        "title_row_read_as_header"
+    } else if data_row {
+        "data_row_read_as_header"
+    } else if preamble && gold_header.is_some_and(|h| h.iter().any(|n| n == gold)) {
+        "csv_preamble_read_as_header"
     } else if gold.contains(" / ") != closest.contains(" / ") {
         "multi_level_flattening"
     } else if strip_suffix(&a).eq_ignore_ascii_case(strip_suffix(&b)) {
@@ -331,14 +346,8 @@ fn classify(
         "year_header_parsed_as_number"
     } else if gold.starts_with("Column ") || closest.starts_with("Column ") {
         "unnamed_column"
-    } else if grids
-        .iter()
-        .any(|(_, m)| m.columns.iter().any(|c| c.name == gold))
-    {
+    } else if grid.is_some_and(|(_, m)| m.columns.iter().any(|c| c.name == gold)) {
         "wrong_grid_selected"
-    } else if gold_header.is_some_and(|h| h.iter().any(|n| n == gold)) && closest == "(no columns)"
-    {
-        "header_not_detected"
     } else {
         "no_similar_name"
     };
@@ -369,7 +378,7 @@ mod tests {
 
     #[test]
     fn classifier_sees_a_case_only_drift() {
-        let (closest, cause) = classify("Kode Code", &["kode code".to_string()], &[], None);
+        let (closest, cause) = classify("Kode Code", &["kode code".to_string()], None, None);
         assert_eq!(closest, "kode code");
         assert_eq!(cause, "case_only");
     }
@@ -379,7 +388,7 @@ mod tests {
         let (_, cause) = classify(
             "Country Code / ABW",
             &["Country Code".to_string()],
-            &[],
+            None,
             None,
         );
         assert_eq!(cause, "multi_level_flattening");
