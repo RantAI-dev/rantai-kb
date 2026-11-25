@@ -158,6 +158,12 @@ impl CommunityStore for PgCommunityStore {
         &self,
         scope: &DocumentScope,
     ) -> Result<Vec<CommunityRecord>, PortError> {
+        // SEC-2a: a predicate scope deliberately has no id list, and the
+        // community SQL is an `ANY(ids)` lookup. The arm stays off rather than
+        // running unfiltered; both graph and global arms are deprecated (DEC-6).
+        if scope.is_predicate() {
+            return Ok(Vec::new());
+        }
         let documents: Vec<String> = scope
             .document_ids()
             .iter()

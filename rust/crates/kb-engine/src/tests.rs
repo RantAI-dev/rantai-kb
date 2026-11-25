@@ -855,6 +855,7 @@ mod pipeline_tests {
                     category: None,
                     ..DocumentFilter::default()
                 },
+                force_ids: false,
             })
             .await
             .unwrap();
@@ -919,6 +920,7 @@ mod pipeline_tests {
                     category: Some("cat_a".into()),
                     ..DocumentFilter::default()
                 },
+                force_ids: false,
             })
             .await
             .unwrap();
@@ -979,6 +981,7 @@ mod pipeline_tests {
             .build_scope(&ScopeRequest {
                 tenant: tenant.clone(),
                 filter: DocumentFilter::default(),
+                force_ids: false,
             })
             .await
             .unwrap();
@@ -1040,6 +1043,7 @@ mod pipeline_tests {
             .build_scope(&ScopeRequest {
                 tenant: tenant.clone(),
                 filter: DocumentFilter::default(),
+                force_ids: false,
             })
             .await
             .unwrap();

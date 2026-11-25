@@ -417,6 +417,7 @@ impl Engine {
                 global_arm: None,
                 // An empty query never reaches the reranker or the cap.
                 reranked_count: None,
+                scope_verify_dropped: None,
                 confidence_scores: kb_core::ScoreEvidence::default(),
                 per_document_capped: None,
                 timings: StageTimings::default(),
