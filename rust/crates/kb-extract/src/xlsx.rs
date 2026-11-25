@@ -537,7 +537,9 @@ fn spread_merges(
         if !rows.contains(&start_row) || !columns.contains(&start_column) {
             continue;
         }
-        let value = cells[start_row - rows.start][start_column - columns.start].clone();
+        let local_row = start_row - rows.start;
+        let local_column = start_column - columns.start;
+        let value = cells[local_row][local_column].clone();
         if value == Cell::Empty {
             continue;
         }

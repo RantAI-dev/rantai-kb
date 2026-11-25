@@ -594,6 +594,9 @@ fn arithmetic_derived_rows(
             block_start = row + 1;
             continue;
         }
+        if row_is_year_keyed(grid, row) {
+            continue;
+        }
         if row >= block_start + min_rows_for(row)
             && row_equals_sum(grid, row, block_start..row, &quantity)
         {
@@ -607,7 +610,7 @@ fn arithmetic_derived_rows(
     // (a) A grand total equals every other non-derived data row, whether it sits
     // at the bottom or (as some BPS sheets do) at the top.
     for candidate in [grid.rows.len() - 1, 0] {
-        if derived.contains(&(candidate as u32)) {
+        if derived.contains(&(candidate as u32)) || row_is_year_keyed(grid, candidate) {
             continue;
         }
         let others: Vec<usize> = (0..grid.rows.len())
@@ -625,6 +628,18 @@ fn arithmetic_derived_rows(
     found.sort_unstable();
     found.dedup();
     (derived, found)
+}
+
+/// A stacked year block (`2019`, `2020` … below a kecamatan table) uses a year
+/// as its row key. Such a row can coincidentally equal the sum of the rows
+/// above it, but it is not a subtotal and must not be excluded.
+fn row_is_year_keyed(grid: &TableGrid, row: usize) -> bool {
+    grid.rows.get(row).is_some_and(|cells| {
+        cells.iter().find(|cell| **cell != Cell::Empty).is_some_and(|cell| {
+            matches!(cell, Cell::Number(number) if number.fract() == 0.0 && (1900.0..=2100.0).contains(number))
+                || matches!(cell, Cell::Text(text) if text.trim().len() == 4 && text.trim().chars().all(|c| c.is_ascii_digit()) && text.trim().parse::<i32>().is_ok_and(|year| (1900..=2100).contains(&year)))
+        })
+    })
 }
 
 /// A label that names an aggregate: a region level (BPS labels its total row
@@ -1114,6 +1129,23 @@ mod tests {
             ],
         ));
         assert!(not_a_total.derived_rows.is_empty());
+    }
+
+    #[test]
+    fn a_year_keyed_row_is_not_a_subtotal() {
+        // The stacked `2019 / 2020` block below a kecamatan table is data: its
+        // values may equal the sum of the rows above by coincidence.
+        let manifest = build_manifest(&grid(
+            &["Kecamatan", "Produksi"],
+            vec![
+                vec![text("A"), number(10.0)],
+                vec![text("B"), number(20.0)],
+                vec![text("Jumlah"), number(30.0)],
+                vec![number(2019.0), number(30.0)],
+                vec![number(2020.0), number(15.0)],
+            ],
+        ));
+        assert_eq!(manifest.derived_rows, vec![2], "{:?}", manifest.derived_rows);
     }
 
     #[test]
