@@ -1,8 +1,9 @@
-# EVAL-7 — progressive-disclosure coverage gate (harness, not run yet)
+# EVAL-7 — progressive-disclosure coverage gate (measured 2026-11-25, GB10)
 
-**Status:** harness built and unit-tested; **no live measurement has been made**. The reviewer
-runs the command below on the GPU box after ingesting the ViDoRe HR corpus. The result of that
-run — not this document — is the gate.
+**Status: measured, two targets MISSED.** Coverage **0.238 [0.206, 0.269]**
+(target ≥ 0.90) and `/content` p95 **60.4 ms** (target < 50 ms) both missed;
+chars read / gold chars **1.353 [1.315, 1.387]** passed (≤ 1.5×). These are
+live numbers on the ViDoRe HR corpus, reported as measured — not hidden.
 
 ## Why this exists
 
@@ -87,8 +88,57 @@ ingest used a different output directory, point `--ingest-map` at that directory
 The four release gates are unchanged by this harness; it only reads `/v1/*` with a key and writes
 files under `--out`.
 
-## Results
+## Results (2026-11-25)
 
-**Not run yet.** No coverage, CI, chars ratio, latency number or PASS/MISS verdict is claimed
-here. Paste the reviewer's `docs/eval-ab/disclosure-v1/run/report.md` and `results.json` here when
-the live measurement exists.
+Setup: branch `bench/v09-measure` @ `7d5adbdf`; release kb-server from
+`~/kb-target-v09m`, run natively on the GB10 against the `stack-up.sh` containers;
+Nemotron at `127.0.0.1:8210` embedded the HR corpus once for the RET-12 A/B
+(no re-ingest here); qwen3-rerank-0.6B at `127.0.0.1:8122`; the page-image arm
+was off and the search config was the shipped default (breadcrumbs off, no cap).
+See [`../rerank-breadcrumbs/README.md`](../rerank-breadcrumbs/README.md) for the
+stack wiring. The `--ingest-map` came from that single ingest.
+
+Exact command (wrapper `~/v09m/run-m4-disclosure.sh`, log
+`~/v09m/logs/m4-disclosure.out`):
+
+```sh
+source ~/v09m/stack-env-hr.sh
+~/kb-target-v09m/release/kb-server eval disclosure \
+  --base-url http://127.0.0.1:28081 --key "$KEY" \
+  --dataset "$PWD/rust/crates/kb-eval/datasets/vidore3-hr-en" \
+  --out ~/v09m/results/m4-disclosure \
+  --ingest-map ~/v09m/results/m1-hr/base/ingest-map.json \
+  --top-k 5 --budget-factor 1.5
+```
+
+| Measure | Value | Target | Verdict |
+|---|---:|---|---|
+| coverage (318 questions) | **0.238 [0.206, 0.269]** | ≥ 0.90 | **MISS** |
+| chars read / gold chars | 1.353 [1.315, 1.387] | ≤ 1.5× | PASS |
+| `/content` p95 | **60.4 ms** | < 50 ms | **MISS** |
+
+Per-endpoint latency (ms, from `results.json`; `/structure` n = 14 cached
+documents, `/content` n = 3839 reads, `/v1/search` n = 318):
+
+| endpoint | p50 | p95 | p99 | n |
+|---|---:|---:|---:|---:|
+| `/v1/search` | 11.7 | 56.0 | 79.8 | 318 |
+| `/v1/documents/:id/structure` | 13.5 | 41.7 | 50.6 | 14 |
+| `/v1/documents/:id/content` | 15.4 | **60.4** | 118.9 | 3839 |
+
+`missing_doc = 0`; bootstrap 2000 resamples. Raw stdout excerpt:
+
+```text
+disclosure: 318 questions, coverage 0.238 [0.206, 0.269], chars read/gold 1.353, content p95 60.4 ms
+targets: coverage MISS · chars PASS · content p95 MISS
+wrote results.json, per_question.jsonl, report.md
+```
+
+Raw artifacts: `~/v09m/results/m4-disclosure/{results.json,report.md,per_question.jsonl}`.
+One question's raw line from `report.md`:
+
+```text
+| 0 | 0.333 | 2/6 | 0 | 10276 | 13460 | 0.763 |
+```
+
+No paid call was made. The MISS is reported, not hidden.
