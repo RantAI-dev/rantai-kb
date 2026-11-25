@@ -19,6 +19,12 @@ const DOC: &str = "doc-d";
 
 fn document() -> kb_ports::DocumentMeta {
     kb_ports::DocumentMeta {
+        doc_key: None,
+        version: None,
+        supersedes_document_id: None,
+        effective_from: None,
+        effective_to: None,
+        is_latest: true,
         sha256: None,
         id: DocumentId(DOC.to_string()),
         title: DOC.to_string(),

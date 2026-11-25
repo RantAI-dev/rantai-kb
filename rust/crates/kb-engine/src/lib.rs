@@ -70,6 +70,7 @@ mod in_memory_index_tests;
 mod ingest_concurrency_tests;
 #[cfg(test)]
 mod ingest_tests;
+#[cfg(test)]
 mod max_per_document_tests;
 #[cfg(test)]
 mod outbox_tests;
