@@ -1,7 +1,8 @@
 # RET-20 — Qdrant quantization A/B
 
-**Status: tool built, 1M-chunk run not run yet.** No numbers in this directory
-are claimed until the big-RAM box run below has actually happened.
+**Status: measured on GB10 (2026-11-25) at 1M points for `off` and `scalar`;
+`binary` at 1M did not complete (Qdrant optimizer space error).** The smoke
+run measured all three modes at 20k points. Results and raw stdout are below.
 
 ## Goal
 
@@ -87,11 +88,91 @@ recall@20, percentiles and flag parsing:
 cargo test --manifest-path rust/Cargo.toml -p kb-store-qdrant bench::
 ```
 
-## Results
+## Results — measured 2026-11-25 on GB10
 
-**Not run yet.** Small smoke against a local Qdrant: not run (no Qdrant was
-available at `localhost:6334` when this tool was built). 1M run: not run.
+Box: ThinkStation GB10 (arm64, 20 cores, 128 GB unified). Check before the big
+run: `df -h /` → `71G` free; `free -g` → `available 67`. Release `kb-server`
+from `bench/tbl2-quant @ aa3f8294` in `~/kb-target-tq`, using the Qdrant
+container of the fresh `tq` `stack-up.sh` stack on gRPC `127.0.0.1:26344`.
 
-When the run happens, paste the raw stdout of the command above plus the
-contents of `report.md` here, including the RAM reading taken from Qdrant
-outside the tool.
+### Smoke — 20k points, 100 queries (sanity, not a result)
+
+```sh
+"$BIN" eval quant-bench --qdrant-url http://127.0.0.1:26344 \
+  --collection-prefix tqqb --points 20000 --dim 2048 --queries 100 --seed 42 \
+  --modes off,scalar,binary --out ~/tq/m2-smoke
+```
+
+Raw stdout (`~/tq/logs/m2-smoke.out`):
+
+```text
+quant-bench: 20000 point(s), 2048 dims, 100 queries, seed 42, modes off,scalar,binary
+     off: p50    4.17 ms  p95    4.76 ms  recall@20 0.6545  RAM not measured
+  scalar: p50    2.19 ms  p95    2.60 ms  recall@20 0.7225  RAM not measured
+  binary: p50    1.05 ms  p95    1.46 ms  recall@20 0.5060  RAM not measured
+```
+
+### Real run — 1M points, 2048-dim, 500 queries
+
+```sh
+"$BIN" eval quant-bench --qdrant-url http://127.0.0.1:26344 \
+  --collection-prefix tqqb --points 1000000 --dim 2048 --queries 500 --seed 42 \
+  --modes off,scalar --out ~/tq/m2-1m-offscalar --keep
+```
+
+Raw stdout (`~/tq/logs/m2-1m-offscalar.out`):
+
+```text
+=== M2 1M off+scalar start Wed Nov 25 06:57:38 AM UTC 2026 ===
+/dev/nvme0n1p2  938G  820G   71G  93% /
+quant-bench: 1000000 point(s), 2048 dims, 500 queries, seed 42, modes off,scalar
+     off: p50    8.80 ms  p95   10.77 ms  recall@20 0.0407  RAM not measured
+  scalar: p50    3.77 ms  p95    4.86 ms  recall@20 0.0433  RAM not measured
+quant-bench: wrote /home/rismana/tq/m2-1m-offscalar/results.json and /home/rismana/tq/m2-1m-offscalar/report.md
+=== M2 1M off+scalar exit=0 Wed Nov 25 08:12:15 AM UTC 2026 ===
+```
+
+`report.md` from that run (`~/tq/m2-1m-offscalar/report.md`):
+
+```text
+| mode | p50 (ms) | p95 (ms) | recall@20 | RAM |
+|---|---:|---:|---:|---|
+| off | 8.80 | 10.77 | 0.0407 | not measured |
+| scalar | 3.77 | 4.86 | 0.0433 | not measured |
+
+Targets at 1M points: p95 < 20.0 ms and recall@20 >= 0.97 against exact float32.
+```
+
+| mode | p50 (ms) | p95 (ms) | recall@20 vs exact float32 | RAM |
+|---|---:|---:|---:|---|
+| off (float32) | 8.80 | 10.77 | 0.0407 | not measured |
+| scalar int8 | 3.77 | 4.86 | 0.0433 | not measured |
+| binary | — | — | not measured at 1M (see below); smoke 1.05 / 1.46 / 0.5060 at 20k | not measured |
+
+**Targets:** p95 < 20 ms **met** for off (10.77) and scalar (4.86); recall@20
+≥ 0.97 **missed** (scalar 0.0433). Important caveat: the float32 `off` arm
+itself only reaches 0.0407 against `exact: true` brute force on the tool's
+uniform-random 2048-d vectors — the HNSW index barely agrees with exact search
+at 1M on this synthetic shape, so the absolute recall target is not reached
+by the reference arm either. Scalar's recall is marginally *higher* than the
+float32 arm's (0.0433 vs 0.0407), i.e. no measurable recall loss from
+quantization on this run. RAM is **not measured**: `GET /telemetry` at
+`~/tq/logs/qdrant-telemetry.json` exposes only request counts and a collection
+count, no per-collection memory.
+
+### What did not complete, and why
+
+- `binary` at 1M: three-mode run created `tqqb_binary` but Qdrant 1.19.2
+  marked it red with `optimizer_status: {"error": "Service runtime error:
+  Not enough space available for optimization, needed: 1.54 GiB, available:
+  794.18 MiB"}` (full log `~/tq/logs/m2-1m-3mode-failed.out`). The run was
+  stopped; binary's 1M numbers are not claimed. The 20k smoke numbers above
+  are the only binary measurement.
+- The first 1M attempt hit the tool's fixed 600 s `wait_green` window while
+  Qdrant was still building the 1M×2048 HNSW index. `wait_green` in
+  `rust/crates/kb-store-qdrant/src/bench.rs` was extended from 600 to 3600
+  **polls** (a wait only; no measurement logic changed) and the release binary
+  rebuilt. First attempt log: `~/tq/logs/m2-1m.out`.
+
+Raw artifacts: `~/tq/m2-smoke/{report.md,results.json}`,
+`~/tq/m2-1m-offscalar/{report.md,results.json}` and the logs above.
