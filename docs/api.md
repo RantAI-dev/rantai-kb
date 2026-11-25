@@ -8,6 +8,29 @@ The contract is machine-readable: `GET /openapi.json` serves an OpenAPI 3.1 docu
 `GET /docs` renders it with a "try it" button. Both are unauthenticated, like `/health`,
 because the contract has to be readable before the caller has one.
 
+## Stability (v1.0)
+
+From v1.0.0 the `/v1/*` HTTP contract and the Postgres tables that calling apps rely on
+(documents, jobs, knowledge bases, keys, their ids and the job queue) are **stable**:
+
+- **Additive only.** A minor release may add routes, optional request fields and response
+  fields. Existing fields keep their name, type and meaning. A client must ignore fields it
+  does not know.
+- **No silent behaviour change.** Any change to what an existing request returns is listed in
+  `CHANGELOG.md` and in [`rust-cutover.md`](rust-cutover.md) before it ships. It lands in a
+  major release, unless it fixes a security or correctness bug.
+- **Deprecation before removal.** A setting or field is first marked deprecated, with a startup
+  warning and a CHANGELOG `### Deprecated` entry. It stays for at least one minor release and
+  can be removed only in the next major. Deprecated today: `KB_GRAPH_ARM` and `KB_GLOBAL_ARM`
+  (`DEC-6`).
+- **Opt-in switches stay opt-in.** `KB_MCP`, `KB_SCOPE_ID_LIMIT`, `KB_QDRANT_QUANTIZATION`,
+  `KB_RERANK_BREADCRUMBS`, `KB_MAX_PER_DOCUMENT` and `KB_CONFIDENCE_CALIBRATION` default to the
+  behaviour of earlier releases. Turning one on never changes what other callers see.
+- **Stateless mode follows the same rules.** This covers `/v1/process`, `/v1/encode` and
+  `/v1/rerank`. Their parity with full mode is pinned by tests (`API-5`).
+
+## Routes
+
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/v1/documents` | Upload a file (multipart field `file`). Returns `202` with a `jobId`. |

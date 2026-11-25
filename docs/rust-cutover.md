@@ -1207,3 +1207,50 @@ Postgres. It is idempotent, needs no re-embed and does not touch vectors, BM25 o
 images; soft-deleted documents are skipped. `kb-server reindex` also restores the payload
 but re-embeds every chunk, so prefer the backfill when only the payload is missing.
 `GET /v1/health` gains an additive `scopeOutbox` field (`pending`, `oldestPendingSecs`).
+
+## 13. Upgrading 0.8 → 1.0
+
+This is a checklist for a deployment on 0.8.x moving to 1.0. The sections above have the details. Every
+schema change is additive, and every new behaviour that could surprise an existing caller is
+listed here.
+
+**1. Migrate.** `kb-server migrate` applies three additive migrations: document versions
+(`20261124120000_document_versions`, §10), access lists
+(`20261125120000_document_acl_principals`, §11) and the scope outbox
+(`20261124130000_scope_outbox`, §12). Existing rows stay valid without a backfill.
+
+**2. Re-index where the data changed shape.** `kb-server reindex` rebuilds from the stored
+originals. Run it for:
+- **`lite` corpora** (multilingual-e5-small). Before 0.9 their passages were embedded without
+  the `passage: ` prefix (§8). The embedding cache does not reuse those vectors.
+- **Tables you query exactly.** TBL-2 changed how headers, title rows, CSV preambles and code
+  columns are read: on `tables-v1`, exact execution went from 0.521 to 0.995. Old tables keep
+  their old manifests until they are re-extracted.
+- **Documents you read with `/content`.** Chunks ingested before 0.9 have no character spans
+  (ING-13). They are still readable, but `/content` reports a `degrades` entry and cannot
+  remove the chunk overlap.
+
+If none of these apply, no re-index is needed.
+
+**3. Predicate scope (optional).** To stop sending every visible document id to Qdrant on
+large tenants, run `kb-server scope backfill` once, then set `KB_SCOPE_ID_LIMIT` (for example
+`2000`). Without the backfill, chunks ingested before 0.9 carry no `knowledge_base_id`
+payload. A KB-limited key would then miss them: the scope fails closed, so there is no leak,
+but recall drops. A tenant with versioned or access-listed documents keeps the id-list path
+either way.
+
+**4. Behaviour changes for existing calls:**
+- A `documentIds` search runs the full pipeline (BM25, reranker, page, tree, neighbour and
+  figure arms). It now also returns `sources` and `context` (§9).
+- By default a search answers from the **current version** of a `docKey`. Documents without a
+  `docKey`, which is every document from before 0.9, are unaffected (§10).
+- `GET /v1/tables` without `documentId` lists only tables whose document the key can see. It
+  used to list every table of the tenant, regardless of the key's knowledge bases.
+- A document with a non-empty `aclPrincipals` list is hidden from any request that does not
+  assert a matching principal (§11). No document has one until you set it.
+- `KB_GRAPH_ARM` and `KB_GLOBAL_ARM` log a deprecation warning at startup (`DEC-6`).
+
+**5. New, all off or additive by default:** `/v1/documents/:id/content`, outline v2 on
+`/structure`, `pageRange`/`section` and `maxPerDocument` on search, a `confidence` object on
+every search answer, `/mcp` behind `KB_MCP=on`, and opt-in Qdrant quantization
+(`KB_QDRANT_QUANTIZATION`, which needs a new collection and a re-index).
