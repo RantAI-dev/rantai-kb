@@ -129,8 +129,9 @@ pub fn locale_number(text: &str) -> Option<f64> {
     let normalised = match (has_dot, has_comma) {
         (0, 0) => cleaned.clone(),
         (_, 0) => {
-            // Only dots: the last group of exactly three digits after a dot is
-            // a thousands separator (`1.234`), otherwise a decimal point.
+            // Only dots: a single dot inside a long number (`913140741332.687`)
+            // is the English decimal mark, not a thousands separator. Short
+            // `1.234` and repeated groups `1.234.567` are grouped thousands.
             if has_dot > 1 || is_thousands_group(&cleaned, '.') {
                 cleaned.replace('.', "")
             } else {
@@ -174,9 +175,15 @@ pub fn locale_number(text: &str) -> Option<f64> {
 fn is_thousands_group(text: &str, separator: char) -> bool {
     let mut parts = text.split(separator);
     let first = parts.next().unwrap_or("");
-    let all_three = parts.clone().all(|group| group.len() == 3);
-    let groups = parts.count();
-    groups >= 1 && all_three && !first.is_empty() && first.chars().all(|c| c.is_ascii_digit())
+    let rest: Vec<&str> = parts.collect();
+    let groups = rest.len();
+    let all_three = rest.iter().all(|group| group.len() == 3);
+    groups >= 1
+        && all_three
+        && !first.is_empty()
+        && first.chars().all(|c| c.is_ascii_digit())
+        // `913140741332.687` is a decimal, not `913140741332687`.
+        && !(groups == 1 && first.len() > 3)
 }
 
 fn cell_text(cell: &Cell) -> Option<String> {
@@ -418,8 +425,10 @@ pub fn placeholder_note(count: usize) -> Option<String> {
 
 /// Read a text cell into the typed contract: booleans, ISO dates, numbers and
 /// the rest as text. A zero-padded digit string (`00123`, a NIK) stays text so
-/// its leading zeros survive, and a statistical placeholder (`-`, `...`, `NA`)
-/// is empty rather than a label.
+/// its leading zeros survive, and so does a long fixed-width digit string
+/// (`197011281990031002`, an NIP): an `f64` cannot hold 18 digits exactly, and
+/// a sum over an identifier is never a meaningful answer. A statistical
+/// placeholder (`-`, `...`, `NA`) is empty rather than a label.
 #[must_use]
 pub fn cell_from_text(text: &str) -> Cell {
     let trimmed = text.trim();
@@ -432,7 +441,7 @@ pub fn cell_from_text(text: &str) -> Cell {
     if trimmed.eq_ignore_ascii_case("false") {
         return Cell::Bool(false);
     }
-    if is_zero_padded_digits(trimmed) {
+    if is_zero_padded_digits(trimmed) || is_long_identifier(trimmed) {
         return Cell::Text(trimmed.to_string());
     }
     if looks_like_iso_date(trimmed) {
@@ -446,6 +455,15 @@ pub fn cell_from_text(text: &str) -> Cell {
 
 fn is_zero_padded_digits(text: &str) -> bool {
     text.len() > 1 && text.starts_with('0') && text.chars().all(|ch| ch.is_ascii_digit())
+}
+
+/// A government identifier (NIP, NIK, a long account number) is written as a
+/// run of digits, but it names a person or an account: it must keep every
+/// digit and never be summed.
+fn is_long_identifier(text: &str) -> bool {
+    // 16/18-digit government IDs; a World Bank GDP is at most ~15 digits and
+    // stays a number.
+    text.len() >= 16 && text.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn looks_like_iso_date(text: &str) -> bool {
@@ -480,6 +498,26 @@ pub fn is_derived_label(text: &str) -> bool {
     false
 }
 
+/// A bare total word (`Jumlah`, `Total`, `Grand total`) is a derived row on
+/// its own. `Jumlah Posyandu aktif` is an ordinary data row whose label merely
+/// starts with a total word: it must be proven by arithmetic, never dropped
+/// just because of the first word.
+fn is_bare_total_label(text: &str) -> bool {
+    let lower = text.trim().to_lowercase();
+    matches!(
+        lower.as_str(),
+        "jumlah"
+            | "total"
+            | "sub total"
+            | "subtotal"
+            | "grand total"
+            | "grandtotal"
+            | "rata-rata"
+            | "rata rata"
+            | "average"
+    )
+}
+
 fn derived_rows(grid: &TableGrid, roles: &[ColumnRole]) -> Vec<u32> {
     let mut rows: Vec<u32> = if grid.formula_rows.is_empty() {
         grid.rows
@@ -492,13 +530,19 @@ fn derived_rows(grid: &TableGrid, roles: &[ColumnRole]) -> Vec<u32> {
                             role,
                             ColumnRole::Identifier | ColumnRole::Label | ColumnRole::Code
                         )
-                    }) && matches!(cell, Cell::Text(text) if is_derived_label(text))
+                    }) && matches!(cell, Cell::Text(text) if is_bare_total_label(text))
                 })
             })
             .map(|(index, _)| index as u32)
             .collect()
     } else {
-        grid.formula_rows.clone()
+        // A formula in a year-keyed block computes a rate for that year; it
+        // does not make the year row a subtotal of the table above it.
+        grid.formula_rows
+            .iter()
+            .copied()
+            .filter(|row| !row_is_year_keyed(grid, *row as usize))
+            .collect()
     };
     rows.sort_unstable();
     rows.dedup();
@@ -556,6 +600,9 @@ fn arithmetic_derived_rows(
             block_start = row + 1;
             continue;
         }
+        if row_is_year_keyed(grid, row) {
+            continue;
+        }
         if row >= block_start + min_rows_for(row)
             && row_equals_sum(grid, row, block_start..row, &quantity)
         {
@@ -569,7 +616,7 @@ fn arithmetic_derived_rows(
     // (a) A grand total equals every other non-derived data row, whether it sits
     // at the bottom or (as some BPS sheets do) at the top.
     for candidate in [grid.rows.len() - 1, 0] {
-        if derived.contains(&(candidate as u32)) {
+        if derived.contains(&(candidate as u32)) || row_is_year_keyed(grid, candidate) {
             continue;
         }
         let others: Vec<usize> = (0..grid.rows.len())
@@ -587,6 +634,18 @@ fn arithmetic_derived_rows(
     found.sort_unstable();
     found.dedup();
     (derived, found)
+}
+
+/// A stacked year block (`2019`, `2020` … below a kecamatan table) uses a year
+/// as its row key. Such a row can coincidentally equal the sum of the rows
+/// above it, but it is not a subtotal and must not be excluded.
+fn row_is_year_keyed(grid: &TableGrid, row: usize) -> bool {
+    grid.rows.get(row).is_some_and(|cells| {
+        cells.iter().find(|cell| **cell != Cell::Empty).is_some_and(|cell| {
+            matches!(cell, Cell::Number(number) if number.fract() == 0.0 && (1900.0..=2100.0).contains(number))
+                || matches!(cell, Cell::Text(text) if text.trim().len() == 4 && text.trim().chars().all(|c| c.is_ascii_digit()) && text.trim().parse::<i32>().is_ok_and(|year| (1900..=2100).contains(&year)))
+        })
+    })
 }
 
 /// A label that names an aggregate: a region level (BPS labels its total row
@@ -772,6 +831,9 @@ mod tests {
         assert_eq!(locale_number("Rp 1.500.000"), Some(1_500_000.0));
         assert_eq!(locale_number("Rp 1.234,5"), Some(1234.5));
         assert_eq!(locale_number("2023"), Some(2023.0));
+        // A long English decimal (World Bank GDP) keeps its fractional part.
+        assert_eq!(locale_number("913140741332.687"), Some(913_140_741_332.687));
+        assert_eq!(locale_number("1.234.567"), Some(1_234_567.0));
         assert_eq!(locale_number("(Rp 2.000)"), Some(-2000.0));
         assert_eq!(locale_number("abc"), None);
         assert_eq!(locale_number("Rp juta"), None);
@@ -879,6 +941,37 @@ mod tests {
         let mut guessed = grid(&["Region", "Value"], vec![vec![text("A"), number(1.0)]]);
         guessed.source = Some(TableSource::Markdown);
         assert_eq!(build_manifest(&guessed).confidence, Confidence::Low);
+    }
+
+    #[test]
+    fn a_long_digit_string_is_an_identifier_that_cannot_be_summed() {
+        let nip = "197011281990031002";
+        assert_eq!(cell_from_text(nip), Cell::Text(nip.to_string()));
+        let manifest = build_manifest(&grid(
+            &["Nama PNS", "NIP"],
+            vec![
+                vec![text("MOCHAMAD NURROSYID"), text(nip)],
+                vec![text("SRI WAHYUNINGSIH"), text("197707112010012010")],
+            ],
+        ));
+        assert_eq!(manifest.columns[1].kind, ColumnKind::Text);
+        assert_eq!(manifest.columns[1].role, ColumnRole::Code);
+        assert!(
+            manifest.columns[1].sample_values.contains(&nip.to_string()),
+            "{:?}",
+            manifest.columns[1].sample_values
+        );
+        // The compiler refuses SUM/AVG unless the role is Quantity.
+        assert_ne!(manifest.columns[1].role, ColumnRole::Quantity);
+        // A six-digit kode wilayah written as text is a code by its shape too.
+        let codes = build_manifest(&grid(
+            &["Wilayah", "Kode"],
+            vec![
+                vec![text("Prambanan"), text("331001")],
+                vec![text("Wedi"), text("331002")],
+            ],
+        ));
+        assert_eq!(codes.columns[1].role, ColumnRole::Code);
     }
 
     #[test]
@@ -1042,6 +1135,49 @@ mod tests {
             ],
         ));
         assert!(not_a_total.derived_rows.is_empty());
+    }
+
+    #[test]
+    fn a_year_keyed_row_is_not_a_subtotal() {
+        // The stacked `2019 / 2020` block below a kecamatan table is data: its
+        // values may equal the sum of the rows above by coincidence.
+        let manifest = build_manifest(&grid(
+            &["Kecamatan", "Produksi"],
+            vec![
+                vec![text("A"), number(10.0)],
+                vec![text("B"), number(20.0)],
+                vec![text("Jumlah"), number(30.0)],
+                vec![number(2019.0), number(30.0)],
+                vec![number(2020.0), number(15.0)],
+            ],
+        ));
+        assert_eq!(
+            manifest.derived_rows,
+            vec![2],
+            "{:?}",
+            manifest.derived_rows
+        );
+    }
+
+    #[test]
+    fn a_formula_in_a_year_keyed_row_does_not_make_it_a_subtotal() {
+        let mut sheet = grid(
+            &["Kecamatan", "Produksi", "Rasio"],
+            vec![
+                vec![text("A"), number(10.0), number(1.0)],
+                vec![text("Jumlah"), number(10.0), number(1.0)],
+                vec![number(2019.0), number(20.0), number(2.0)],
+            ],
+        );
+        sheet.formula_rows = vec![1, 2];
+        let manifest = build_manifest(&sheet);
+        assert_eq!(
+            manifest.derived_rows,
+            vec![1],
+            "{:?}",
+            manifest.derived_rows
+        );
+        assert!(manifest.formulas_known);
     }
 
     #[test]

@@ -422,6 +422,12 @@ pub fn json_value(value: DuckValue) -> serde_json::Value {
 }
 
 fn number_or_null(n: f64) -> serde_json::Value {
+    // A whole year read from a Parquet DOUBLE is still a year: return JSON
+    // `2013`, not `2013.0`, so a caller comparing a label sees the value it
+    // saw in the spreadsheet. The i64 bound keeps the conversion exact.
+    if n.is_finite() && n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 {
+        return serde_json::Value::Number(serde_json::Number::from(n as i64));
+    }
     serde_json::Number::from_f64(n).map_or(serde_json::Value::Null, serde_json::Value::Number)
 }
 
@@ -553,6 +559,14 @@ mod tests {
             ..grid
         };
         assert!(write_grid(&named, None).is_ok());
+    }
+
+    #[test]
+    fn whole_numbers_are_json_integers_not_decimal_strings() {
+        assert_eq!(number_or_null(2013.0), serde_json::json!(2013));
+        assert_eq!(number_or_null(0.0), serde_json::json!(0));
+        assert_eq!(number_or_null(1234.5), serde_json::json!(1234.5));
+        assert_eq!(number_or_null(f64::NAN), serde_json::Value::Null);
     }
 
     #[test]

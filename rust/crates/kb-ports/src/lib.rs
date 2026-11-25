@@ -42,8 +42,9 @@ pub use outbox::{
 };
 pub use pages::{PageDescriber, PageEmbedder, PageImage, PageRenderer, PageVisionScorer};
 pub use retrieval::{
-    ArmRanks, ArmScores, Candidate, ChunkMeta, Fusion, HybridQuery, IndexCapabilities, IndexUnit,
-    KeywordQuery, KeywordSemantics, RetrievalIndex, chunk_meta_from_candidate, sort_candidates,
+    ArmRanks, ArmScores, Candidate, ChunkMeta, ChunkRange, Fusion, HybridQuery, IndexCapabilities,
+    IndexUnit, KeywordQuery, KeywordSemantics, RetrievalIndex, chunk_meta_from_candidate,
+    sort_candidates,
 };
 #[cfg(feature = "scope-adapter")]
 pub use scope::adapter;

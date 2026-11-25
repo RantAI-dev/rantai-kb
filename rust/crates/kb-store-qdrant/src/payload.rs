@@ -15,8 +15,8 @@
 //! [`RetrievalIndex::fetch`]: kb_ports::RetrievalIndex::fetch
 
 use kb_ports::{
-    ArmRanks, ArmScores, Candidate, ChunkId, ChunkMeta, ChunkType, DocumentId, DocumentScope,
-    IndexUnit, TenantId, UnitRange,
+    ArmRanks, ArmScores, Candidate, ChunkId, ChunkMeta, ChunkRange, ChunkType, DocumentId,
+    DocumentScope, IndexUnit, TenantId, UnitRange,
 };
 use qdrant_client::Payload;
 use qdrant_client::qdrant::{
@@ -264,6 +264,44 @@ pub fn one_document_filter(tenant: &TenantId, document: &DocumentId) -> Filter {
             MatchValue::Keyword(document.as_str().to_string()),
         ),
     ])
+}
+
+/// `tenant == t AND document_id == d` plus the integer range conditions of a
+/// [`ChunkRange`] (`EVAL-9`). The vector-free `/content` read uses this so a
+/// page or chunk selection is answered from the `page` / `chunkIndex` payload
+/// indexes rather than by scrolling the whole document.
+///
+/// Both halves are required, exactly as in [`one_document_filter`]: the tenant
+/// alone is not scope and the range alone could cross documents. This mirrors
+/// the scope check of `list_chunk_meta`, which is repeated by the caller.
+#[must_use]
+pub fn chunk_meta_range_filter(
+    scope: &DocumentScope,
+    document: &DocumentId,
+    range: ChunkRange,
+) -> Filter {
+    let mut filter = one_document_filter(scope.tenant(), document);
+    if let Some((lo, hi)) = range.pages {
+        filter.must.push(Condition::range(
+            KEY_PAGE,
+            Range {
+                gte: Some(f64::from(lo)),
+                lte: Some(f64::from(hi)),
+                ..Default::default()
+            },
+        ));
+    }
+    if let Some((lo, hi)) = range.chunks {
+        filter.must.push(Condition::range(
+            KEY_CHUNK_INDEX,
+            Range {
+                gte: Some(f64::from(lo)),
+                lte: Some(f64::from(hi)),
+                ..Default::default()
+            },
+        ));
+    }
+    filter
 }
 
 /// `tenant == t AND document_id == d AND lo <= chunk_index <= hi`.
@@ -708,6 +746,41 @@ mod tests {
             assert!(debug.contains(KEY_PAGE), "no page range in {debug}");
             assert!(debug.contains(KEY_CHUNK_INDEX), "no chunk range in {debug}");
         }
+    }
+
+    #[test]
+    fn a_chunk_meta_range_filter_has_both_integer_range_conditions() {
+        // EVAL-9: the vector-free /content read is a range scroll, not a whole
+        // document scroll. Both integer indexes must be named as conditions,
+        // and the tenant/document fence must still be there.
+        let scope = test_scope(&["doc-a1"]);
+        let document = DocumentId::new_unchecked("doc-a1");
+        let filter = chunk_meta_range_filter(
+            &scope,
+            &document,
+            ChunkRange {
+                chunks: Some((10, 20)),
+                pages: Some((2, 4)),
+            },
+        );
+        assert_eq!(filter.must.len(), 4, "tenant, document and two ranges");
+        let debug = format!("{filter:?}");
+        assert!(debug.contains(KEY_CHUNK_INDEX), "no chunk range: {debug}");
+        assert!(debug.contains(KEY_PAGE), "no page range: {debug}");
+        assert!(debug.contains(KEY_TENANT_ID), "no tenant: {debug}");
+        assert!(debug.contains(KEY_DOCUMENT_ID), "no document: {debug}");
+        // A chunk-only range must not smuggle in a page condition, or vice versa.
+        let chunks_only = chunk_meta_range_filter(
+            &scope,
+            &document,
+            ChunkRange {
+                chunks: Some((1, 2)),
+                pages: None,
+            },
+        );
+        let debug = format!("{chunks_only:?}");
+        assert!(debug.contains(KEY_CHUNK_INDEX));
+        assert!(!debug.contains(KEY_PAGE), "unwanted page range: {debug}");
     }
 
     #[test]
