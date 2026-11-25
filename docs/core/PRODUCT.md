@@ -78,7 +78,7 @@ Open source under Apache-2.0. There is no paid edition and no hosted version.
 | --- | --- | --- |
 | **Ingest** | Uploads a file (`POST /v1/documents`, 202 and a job). It is extracted, OCR'd if scanned, chunked, embedded and indexed, with progress on `/v1/jobs/:id` and `/v1/events` | Built. 55 extensions (PDF, images, Office Open XML, OpenDocument, text, Markdown, code, CSV/TSV/JSON, HTML/XML, RTF, EPUB; `kb-core/src/policy.rs`). Legacy `.doc/.xls/.ppt` are accepted but fail to extract (`ING-1`). A 943-page PDF ingests in 71 s with simulated provider latency (`docs/eval-ab/ingest-big-pdf/`) |
 | **Retrieval** | `POST /v1/search` returns chunks with document, page, score, figures, the arms that found each hit, and `degrades` when an arm failed | Built. Dense + BM25 fused, reranker, page-image arm, neighbour chunks and an entity graph. Measured numbers are in section 1 |
-| **Access & Security** | Tenants, API keys (scopes `kb:read` / `kb:write`, optional knowledge-base limit), knowledge bases and categories | Partial. The tenant wall is tested in CI. The knowledge-base limit is applied to search and to the by-ID document routes (`SEC-1`, done 2026-11-04). There are no users, roles, folders or per-document permissions |
+| **Access & Security** | Tenants, API keys (scopes `kb:read` / `kb:write`, optional knowledge-base limit), knowledge bases and categories | Partial. The tenant wall is tested in CI. The knowledge-base limit is applied to search and to the by-ID document routes (`SEC-1`, done 2026-11-04). Per-document access lists with default-deny shipped in v0.9.0 (`SEC-3`); principals are asserted by the calling app under `kb:assert-principals`. There are no users, roles or folders managed inside rantai-kb |
 | **Deployment** | `kb-dev.sh setup` → `up <tier>` → `key`. Tiers: lite, lite-en (CPU), desk, studio, station (NVIDIA), cloud (OpenRouter key) | Partial. lite-en ran end to end on 2026-10-25. The GPU tiers are checked by `docker compose config` only. Cloud is measured through the eval harness, not through compose (`DEP-1` to `DEP-3`) |
 | **Platform** | Postgres (documents, jobs, keys, graph), Qdrant (chunks, vectors, BM25, page images) and S3 for originals. `kb-server reindex` rebuilds the index from S3 | Built in Rust. Bun was removed in `v0.2.0` (`DEC-3`); `v0.1.0` is the last Bun release |
 
@@ -115,7 +115,7 @@ Stated plainly, for anyone trying it.
 - Permissions belong to API keys, not people. There are no users, groups or roles. A
   calling app decides who may see what and hands out keys or knowledge-base filters to match.
 - There are no folders. Knowledge bases are flat, and a document may be in several.
-- There are no per-document permissions inside a knowledge base.
+- There is no user or group directory: per-document access lists (`SEC-3`) hold opaque principals that the calling app asserts.
 
 **Ingest**
 - It does not sync from Drive, SharePoint or other sources. The calling app uploads every
