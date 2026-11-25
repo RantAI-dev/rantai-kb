@@ -50,6 +50,7 @@ fn doc(id: &str, kbs: &[&str]) -> DocumentMeta {
         effective_from: None,
         effective_to: None,
         is_latest: true,
+        acl_principals: vec![],
         sha256: None,
         id: DocumentId(id.to_string()),
         title: id.to_string(),

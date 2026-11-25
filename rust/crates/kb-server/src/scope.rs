@@ -12,8 +12,7 @@
 
 use std::sync::Arc;
 
-use kb_ports::{DocumentStore, KnowledgeBaseId, RetrievalIndex, TenantId};
-use kb_store_pg::PgDocumentStore;
+use kb_ports::{KnowledgeBaseId, RetrievalIndex, TenantId};
 use kb_store_qdrant::QdrantIndex;
 
 use crate::cli::CliError;
@@ -80,7 +79,6 @@ pub async fn run(args: &[String]) -> Result<(), CliError> {
     let pg = Config::pg_from_lookup(|key| std::env::var(key).ok())
         .map_err(|e| CliError::Failed(e.to_string()))?;
     let pool = kb_store_pg::connect_pool(&pg).await?;
-    let documents: Arc<dyn DocumentStore> = Arc::new(PgDocumentStore::from_pool(pool.clone()));
     let tenants = match parsed.tenant.as_deref() {
         Some(tenant) => vec![tenant.to_string()],
         None => kb_store_pg::scope::list_tenants(&pool).await?,
@@ -117,15 +115,20 @@ pub async fn run(args: &[String]) -> Result<(), CliError> {
     let mut failed = 0usize;
     for tenant_id in &tenants {
         let tenant = TenantId::new_unchecked(tenant_id.clone());
-        let mut cursor = None;
+        let mut after: Option<String> = None;
         loop {
-            let page = documents
-                .list_page(&tenant, PAGE_SIZE, &[], None, cursor.as_ref())
-                .await?;
-            for doc in &page.documents {
+            let page = kb_store_pg::scope::document_kb_page(
+                &pool,
+                tenant_id,
+                after.as_deref(),
+                PAGE_SIZE.into(),
+            )
+            .await?;
+            let last = page.last().map(|(id, _)| id.clone());
+            for (doc_id, kb) in &page {
                 scanned += 1;
-                let kb_ids: Vec<KnowledgeBaseId> = doc
-                    .knowledge_base_ids
+                let doc_id = kb_ports::DocumentId::new_unchecked(doc_id.clone());
+                let kb_ids: Vec<KnowledgeBaseId> = kb
                     .iter()
                     .map(|id| KnowledgeBaseId::new_unchecked(id.clone()))
                     .collect();
@@ -134,7 +137,7 @@ pub async fn run(args: &[String]) -> Result<(), CliError> {
                     continue;
                 }
                 match index
-                    .set_document_kb_payload(&tenant, &doc.id, &kb_ids)
+                    .set_document_kb_payload(&tenant, &doc_id, &kb_ids)
                     .await
                 {
                     Ok(()) => updated += 1,
@@ -142,24 +145,18 @@ pub async fn run(args: &[String]) -> Result<(), CliError> {
                         failed += 1;
                         tracing::warn!(
                             tenant = %tenant_id,
-                            document = %doc.id.as_str(),
+                            document = %doc_id.as_str(),
                             error = %err.to_string(),
                             "backfill payload write failed"
                         );
                     }
                 }
             }
-            match page.next_cursor {
-                Some(token) => {
-                    cursor = kb_core::pagination::decode(&token);
-                    if cursor.is_none() {
-                        return Err(CliError::Failed(format!(
-                            "tenant {tenant_id}: malformed pagination cursor"
-                        )));
-                    }
-                }
-                None => break,
+            // Keyset paging by id: a short page is the last one.
+            if page.len() < PAGE_SIZE as usize {
+                break;
             }
+            after = last;
         }
         println!("  {tenant_id}: scanned so far {scanned}");
     }

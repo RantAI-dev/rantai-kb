@@ -25,6 +25,7 @@ fn document() -> kb_ports::DocumentMeta {
         effective_from: None,
         effective_to: None,
         is_latest: true,
+        acl_principals: vec![],
         sha256: None,
         id: DocumentId(DOC.to_string()),
         title: DOC.to_string(),
