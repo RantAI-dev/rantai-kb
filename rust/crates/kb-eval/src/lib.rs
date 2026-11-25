@@ -30,6 +30,7 @@ pub mod pdf;
 pub mod report;
 pub mod runner;
 pub mod stages;
+pub mod stale;
 
 pub use bench::{BenchConfig, BenchReport, run_cli as run_bench};
 pub use calibrate_confidence::{

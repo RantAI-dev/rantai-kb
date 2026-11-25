@@ -41,6 +41,12 @@ utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
 # `kb-server setup --check` probes model endpoints and stores directly.
 reqwest = { workspace = true }
+sqlx = { workspace = true }
+chrono = { workspace = true }
+qdrant-client = { version = "1.19.0", default-features = false, features = [
+    "serde",
+    "generate-snippets",
+] }
 
 [dev-dependencies]
 kb-ports = { path = "../kb-ports" }

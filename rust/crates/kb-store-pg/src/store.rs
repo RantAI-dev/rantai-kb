@@ -7,15 +7,16 @@ use async_trait::async_trait;
 use kb_ports::{
     AuthContext, CategoryRecord, CreateCategory, CreateKnowledgeBase, DocumentDownloadMeta,
     DocumentFilter, DocumentId, DocumentMeta, DocumentPage, DocumentScope, DocumentStore,
-    KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary, NewDocument, PatchCategory,
-    PatchDocument, PatchKnowledgeBase, PortError, ScopeRequest, TenantId, adapter::ScopeToken,
-    predicate_spec_for, scope_id_limit_from_env,
+    KnowledgeBaseId, KnowledgeBaseRecord, KnowledgeBaseSummary, NewDocument, OutboxOp,
+    PatchCategory, PatchDocument, PatchKnowledgeBase, PortError, ScopeRequest, TenantId,
+    adapter::ScopeToken, predicate_spec_for, scope_id_limit_from_env,
 };
 use sqlx::postgres::{PgPoolOptions, PgRow};
 use sqlx::{PgPool, Row};
 
 use crate::auth::resolve_api_key_query;
 use crate::documents::row_to_doc_meta;
+use crate::outbox::insert_outbox;
 use crate::queries::{
     COUNT_DOCS_TENANT_ONLY, COUNT_DOCS_WITH_KB, DELETE_CATEGORY, DELETE_DOCUMENT_GROUPS,
     DELETE_KB_GROUPS, DELETE_KNOWLEDGE_BASE, INSERT_CATEGORY, INSERT_DOCUMENT,
@@ -23,10 +24,10 @@ use crate::queries::{
     SELECT_ALIVE_BY_IDS, SELECT_BY_ID, SELECT_BY_ID_WITH_DELETED, SELECT_CATEGORIES,
     SELECT_CATEGORY_BY_ID_TENANT, SELECT_DOCS_TENANT_ONLY, SELECT_DOCS_WITH_KB,
     SELECT_DUPLICATE_BY_SHA256, SELECT_EXISTS_FOR_PATCH, SELECT_FOR_DOWNLOAD,
-    SELECT_KB_BY_ID_TENANT, SELECT_KNOWLEDGE_BASES, SELECT_LATEST_BY_DOC_KEY, SELECT_OUTLINES,
-    SELECT_OWNED_KB_IDS, SELECT_VISIBLE_BY_ID, SET_DOCUMENT_STATUS, UPDATE_CATEGORY,
-    UPDATE_DOCUMENT_PATCH, UPDATE_DOCUMENT_VERSION_PATCH, UPDATE_EXTRACTED_CONTENT,
-    UPDATE_KNOWLEDGE_BASE, UPDATE_METADATA,
+    SELECT_KB_BY_ID_TENANT, SELECT_KB_MEMBER_DOCUMENTS, SELECT_KNOWLEDGE_BASES,
+    SELECT_LATEST_BY_DOC_KEY, SELECT_OUTLINES, SELECT_OWNED_KB_IDS, SELECT_VISIBLE_BY_ID,
+    SET_DOCUMENT_STATUS, UPDATE_CATEGORY, UPDATE_DOCUMENT_PATCH, UPDATE_DOCUMENT_VERSION_PATCH,
+    UPDATE_EXTRACTED_CONTENT, UPDATE_KNOWLEDGE_BASE, UPDATE_METADATA,
 };
 
 /// Open a connection pool from settings. A free function rather than a
@@ -506,16 +507,30 @@ impl DocumentStore for PgDocumentStore {
     }
 
     async fn soft_delete(&self, tenant: &TenantId, id: &DocumentId) -> Result<bool, PortError> {
+        // The repair row is written on this same transaction: a delete that
+        // rolls back must not leave a worker deleting live points.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg tx begin (soft delete): {e}")))?;
         let res = sqlx::query(
             r#"UPDATE "Document" SET "deletedAt" = NOW()
                WHERE id = $1 AND "tenantId" = $2 AND "deletedAt" IS NULL"#,
         )
         .bind(id.0.as_str())
         .bind(tenant.0.as_str())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| PortError::Unavailable(format!("pg delete: {e}")))?;
-        Ok(res.rows_affected() > 0)
+        let deleted = res.rows_affected() > 0;
+        if deleted {
+            insert_outbox(&mut tx, tenant, id, OutboxOp::Deleted).await?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg tx commit (soft delete): {e}")))?;
+        Ok(deleted)
     }
 
     async fn hard_delete(
@@ -523,24 +538,36 @@ impl DocumentStore for PgDocumentStore {
         tenant: &TenantId,
         id: &DocumentId,
     ) -> Result<Option<Option<String>>, PortError> {
-        // DocumentGroup rows cascade on delete (see the init migration).
+        // DocumentGroup rows cascade on delete (see the init migration). The
+        // outbox row is written before the commit, so a failed delete cannot
+        // order the index to drop a document that is still live.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg tx begin (hard delete): {e}")))?;
         let row = sqlx::query(
             r#"DELETE FROM "Document" WHERE id = $1 AND "tenantId" = $2 RETURNING "s3Key""#,
         )
         .bind(id.0.as_str())
         .bind(tenant.0.as_str())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|e| PortError::Unavailable(format!("pg delete: {e}")))?;
-        match row {
-            None => Ok(None),
+        let result = match row {
+            None => None,
             Some(r) => {
                 let s3_key: Option<String> = r
                     .try_get("s3Key")
                     .map_err(|e| PortError::Unavailable(format!("pg delete: {e}")))?;
-                Ok(Some(s3_key))
+                insert_outbox(&mut tx, tenant, id, OutboxOp::Deleted).await?;
+                Some(s3_key)
             }
-        }
+        };
+        tx.commit()
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg tx commit (hard delete): {e}")))?;
+        Ok(result)
     }
 
     async fn find_alive_meta_by_ids(
@@ -906,6 +933,10 @@ impl DocumentStore for PgDocumentStore {
                 .await
                 .map_err(|e| PortError::Unavailable(format!("pg insert document group: {e}")))?;
         }
+        // Chunks are indexed asynchronously by the ingest worker. Writing the
+        // repair row here gives the reconciler the document's membership even
+        // if the worker reads the group links before they commit.
+        insert_outbox(&mut tx, &doc.tenant_id, &doc.id, OutboxOp::KbChanged).await?;
 
         tx.commit()
             .await
@@ -1003,6 +1034,9 @@ impl DocumentStore for PgDocumentStore {
                         PortError::Unavailable(format!("pg insert document group: {e}"))
                     })?;
             }
+            // One row per PATCH that changes membership, whether the new list
+            // is empty, smaller or bigger. The reconciler re-reads the truth.
+            insert_outbox(&mut tx, tenant, id, OutboxOp::KbChanged).await?;
         }
 
         tx.commit()
@@ -1129,17 +1163,36 @@ impl DocumentStore for PgDocumentStore {
         }
 
         // Links and base together: Document has no relation to KnowledgeBase,
-        // so nothing reachable from here can delete a document.
+        // so nothing reachable from here can delete a document. Every document
+        // that loses this KB still has live chunks whose payload must change,
+        // so each gets one repair row inside this transaction.
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| PortError::Unavailable(format!("pg tx begin: {e}")))?;
+        let members = sqlx::query(SELECT_KB_MEMBER_DOCUMENTS)
+            .bind(id.0.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| PortError::Unavailable(format!("pg select kb members: {e}")))?;
         sqlx::query(DELETE_KB_GROUPS)
             .bind(id.0.as_str())
             .execute(&mut *tx)
             .await
             .map_err(|e| PortError::Unavailable(format!("pg delete kb groups: {e}")))?;
+        for member in &members {
+            let document: String = member
+                .try_get("documentId")
+                .map_err(|e| PortError::Unavailable(format!("pg kb member id: {e}")))?;
+            insert_outbox(
+                &mut tx,
+                tenant,
+                &DocumentId::new_unchecked(document),
+                OutboxOp::KbChanged,
+            )
+            .await?;
+        }
         sqlx::query(DELETE_KNOWLEDGE_BASE)
             .bind(id.0.as_str())
             .bind(tenant.as_str())

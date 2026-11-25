@@ -34,6 +34,7 @@ vectors, BM25, page images — the only chunk store), and S3-compatible blobs. D
 | Rust tests | `cargo test --manifest-path rust/Cargo.toml --workspace` (needs libpdfium: `./rust/scripts/fetch-pdfium.sh ./rust/.vendor/pdfium`) |
 | Rust boundary | `cargo run --manifest-path rust/Cargo.toml -p kb-server -- check-boundary` |
 | Live checks | `rust/scripts/smoke.sh` · `rust/scripts/ci-eval-gate.sh` |
+| Postgres contracts | `docker run -d --rm --name ci-pg -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=kb -p 55440:5432 postgres:16-alpine` then, with `KB_PG_{VERSIONS,OUTBOX,ACL,GRAPH}_CONTRACT=1` and the four `*_URL`s on port 55440 (one database each: `kb_versions`, `kb_outbox`, `kb_acl`, `kb_graph`; migrate `kb_graph` from `prisma/migrations/` first), `cargo test --manifest-path rust/Cargo.toml -p kb-store-pg --features integration -- --test-threads=1`. `docker stop ci-pg` when done. |
 
 ## Working rules
 

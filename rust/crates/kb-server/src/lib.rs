@@ -18,6 +18,8 @@ pub mod openapi;
 pub mod quant_bench;
 pub mod routes;
 pub mod runtime;
+pub mod scope;
+pub mod scope_bench;
 pub mod setup;
 pub mod stack;
 pub mod state;
@@ -42,7 +44,7 @@ use axum::Router;
 use axum::routing::any;
 use tracing_subscriber::EnvFilter;
 
-use kb_engine::CancelToken;
+use kb_engine::{CancelToken, OutboxReconciler};
 
 /// Build the Axum router for the given state.
 ///
@@ -91,6 +93,17 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         .await
         .context("could not bind")?;
 
+    // The scope outbox is independent of the ingest worker: a document moves
+    // or is deleted through the API even on an API-only replica, so the payload
+    // repair must run whenever a database is configured.
+    let reconciler = state.outbox.as_ref().map(|outbox| {
+        Arc::new(OutboxReconciler::new(
+            outbox.clone(),
+            state.documents.clone(),
+            state.index.clone(),
+        ))
+    });
+
     let (worker, maintenance) = if config.worker.enabled {
         let worker = state.build_worker(&config, config.worker.ingest_settings())?;
         let maintenance = runtime::Maintenance {
@@ -111,6 +124,7 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         listener,
         worker,
         maintenance,
+        reconciler,
         CancelToken::new(),
     )
     .await

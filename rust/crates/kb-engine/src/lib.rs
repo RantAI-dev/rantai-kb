@@ -28,6 +28,7 @@ pub mod fakes;
 pub mod global_arm;
 pub mod graph_arm;
 pub mod ingest;
+pub mod outbox;
 pub mod page_arm;
 pub mod processor;
 pub mod retrieval;
@@ -72,6 +73,8 @@ mod ingest_tests;
 #[cfg(test)]
 mod max_per_document_tests;
 #[cfg(test)]
+mod outbox_tests;
+#[cfg(test)]
 mod page_arm_tests;
 #[cfg(test)]
 mod processor_tests;
@@ -90,6 +93,7 @@ pub use ingest::{
     CancelToken, DEFAULT_JOB_WORKERS, INGEST_CHUNKING, IngestSettings, IngestWorker, JobOutcome,
     reap_failed_job_uploads,
 };
+pub use outbox::{OutboxReconciler, OutboxReport};
 pub use page_arm::{
     MergeOutcome, PageArm, PageArmConfig, PageCaption, PageCaptionConfig, PageIngest, PageOutcome,
     PageRerankConfig, PageRerankContext, PageTextSemantics, PageVision, PageVisionContext,

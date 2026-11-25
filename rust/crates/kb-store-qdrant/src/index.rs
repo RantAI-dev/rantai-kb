@@ -7,20 +7,22 @@ use std::time::Instant;
 use async_trait::async_trait;
 use kb_ports::Fusion as PortFusion;
 use kb_ports::{
-    ArmRanks, ArmScores, Candidate, ChunkId, ChunkMeta, DocumentId, DocumentScope, HybridQuery,
-    IndexCapabilities, IndexUnit, KeywordSemantics, PortError, RetrievalIndex, TenantId,
-    sort_candidates,
+    ArmRanks, ArmScores, Candidate, ChunkId, ChunkMeta, ChunkRange, DocumentId, DocumentScope,
+    HybridQuery, IndexCapabilities, IndexUnit, KeywordSemantics, KnowledgeBaseId, PortError,
+    RetrievalIndex, TenantId, sort_candidates,
 };
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
-    CountPointsBuilder, DeletePointsBuilder, NamedVectors, PointId, PointStruct,
-    PrefetchQueryBuilder, QuantizationSearchParams, Query, QueryBatchPointsBuilder,
-    QueryPointsBuilder, ScrollPointsBuilder, SearchParams, UpsertPointsBuilder, Vector,
-    VectorInput,
+    CountPointsBuilder, DeletePointsBuilder, Direction, NamedVectors, OrderBy, PointId,
+    PointStruct, PrefetchQueryBuilder, QuantizationSearchParams, Query, QueryBatchPointsBuilder,
+    QueryPointsBuilder, ScrollPointsBuilder, SearchParams, SetPayloadPointsBuilder,
+    UpsertPointsBuilder, Vector, VectorInput,
 };
 
 use crate::ids::point_id;
-use crate::payload::{candidate_from, chunk_meta_from_payload, unit_payload};
+use crate::payload::{
+    KEY_CHUNK_INDEX, candidate_from, chunk_meta_from_payload, chunk_meta_range_filter, unit_payload,
+};
 use crate::settings::{DENSE_VECTOR, QdrantSettings, SPARSE_VECTOR, map};
 
 /// Points below which the dense arm scans exactly instead of walking the HNSW
@@ -355,6 +357,28 @@ impl RetrievalIndex for QdrantIndex {
             .map_err(map)?;
         *self.point_count.lock().await = None;
         Ok(count)
+    }
+
+    async fn set_document_kb_payload(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+        kb_ids: &[KnowledgeBaseId],
+    ) -> Result<(), PortError> {
+        // The tenant half is mandatory: a caller that only knows a document id
+        // must never be able to rewrite another tenant's payload.
+        let filter = crate::payload::one_document_filter(tenant, document_id);
+        let values: Vec<String> = kb_ids.iter().map(|kb| kb.0.clone()).collect();
+        let payload = crate::payload::knowledge_base_payload(&values);
+        self.client
+            .set_payload(
+                SetPayloadPointsBuilder::new(&self.collection, payload)
+                    .points_selector(filter)
+                    .wait(true),
+            )
+            .await
+            .map_err(map)?;
+        Ok(())
     }
 
     async fn search(
@@ -939,6 +963,46 @@ impl RetrievalIndex for QdrantIndex {
                 None => break,
             }
         }
+        out.sort_by_key(|meta| meta.chunk_index);
+        Ok(out)
+    }
+
+    async fn list_chunk_meta_range(
+        &self,
+        scope: &DocumentScope,
+        document: &DocumentId,
+        range: ChunkRange,
+        limit: usize,
+    ) -> Result<Vec<ChunkMeta>, PortError> {
+        // The same fence as `list_chunk_meta`: never read a document the caller
+        // cannot see, even when the caller forgot to check first.
+        if !scope.allows_document(document) || limit == 0 {
+            return Ok(Vec::new());
+        }
+        // A filtered scroll over the integer `page` / `chunkIndex` indexes
+        // (ING-13), ordered by chunk index and with no vectors. The route asks
+        // for 64 chunks at a time and stops at its character budget, so this
+        // never walks a 180-page document the way `list_chunk_meta` does.
+        let filter = chunk_meta_range_filter(scope, document, range);
+        let window = u32::try_from(limit)
+            .unwrap_or(u32::MAX)
+            .min(DOCUMENT_SCROLL_WINDOW);
+        let builder = ScrollPointsBuilder::new(&self.collection)
+            .filter(filter)
+            .limit(window)
+            .with_payload(true)
+            .with_vectors(false)
+            .order_by(OrderBy {
+                key: KEY_CHUNK_INDEX.to_string(),
+                direction: Some(Direction::Asc as i32),
+                start_from: None,
+            });
+        let response = self.client.scroll(builder).await.map_err(map)?;
+        let mut out: Vec<ChunkMeta> = response
+            .result
+            .into_iter()
+            .filter_map(|point| chunk_meta_from_payload(&point.payload))
+            .collect();
         out.sort_by_key(|meta| meta.chunk_index);
         Ok(out)
     }

@@ -16,8 +16,10 @@ mod graph;
 pub(crate) mod graph_queries;
 mod jobs;
 pub mod migrate;
+pub mod outbox;
 mod queries;
 pub mod reindex;
+pub mod scope;
 mod store;
 
 pub use api_keys::{MintedApiKey, NewApiKey, generate_api_key, insert_api_key};
@@ -27,6 +29,7 @@ pub use documents::row_to_doc_meta;
 pub use graph::PgGraphStore;
 pub use jobs::PgJobStore;
 pub use migrate::{Migration, MigrationReport};
+pub use outbox::{claim_batch_on, insert_outbox};
 pub use reindex::{ReindexDocument, ReindexTenantCount, plan};
 pub use store::{PgDocumentStore, PgSettings, connect_pool};
 

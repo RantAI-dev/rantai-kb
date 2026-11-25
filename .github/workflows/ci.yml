@@ -51,6 +51,57 @@ jobs:
       - name: Run workspace tests
         run: cargo test --manifest-path rust/Cargo.toml --workspace
 
+  pg-contracts:
+    name: Postgres contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Each contract gets its own database. The outbox contract's claim query is
+    # tenant-agnostic, so leftover ScopeOutbox rows from another contract would be
+    # claimed and break its "exactly one row" assertion. Versions, outbox and ACL
+    # migrate their own database from prisma/migrations; graph_contract only
+    # connects, so its database is migrated by the step below.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pw
+          POSTGRES_DB: kb
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d kb"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      KB_PG_VERSIONS_CONTRACT: "1"
+      KB_PG_VERSIONS_URL: postgres://postgres:pw@localhost:5432/kb_versions
+      KB_PG_OUTBOX_CONTRACT: "1"
+      KB_PG_OUTBOX_URL: postgres://postgres:pw@localhost:5432/kb_outbox
+      KB_PG_ACL_CONTRACT: "1"
+      KB_PG_ACL_URL: postgres://postgres:pw@localhost:5432/kb_acl
+      KB_PG_GRAPH_CONTRACT: "1"
+      KB_PG_GRAPH_URL: postgres://postgres:pw@localhost:5432/kb_graph
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # graph_contract never calls migrate::apply, so it cannot migrate its own
+      # database. Apply the same prisma/migrations SQL to its database here.
+      - name: Create contract databases and migrate the graph database
+        run: |
+          for db in kb_versions kb_outbox kb_acl kb_graph; do
+            psql "postgres://postgres:pw@localhost:5432/postgres" -v ON_ERROR_STOP=1 -c "CREATE DATABASE $db"
+          done
+          for f in prisma/migrations/*/migration.sql; do
+            psql "postgres://postgres:pw@localhost:5432/kb_graph" -v ON_ERROR_STOP=1 -f "$f"
+          done
+      - name: Clippy (integration)
+        run: cargo clippy --manifest-path rust/Cargo.toml -p kb-store-pg --features integration --all-targets -- -D warnings
+      - name: Postgres contract tests
+        run: cargo test --manifest-path rust/Cargo.toml -p kb-store-pg --features integration -- --test-threads=1
+
   rust-docker:
     name: Rust Docker build (linux/${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}

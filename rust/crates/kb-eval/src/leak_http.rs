@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -55,6 +55,11 @@ pub struct LeakConfig {
     /// an asset key, so the figure arm and the asset route have something to
     /// find without a layout extractor or a vision model.
     pub docx_corpus: bool,
+    /// SEC-2c: after seeding, make Postgres disagree with Qdrant on purpose
+    /// (KB move, soft delete, ACL) and probe every arm and surface.
+    pub stale_payload: bool,
+    /// Postgres connection, required by `--stale-payload` to inject the drift.
+    pub database_url: Option<String>,
 }
 
 impl LeakConfig {
@@ -73,6 +78,8 @@ impl LeakConfig {
             strict: false,
             pdf_corpus: false,
             docx_corpus: false,
+            stale_payload: false,
+            database_url: None,
         }
     }
 }
@@ -86,6 +93,8 @@ pub enum LeakError {
     Io(#[from] std::io::Error),
     #[error("seed: {0}")]
     Seed(String),
+    #[error("pg: {0}")]
+    Pg(#[from] sqlx::Error),
 }
 
 /// What a run produced.
@@ -923,7 +932,11 @@ pub async fn probe(
         let Some(scope) = seed_plan.scope(probe.scope) else {
             continue;
         };
-        let Some(key) = keys.get(&scope.tenant) else {
+        let key = probe
+            .key_override
+            .as_deref()
+            .or_else(|| keys.get(&scope.tenant).map(String::as_str));
+        let Some(key) = key else {
             matrix.notes.push(format!(
                 "no key for tenant {}: {} probes in `{}` were skipped",
                 scope.tenant,
@@ -942,12 +955,29 @@ pub async fn probe(
             config.max_chunks,
         )
         .await;
+        // The stale-payload matrix names its targets explicitly: a moved,
+        // deleted or ACL'd document is a leak wherever it appears, even when
+        // the scope's coarse `allowed` set would have permitted it.
+        let mut leaked = outcome.leaked;
+        for id in probe.forbidden.iter().flatten() {
+            if outcome.answer.documents.iter().any(|found| found == id)
+                && !leaked.iter().any(|found| found == id)
+            {
+                leaked.push(id.clone());
+            }
+        }
+        if probe.kind == ProbeKind::Mcp
+            && let Some(note) = &outcome.answer.note
+            && !matrix.notes.contains(note)
+        {
+            matrix.notes.push(note.clone());
+        }
         matrix.record(Observation {
             arm: probe.arm,
             scope: scope.kind,
             positive: probe.positive,
             hit: outcome.hit,
-            leaked: outcome.leaked,
+            leaked,
             errored: outcome.answer.is_error(),
             refused: outcome.answer.refused,
             degrades: outcome.answer.degrades,
@@ -1045,6 +1075,60 @@ async fn run_probe(
                     &by_tenant,
                 ),
             }
+        }
+        ProbeKind::DocumentContent | ProbeKind::DocumentStructure => {
+            let suffix = match probe.kind {
+                ProbeKind::DocumentContent => "content",
+                _ => "structure",
+            };
+            let path = format!("/v1/documents/{}/{suffix}", probe.query);
+            let response = client
+                .get(endpoint(&config.base_url, &path))
+                .header(reqwest::header::AUTHORIZATION, bearer(key))
+                .send()
+                .await;
+            match response {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let body: Value = response.json().await.unwrap_or(Value::Null);
+                    // Named by the route itself. A 404 for a document outside
+                    // the caller's visibility is a refusal, not an error.
+                    let served = status < 400;
+                    let documents = served
+                        .then(|| {
+                            body.get("documentId")
+                                .and_then(Value::as_str)
+                                .unwrap_or(&probe.query)
+                                .to_string()
+                        })
+                        .into_iter()
+                        .collect();
+                    finish(
+                        probe,
+                        scope,
+                        Answer {
+                            documents,
+                            http_status: status,
+                            error: (status >= 500).then(|| body.to_string()),
+                            refused: (400..500).contains(&status),
+                            ..Answer::default()
+                        },
+                        max_chunks,
+                        &by_tenant,
+                    )
+                }
+                Err(err) => finish(
+                    probe,
+                    scope,
+                    Answer::failed(0, err.to_string()),
+                    max_chunks,
+                    &by_tenant,
+                ),
+            }
+        }
+        ProbeKind::Mcp => {
+            let outcome = mcp_probe(client, config, key, probe).await;
+            finish(probe, scope, outcome, max_chunks, &by_tenant)
         }
     }
 }
@@ -1265,6 +1349,94 @@ async fn asset_probe(
     }
 }
 
+/// One JSON-RPC call to the thin MCP endpoint.
+async fn rpc_call(
+    client: &reqwest::Client,
+    url: &str,
+    key: &str,
+    tool: &str,
+    arguments: Value,
+) -> Result<(u16, Value), LeakError> {
+    let response = client
+        .post(url)
+        .header(reqwest::header::AUTHORIZATION, bearer(key))
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": arguments},
+        }))
+        .send()
+        .await?;
+    let status = response.status().as_u16();
+    let body: Value = response.json().await.unwrap_or(Value::Null);
+    Ok((status, body))
+}
+
+/// MCP row: `kb_search` with the canary and `kb_read` for the canary's document.
+///
+/// Both delegate to the very handlers the `/v1` routes use, so a scope hole
+/// here is a hole in the shared visibility logic, not in a second copy of it.
+async fn mcp_probe(
+    client: &reqwest::Client,
+    config: &LeakConfig,
+    key: &str,
+    probe: &crate::leak::PlannedProbe,
+) -> Answer {
+    let url = endpoint(&config.base_url, "/mcp");
+    let (status, body) = match rpc_call(
+        client,
+        &url,
+        key,
+        "kb_search",
+        json!({"query": probe.query, "maxChunks": config.max_chunks}),
+    )
+    .await
+    {
+        Ok(answer) => answer,
+        Err(err) => return Answer::failed(0, err.to_string()),
+    };
+    if let Some(reason) = crate::stale::mcp_unavailable(status, &body) {
+        return Answer {
+            http_status: status,
+            note: Some(reason),
+            error: (status >= 500).then(|| body.to_string()),
+            refused: (400..500).contains(&status),
+            ..Answer::default()
+        };
+    }
+    let result = body.get("result").unwrap_or(&Value::Null);
+    let structured = result.get("structuredContent").unwrap_or(&Value::Null);
+    // The neighbour arm reads every chunk, which is the widest containment
+    // check the MCP search result allows.
+    let mut documents = documents_for_arm(structured, Arm::Neighbour);
+    if let Ok((read_status, read_body)) = rpc_call(
+        client,
+        &url,
+        key,
+        "kb_read",
+        json!({"documentId": probe.canary_owner}),
+    )
+    .await
+    {
+        let read_result = read_body.get("result").unwrap_or(&Value::Null);
+        let read_structured = read_result.get("structuredContent").unwrap_or(&Value::Null);
+        if (200..400).contains(&read_status)
+            && read_result.get("isError") != Some(&Value::Bool(true))
+        {
+            if let Some(id) = read_structured.get("documentId").and_then(Value::as_str) {
+                push_document(&mut documents, id);
+            }
+        }
+    }
+    Answer {
+        documents,
+        http_status: status,
+        error: (status >= 500).then(|| body.to_string()),
+        ..Answer::default()
+    }
+}
+
 fn finish(
     probe: &crate::leak::PlannedProbe,
     scope: &Scope,
@@ -1276,7 +1448,12 @@ fn finish(
         // Search arms answer inside the search scope; a document-addressed
         // route answers for the whole tenant.
         ProbeKind::Search => &scope.allowed,
-        ProbeKind::SearchOrAsset | ProbeKind::DocumentIntelligence | ProbeKind::Tables => by_tenant,
+        ProbeKind::SearchOrAsset
+        | ProbeKind::DocumentIntelligence
+        | ProbeKind::Tables
+        | ProbeKind::DocumentContent
+        | ProbeKind::DocumentStructure
+        | ProbeKind::Mcp => by_tenant,
     };
     let leaked = leaks_in(&answer, allowed);
     let hit = positive_hit(&answer, &probe.canary_owner);
@@ -1297,6 +1474,21 @@ fn finish(
                     "path": format!("/v1/tables?documentId={}", probe.query),
                     "then": ["GET /v1/tables/{id}", "POST /v1/tables/{id}/query"],
                 }),
+                ProbeKind::DocumentContent => json!({
+                    "method": "GET",
+                    "path": format!("/v1/documents/{}/content", probe.query),
+                }),
+                ProbeKind::DocumentStructure => json!({
+                    "method": "GET",
+                    "path": format!("/v1/documents/{}/structure", probe.query),
+                }),
+                ProbeKind::Mcp => json!({
+                    "method": "POST",
+                    "path": "/mcp",
+                    "tools": ["kb_search", "kb_read"],
+                    "query": probe.query,
+                    "documentId": probe.canary_owner,
+                }),
                 _ => search_body(scope, &probe.query, max_chunks),
             },
             foreign_document_ids: leaked.clone(),
@@ -1310,6 +1502,135 @@ fn finish(
         leaked,
         example,
     }
+}
+
+// ─── stale payloads (SEC-2c) ────────────────────────────────────────────────
+
+/// Make Postgres disagree with Qdrant on purpose, then plan the targeted
+/// probes. Nothing here writes Qdrant: the payloads stay stale by design.
+///
+/// The ACL case is also the evidence that the Ids path is live: a tenant with
+/// an ACL'd document forces `predicate_spec_for` to return `None`, whatever
+/// `KB_SCOPE_ID_LIMIT` says.
+async fn inject_stale(
+    documents: &[SeedDocument],
+    config: &LeakConfig,
+) -> Result<(SeedPlan, Vec<String>), LeakError> {
+    let url = config.database_url.as_deref().ok_or_else(|| {
+        LeakError::Seed("--stale-payload needs --database-url to inject drift".to_string())
+    })?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(url)
+        .await?;
+    let targets = crate::stale::pick_targets(documents).ok_or_else(|| {
+        LeakError::Seed("the seeded corpus has no two tenants to use for stale targets".to_string())
+    })?;
+    let tenant_of = |id: &str| {
+        documents
+            .iter()
+            .find(|d| d.id == id)
+            .map_or_else(String::new, |d| d.tenant.clone())
+    };
+
+    // (a) D leaves KB-1 in Postgres only; Qdrant still says KB-1.
+    sqlx::query(crate::stale::move_kb_sql())
+        .bind(&targets.moved)
+        .bind(&targets.moved_to_kb)
+        .bind(&targets.moved_from_kb)
+        .execute(&pool)
+        .await?;
+    // (b) E is soft-deleted in Postgres only.
+    sqlx::query(crate::stale::soft_delete_sql())
+        .bind(&targets.deleted)
+        .execute(&pool)
+        .await?;
+    // (c) F gets an ACL in Postgres only.
+    sqlx::query(crate::stale::set_acl_sql())
+        .bind(&targets.acl)
+        .bind(std::slice::from_ref(&targets.principal))
+        .execute(&pool)
+        .await?;
+    // No outbox row may heal any of the three before the probes run.
+    for id in [&targets.moved, &targets.deleted, &targets.acl] {
+        sqlx::query(crate::stale::delete_outbox_sql())
+            .bind(id)
+            .execute(&pool)
+            .await?;
+    }
+
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .to_string();
+    let pool_ref = &pool;
+    let mint = |tenant: &str, label: &str, scopes: &[&str], kbs: &[String]| {
+        let plaintext = crate::stale::mint_key(tenant, &format!("{label}-{nonce}"));
+        let id = format!("stale-key-{label}-{nonce}");
+        let hash = crate::stale::hash_key(&plaintext);
+        let key_id = id.clone();
+        let tenant = tenant.to_string();
+        let name = label.to_string();
+        let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
+        let kbs = kbs.to_vec();
+        async move {
+            sqlx::query(crate::stale::insert_key_sql())
+                .bind(&key_id)
+                .bind(&tenant)
+                .bind(&name)
+                .bind(&hash)
+                .bind(&scopes)
+                .bind(&kbs)
+                .execute(pool_ref)
+                .await?;
+            Ok::<String, LeakError>(plaintext)
+        }
+    };
+    let empty_kbs: Vec<String> = Vec::new();
+    let kb_limited = mint(
+        &tenant_of(&targets.moved),
+        "kb-limited",
+        &["kb:read"],
+        std::slice::from_ref(&targets.moved_from_kb),
+    )
+    .await?;
+    let plain_first = mint(
+        &tenant_of(&targets.deleted),
+        "plain-a",
+        &["kb:read", "kb:assert-principals"],
+        &empty_kbs,
+    )
+    .await?;
+    let plain_second = mint(
+        &tenant_of(&targets.acl),
+        "plain-b",
+        &["kb:read", "kb:assert-principals"],
+        &empty_kbs,
+    )
+    .await?;
+    let keys = crate::stale::StaleKeys {
+        kb_limited,
+        plain_first,
+        plain_second,
+    };
+    let plan =
+        crate::stale::build_stale_plan(&crate::leak::plan(documents.to_vec()), &targets, &keys);
+    let notes = vec![
+        format!(
+            "stale drift injected in Postgres only: D={} moved {} -> {}, E={} soft-deleted, F={} ACL'd with {}",
+            targets.moved,
+            targets.moved_from_kb,
+            targets.moved_to_kb,
+            targets.deleted,
+            targets.acl,
+            targets.principal
+        ),
+        "no Qdrant payload was changed and every ScopeOutbox row for D/E/F was deleted".to_string(),
+        "F's tenant has an ACL'd document, so predicate mode is disabled there: its probes exercise the Ids path (KB_SCOPE_ID_LIMIT is ignored)"
+            .to_string(),
+    ];
+    Ok((plan, notes))
 }
 
 // ─── the run ─────────────────────────────────────────────────────────────────
@@ -1334,7 +1655,12 @@ pub async fn run(config: LeakConfig) -> Result<LeakRun, LeakError> {
     eprintln!("leak: seeding the matrix corpus…");
     let (documents, keys, seed_notes) = seed(&client, &config).await?;
     matrix.notes.extend(seed_notes);
-    let plan = plan(documents);
+    let (plan, stale_notes) = if config.stale_payload {
+        inject_stale(&documents, &config).await?
+    } else {
+        (plan(documents.clone()), Vec::new())
+    };
+    matrix.notes.extend(stale_notes);
     if plan.documents.is_empty() {
         return Err(LeakError::Seed("nothing was seeded".to_string()));
     }

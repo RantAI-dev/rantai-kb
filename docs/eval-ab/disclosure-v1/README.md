@@ -142,3 +142,69 @@ One question's raw line from `report.md`:
 ```
 
 No paid call was made. The MISS is reported, not hidden.
+
+## EVAL-9
+
+**Status: code done; live re-run pending. No new result is claimed here.** The 2026-11-25
+numbers above are the baseline.
+
+### What changed in the gate
+
+`answer_page_coverage` is now the **primary** metric: the mean, with a bootstrap CI, of the
+per-question `answer_page_hit` (1 when at least one gold page's text was fully read, else 0).
+The primary target is **≥ 0.80 at ≤ 1.5× gold chars**. Two diagnostics were added:
+
+- `single_gold_coverage` — the old all-pages coverage restricted to questions with exactly one
+  gold page, with its own CI.
+- `best_gold_rank` — the 1-based rank of the first search hit whose (document, page) is a gold
+  page, `null` if no gold page is in the top-k. `results.json` also carries its distribution
+  (count per rank, number of questions with/without a gold hit, mean rank).
+
+`per_question.jsonl` now carries `answer_page_hit`, `best_gold_rank`, `hits` (rank, document id,
+page and goldness for every hit) and `pages_read` (document, selector, chunk range, page range
+and characters kept for every budgeted read). That split is what makes the diagnosis possible:
+a low `best_gold_rank` with a high rank value means search ranked the gold page low; a gold hit
+at rank 1 with `answer_page_hit = 0` means the reader spent its budget on the wrong page.
+
+`coverage` (all gold pages) is still computed and printed in `report.md` with its PASS/MISS, but
+it is **secondary** now; the old 0.90 target is kept only for continuity with EVAL-7.
+
+### Why the 0.90 all-pages gate was mis-specified
+
+The reviewer's analysis of the 2026-11-25 per-question data:
+
+- ViDoRe HR has on average **5.4 gold pages per question** (median 3, max 30), spread over
+  documents of roughly **180 pages**.
+- At least one gold page was fully read in **52.2%** of questions.
+- Only **14%** of the **71 single-gold-page questions** were covered.
+
+Demanding that the reader fetch *every* gold page in one 1.5× budget mostly measures how many
+gold pages a question happens to have, not whether the API can expose the page that answers it.
+On this corpus the floor imposed by question shape is far below 0.90, so the gate could never
+pass even with a perfect rank-1 answer. The answer-page gate asks the question the calling agent
+actually asks: did it get one complete answer page, under budget?
+
+### Exact re-run command
+
+Build the new release binary and run the harness against the same stack and ingest map. Run this
+on the GPU box after bringing up the HR stack (see the 2026-11-25 setup above); nothing in this
+section is a measured result.
+
+```sh
+export CARGO_TARGET_DIR=/home/shiro/kb-target-eval9
+export CARGO_BUILD_JOBS=2
+cargo build --release --manifest-path rust/Cargo.toml -p kb-server
+
+source ~/v09m/stack-env-hr.sh
+"$CARGO_TARGET_DIR/release/kb-server" eval disclosure \
+  --base-url http://127.0.0.1:28081 --key "$KEY" \
+  --dataset "$PWD/rust/crates/kb-eval/datasets/vidore3-hr-en" \
+  --out ~/v09m/results/m4-disclosure-eval9 \
+  --ingest-map ~/v09m/results/m1-hr/base/ingest-map.json \
+  --top-k 5 --budget-factor 1.5
+```
+
+The three outputs are `results.json` (both coverages, the rank distribution and the latency
+table), `per_question.jsonl` (the new fields above) and `report.md` (both gates with PASS/MISS).
+Part A's diagnosis — search rank vs. reader choice — is read off those per-question fields; no
+paid call is made by the harness.
