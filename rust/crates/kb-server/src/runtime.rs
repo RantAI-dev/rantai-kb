@@ -16,7 +16,7 @@ use anyhow::Context;
 use axum::Router;
 use tokio::net::TcpListener;
 
-use kb_engine::{CancelToken, IngestWorker, reap_failed_job_uploads};
+use kb_engine::{CancelToken, IngestWorker, OutboxReconciler, reap_failed_job_uploads};
 use kb_ports::{BlobStore, JobStore};
 
 /// Background maintenance that is not the worker's own loop: the orphan reaper
@@ -84,6 +84,7 @@ pub async fn serve(
     listener: TcpListener,
     worker: Option<IngestWorker>,
     maintenance: Option<Maintenance>,
+    reconciler: Option<Arc<OutboxReconciler>>,
     cancel: CancelToken,
 ) -> anyhow::Result<()> {
     let worker_task = worker.map(|worker| {
@@ -91,6 +92,10 @@ pub async fn serve(
         tokio::spawn(async move { worker.run(cancel).await })
     });
     let reaper_task = maintenance.map(|m| tokio::spawn(m.run(cancel.clone())));
+    let reconciler_task = reconciler.map(|worker| {
+        let cancel = cancel.clone();
+        tokio::spawn(async move { worker.run(cancel).await })
+    });
 
     let local_addr = listener
         .local_addr()
@@ -113,6 +118,11 @@ pub async fn serve(
         }
     }
     if let Some(handle) = reaper_task {
+        let _ = handle.await;
+    }
+    // The reconciler sleeps between passes; cancellation wakes it, so this
+    // join is bounded by the time a single payload repair takes.
+    if let Some(handle) = reconciler_task {
         let _ = handle.await;
     }
     tracing::info!("kb-server stopped");

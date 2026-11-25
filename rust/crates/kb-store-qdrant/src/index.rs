@@ -8,15 +8,15 @@ use async_trait::async_trait;
 use kb_ports::Fusion as PortFusion;
 use kb_ports::{
     ArmRanks, ArmScores, Candidate, ChunkId, ChunkMeta, DocumentId, DocumentScope, HybridQuery,
-    IndexCapabilities, IndexUnit, KeywordSemantics, PortError, RetrievalIndex, TenantId,
-    sort_candidates,
+    IndexCapabilities, IndexUnit, KeywordSemantics, KnowledgeBaseId, PortError, RetrievalIndex,
+    TenantId, sort_candidates,
 };
 use qdrant_client::Qdrant;
 use qdrant_client::qdrant::{
     CountPointsBuilder, DeletePointsBuilder, NamedVectors, PointId, PointStruct,
     PrefetchQueryBuilder, QuantizationSearchParams, Query, QueryBatchPointsBuilder,
-    QueryPointsBuilder, ScrollPointsBuilder, SearchParams, UpsertPointsBuilder, Vector,
-    VectorInput,
+    QueryPointsBuilder, ScrollPointsBuilder, SearchParams, SetPayloadPointsBuilder,
+    UpsertPointsBuilder, Vector, VectorInput,
 };
 
 use crate::ids::point_id;
@@ -355,6 +355,28 @@ impl RetrievalIndex for QdrantIndex {
             .map_err(map)?;
         *self.point_count.lock().await = None;
         Ok(count)
+    }
+
+    async fn set_document_kb_payload(
+        &self,
+        tenant: &TenantId,
+        document_id: &DocumentId,
+        kb_ids: &[KnowledgeBaseId],
+    ) -> Result<(), PortError> {
+        // The tenant half is mandatory: a caller that only knows a document id
+        // must never be able to rewrite another tenant's payload.
+        let filter = crate::payload::one_document_filter(tenant, document_id);
+        let values: Vec<String> = kb_ids.iter().map(|kb| kb.0.clone()).collect();
+        let payload = crate::payload::knowledge_base_payload(&values);
+        self.client
+            .set_payload(
+                SetPayloadPointsBuilder::new(&self.collection, payload)
+                    .points_selector(filter)
+                    .wait(true),
+            )
+            .await
+            .map_err(map)?;
+        Ok(())
     }
 
     async fn search(
