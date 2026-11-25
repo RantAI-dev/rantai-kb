@@ -428,7 +428,7 @@ fn region_grid(
     let (header_rows, header) = header_and_rows(&cells);
     let data = &cells[header_rows.min(cells.len())..];
     let width = header.len();
-    let grid_rows: Vec<Vec<Cell>> = data
+    let mut grid_rows: Vec<Vec<Cell>> = data
         .iter()
         .map(|row| {
             let mut row = row.clone();
@@ -437,6 +437,7 @@ fn region_grid(
             row
         })
         .collect();
+    trim_footer_rows(&mut grid_rows);
 
     let formula_rows = formula_rows(
         offset.0 + rows.start + title_rows,
@@ -476,6 +477,41 @@ fn region_grid(
         notes: placeholder_note(placeholder_count).into_iter().collect(),
         truncated: false,
     })
+}
+
+/// BPS sheets put a `Sumber : …` footnote below the table. It is not a data
+/// row: counting or summing it changes the answer, so the data region stops
+/// there. A second, year-keyed block *is* data in these sheets and is kept.
+fn trim_footer_rows(rows: &mut Vec<Vec<Cell>>) {
+    let mut stop = rows.len();
+    for (index, row) in rows.iter().enumerate() {
+        let first = row.iter().find(|cell| **cell != Cell::Empty);
+        let footer = first.is_some_and(|cell| {
+            let text = match cell {
+                Cell::Text(text) | Cell::Date(text) => text.trim().to_lowercase(),
+                _ => return false,
+            };
+            [
+                "sumber",
+                "source",
+                "catatan",
+                "keterangan",
+                "note",
+                "ket:",
+                "diakses",
+                "data diolah",
+                "*",
+                "•",
+            ]
+            .iter()
+            .any(|prefix| text.starts_with(prefix))
+        });
+        if footer {
+            stop = index;
+            break;
+        }
+    }
+    rows.truncate(stop);
 }
 
 /// Fill every cell of a merged span with the span's top-left value, clipped to
@@ -570,6 +606,11 @@ fn header_and_rows(cells: &[Vec<Cell>]) -> (usize, Vec<String>) {
             }
             end += 1;
         }
+    }
+    // A `(1) (2) (3)` row under a flat header is furniture too: keeping it as
+    // data adds a bogus code to a distinct count over a code column.
+    if end < cells.len() && is_column_number_row(&cells[end]) {
+        end += 1;
     }
 
     let header: Vec<String> = (0..width)
@@ -733,6 +774,103 @@ mod tests {
             ]
         );
         assert_eq!(sheet_data.tables[0].header_rows, 2);
+    }
+
+    #[test]
+    fn a_numbering_row_under_a_flat_header_is_not_data() {
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        for (column, value) in ["Kode Code", "Kecamatan", "Nilai"].iter().enumerate() {
+            sheet.write_string(0, column as u16, *value).unwrap();
+        }
+        for (column, value) in ["(1)", "(2)", "(3)"].iter().enumerate() {
+            sheet.write_string(1, column as u16, *value).unwrap();
+        }
+        for (row, values) in [("331001", "Prambanan", "5"), ("331002", "Wedi", "7")]
+            .iter()
+            .enumerate()
+        {
+            sheet.write_string(row as u32 + 2, 0, values.0).unwrap();
+            sheet.write_string(row as u32 + 2, 1, values.1).unwrap();
+            sheet
+                .write_number(row as u32 + 2, 2, values.2.parse::<f64>().unwrap())
+                .unwrap();
+        }
+        let bytes = workbook.save_to_buffer().unwrap();
+        let sheet_data = parse_with_tables(&bytes, "book.xlsx").unwrap();
+        let grid = &sheet_data.tables[0];
+        assert_eq!(grid.header, vec!["Kode Code", "Kecamatan", "Nilai"]);
+        assert_eq!(grid.rows.len(), 2, "{:?}", grid.rows);
+        assert_eq!(grid.rows[0][0], Cell::Number(331001.0));
+    }
+
+    #[test]
+    fn three_header_levels_and_a_merged_title_above_a_blank_row() {
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        let format = Format::default();
+        // The title is merged in row 1, then a blank row; a merge whose
+        // coordinates are absolute must not overwrite the header in row 4.
+        sheet
+            .merge_range(0, 0, 0, 2, "Tabel 25.8", &format)
+            .unwrap();
+        for (column, value) in ["Kangkung", "Kangkung", "Tomat"].iter().enumerate() {
+            sheet.write_string(2, column as u16 + 1, *value).unwrap();
+        }
+        for (column, value) in ["Luas Panen", "Produksi", "Produksi"].iter().enumerate() {
+            sheet.write_string(3, column as u16 + 1, *value).unwrap();
+        }
+        for (column, value) in ["( Ha )", "( Kw )", "( Kw )"].iter().enumerate() {
+            sheet.write_string(4, column as u16 + 1, *value).unwrap();
+        }
+        for (column, value) in ["(1)", "(2)", "(3)", "(4)"].iter().enumerate() {
+            sheet.write_string(5, column as u16, *value).unwrap();
+        }
+        sheet.write_string(6, 0, "Prambanan").unwrap();
+        for column in 1..4u16 {
+            sheet.write_number(6, column, f64::from(column)).unwrap();
+        }
+        let bytes = workbook.save_to_buffer().unwrap();
+        let sheet_data = parse_with_tables(&bytes, "book.xlsx").unwrap();
+        assert_eq!(sheet_data.tables.len(), 1, "{:?}", sheet_data.tables);
+        let grid = &sheet_data.tables[0];
+        assert_eq!(
+            grid.header,
+            vec![
+                "Column 1",
+                "Kangkung / Luas Panen / ( Ha )",
+                "Kangkung / Produksi / ( Kw )",
+                "Tomat / Produksi / ( Kw )"
+            ]
+        );
+        assert_eq!(grid.rows.len(), 1);
+        assert_eq!(grid.rows[0][0], Cell::Text("Prambanan".to_string()));
+    }
+
+    #[test]
+    fn a_footnote_is_not_a_data_row_but_a_stacked_year_block_is() {
+        let mut workbook = Workbook::new();
+        let sheet = workbook.add_worksheet();
+        for (column, value) in ["Kecamatan", "Produksi"].iter().enumerate() {
+            sheet.write_string(0, column as u16, *value).unwrap();
+        }
+        sheet.write_string(1, 0, "01 Prambanan").unwrap();
+        sheet.write_number(1, 1, 10.0).unwrap();
+        sheet.write_string(2, 0, "02 Wedi").unwrap();
+        sheet.write_number(2, 1, 20.0).unwrap();
+        // A year-keyed block below the kecamatan rows is data in BPS sheets;
+        // only the `Sumber : …` note at the end is furniture.
+        sheet.write_number(3, 0, 2019.0).unwrap();
+        sheet.write_number(3, 1, 30.0).unwrap();
+        sheet
+            .write_string(4, 0, "Sumber : Dinas Pertanian")
+            .unwrap();
+        let bytes = workbook.save_to_buffer().unwrap();
+        let sheet_data = parse_with_tables(&bytes, "book.xlsx").unwrap();
+        let grid = &sheet_data.tables[0];
+        assert_eq!(grid.header, vec!["Kecamatan", "Produksi"]);
+        assert_eq!(grid.rows.len(), 3, "{:?}", grid.rows);
+        assert!(matches!(grid.rows[2][0], Cell::Number(year) if year == 2019.0));
     }
 
     #[test]

@@ -70,33 +70,38 @@ pub fn flatten_header_parts(parts: &[String]) -> String {
 /// furniture under a multi-level header, not data and not a header name.
 #[must_use]
 pub fn is_column_number_row(row: &[Cell]) -> bool {
-    let mut numbers = Vec::new();
+    let mut numbers: Vec<i64> = Vec::new();
+    let mut negative_sign: Option<bool> = None;
     for cell in row {
-        let text = match cell {
-            Cell::Text(text) | Cell::Date(text) => text.trim(),
-            Cell::Number(number) if number.fract() == 0.0 => {
-                let value = *number as i64;
-                if !(0..=999).contains(&value) {
+        let value = match cell {
+            Cell::Text(text) | Cell::Date(text) => {
+                let text = text.trim();
+                let digits = text
+                    .strip_prefix('(')
+                    .unwrap_or(text)
+                    .strip_suffix(')')
+                    .unwrap_or(text);
+                let Ok(value) = digits.parse::<i64>() else {
                     return false;
-                }
-                numbers.push(value);
-                continue;
+                };
+                value
             }
+            Cell::Number(number) if number.fract() == 0.0 => *number as i64,
             Cell::Empty => continue,
             _ => return false,
         };
-        let digits = text
-            .strip_prefix('(')
-            .unwrap_or(text)
-            .strip_suffix(')')
-            .unwrap_or(text);
-        let Ok(value) = digits.parse::<i64>() else {
-            return false;
-        };
-        if !(0..=999).contains(&value) {
+        // Calamine reads `(1)` as the accounting number -1, so both signs are
+        // accepted, but a row must not mix them.
+        let negative = value < 0;
+        if negative_sign.is_some_and(|previous| previous != negative) {
             return false;
         }
-        numbers.push(value);
+        negative_sign = Some(negative);
+        let magnitude = value.abs();
+        if !(1..=999).contains(&magnitude) {
+            return false;
+        }
+        numbers.push(magnitude);
     }
     numbers.len() >= 3 && numbers.windows(2).all(|pair| pair[0] < pair[1])
 }
@@ -259,6 +264,12 @@ mod tests {
             text("2018"),
             text("2019"),
             text("2020")
+        ]));
+        // Calamine reads `(1)` as the accounting number -1.
+        assert!(is_column_number_row(&[
+            number(-1.0),
+            number(-2.0),
+            number(-3.0)
         ]));
         assert!(!is_column_number_row(&[text("(1)"), text("(3)")]));
     }

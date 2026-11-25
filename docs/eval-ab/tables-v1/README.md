@@ -122,4 +122,60 @@ fine and the naming differs; a drift that answers wrongly is a real failure. Bot
 
 The live numbers are produced by the reviewer after work packages A (extraction) and B (store and
 API) merge; this directory holds the set and the instrument, not a result. No live run with a
-model was made here, and none is claimed.
+model was made here, and none is claimed. **The 2026-11-25 live re-score is recorded in commit
+`92b56aa8`** (`git show 92b56aa8:docs/eval-ab/tables-v1/README.md`): table retrieval 1.000,
+execution 0.521, 180 `query_rejected: unknown_column`, code traps 0.133.
+
+## TBL-2 — close the execution gap (2026-11-25)
+
+**Instrument (offline, no server).** `kb-extract`'s `table_column_drift` example runs the same
+extractor and manifest as `kb-server` over `~/kbdata/tables-v1/sources`, picks the grid the live
+scorer would map to each question (sheet, index, then header overlap), and compares every column
+name in the gold `TableQuery` with the manifest's names.
+
+```sh
+cargo run --manifest-path rust/Cargo.toml -p kb-extract --example table_column_drift -- \
+  ~/kbdata/tables-v1
+```
+
+Before (commit `73b95406`, the instrument with the scorer's grid selection):
+
+```text
+files=29 extraction_failures=0 questions=386 gold_columns=715 queries_with_unknown_column=180
+=== counts by cause (gold column occurrences) ===
+csv_preamble_read_as_header: 229
+data_row_read_as_header: 35
+title_row_read_as_header: 68
+TOTAL_MISMATCH_COLUMNS: 332
+```
+
+After (fixes in this branch):
+
+```text
+files=29 extraction_failures=0 questions=386 gold_columns=715 queries_with_unknown_column=0
+
+=== counts by cause (gold column occurrences) ===
+TOTAL_MISMATCH_COLUMNS: 0
+```
+
+The 180 offline rejections match the 180 live `query_rejected: unknown_column` failures exactly.
+A second offline check runs all 386 gold queries through the dataset's own reference executor
+(`import_tables.execute`) over the extracted grids: **370/386 = 0.940** after the naming
+fixes; the remaining differences are row-boundary cases (footnotes, year blocks and integer
+labels), not unknown columns. All 15 code traps now produce their gold distinct counts offline
+(previously `Kode Code` was off by one on `q-0234`/`q-0235` because a `(1) (2) (3)` numbering
+row was kept as data, and `NIP` was a `Quantity`/`Number` column).
+
+**Live re-score (GPU box, reviewer).** Re-extract first — tables are stored, so the fix needs
+`kb-server reindex`; then run the same command as the 2026-11-25 run:
+
+```sh
+python3 rust/crates/kb-eval/scripts/score_tables.py \
+  --dataset ~/kbdata/tables-v1 \
+  --base-url http://127.0.0.1:28080 --key "$KEY" \
+  --out ~/v09m/results/m5-tables-tbl2
+```
+
+Report the failure counts (`query_rejected`, `execution_mismatch`, `column_name_drift`) and the
+`template:code_trap` / `template:subtotal_trap` rows from `report.md`; `execution_remapped.all`
+should now be 0. No live number is claimed here.

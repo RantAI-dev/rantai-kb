@@ -33,6 +33,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let show_headers = std::env::args().any(|arg| arg == "--headers");
     let show_grids = std::env::args().any(|arg| arg == "--grids");
+    let cells_for = std::env::args()
+        .position(|arg| arg == "--cells")
+        .and_then(|pos| std::env::args().nth(pos + 1));
 
     let raw = std::fs::read_to_string(dataset.join("queries.jsonl"))?;
     let questions: Vec<serde_json::Value> = raw
@@ -98,6 +101,58 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             })
             .unwrap_or_default()
     };
+
+    if let Some(wanted) = std::env::args()
+        .position(|arg| arg == "--raw")
+        .and_then(|pos| std::env::args().nth(pos + 1))
+    {
+        use calamine::{Reader, Xlsx, open_workbook};
+        let path = dataset.join("sources").join(&wanted);
+        let mut book: Xlsx<_> = open_workbook(&path)?;
+        for name in book.sheet_names().to_vec() {
+            let range = book.worksheet_range(&name)?;
+            println!("RAW {wanted} sheet={name}");
+            for row in range.rows().take(9) {
+                println!(
+                    "  {:?}",
+                    row.iter()
+                        .map(|cell| match cell {
+                            calamine::Data::String(s) => s.clone(),
+                            calamine::Data::Int(i) => i.to_string(),
+                            calamine::Data::Float(f) => f.to_string(),
+                            calamine::Data::Empty => String::new(),
+                            other => other.to_string(),
+                        })
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
+
+    if let Some(wanted) = &cells_for {
+        for (file, grids) in &extracted {
+            if !file.contains(wanted) {
+                continue;
+            }
+            for (i, (grid, _)) in grids.iter().enumerate() {
+                println!("CELLS {file}[{i}] title={:?}", grid.title);
+                for row in grid.rows.iter().take(4) {
+                    println!(
+                        "  {:?}",
+                        row.iter()
+                            .map(|c| match c {
+                                kb_core::tables::Cell::Text(t) => t.clone(),
+                                kb_core::tables::Cell::Number(n) => n.to_string(),
+                                kb_core::tables::Cell::Date(d) => d.clone(),
+                                kb_core::tables::Cell::Bool(b) => b.to_string(),
+                                kb_core::tables::Cell::Empty => "-".to_string(),
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
 
     if show_grids {
         for (file, grids) in &extracted {
@@ -229,6 +284,115 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             mismatch.questions.join(",")
         );
     }
+    if let Some(path) = std::env::args()
+        .position(|arg| arg == "--dump-grids")
+        .and_then(|pos| std::env::args().nth(pos + 1))
+    {
+        let mut dump = serde_json::Map::new();
+        for (file, grids) in &extracted {
+            let grids: Vec<serde_json::Value> = grids
+                .iter()
+                .map(|(grid, manifest)| {
+                    let rows: Vec<Vec<serde_json::Value>> = grid
+                        .rows
+                        .iter()
+                        .map(|row| {
+                            row.iter()
+                                .map(|cell| match cell {
+                                    kb_core::tables::Cell::Empty => serde_json::Value::Null,
+                                    kb_core::tables::Cell::Text(text)
+                                    | kb_core::tables::Cell::Date(text) => {
+                                        serde_json::Value::String(text.clone())
+                                    }
+                                    kb_core::tables::Cell::Number(number)
+                                        if number.is_finite()
+                                            && number.fract() == 0.0
+                                            && number.abs() < 9_007_199_254_740_992.0 =>
+                                    {
+                                        serde_json::Value::Number(serde_json::Number::from(
+                                            *number as i64,
+                                        ))
+                                    }
+                                    kb_core::tables::Cell::Number(number) => {
+                                        serde_json::Number::from_f64(*number)
+                                            .map(serde_json::Value::Number)
+                                            .unwrap_or(serde_json::Value::Null)
+                                    }
+                                    kb_core::tables::Cell::Bool(value) => {
+                                        serde_json::Value::Bool(*value)
+                                    }
+                                })
+                                .collect()
+                        })
+                        .collect();
+                    serde_json::json!({
+                        "sheet": grid.sheet,
+                        "title": grid.title,
+                        "header": grid.header,
+                        "rows": rows,
+                        "derived_rows": manifest.derived_rows,
+                        "columns": manifest.columns.iter().map(|c| serde_json::json!({
+                            "name": c.name,
+                            "kind": c.kind,
+                            "role": c.role,
+                        })).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+            dump.insert(file.clone(), serde_json::json!({ "grids": grids }));
+        }
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&serde_json::Value::Object(dump))?,
+        )?;
+        eprintln!("dumped {} files to {path}", extracted.len());
+    }
+
+    if std::env::args().any(|arg| arg == "--code-traps") {
+        println!("\n=== code traps: role, kind, derived rows, count_distinct ===");
+        for question in &questions {
+            if question["template"].as_str() != Some("code_trap") {
+                continue;
+            }
+            let file = question["file"].as_str().unwrap_or("");
+            let qid = question["id"].as_str().unwrap_or("");
+            let column = question["gold_query"]["select"][0]["column"]
+                .as_str()
+                .unwrap_or("");
+            let grids = extracted.get(file).map(Vec::as_slice).unwrap_or(&[]);
+            let Some((grid, manifest)) = pick_grid(grids, question, gold_headers.get(file)) else {
+                println!("{qid} {file} | {column} | NO GRID");
+                continue;
+            };
+            let index = manifest.columns.iter().position(|c| c.name == column);
+            let info = index.and_then(|i| manifest.columns.get(i));
+            let values: BTreeSet<String> = index
+                .map(|i| {
+                    grid.rows
+                        .iter()
+                        .enumerate()
+                        .filter(|(row, _)| !manifest.derived_rows.contains(&(*row as u32)))
+                        .filter_map(|(_, cells)| cells.get(i))
+                        .filter_map(|cell| match cell {
+                            kb_core::tables::Cell::Empty => None,
+                            other => Some(format!("{other:?}")),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            println!(
+                "{qid} {file} | {:?} | role={:?} kind={:?} | n_rows={} derived={} distinct={} gold={}",
+                column,
+                info.map(|c| c.role),
+                info.map(|c| c.kind),
+                manifest.n_rows,
+                manifest.derived_rows.len(),
+                values.len(),
+                question["gold_answer"]
+            );
+        }
+    }
+
     println!("\n=== counts by cause (gold column occurrences) ===");
     for (cause, counts) in &totals {
         println!("{cause}: {}", counts.columns);
