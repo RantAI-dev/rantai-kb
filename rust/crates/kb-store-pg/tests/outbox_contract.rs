@@ -22,6 +22,9 @@ const DOC: &str = "outbox-contract-doc";
 const KB_1: &str = "outbox-kb-1";
 const KB_2: &str = "outbox-kb-2";
 
+/// The three tests share one document, so they run one at a time.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn database_url() -> String {
     std::env::var("KB_PG_OUTBOX_URL")
         .or_else(|_| std::env::var("DATABASE_URL"))
@@ -52,7 +55,20 @@ async fn pool() -> PgPool {
         database_url: database_url(),
         ..PgSettings::default()
     };
-    kb_store_pg::connect_pool(&settings).await.unwrap()
+    let pool = kb_store_pg::connect_pool(&settings).await.unwrap();
+    // A fresh database must be migratable from zero, exactly as
+    // `kb-server migrate` does it. The tests run in parallel, so migrate once.
+    static MIGRATED: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+    MIGRATED
+        .get_or_init(|| async {
+            let migrations =
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../prisma/migrations");
+            kb_store_pg::migrate::apply(&pool, &migrations)
+                .await
+                .unwrap();
+        })
+        .await;
+    pool
 }
 
 async fn pending(pool: &PgPool, tenant: &str) -> i64 {
@@ -84,6 +100,17 @@ async fn reset(pool: &PgPool) {
 }
 
 async fn seed_document(pool: &PgPool) {
+    for kb in [KB_1, KB_2] {
+        sqlx::query(
+            r#"INSERT INTO "KnowledgeBase" (id, "tenantId", name, "updatedAt")
+               VALUES ($1, $2, $1, now()) ON CONFLICT (id) DO NOTHING"#,
+        )
+        .bind(kb)
+        .bind(TENANT)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
     sqlx::query(
         r#"INSERT INTO "Document" (id, "tenantId", title, content, "updatedAt")
            VALUES ($1, $2, 'outbox doc', '', now())"#,
@@ -107,6 +134,7 @@ async fn seed_document(pool: &PgPool) {
 
 #[tokio::test]
 async fn a_move_writes_exactly_one_outbox_row_in_the_same_transaction() {
+    let _serial = SERIAL.lock().await;
     let pool = pool().await;
     reset(&pool).await;
     seed_document(&pool).await;
@@ -155,6 +183,7 @@ async fn a_move_writes_exactly_one_outbox_row_in_the_same_transaction() {
 
 #[tokio::test]
 async fn a_rolled_back_change_writes_no_outbox_row() {
+    let _serial = SERIAL.lock().await;
     let pool = pool().await;
     reset(&pool).await;
     seed_document(&pool).await;
@@ -189,6 +218,7 @@ async fn a_rolled_back_change_writes_no_outbox_row() {
 
 #[tokio::test]
 async fn skip_locked_does_not_hand_one_row_to_two_claimers() {
+    let _serial = SERIAL.lock().await;
     let pool = pool().await;
     reset(&pool).await;
     seed_document(&pool).await;
