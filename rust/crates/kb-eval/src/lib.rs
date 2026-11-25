@@ -19,8 +19,10 @@
 //! `kb-server eval` is the front door; see [`cli`].
 
 pub mod bench;
+pub mod calibrate_confidence;
 pub mod cli;
 pub mod dataset;
+pub mod disclosure;
 pub mod leak;
 pub mod leak_http;
 pub mod metrics;
@@ -30,6 +32,9 @@ pub mod runner;
 pub mod stages;
 
 pub use bench::{BenchConfig, BenchReport, run_cli as run_bench};
+pub use calibrate_confidence::{
+    CalibrateConfig, CalibrationEntry, QueryScore, run as run_calibrate,
+};
 pub use cli::{EvalError, run};
 pub use dataset::{Dataset, DatasetError};
 pub use leak::{Arm, LeakMatrix, ScopeKind, SeedPlan, Status};

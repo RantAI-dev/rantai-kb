@@ -1181,6 +1181,7 @@ impl IngestWorker {
                     asset_key: None,
                     anchor_chunk_index: None,
                     table_id: Some(record.id.to_string()),
+                    ..ChunkMetadata::default()
                 },
             });
             next_index = next_index.saturating_add(1);
@@ -1208,6 +1209,7 @@ impl IngestWorker {
                         asset_key: None,
                         anchor_chunk_index: None,
                         table_id: Some(record.id.to_string()),
+                        ..ChunkMetadata::default()
                     },
                 });
                 next_index = next_index.saturating_add(1);
@@ -1240,6 +1242,7 @@ impl IngestWorker {
         if chunks.is_empty() {
             return Ok(0);
         }
+        let params = job.params.clone().unwrap_or_else(|| json!({}));
         let total = u32::try_from(chunks.len()).unwrap_or(u32::MAX);
         // The text embedded for a chunk: the document's title, the chunk's
         // heading path when the chunker found one, and the chunk's content.
@@ -1338,7 +1341,7 @@ impl IngestWorker {
                     chunk_type,
                     content: chunk.content.clone(),
                     contextual_prefix: chunk.metadata.contextual_prefix.clone(),
-                    metadata: storage_metadata(&chunk.metadata),
+                    metadata: storage_metadata_with_kbs(&chunk.metadata, &params),
                     dense,
                     sparse,
                 }
@@ -1433,6 +1436,7 @@ impl IngestWorker {
         first_index: usize,
         priority: &crate::seats::SeatPriority,
     ) {
+        let params = job.params.clone().unwrap_or_else(|| json!({}));
         let contents: Vec<(u32, String)> = descriptions
             .iter()
             .map(|(page, description)| (*page, format!("[Visual] {description}")))
@@ -1482,6 +1486,7 @@ impl IngestWorker {
                     anchor_chunk_index: None,
                     contextual_prefix: None,
                     table_id: None,
+                    ..ChunkMetadata::default()
                 };
                 IndexUnit {
                     id: ChunkId(format!("{}_{}", document_id.0, chunk_index)),
@@ -1495,7 +1500,7 @@ impl IngestWorker {
                     sparse: kb_core::sparse::encode_document(&content),
                     content,
                     contextual_prefix: None,
-                    metadata: storage_metadata(&metadata),
+                    metadata: storage_metadata_with_kbs(&metadata, &params),
                     dense,
                 }
             })
@@ -1850,6 +1855,7 @@ impl IngestWorker {
                     anchor_chunk_index,
                     contextual_prefix: None,
                     table_id: None,
+                    ..ChunkMetadata::default()
                 },
             });
         }
@@ -2605,6 +2611,35 @@ fn role_word(role: kb_core::tables::ColumnRole) -> &'static str {
 /// The metadata object stored on each chunk, with the field names the Bun
 /// chunker writes. An absent value is left out rather than written as null,
 /// matching how an `undefined` property drops out of the TS object.
+/// The document's knowledge bases, copied into every chunk's metadata so the
+/// Qdrant payload can carry the whole list (a document may sit in several KBs).
+/// SEC-2a predicate mode filters on this payload; the Postgres verify remains
+/// authoritative if it is stale.
+fn knowledge_base_ids_of(params: &Value) -> Vec<String> {
+    params
+        .get("knowledgeBaseIds")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn storage_metadata_with_kbs(meta: &ChunkMetadata, params: &Value) -> Value {
+    let mut value = storage_metadata(meta);
+    let kb_ids = knowledge_base_ids_of(params);
+    if !kb_ids.is_empty()
+        && let Some(map) = value.as_object_mut()
+    {
+        map.insert("knowledgeBaseIds".to_string(), json!(kb_ids));
+    }
+    value
+}
+
 fn storage_metadata(meta: &ChunkMetadata) -> Value {
     let mut map = Map::new();
     map.insert("documentTitle".to_string(), json!(meta.document_title));
@@ -2635,6 +2670,18 @@ fn storage_metadata(meta: &ChunkMetadata) -> Value {
         // `TBL-1`: the table a search hit can be queried through.
         map.insert("tableId".to_string(), json!(table_id));
     }
+    // `ING-13`: spans let the future document-content route rebuild the text
+    // in order without duplicating overlap. Absent means "unknown" (old
+    // chunks, figures, table summaries), never a misleading zero.
+    if let Some(start) = meta.char_start {
+        map.insert("charStart".to_string(), json!(start));
+    }
+    if let Some(end) = meta.char_end {
+        map.insert("charEnd".to_string(), json!(end));
+    }
+    if let Some(overlap) = meta.overlap_prefix_len {
+        map.insert("overlapPrefixLen".to_string(), json!(overlap));
+    }
     Value::Object(map)
 }
 
@@ -2657,6 +2704,7 @@ mod tests {
             asset_key: None,
             anchor_chunk_index: None,
             table_id: None,
+            ..ChunkMetadata::default()
         }
     }
 
@@ -2800,6 +2848,21 @@ mod tests {
         assert!(stored.get("page").is_none());
         assert!(stored.get("assetKey").is_none());
         assert!(stored.get("anchorChunkIndex").is_none());
+        assert!(stored.get("charStart").is_none());
+        assert!(stored.get("charEnd").is_none());
+        assert!(stored.get("overlapPrefixLen").is_none());
+    }
+
+    #[test]
+    fn stored_metadata_includes_chunk_spans_when_present() {
+        let mut m = meta();
+        m.char_start = Some(120);
+        m.char_end = Some(400);
+        m.overlap_prefix_len = Some(24);
+        let stored = storage_metadata(&m);
+        assert_eq!(stored["charStart"], json!(120));
+        assert_eq!(stored["charEnd"], json!(400));
+        assert_eq!(stored["overlapPrefixLen"], json!(24));
     }
 
     #[test]

@@ -54,9 +54,15 @@ impl CachedEmbedder {
 
     fn key(&self, kind: &[u8], text: &str) -> CacheKey {
         let prefix = if kind == b"query" {
-            &self.query_prefix
+            self.query_prefix.clone()
+        } else if self.passage_prefix.is_empty() {
+            String::new()
         } else {
-            &self.passage_prefix
+            // Before `ING-9` the batch path sent passages without their
+            // prefix, yet the entries were keyed *with* it, so every cached
+            // passage vector under a non-empty prefix is an unprefixed one.
+            // A new marker keeps a re-index from reading them back.
+            format!("ing9|{}", self.passage_prefix)
         };
         CacheKey::from_parts(&[
             self.fingerprint.as_bytes(),

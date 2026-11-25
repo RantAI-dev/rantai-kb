@@ -641,7 +641,7 @@ async fn dense_top_k(index: &impl RetrievalIndex) -> Outcome {
     // Brute force over exactly the same fixture, same scope, same vectors.
     let mut truth: Vec<(String, f32)> = fixture_units()
         .iter()
-        .filter(|u| u.tenant == *scope.tenant() && scope.document_ids().contains(&u.document_id))
+        .filter(|u| u.tenant == *scope.tenant() && scope.allows_document(&u.document_id))
         .map(|u| (u.id.as_str().to_string(), cosine(&u.dense, &query_vec)))
         .collect();
     truth.sort_by(|a, b| {
@@ -1317,7 +1317,7 @@ fn hybrid_probe(caps: IndexCapabilities) -> (Vec<f32>, KeywordQuery) {
 /// The first candidate that is not visible in `scope`, described.
 fn first_out_of_scope(candidates: &[Candidate], scope: &DocumentScope) -> Option<String> {
     for c in candidates {
-        let in_docs = scope.document_ids().contains(&c.document_id);
+        let in_docs = scope.allows_document(&c.document_id);
         let in_tenant = c.tenant == *scope.tenant();
         if !in_docs || !in_tenant {
             return Some(format!(
@@ -1326,7 +1326,7 @@ fn first_out_of_scope(candidates: &[Candidate], scope: &DocumentScope) -> Option
                 c.document_id.as_str(),
                 c.tenant,
                 scope.tenant(),
-                scope.document_ids().len()
+                scope.visible_document_count().unwrap_or(0)
             ));
         }
     }

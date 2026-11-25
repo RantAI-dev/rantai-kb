@@ -37,12 +37,15 @@ pub use ids::{ChunkId, DocumentId, KnowledgeBaseId, TenantId};
 pub use ocr::{LayoutBox, LayoutDetector, OcrPageCache, OcrReport, PageLayout};
 pub use pages::{PageDescriber, PageEmbedder, PageImage, PageRenderer, PageVisionScorer};
 pub use retrieval::{
-    ArmRanks, ArmScores, Candidate, Fusion, HybridQuery, IndexCapabilities, IndexUnit,
-    KeywordQuery, KeywordSemantics, RetrievalIndex, sort_candidates,
+    ArmRanks, ArmScores, Candidate, ChunkMeta, Fusion, HybridQuery, IndexCapabilities, IndexUnit,
+    KeywordQuery, KeywordSemantics, RetrievalIndex, chunk_meta_from_candidate, sort_candidates,
 };
-pub use scope::DocumentScope;
 #[cfg(feature = "scope-adapter")]
 pub use scope::adapter;
+pub use scope::{
+    DEFAULT_SCOPE_ID_LIMIT, DocumentScope, PredicateSpec, UnitRange, VerifySpec,
+    predicate_spec_for, scope_id_limit_from_env,
+};
 pub use tables::{TableId, TableQueryFailure, TableRecord, TableStore};
 pub use traits::{
     ChunkStore, DocumentFilter, DocumentStore, Embedder, EntityExtractor, EntityStore, Extractor,

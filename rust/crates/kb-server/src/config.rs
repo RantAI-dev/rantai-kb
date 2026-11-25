@@ -142,6 +142,13 @@ pub struct Config {
     /// What the upload route does with a file the tenant already has
     /// (`KB_UPLOAD_DEDUPE`). `reject` by default.
     pub upload_dedupe: kb_core::policy::UploadDedupe,
+    /// Whether the thin Streamable-HTTP MCP endpoint is mounted (`KB_MCP`).
+    /// Off by default: when off, `/mcp` is just an unknown path.
+    pub mcp_enabled: bool,
+    /// Confidence bands fitted per scoring model (`RET-18`). Loaded from
+    /// `KB_CONFIDENCE_CALIBRATION` at startup; a bad file is a startup error.
+    /// Empty by default, so every answer is honestly `calibrated: false`.
+    pub confidence_table: kb_core::CalibrationTable,
 }
 
 /// The table store (`TBL-1`). On by default: a document with no tables is
@@ -557,6 +564,18 @@ impl EmbedderConfig {
             self.model, self.dimension
         )
     }
+
+    /// The prefixes the inner embedder really applies. With an out-of-band
+    /// instruction (`input_type`, or every OmniEmbed request) the text is not
+    /// prefixed, so the cache key must not claim a prefix either (`ING-9`).
+    #[must_use]
+    pub fn effective_prefixes(&self) -> (&str, &str) {
+        if self.send_input_type || self.format == kb_inference::EmbedFormat::OmniEmbed {
+            ("", "")
+        } else {
+            (&self.query_prefix, &self.passage_prefix)
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -781,6 +800,11 @@ impl Config {
         // head is the whole pool. It costs no extra rerank compute, because
         // those candidates were already sent and already scored.
         let rerank_max_k = int_var(&lookup, "KB_RERANK_MAX_K", 10u32)?.min(100);
+        // RET-17: default per-document diversity cap. Unset or 0 leaves the
+        // ranking unchanged; a request's `maxPerDocument` wins over this.
+        // Clamped to the request's accepted range so a typo cannot ask for a
+        // cap larger than any answer.
+        let max_per_document = int_var(&lookup, "KB_MAX_PER_DOCUMENT", 0u32)?.min(50);
         let figure_limit = int_var(&lookup, "KB_FIGURE_MAX_PER_ANSWER", 3)?;
         let query_expansion_enabled = bool_flag(&lookup, "KB_QUERY_EXPANSION_ENABLED", false);
         let query_expansion_model = lookup("KB_QUERY_EXPANSION_MODEL")
@@ -814,6 +838,20 @@ impl Config {
         // e.g. 5 candidates of 200 chars (`docs/eval-baseline.md` §8).
         let rerank_candidate_limit = int_var(&lookup, "KB_RERANK_CANDIDATE_LIMIT", 0u32)?.min(50);
         let rerank_char_budget = int_var(&lookup, "KB_RERANK_CHAR_BUDGET", 0)? as usize;
+        // RET-12: prepend the document/section breadcrumb to what the reranker
+        // sees. Off until the A/B shows it helps (`docs/core/specs/v1-roadmap.md`
+        // RET-12). An unknown value is a startup error, like the other enum
+        // settings above (`KB_GRAPH_STORE`, `KB_ENTITY_EXTRACTOR`).
+        let rerank_breadcrumbs = match lookup("KB_RERANK_BREADCRUMBS")
+            .map(|v| v.trim().to_lowercase())
+            .as_deref()
+        {
+            None | Some("") | Some("off") | Some("false") => false,
+            Some("on") | Some("true") => true,
+            Some(other) => {
+                bail!("KB_RERANK_BREADCRUMBS must be \"off\" or \"on\", got {other:?}")
+            }
+        };
         let rerank_timeout_ms = int_var(&lookup, "KB_RERANK_TIMEOUT_MS", 20_000)? as u64;
 
         // `KB_MIN_SIMILARITY` is not a documented variable. The minimum is the
@@ -836,15 +874,35 @@ impl Config {
             bail!("KB_MIN_SCORE must be a finite number");
         }
 
+        // Confidence bands (RET-18). An operator who has run
+        // `kb-server eval calibrate-confidence` points here at its
+        // `calibration.json`. Refusing a malformed file at boot keeps a bad fit
+        // from quietly turning every answer into an uncalibrated hint.
+        let confidence_table = match lookup("KB_CONFIDENCE_CALIBRATION")
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+        {
+            None => kb_core::CalibrationTable::built_in(),
+            Some(path) => {
+                let text = std::fs::read_to_string(&path).map_err(|err| {
+                    anyhow::anyhow!("KB_CONFIDENCE_CALIBRATION: read {path}: {err}")
+                })?;
+                kb_core::CalibrationTable::from_json(&text)
+                    .map_err(|err| anyhow::anyhow!("KB_CONFIDENCE_CALIBRATION ({path}): {err}"))?
+            }
+        };
+
         let engine = EngineSettings {
             candidate_pool_size: rerank_initial_k,
             rrf_k,
             rerank_candidate_limit,
             rerank_char_budget,
+            rerank_breadcrumbs,
             rerank_timeout_ms,
             rerank_final_k,
             rerank_max_k,
             max_chunks: default_max_chunks,
+            max_per_document,
             min_similarity,
             min_score,
             neighbour_window,
@@ -966,6 +1024,17 @@ impl Config {
             weight: float_var(&lookup, "KB_GLOBAL_ARM_WEIGHT", 0.5)?.clamp(0.0, 1.0),
             chunks: int_var(&lookup, "KB_GLOBAL_ARM_CHUNKS", 200)?.max(1) as usize,
         };
+        // DEC-6: one startup line for whichever deprecated arms are enabled.
+        // The arms still work today; the warning says why they are frozen.
+        let deprecated = deprecated_arms_enabled(graph_arm.enabled, global_arm.enabled);
+        if !deprecated.is_empty() {
+            tracing::warn!(
+                arms = %deprecated.join(", "),
+                "KB_GRAPH_ARM / KB_GLOBAL_ARM are deprecated (DEC-6): HotpotQA -8.5 pp R@5 \
+                 and +400 ms p95 (docs/eval-baseline.md, EVAL-3); these arms may be removed \
+                 after v1.0"
+            );
+        }
         // Communities are built from the Postgres entity graph and stored in
         // Postgres. Without `KB_GRAPH_STORE=pg` there is neither a graph to build
         // from nor a table to read, so an enabled arm would silently return
@@ -1266,7 +1335,29 @@ impl Config {
             request_timeout: Duration::from_secs(30),
             tier: tier_plan,
             upload_dedupe,
+            mcp_enabled: bool_flag(&lookup, "KB_MCP", false),
+            confidence_table,
         })
+    }
+
+    /// The id to match against a calibration entry when reranking ran.
+    /// `None` when there is no reranker: a dense answer must be matched by the
+    /// embedding model id instead.
+    #[must_use]
+    pub fn rerank_model_id(&self) -> Option<&str> {
+        match &self.reranker {
+            RerankerConfig::Disabled => None,
+            RerankerConfig::Llm { model, .. }
+            | RerankerConfig::Tei { model, .. }
+            | RerankerConfig::Vllm { model, .. }
+            | RerankerConfig::Cohere { model, .. } => Some(model.as_str()),
+        }
+    }
+
+    /// The embedding model id, used for dense and fused answers.
+    #[must_use]
+    pub fn embedding_model_id(&self) -> &str {
+        &self.embedder.model
     }
 
     /// Print one INFO line describing what `KB_TIER` filled. A no-op without a
@@ -1359,6 +1450,23 @@ pub(crate) fn extract_outbound_urls(extract: &ExtractConfig) -> Vec<String> {
         urls.push(kb_extract::OPENROUTER_VISION_URL.to_string());
     }
     urls
+}
+
+/// DEC-6: the names of the deprecated retrieval arms an operator enabled.
+///
+/// Kept pure so the warning condition can be tested without capturing log
+/// output. An empty vector means no warning; one entry per enabled arm is
+/// joined into the single startup warning line.
+#[must_use]
+pub(crate) fn deprecated_arms_enabled(graph: bool, global: bool) -> Vec<&'static str> {
+    let mut arms = Vec::with_capacity(2);
+    if graph {
+        arms.push("KB_GRAPH_ARM");
+    }
+    if global {
+        arms.push("KB_GLOBAL_ARM");
+    }
+    arms
 }
 
 pub(crate) fn bool_flag<F>(lookup: &F, name: &str, default: bool) -> bool
@@ -1541,6 +1649,49 @@ mod tests {
         assert!(err.to_string().contains("KB_MIN_SCORE"), "{err}");
     }
 
+    fn confidence_test_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("kb-ret18-{}-{name}.json", std::process::id()))
+    }
+
+    #[test]
+    fn test_confidence_calibration_file_loads_at_startup() {
+        let path = confidence_test_path("valid");
+        std::fs::write(
+            &path,
+            r#"[{"modelId":"m","scoreKind":"rerank","high":0.8,"medium":0.6,"low":0.42}]"#,
+        )
+        .expect("write calibration");
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        let path_str = path.to_string_lossy().into_owned();
+        map.insert("KB_CONFIDENCE_CALIBRATION", path_str.as_str());
+        map.insert("KB_RERANK_ENABLED", "true");
+        map.insert("KB_RERANK_MODEL", "m");
+        let config = Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+            .expect("config should load");
+        assert_eq!(config.confidence_table.entries.len(), 1);
+        assert_eq!(config.rerank_model_id(), Some("m"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_bad_confidence_calibration_file_is_a_startup_error() {
+        let path = confidence_test_path("invalid");
+        std::fs::write(&path, r#"{"not":"an array"}"#).expect("write calibration");
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        let path_str = path.to_string_lossy().into_owned();
+        map.insert("KB_CONFIDENCE_CALIBRATION", path_str.as_str());
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        assert!(
+            err.to_string().contains("KB_CONFIDENCE_CALIBRATION"),
+            "{err}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn test_the_rerank_head_cap_defaults_to_ten_and_zero_means_no_cap() {
         let load = |value: Option<&'static str>| {
@@ -1567,6 +1718,74 @@ mod tests {
             100,
             "the cap is clamped, so a typo cannot ask for a thousand reranked hits"
         );
+    }
+
+    #[test]
+    fn test_max_per_document_is_off_unset_or_zero_and_clamped() {
+        let load = |value: Option<&'static str>| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            if let Some(v) = value {
+                map.insert("KB_MAX_PER_DOCUMENT", v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .engine
+                .max_per_document
+        };
+        assert_eq!(load(None), 0, "unset means the cap is off");
+        assert_eq!(load(Some("")), 0, "empty is the same as unset");
+        assert_eq!(load(Some("0")), 0, "zero means off");
+        assert_eq!(load(Some("3")), 3);
+        assert_eq!(load(Some("9999")), 50, "clamped to the request range");
+    }
+
+    #[test]
+    fn test_only_enabled_deprecated_arms_trigger_the_warning_condition() {
+        assert!(
+            deprecated_arms_enabled(false, false).is_empty(),
+            "a default server warns about nothing"
+        );
+        assert_eq!(deprecated_arms_enabled(true, false), vec!["KB_GRAPH_ARM"]);
+        assert_eq!(deprecated_arms_enabled(false, true), vec!["KB_GLOBAL_ARM"]);
+        assert_eq!(
+            deprecated_arms_enabled(true, true),
+            vec!["KB_GRAPH_ARM", "KB_GLOBAL_ARM"]
+        );
+    }
+
+    #[test]
+    fn test_rerank_breadcrumbs_default_off_and_reject_unknown() {
+        let load = |value: Option<&'static str>| {
+            let mut map = HashMap::new();
+            map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+            map.insert("OPENROUTER_API_KEY", "test-key");
+            if let Some(v) = value {
+                map.insert("KB_RERANK_BREADCRUMBS", v);
+            }
+            Config::from_lookup(|k| map.get(k).copied().map(str::to_string))
+                .expect("config should load")
+                .engine
+                .rerank_breadcrumbs
+        };
+        assert!(!load(None), "off by default until the A/B result");
+        assert!(!load(Some("")), "empty is the same as unset");
+        assert!(!load(Some("off")));
+        assert!(!load(Some("false")));
+        assert!(load(Some("on")));
+        assert!(load(Some("true")));
+        assert!(
+            load(Some(" ON ")),
+            "values are case-insensitive and trimmed"
+        );
+
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://user:pass@localhost/db");
+        map.insert("OPENROUTER_API_KEY", "test-key");
+        map.insert("KB_RERANK_BREADCRUMBS", "maybe");
+        let err = Config::from_lookup(|k| map.get(k).copied().map(str::to_string)).unwrap_err();
+        assert!(err.to_string().contains("KB_RERANK_BREADCRUMBS"), "{err}");
     }
 
     #[test]
@@ -1963,6 +2182,28 @@ mod tests {
         let fp = extract.cache_fingerprint();
         assert!(!fp.contains("sk-secret-value"));
         assert_ne!(fp, cfg.extract.cache_fingerprint(), "key presence matters");
+    }
+
+    /// The disk cache must key only the prefixes the inner embedder applies:
+    /// an out-of-band `input_type` (or OmniEmbed) leaves the text alone.
+    #[test]
+    fn effective_prefixes_are_empty_when_the_instruction_is_out_of_band() {
+        let mut map = HashMap::new();
+        map.insert("DATABASE_URL", "postgres://u:p@localhost/db".into());
+        map.insert("OPENROUTER_API_KEY", "test-key".into());
+        map.insert("KB_EMBEDDING_QUERY_PREFIX", "query: ".into());
+        map.insert("KB_EMBEDDING_PASSAGE_PREFIX", "passage: ".into());
+        let cfg = Config::from_lookup(|k| map.get(k).cloned()).expect("config");
+        assert_eq!(cfg.embedder.effective_prefixes(), ("query: ", "passage: "));
+
+        map.insert("KB_EMBEDDING_INPUT_TYPE", "true".into());
+        let cfg = Config::from_lookup(|k| map.get(k).cloned()).expect("config");
+        assert_eq!(cfg.embedder.effective_prefixes(), ("", ""));
+
+        map.remove("KB_EMBEDDING_INPUT_TYPE");
+        map.insert("KB_EMBEDDING_FORMAT", "omniembed".into());
+        let cfg = Config::from_lookup(|k| map.get(k).cloned()).expect("config");
+        assert_eq!(cfg.embedder.effective_prefixes(), ("", ""));
     }
 
     #[test]

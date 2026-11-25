@@ -15,8 +15,8 @@
 //! [`RetrievalIndex::fetch`]: kb_ports::RetrievalIndex::fetch
 
 use kb_ports::{
-    ArmRanks, ArmScores, Candidate, ChunkId, ChunkType, DocumentId, DocumentScope, IndexUnit,
-    TenantId,
+    ArmRanks, ArmScores, Candidate, ChunkId, ChunkMeta, ChunkType, DocumentId, DocumentScope,
+    IndexUnit, TenantId, UnitRange,
 };
 use qdrant_client::Payload;
 use qdrant_client::qdrant::{
@@ -45,6 +45,48 @@ pub const KEY_CONTENT: &str = "content";
 pub const KEY_CONTEXTUAL_PREFIX: &str = "contextual_prefix";
 /// The caller's opaque metadata JSON.
 pub const KEY_METADATA: &str = "metadata";
+/// Character span fields, written on chunks ingested with `ING-13`. They are
+/// also mirrored inside [`KEY_METADATA`]; old chunks carry neither.
+pub const KEY_CHAR_START: &str = "charStart";
+pub const KEY_CHAR_END: &str = "charEnd";
+pub const KEY_OVERLAP_PREFIX_LEN: &str = "overlapPrefixLen";
+
+/// Where a chunk sits in the chunker's normalised source. Every field is
+/// `None` for chunks written before spans existed, never a misleading `0`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChunkSpans {
+    pub char_start: Option<u32>,
+    pub char_end: Option<u32>,
+    pub overlap_prefix_len: Option<u32>,
+}
+
+/// Read spans from the opaque metadata JSON the engine writes.
+#[must_use]
+pub fn spans_from_metadata(metadata: &serde_json::Value) -> ChunkSpans {
+    let u32_at = |key: &str| {
+        metadata
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|n| u32::try_from(n).ok())
+    };
+    ChunkSpans {
+        char_start: u32_at(KEY_CHAR_START),
+        char_end: u32_at(KEY_CHAR_END),
+        overlap_prefix_len: u32_at(KEY_OVERLAP_PREFIX_LEN),
+    }
+}
+
+/// Read the mirrored span fields from a Qdrant payload. Missing keys (and
+/// values that are not unsigned 32-bit integers) read as `None`.
+#[must_use]
+pub fn spans_from_payload(payload: &std::collections::HashMap<String, Value>) -> ChunkSpans {
+    let u32_at = |key: &str| integer(payload, key).and_then(|n| u32::try_from(n).ok());
+    ChunkSpans {
+        char_start: u32_at(KEY_CHAR_START),
+        char_end: u32_at(KEY_CHAR_END),
+        overlap_prefix_len: u32_at(KEY_OVERLAP_PREFIX_LEN),
+    }
+}
 
 /// Every payload key, for the payload-index pass and for documentation.
 pub const PAYLOAD_KEYS: &[&str] = &[
@@ -59,6 +101,9 @@ pub const PAYLOAD_KEYS: &[&str] = &[
     KEY_CONTENT,
     KEY_CONTEXTUAL_PREFIX,
     KEY_METADATA,
+    KEY_CHAR_START,
+    KEY_CHAR_END,
+    KEY_OVERLAP_PREFIX_LEN,
 ];
 
 /// The scope filter: this tenant **and** one of these documents.
@@ -68,27 +113,112 @@ pub const PAYLOAD_KEYS: &[&str] = &[
 /// alone is not one either (document ids are tenant-unique only inside a
 /// tenant).
 ///
-/// The document list is a `match any` keyword list. Qdrant pushes it into the
-/// payload index rather than scanning; `docs/eval-baseline.md` §6 measures the
-/// worst case (every document in a 2,933-document corpus) against a 10-document
-/// scope.
+/// In Ids mode the document list is a `match any` keyword list. Qdrant pushes it
+/// into the payload index rather than scanning; `docs/eval-baseline.md` §6
+/// measures the worst case (every document in a 2,933-document corpus) against a
+/// 10-document scope. In Predicate mode (SEC-2a) the list is replaced by the
+/// tenant / knowledge-base / category conditions and a narrower `document_id`
+/// condition only when the scope was explicitly narrowed by `documentIds`.
+/// The index filter is an optimisation: the engine verifies every candidate
+/// against Postgres before it can be returned.
 #[must_use]
 pub fn scope_filter(scope: &DocumentScope) -> Filter {
-    let documents: Vec<String> = scope
-        .document_ids()
-        .iter()
-        .map(|d| d.as_str().to_string())
-        .collect();
-    document_filter(scope.tenant(), &documents)
+    let mut filter = if let Some(predicate) = scope.predicate() {
+        let mut conditions = vec![Condition::matches(
+            KEY_TENANT_ID,
+            MatchValue::Keyword(scope.tenant().as_str().to_string()),
+        )];
+        if let Some(kb_ids) = &predicate.kb_ids {
+            conditions.push(any_of(
+                KEY_KNOWLEDGE_BASE_ID,
+                kb_ids.iter().map(|kb| kb.0.clone()).collect(),
+            ));
+        }
+        if let Some(category) = &predicate.category {
+            conditions.push(Condition::matches(
+                KEY_CATEGORY,
+                MatchValue::Keyword(category.clone()),
+            ));
+        }
+        if let Some(ids) = scope.restricted_ids() {
+            conditions.push(any_of(
+                KEY_DOCUMENT_ID,
+                ids.iter().map(|id| id.as_str().to_string()).collect(),
+            ));
+        }
+        Filter::must(conditions)
+    } else {
+        let documents: Vec<String> = scope
+            .document_ids()
+            .iter()
+            .map(|d| d.as_str().to_string())
+            .collect();
+        document_filter(scope.tenant(), &documents)
+    };
+    append_unit_range(&mut filter, scope.unit_range());
+    filter
 }
 
-/// `tenant == t AND document_id in documents AND chunk_type == "figure"`.
+/// Add a predicate scope's knowledge-base and category conditions to a filter
+/// that already names its tenant and one document. The document-id condition is
+/// the primary fence; these repeat the coarse conditions so an index that
+/// returns a stale payload cannot widen a predicate search before the verify.
+fn append_predicate_conditions(filter: &mut Filter, scope: &DocumentScope) {
+    if let Some(predicate) = scope.predicate() {
+        if let Some(kb_ids) = &predicate.kb_ids {
+            filter.must.push(any_of(
+                KEY_KNOWLEDGE_BASE_ID,
+                kb_ids.iter().map(|kb| kb.0.clone()).collect(),
+            ));
+        }
+        if let Some(category) = &predicate.category {
+            filter.must.push(Condition::matches(
+                KEY_CATEGORY,
+                MatchValue::Keyword(category.clone()),
+            ));
+        }
+    }
+}
+
+/// Add the RET-15 range as index conditions, not as a post-filter.
+///
+/// Both halves are added when both are set, so top-k is spent only on units
+/// inside the requested part. The integer `page` and `chunkIndex` payload
+/// indexes (ING-13) make these ranges index lookups.
+fn append_unit_range(filter: &mut Filter, range: Option<UnitRange>) {
+    let Some(range) = range else {
+        return;
+    };
+    if let Some((lo, hi)) = range.pages {
+        filter.must.push(Condition::range(
+            KEY_PAGE,
+            Range {
+                gte: Some(f64::from(lo)),
+                lte: Some(f64::from(hi)),
+                ..Default::default()
+            },
+        ));
+    }
+    if let Some((lo, hi)) = range.chunks {
+        filter.must.push(Condition::range(
+            KEY_CHUNK_INDEX,
+            Range {
+                gte: Some(f64::from(lo)),
+                lte: Some(f64::from(hi)),
+                ..Default::default()
+            },
+        ));
+    }
+}
+
+/// `tenant == t AND document_id in documents AND chunk_type == "figure"`, plus
+/// the caller's unit range when one is set.
 #[must_use]
-pub fn figures_filter(tenant: &TenantId, documents: &[String]) -> Filter {
-    Filter::must([
+pub fn figures_filter(scope: &DocumentScope, documents: &[String]) -> Filter {
+    let mut filter = Filter::must([
         Condition::matches(
             KEY_TENANT_ID,
-            MatchValue::Keyword(tenant.as_str().to_string()),
+            MatchValue::Keyword(scope.tenant().as_str().to_string()),
         ),
         Condition::matches(
             KEY_DOCUMENT_ID,
@@ -97,7 +227,10 @@ pub fn figures_filter(tenant: &TenantId, documents: &[String]) -> Filter {
             }),
         ),
         Condition::matches(KEY_CHUNK_TYPE, MatchValue::Keyword("figure".to_string())),
-    ])
+    ]);
+    append_predicate_conditions(&mut filter, scope);
+    append_unit_range(&mut filter, scope.unit_range());
+    filter
 }
 
 /// `tenant == t AND document_id in documents`.
@@ -140,11 +273,16 @@ pub fn one_document_filter(tenant: &TenantId, document: &DocumentId) -> Filter {
 /// answer from the `chunk_index` index without touching the rest of the
 /// document.
 #[must_use]
-pub fn chunk_range_filter(tenant: &TenantId, document: &DocumentId, lo: u32, hi: u32) -> Filter {
-    Filter::must([
+pub fn chunk_range_filter(
+    scope: &DocumentScope,
+    document: &DocumentId,
+    lo: u32,
+    hi: u32,
+) -> Filter {
+    let mut filter = Filter::must([
         Condition::matches(
             KEY_TENANT_ID,
-            MatchValue::Keyword(tenant.as_str().to_string()),
+            MatchValue::Keyword(scope.tenant().as_str().to_string()),
         ),
         Condition::matches(
             KEY_DOCUMENT_ID,
@@ -158,7 +296,10 @@ pub fn chunk_range_filter(tenant: &TenantId, document: &DocumentId, lo: u32, hi:
                 ..Default::default()
             },
         ),
-    ])
+    ]);
+    append_predicate_conditions(&mut filter, scope);
+    append_unit_range(&mut filter, scope.unit_range());
+    filter
 }
 
 /// Ids belong to this scope: the scope filter **and** the id list.
@@ -184,13 +325,15 @@ pub fn scoped_ids_filter(scope: &DocumentScope, ids: &[ChunkId]) -> Filter {
 /// alone is not scope, and the page list alone could cross into another
 /// document. The caller (the tree arm) only passes documents it read from a
 /// [`DocumentScope`], and this filter repeats the tenant/document condition so
-/// a bug in that caller cannot widen the read.
+/// a bug in that caller cannot widen the read. The caller's unit range is
+/// intersected here too, so the tree arm cannot fetch a page outside the part
+/// of the document being searched.
 #[must_use]
-pub fn pages_filter(tenant: &TenantId, document: &DocumentId, pages: &[u32]) -> Filter {
-    Filter::must([
+pub fn pages_filter(scope: &DocumentScope, document: &DocumentId, pages: &[u32]) -> Filter {
+    let mut filter = Filter::must([
         Condition::matches(
             KEY_TENANT_ID,
-            MatchValue::Keyword(tenant.as_str().to_string()),
+            MatchValue::Keyword(scope.tenant().as_str().to_string()),
         ),
         Condition::matches(
             KEY_DOCUMENT_ID,
@@ -202,7 +345,10 @@ pub fn pages_filter(tenant: &TenantId, document: &DocumentId, pages: &[u32]) -> 
                 integers: pages.iter().map(|page| i64::from(*page)).collect(),
             }),
         ),
-    ])
+    ]);
+    append_predicate_conditions(&mut filter, scope);
+    append_unit_range(&mut filter, scope.unit_range());
+    filter
 }
 
 /// The payload of one unit, as Qdrant stores it.
@@ -212,7 +358,14 @@ pub fn unit_payload(unit: &IndexUnit) -> Payload {
     payload.insert(KEY_UNIT_ID, unit.id.as_str());
     payload.insert(KEY_TENANT_ID, unit.tenant.as_str());
     payload.insert(KEY_DOCUMENT_ID, unit.document_id.as_str());
-    if let Some(kb) = &unit.knowledge_base_id {
+    // A document may sit in several knowledge bases. Ingest writes the whole
+    // list into `metadata.knowledgeBaseIds`; the singular `IndexUnit` field is
+    // kept for callers that have only one. Qdrant stores a keyword array under
+    // the same key, which `any_of` matches in either shape.
+    let kb_ids = knowledge_base_ids_from_metadata(&unit.metadata);
+    if !kb_ids.is_empty() {
+        payload.insert(KEY_KNOWLEDGE_BASE_ID, kb_ids);
+    } else if let Some(kb) = &unit.knowledge_base_id {
         payload.insert(KEY_KNOWLEDGE_BASE_ID, kb.as_str());
     }
     if let Some(category) = &unit.category {
@@ -227,8 +380,39 @@ pub fn unit_payload(unit: &IndexUnit) -> Payload {
     if let Some(prefix) = &unit.contextual_prefix {
         payload.insert(KEY_CONTEXTUAL_PREFIX, prefix.clone());
     }
+    // `ING-13`: mirror the engine's metadata spans as first-class payload
+    // values, just like `page` and `chunkIndex`, so a reader can ask for them
+    // without walking the opaque metadata object. Absent stays absent.
+    let spans = spans_from_metadata(&unit.metadata);
+    if let Some(start) = spans.char_start {
+        payload.insert(KEY_CHAR_START, i64::from(start));
+    }
+    if let Some(end) = spans.char_end {
+        payload.insert(KEY_CHAR_END, i64::from(end));
+    }
+    if let Some(overlap) = spans.overlap_prefix_len {
+        payload.insert(KEY_OVERLAP_PREFIX_LEN, i64::from(overlap));
+    }
     payload.insert(KEY_METADATA, unit.metadata.clone());
     payload
+}
+
+/// Every knowledge base id the engine wrote for this unit. Old units (and the
+/// stateless path) carry none; the singular `IndexUnit::knowledge_base_id` is
+/// then the only source.
+#[must_use]
+pub fn knowledge_base_ids_from_metadata(metadata: &serde_json::Value) -> Vec<String> {
+    metadata
+        .get("knowledgeBaseIds")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Read a unit back out of a point's payload, or `None` when the payload is not
@@ -256,6 +440,46 @@ pub fn candidate_from(
             .map_or(serde_json::Value::Null, json_of),
         scores,
         ranks,
+    })
+}
+
+/// Read vector-free chunk metadata from a scrolled point's payload. The
+/// mirrored `charStart`/`charEnd`/`overlapPrefixLen` fields are preferred;
+/// older payloads that only carry them inside `metadata` still read correctly.
+/// A point that is not one of ours (no tenant or document id) is skipped.
+#[must_use]
+pub fn chunk_meta_from_payload(
+    payload: &std::collections::HashMap<String, Value>,
+) -> Option<ChunkMeta> {
+    string(payload, KEY_TENANT_ID)?;
+    string(payload, KEY_DOCUMENT_ID)?;
+    let metadata = payload
+        .get(KEY_METADATA)
+        .map_or(serde_json::Value::Null, json_of);
+    let mirrored = spans_from_payload(payload);
+    let nested = spans_from_metadata(&metadata);
+    Some(ChunkMeta {
+        chunk_index: integer(payload, KEY_CHUNK_INDEX).unwrap_or(0) as u32,
+        page: integer(payload, KEY_PAGE).map(|value| value as u32),
+        section: metadata
+            .get("section")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        content: string(payload, KEY_CONTENT).unwrap_or_default(),
+        char_start: mirrored.char_start.or(nested.char_start),
+        char_end: mirrored.char_end.or(nested.char_end),
+        overlap_prefix_len: mirrored.overlap_prefix_len.or(nested.overlap_prefix_len),
+        chunk_type: ChunkType::from_storage(string(payload, KEY_CHUNK_TYPE).as_deref().or_else(
+            || {
+                metadata
+                    .get("chunkType")
+                    .and_then(serde_json::Value::as_str)
+            },
+        )),
+        asset_key: metadata
+            .get("assetKey")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -312,8 +536,8 @@ pub fn any_of(field: &str, values: Vec<String>) -> Condition {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use kb_engine::fakes::make_fake_scope;
-    use kb_ports::KnowledgeBaseId;
+    use kb_engine::fakes::{make_fake_predicate_scope, make_fake_scope};
+    use kb_ports::{DocumentFilter, KnowledgeBaseId, PredicateSpec, VerifySpec};
 
     fn test_scope(docs: &[&str]) -> DocumentScope {
         make_fake_scope(
@@ -359,6 +583,41 @@ mod tests {
     }
 
     #[test]
+    fn chunk_spans_round_trip_through_the_payload() {
+        let mut stored = unit("tenant-a", "doc-a1", 2);
+        stored.metadata = serde_json::json!({"documentTitle": "d", "charStart": 120, "charEnd": 400, "overlapPrefixLen": 24});
+        let payload = unit_payload(&stored);
+        let map: std::collections::HashMap<String, Value> = payload.clone().into();
+        assert_eq!(integer(&map, KEY_CHAR_START), Some(120));
+        assert_eq!(integer(&map, KEY_CHAR_END), Some(400));
+        assert_eq!(integer(&map, KEY_OVERLAP_PREFIX_LEN), Some(24));
+        let spans = spans_from_payload(&map);
+        assert_eq!(spans.char_start, Some(120));
+        assert_eq!(spans.char_end, Some(400));
+        assert_eq!(spans.overlap_prefix_len, Some(24));
+        let back = candidate_from(&map, ArmScores::default(), ArmRanks::default())
+            .expect("payload round-trip");
+        assert_eq!(spans_from_metadata(&back.metadata), spans);
+        assert_eq!(back.metadata, stored.metadata);
+    }
+
+    #[test]
+    fn old_chunks_have_no_spans_not_zero() {
+        // Chunks written before ING-13 carry no span keys: they must read as
+        // absent, never as a span of 0 that would claim to be a real offset.
+        let stored = unit("tenant-a", "doc-a1", 2);
+        let payload = unit_payload(&stored);
+        let map: std::collections::HashMap<String, Value> = payload.clone().into();
+        assert!(!map.contains_key(KEY_CHAR_START));
+        assert!(!map.contains_key(KEY_CHAR_END));
+        assert!(!map.contains_key(KEY_OVERLAP_PREFIX_LEN));
+        assert_eq!(spans_from_payload(&map), ChunkSpans::default());
+        let back = candidate_from(&map, ArmScores::default(), ArmRanks::default())
+            .expect("payload round-trip");
+        assert_eq!(spans_from_metadata(&back.metadata), ChunkSpans::default());
+    }
+
+    #[test]
     fn a_payload_without_a_unit_id_is_not_one_of_ours() {
         let map =
             std::collections::HashMap::from([(KEY_DOCUMENT_ID.to_string(), Value::from("doc"))]);
@@ -378,6 +637,9 @@ mod tests {
         assert!(!map.contains_key(KEY_CONTEXTUAL_PREFIX));
         assert!(!map.contains_key(KEY_CATEGORY));
         assert!(!map.contains_key(KEY_KNOWLEDGE_BASE_ID));
+        assert!(!map.contains_key(KEY_CHAR_START));
+        assert!(!map.contains_key(KEY_CHAR_END));
+        assert!(!map.contains_key(KEY_OVERLAP_PREFIX_LEN));
         let back = candidate_from(&map, ArmScores::default(), ArmRanks::default());
         let back = back.expect("payload round-trip");
         assert_eq!(back.page, None);
@@ -405,10 +667,112 @@ mod tests {
 
     #[test]
     fn a_pages_filter_names_tenant_document_and_page() {
-        let tenant = TenantId::new_unchecked("tenant-a");
+        let scope = test_scope(&["doc-a1"]);
         let document = DocumentId::new_unchecked("doc-a1");
-        let filter = pages_filter(&tenant, &document, &[3, 4]);
+        let filter = pages_filter(&scope, &document, &[3, 4]);
         assert_eq!(filter.must.len(), 3, "tenant, document and pages");
+    }
+
+    #[test]
+    fn a_unit_range_adds_index_range_conditions_to_every_search_filter() {
+        // Every path that queries the chunk store builds its filter here. All
+        // five must carry the range as conditions, not as a post-filter.
+        let scope = test_scope(&["doc-a1"]).with_unit_range(UnitRange {
+            pages: Some((1, 5)),
+            chunks: Some((40, 57)),
+        });
+        let document = DocumentId::new_unchecked("doc-a1");
+        let filters = [
+            scope_filter(&scope),
+            scoped_ids_filter(&scope, &[ChunkId::new_unchecked("doc-a1_3")]),
+            figures_filter(&scope, &["doc-a1".to_string()]),
+            pages_filter(&scope, &document, &[3]),
+            chunk_range_filter(&scope, &document, 40, 57),
+        ];
+        for filter in filters {
+            let debug = format!("{filter:?}");
+            assert!(debug.contains(KEY_PAGE), "no page range in {debug}");
+            assert!(debug.contains(KEY_CHUNK_INDEX), "no chunk range in {debug}");
+        }
+    }
+
+    #[test]
+    fn a_page_only_range_adds_only_the_page_condition() {
+        let scope = test_scope(&["doc-a1"]).with_unit_range(UnitRange {
+            pages: Some((1, 5)),
+            chunks: None,
+        });
+        let debug = format!("{:?}", scope_filter(&scope));
+        assert!(debug.contains(KEY_PAGE), "no page range in {debug}");
+        assert!(
+            !debug.contains(KEY_CHUNK_INDEX),
+            "unwanted chunk range: {debug}"
+        );
+    }
+
+    #[test]
+    fn no_unit_range_leaves_the_filter_untouched() {
+        let scope = test_scope(&["doc-a1"]);
+        let filter = scope_filter(&scope);
+        assert_eq!(filter.must.len(), 2, "tenant and documents only");
+        let debug = format!("{filter:?}");
+        assert!(!debug.contains(KEY_PAGE));
+        assert!(!debug.contains(KEY_CHUNK_INDEX));
+    }
+
+    fn predicate_scope(kb_ids: Option<Vec<&str>>, category: Option<&str>) -> DocumentScope {
+        make_fake_predicate_scope(
+            TenantId::new_unchecked("tenant-a"),
+            PredicateSpec {
+                kb_ids: kb_ids.map(|ids| {
+                    ids.into_iter()
+                        .map(KnowledgeBaseId::new_unchecked)
+                        .collect()
+                }),
+                category: category.map(str::to_string),
+                verify: VerifySpec {
+                    tenant: TenantId::new_unchecked("tenant-a"),
+                    filter: DocumentFilter::default(),
+                    restricted_ids: None,
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn a_predicate_filter_has_no_id_list_and_names_tenant_kb_and_category() {
+        let scope = predicate_scope(Some(vec!["kb-1", "kb-2"]), Some("cat-1"));
+        let filter = scope_filter(&scope);
+        let debug = format!("{filter:?}");
+        assert!(!debug.contains(KEY_DOCUMENT_ID), "{debug}");
+        assert!(debug.contains(KEY_TENANT_ID), "{debug}");
+        assert!(debug.contains(KEY_KNOWLEDGE_BASE_ID), "{debug}");
+        assert!(debug.contains("kb-1"), "{debug}");
+        assert!(debug.contains("kb-2"), "{debug}");
+        assert!(debug.contains(KEY_CATEGORY), "{debug}");
+        assert!(debug.contains("cat-1"), "{debug}");
+    }
+
+    #[test]
+    fn a_narrowed_predicate_filter_adds_the_requested_documents_back() {
+        let scope = predicate_scope(None, None).narrowed_to(&[DocumentId::new_unchecked("doc-a")]);
+        let debug = format!("{:?}", scope_filter(&scope));
+        assert!(debug.contains(KEY_DOCUMENT_ID), "{debug}");
+        assert!(debug.contains("doc-a"), "{debug}");
+        assert!(!debug.contains(KEY_KNOWLEDGE_BASE_ID), "{debug}");
+    }
+
+    #[test]
+    fn knowledge_base_ids_from_metadata_cover_a_document_in_several_kbs() {
+        let mut unit = unit("tenant-a", "doc-a", 0);
+        unit.metadata = serde_json::json!({"knowledgeBaseIds": ["kb-1", "kb-2"]});
+        let payload = unit_payload(&unit);
+        let map: std::collections::HashMap<String, Value> = payload.into();
+        assert_eq!(
+            knowledge_base_ids_from_metadata(&unit.metadata),
+            vec!["kb-1", "kb-2"]
+        );
+        assert!(map.contains_key(KEY_KNOWLEDGE_BASE_ID));
     }
 
     #[test]
@@ -419,6 +783,10 @@ mod tests {
             KEY_KNOWLEDGE_BASE_ID,
             KEY_CATEGORY,
             KEY_CHUNK_INDEX,
+            KEY_PAGE,
+            KEY_CHAR_START,
+            KEY_CHAR_END,
+            KEY_OVERLAP_PREFIX_LEN,
         ] {
             assert!(PAYLOAD_KEYS.contains(&key), "{key}");
         }

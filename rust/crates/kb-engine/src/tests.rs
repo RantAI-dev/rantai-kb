@@ -35,6 +35,12 @@ mod pipeline_tests {
             TenantId("t1".into()),
             DocumentMeta {
                 sha256: None,
+                doc_key: None,
+                version: None,
+                supersedes_document_id: None,
+                effective_from: None,
+                effective_to: None,
+                is_latest: true,
                 id: DocumentId("d1".into()),
                 title: "Title 1".into(),
                 categories: vec![],
@@ -766,6 +772,12 @@ mod pipeline_tests {
             tenant.clone(),
             DocumentMeta {
                 sha256: None,
+                doc_key: None,
+                version: None,
+                supersedes_document_id: None,
+                effective_from: None,
+                effective_to: None,
+                is_latest: true,
                 id: DocumentId("doc_a".into()),
                 title: "Doc in KB A".into(),
                 categories: vec!["cat_a".into()],
@@ -787,6 +799,12 @@ mod pipeline_tests {
             tenant.clone(),
             DocumentMeta {
                 sha256: None,
+                doc_key: None,
+                version: None,
+                supersedes_document_id: None,
+                effective_from: None,
+                effective_to: None,
+                is_latest: true,
                 id: DocumentId("doc_b".into()),
                 title: "Doc in KB B".into(),
                 categories: vec!["cat_b".into()],
@@ -837,6 +855,7 @@ mod pipeline_tests {
                     category: None,
                     ..DocumentFilter::default()
                 },
+                force_ids: false,
             })
             .await
             .unwrap();
@@ -901,6 +920,7 @@ mod pipeline_tests {
                     category: Some("cat_a".into()),
                     ..DocumentFilter::default()
                 },
+                force_ids: false,
             })
             .await
             .unwrap();
@@ -961,6 +981,7 @@ mod pipeline_tests {
             .build_scope(&ScopeRequest {
                 tenant: tenant.clone(),
                 filter: DocumentFilter::default(),
+                force_ids: false,
             })
             .await
             .unwrap();
@@ -1022,6 +1043,7 @@ mod pipeline_tests {
             .build_scope(&ScopeRequest {
                 tenant: tenant.clone(),
                 filter: DocumentFilter::default(),
+                force_ids: false,
             })
             .await
             .unwrap();
@@ -2358,6 +2380,12 @@ mod pipeline_tests {
             TenantId("t1".into()),
             DocumentMeta {
                 sha256: None,
+                doc_key: None,
+                version: None,
+                supersedes_document_id: None,
+                effective_from: None,
+                effective_to: None,
+                is_latest: true,
                 id: DocumentId("d2".into()),
                 title: "Hidden".into(),
                 categories: vec![],
@@ -2427,5 +2455,153 @@ mod pipeline_tests {
                 .map(|hit| hit.chunk.document_id.0.clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    // ---- RET-12: breadcrumb in the rerank input ----
+
+    fn breadcrumb_setup() -> (
+        Arc<FakeDocumentStore>,
+        Arc<FakeChunkStore>,
+        Arc<FakeEmbedder>,
+        Arc<FakeReranker>,
+    ) {
+        let doc_store = Arc::new(FakeDocumentStore::default());
+        doc_store.insert_doc(
+            TenantId("t1".into()),
+            DocumentMeta {
+                sha256: None,
+                doc_key: None,
+                version: None,
+                supersedes_document_id: None,
+                effective_from: None,
+                effective_to: None,
+                is_latest: true,
+                id: DocumentId("d1".into()),
+                title: "Doc".into(),
+                categories: vec![],
+                subcategory: None,
+                status: "READY".into(),
+                external_ref: None,
+                chunk_count: 2,
+                file_type: None,
+                file_size: None,
+                mime_type: None,
+                s3_key: None,
+                created_at: "".into(),
+                updated_at: "".into(),
+                knowledge_base_ids: vec![],
+                metadata: None,
+            },
+        );
+        (
+            doc_store,
+            Arc::new(FakeChunkStore::default()),
+            Arc::new(FakeEmbedder::default()),
+            Arc::new(FakeReranker::default()),
+        )
+    }
+
+    fn breadcrumb_hit(content: &str, index: u32, similarity: f32) -> kb_ports::SearchHit {
+        let mut hit = make_fake_hit(
+            &format!("c{index}"),
+            "d1",
+            "Doc",
+            content,
+            index,
+            similarity,
+        );
+        hit.chunk.metadata.section = Some("Section".into());
+        hit.chunk.metadata.page = Some(3);
+        hit
+    }
+
+    async fn run_breadcrumb_mode(
+        flag: bool,
+        budget: usize,
+    ) -> (crate::RetrievalOutcome, Vec<String>) {
+        let (doc_store, chunk_store, embedder, reranker) = breadcrumb_setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        chunk_store.vector_hits.write().unwrap().extend([
+            breadcrumb_hit("éééééééé", 1, 0.9),
+            breadcrumb_hit("berlaku 12 hari kerja", 2, 0.8),
+        ]);
+        let opts = RetrievalOptions {
+            rerank_enabled: true,
+            rerank_char_budget: budget,
+            rerank_breadcrumbs: flag,
+            ..RetrievalOptions::default()
+        };
+        let outcome = run_with(
+            &doc_store,
+            &chunk_store,
+            &embedder,
+            &reranker,
+            &scope,
+            "query",
+            &opts,
+        )
+        .await;
+        let seen = reranker
+            .seen
+            .read()
+            .unwrap()
+            .iter()
+            .map(|c| c.text.clone())
+            .collect();
+        (outcome, seen)
+    }
+
+    #[tokio::test]
+    async fn breadcrumbs_off_rerank_input_is_byte_identical() {
+        let (outcome, seen) = run_breadcrumb_mode(false, 5).await;
+        assert_eq!(seen.len(), 2, "both candidates reach the reranker");
+        assert_eq!(
+            seen[0], "ééé",
+            "off: a UTF-8-safe 5-byte cut of the content"
+        );
+        assert_eq!(
+            seen[1], "berlak",
+            "off: the same cut, no breadcrumb (the existing budget is inclusive)"
+        );
+        assert!(
+            seen.iter().all(|t| !t.contains('›') && !t.contains('\n')),
+            "off: no breadcrumb and no separator may reach the reranker: {seen:?}"
+        );
+        assert!(
+            outcome.chunks.iter().any(|h| h.chunk.content == "éééééééé"),
+            "the response keeps the untruncated original content"
+        );
+    }
+
+    #[tokio::test]
+    async fn breadcrumbs_on_prefixes_title_section_and_page() {
+        let (_, seen) = run_breadcrumb_mode(true, 0).await;
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], "Doc › Section · p.3\néééééééé");
+        assert_eq!(seen[1], "Doc › Section · p.3\nberlaku 12 hari kerja");
+    }
+
+    #[tokio::test]
+    async fn breadcrumbs_on_with_a_budget_truncates_only_the_content() {
+        let (_, seen) = run_breadcrumb_mode(true, 5).await;
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], "Doc › Section · p.3\nééé");
+        assert_eq!(seen[1], "Doc › Section · p.3\nberlak");
+        assert!(
+            seen.iter().all(|t| t.starts_with("Doc › Section · p.3\n")),
+            "the breadcrumb is never clipped: {seen:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn response_chunk_content_is_unchanged_in_both_modes() {
+        let (off, off_seen) = run_breadcrumb_mode(false, 0).await;
+        let (on, on_seen) = run_breadcrumb_mode(true, 0).await;
+        let off_contents: Vec<_> = off.chunks.iter().map(|h| h.chunk.content.clone()).collect();
+        let on_contents: Vec<_> = on.chunks.iter().map(|h| h.chunk.content.clone()).collect();
+        assert_eq!(off_contents, on_contents, "only the rerank input changes");
+        assert!(off_contents.contains(&"éééééééé".to_string()));
+        assert!(off_contents.contains(&"berlaku 12 hari kerja".to_string()));
+        assert_ne!(off_seen, on_seen, "the reranker must see a different text");
     }
 }

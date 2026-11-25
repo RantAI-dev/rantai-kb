@@ -927,6 +927,179 @@
         ]
       }
     },
+    "/v1/documents/{id}/content": {
+      "get": {
+        "tags": [
+          "structure"
+        ],
+        "summary": "Read a bounded, byte-exact slice of one document.",
+        "description": "`GET /v1/documents/{id}/content`. The visibility check is identical to\n[`crate::routes::structure::get_document_structure`]: a document of another\ntenant, outside the key's knowledge-base limit or soft-deleted answers the\nsame 404. A cursor for another document is a 400, a changed content hash a\n409, so neither can be used to read outside the caller's scope.",
+        "operationId": "get_document_content",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The document's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "section",
+            "in": "query",
+            "description": "A section id from `/structure`'s outline v2, e.g. `s3`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pageStart",
+            "in": "query",
+            "description": "First zero-based page, inclusive. Used with `pageEnd`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "pageEnd",
+            "in": "query",
+            "description": "Last zero-based page, inclusive. Used with `pageStart`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "chunkStart",
+            "in": "query",
+            "description": "First chunk index, inclusive. Used with `chunkEnd`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "chunkEnd",
+            "in": "query",
+            "description": "Last chunk index, inclusive. Used with `chunkStart`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Opaque continuation token from a previous response.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "maxChars",
+            "in": "query",
+            "description": "Character budget, clamped to 500..50000 (default 8000).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stitched text, its range, refs and a continuation cursor",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentContentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Two selectors, a malformed cursor or a cursor for another document",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No key, or a key that does not resolve",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The key lacks the kb:read scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such document is visible to this key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The document changed since the cursor was issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The store could not be read",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer_auth": []
+          },
+          {
+            "api_key_header": []
+          }
+        ]
+      }
+    },
     "/v1/documents/{id}/intelligence": {
       "get": {
         "tags": [
@@ -2333,11 +2506,30 @@
               "null"
             ]
           },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Version metadata of the chunk's document (`RET-16`). Absent when the\ndocument predates versioning or carries no version fields."
+          },
           "documentId": {
             "type": "string"
           },
           "documentTitle": {
             "type": "string"
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "externalRef": {
             "type": [
@@ -2397,6 +2589,12 @@
               "null"
             ],
             "description": "Additive (`TBL-1`): that table's title, when the answer could resolve it."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2506,6 +2704,129 @@
           "low"
         ]
       },
+      "ConfidenceDto": {
+        "type": "object",
+        "description": "The `confidence` object of a search answer (`RET-18`). Additive.\n\n`band` is `high`/`medium`/`low` when the active model has a fitted entry,\n`none` when nothing passed the floor, and `unknown` when there is no entry\nand no `minScore` to fall back on. `calibrated=false` means the band is a\nhint only — answer on `high`/`medium` only when it is true.",
+        "required": [
+          "scoreKind",
+          "band",
+          "calibrated"
+        ],
+        "properties": {
+          "band": {
+            "type": "string"
+          },
+          "calibrated": {
+            "type": "boolean"
+          },
+          "margin": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          },
+          "scoreKind": {
+            "type": "string"
+          },
+          "topScore": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          }
+        }
+      },
+      "ContentRange": {
+        "type": "object",
+        "description": "The chunk and page range actually returned, both inclusive. Pages are null\nwhen no chunk in the window carries one.",
+        "required": [
+          "chunkStart",
+          "chunkEnd"
+        ],
+        "properties": {
+          "chunkEnd": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "chunkStart": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "pageEnd": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "pageStart": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ContentRef": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "table_id",
+              "page",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "table"
+                ]
+              },
+              "page": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              },
+              "table_id": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "asset_key",
+              "page",
+              "kind"
+            ],
+            "properties": {
+              "asset_key": {
+                "type": "string"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "figure"
+                ]
+              },
+              "page": {
+                "type": "integer",
+                "format": "int32",
+                "minimum": 0
+              }
+            }
+          }
+        ],
+        "description": "A reference to another record of the same document. Ids and pages only —\nno payloads, so reading on cannot turn into a second search."
+      },
       "DocumentChunkView": {
         "type": "object",
         "required": [
@@ -2553,6 +2874,54 @@
           }
         }
       },
+      "DocumentContentResponse": {
+        "type": "object",
+        "description": "The response body, camelCase on the wire like every other `/v1` shape.",
+        "required": [
+          "documentId",
+          "text",
+          "range",
+          "truncated",
+          "refs",
+          "degrades"
+        ],
+        "properties": {
+          "degrades": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Visible degradation, never a silent empty answer."
+          },
+          "documentId": {
+            "type": "string"
+          },
+          "nextCursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Base64url cursor for the next page, or null on the last one."
+          },
+          "range": {
+            "$ref": "#/components/schemas/ContentRange"
+          },
+          "refs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContentRef"
+            }
+          },
+          "text": {
+            "type": "string",
+            "description": "Stitched text, with overlap removed. Page boundaries are not marked:\nconcatenating successive cursor pages reproduces one unbounded read."
+          },
+          "truncated": {
+            "type": "boolean",
+            "description": "True when more chunks of the selection remain after this page."
+          }
+        }
+      },
       "DocumentDetail": {
         "type": "object",
         "required": [
@@ -2565,7 +2934,8 @@
           "knowledgeBaseIds",
           "chunkCount",
           "figures",
-          "degrades"
+          "degrades",
+          "isLatest"
         ],
         "properties": {
           "categories": {
@@ -2601,6 +2971,25 @@
             },
             "description": "What kept the document from being fully searchable, one line each\n(`#29`)."
           },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Version metadata (`RET-16`). Absent on documents created before the\nversion columns existed."
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "figures": {
             "type": "array",
             "items": {
@@ -2626,6 +3015,10 @@
           "id": {
             "type": "string",
             "description": "The document's id."
+          },
+          "isLatest": {
+            "type": "boolean",
+            "description": "True for the current version; unversioned documents are current too."
           },
           "knowledgeBaseIds": {
             "type": "array",
@@ -2668,6 +3061,12 @@
             ],
             "description": "The subcategory, when it has one."
           },
+          "supersedesDocumentId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "title": {
             "type": "string",
             "description": "The document's title."
@@ -2675,6 +3074,12 @@
           "updatedAt": {
             "type": "string",
             "description": "When the document was last changed."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2748,7 +3153,11 @@
           "pages",
           "figures",
           "chunks",
-          "truncated"
+          "truncated",
+          "outlineVersion",
+          "sections",
+          "estimatedChars",
+          "hasSpans"
         ],
         "properties": {
           "chunks": {
@@ -2761,6 +3170,12 @@
           "documentId": {
             "type": "string",
             "description": "The document's id."
+          },
+          "estimatedChars": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The document's estimated character count, from chunk spans when all\nchunks have them and from the chunks' own text otherwise.",
+            "minimum": 0
           },
           "externalRef": {
             "type": [
@@ -2776,12 +3191,29 @@
             },
             "description": "The document's figures."
           },
+          "hasSpans": {
+            "type": "boolean",
+            "description": "True only when every listed chunk carries a complete span."
+          },
+          "outlineVersion": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Outline v2. Additive: the older fields above are unchanged.",
+            "minimum": 0
+          },
           "pages": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/PageStructure"
             },
             "description": "The document's pages, by page number."
+          },
+          "sections": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SectionDto"
+            },
+            "description": "A navigable table of contents with chunk and page ranges. Empty for an\nempty document."
           },
           "title": {
             "type": "string",
@@ -2803,7 +3235,8 @@
           "status",
           "createdAt",
           "knowledgeBaseIds",
-          "degrades"
+          "degrades",
+          "isLatest"
         ],
         "properties": {
           "categories": {
@@ -2833,6 +3266,25 @@
             },
             "description": "What kept the document from being fully searchable, one line each\n(`#29`)."
           },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Version metadata (`RET-16`). Absent on documents created before the\nversion columns existed."
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "externalRef": {
             "type": [
               "string",
@@ -2858,6 +3310,10 @@
           "id": {
             "type": "string",
             "description": "The document's id."
+          },
+          "isLatest": {
+            "type": "boolean",
+            "description": "True for the current version; unversioned documents are current too."
           },
           "knowledgeBaseIds": {
             "type": "array",
@@ -2893,9 +3349,21 @@
             ],
             "description": "The subcategory, when it has one."
           },
+          "supersedesDocumentId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "title": {
             "type": "string",
             "description": "The document's title."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -3519,6 +3987,35 @@
           }
         }
       },
+      "MultiVersionWarningDto": {
+        "type": "object",
+        "description": "One `docKey` whose versions were mixed in a single answer (`RET-16`).",
+        "required": [
+          "docKey",
+          "documentIds",
+          "versions"
+        ],
+        "properties": {
+          "docKey": {
+            "type": "string",
+            "description": "The stable document key the versions share."
+          },
+          "documentIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The returned documents holding that key, in first-appearance order."
+          },
+          "versions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Their version labels, in the same order. `None` labels are omitted."
+          }
+        }
+      },
       "OkResponse": {
         "type": "object",
         "description": "The body every delete answers with.\n\nOne shape for every route that removes something: `{\"ok\": true}`. A delete\nthat removed nothing answers `404` instead, so `ok` is always `true` when\nit is there at all.",
@@ -3547,6 +4044,26 @@
           "key": {
             "type": "string",
             "description": "An output column name or alias."
+          }
+        }
+      },
+      "PageRangeDto": {
+        "type": "object",
+        "description": "An inclusive page window. Valid only with exactly one `documentIds` entry.",
+        "required": [
+          "start",
+          "end"
+        ],
+        "properties": {
+          "end": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "start": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
           }
         }
       },
@@ -3599,6 +4116,25 @@
             },
             "description": "The document's new categories."
           },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Version metadata (`RET-16`). Absent leaves the column alone; a bad date\nis a 400. Dates accept `YYYY-MM-DD` or a full ISO timestamp."
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "knowledgeBaseIds": {
             "type": [
               "array",
@@ -3622,6 +4158,12 @@
               "null"
             ],
             "description": "The document's new title."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -3634,7 +4176,8 @@
           "status",
           "createdAt",
           "updatedAt",
-          "knowledgeBaseIds"
+          "knowledgeBaseIds",
+          "isLatest"
         ],
         "properties": {
           "categories": {
@@ -3647,6 +4190,25 @@
           "createdAt": {
             "type": "string",
             "description": "When the document was created."
+          },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Version metadata after the patch (`RET-16`)."
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "fileSize": {
             "type": [
@@ -3666,6 +4228,10 @@
           "id": {
             "type": "string",
             "description": "The document's id."
+          },
+          "isLatest": {
+            "type": "boolean",
+            "description": "True for the current version; unversioned documents are current too."
           },
           "knowledgeBaseIds": {
             "type": "array",
@@ -3692,6 +4258,12 @@
             ],
             "description": "The subcategory, when it has one."
           },
+          "supersedesDocumentId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "title": {
             "type": "string",
             "description": "The document's title."
@@ -3699,6 +4271,12 @@
           "updatedAt": {
             "type": "string",
             "description": "When the document was last changed."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -4038,6 +4616,9 @@
             ],
             "description": "Per-request adaptive arm choice (RET-5). `Some(true)`/`Some(false)`\noverrides the server's `KB_ADAPTIVE_ARMS`; absent means \"use the server\ndefault\", which is off."
           },
+          "asOf": {
+            "description": "Additive (`RET-16`): point-in-time search. Accepts `YYYY-MM-DD` or a full\nISO timestamp. Kept untyped so a bad value is a field-level 400 rather\nthan a deserialiser error the route cannot explain."
+          },
           "boost": {
             "description": "Additive (`RET-4`): optional recency/authority boosts. Kept untyped so\na malformed value is this route's 400, not a deserialiser 422."
           },
@@ -4078,6 +4659,9 @@
               "null"
             ]
           },
+          "includeHistory": {
+            "description": "Additive (`RET-16`): search every version of a `docKey`, not only the\nlatest. Default false. Kept untyped so a non-boolean is this route's 400."
+          },
           "knowledgeBaseIds": {
             "type": [
               "array",
@@ -4102,6 +4686,15 @@
             "format": "int32",
             "minimum": 0
           },
+          "maxPerDocument": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Additive (`RET-17`): keep at most this many chunks per document. The\nroute answers 400 unless the value is in 1..=50; absent means the\nserver default `KB_MAX_PER_DOCUMENT` (off when unset or 0).",
+            "minimum": 0
+          },
           "metadata": {
             "description": "Additive (`RET-3`): top-level JSONB metadata predicates. Kept untyped\nso an invalid key or a non-scalar value is a 400 from validation rather\nthan a deserialiser 422."
           },
@@ -4113,8 +4706,26 @@
             "format": "float",
             "description": "Optional relevance floor for this request (RET-2). Overrides the\nserver's `KB_MIN_SCORE`; absent means \"use the server default\" (which\nis unset unless an operator configured one)."
           },
+          "pageRange": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PageRangeDto",
+                "description": "Additive (`RET-15`): an inclusive page window inside one document."
+              }
+            ]
+          },
           "query": {
             "description": "Left as raw JSON: the TypeScript route rejects a non-string query with\nits own 400, which a typed field would turn into a parser error."
+          },
+          "section": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`RET-15`): an outline v2 section id inside one document."
           }
         }
       },
@@ -4130,6 +4741,17 @@
               "$ref": "#/components/schemas/ChunkDto"
             }
           },
+          "confidence": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ConfidenceDto",
+                "description": "Additive (`RET-18`): an actionable band computed from the top score and\nthe active scoring model's calibration. Always present on a standard\nor `documentIds` search; absent on the `hybrid: true` stub, which runs\nno search at all."
+              }
+            ]
+          },
           "context": {
             "type": [
               "string",
@@ -4141,6 +4763,13 @@
             "items": {
               "type": "string"
             }
+          },
+          "multiVersionWarning": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MultiVersionWarningDto"
+            },
+            "description": "Additive (`RET-16`): when the answer mixes versions of one `docKey`, the\ncaller is told which documents and versions it is reading. Absent when\nthere is no mix (the default current-version search can never mix)."
           },
           "note": {
             "type": [
@@ -4256,7 +4885,7 @@
               },
               {
                 "$ref": "#/components/schemas/GlobalArmStatsDto",
-                "description": "Additive (`DEC-5`): what the global community arm did. Present only when\nthe arm ran (`KB_GLOBAL_ARM` on and an aggregative query), so a server\nwith the flag off answers exactly the earlier shape. `communities: 0`\nmeans the tenant has no community set — the arm had nothing to say, and\nthat is not a degrade."
+                "description": "Additive (`DEC-5`): what the global community arm did. `KB_GLOBAL_ARM` is\n**deprecated (DEC-6)** and stays off; enabling it logs a startup warning.\nPresent only when the arm ran (on and an aggregative query), so a server\nwith the flag off answers exactly the earlier shape. `communities: 0`\nmeans the tenant has no community set — the arm had nothing to say, and\nthat is not a degrade."
               }
             ]
           },
@@ -4267,6 +4896,14 @@
           "graphSearchTimeMs": {
             "type": "number",
             "format": "double"
+          },
+          "perDocumentCapped": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Additive (`RET-17`): how many hits the per-document diversity cap\ndropped. Present whenever the cap ran (even when it dropped nothing);\nabsent when it was off, so an old client's shape is unchanged.",
+            "minimum": 0
           },
           "queryClass": {
             "type": [
@@ -4281,6 +4918,14 @@
               "null"
             ],
             "description": "Additive (issue #31): how many of the returned chunks carry a\n`rerankScore` — that is, how many of them the reranker scored.\n\nWithout a relevance floor that is the reranked head: the chunks ordered\nby the rerank score, followed by the rest in the fused order without\none. With a relevance floor (`minScore`) the whole pool was scored (the\nfloor compares every hit against its score), so it can be the whole\nanswer.\n\nAbsent when no reranker ran, so a search without a reranker keeps\nexactly the earlier shape.",
+            "minimum": 0
+          },
+          "scopeVerifyDropped": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "SEC-2a: candidates dropped because Postgres did not verify their\ndocument. Absent in Ids mode, so an old client sees the earlier shape.",
             "minimum": 0
           },
           "skippedArms": {
@@ -4323,6 +4968,83 @@
           "vectorSearchTimeMs": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "SectionDto": {
+        "type": "object",
+        "description": "One section of the outline v2, mapping to a contiguous chunk range.",
+        "required": [
+          "id",
+          "title",
+          "level",
+          "path",
+          "chunkStart",
+          "chunkEnd",
+          "estimatedChars",
+          "marker"
+        ],
+        "properties": {
+          "chunkEnd": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Last chunk index (inclusive).",
+            "minimum": 0
+          },
+          "chunkStart": {
+            "type": "integer",
+            "format": "int32",
+            "description": "First chunk index (inclusive).",
+            "minimum": 0
+          },
+          "estimatedChars": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Estimated non-overlap characters in the section.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "Stable section id within this document (`s1`, `s2`, …), used by the\ncontent route's `?section=` parameter."
+          },
+          "level": {
+            "type": "integer",
+            "format": "int32",
+            "description": "1 for a chapter/top-level heading, deeper for nested markers.",
+            "minimum": 0
+          },
+          "marker": {
+            "type": "string",
+            "description": "What produced the boundary: `bab`, `bagian`, `pasal`, `paragraf`,\n`heading` or `page`."
+          },
+          "pageEnd": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Last page of the section, or null when its chunks have no page.",
+            "minimum": 0
+          },
+          "pageStart": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "First page of the section, or null when its chunks have no page.",
+            "minimum": 0
+          },
+          "path": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ancestor titles from the top-level BAB down to this section."
+          },
+          "title": {
+            "type": "string",
+            "description": "The heading as printed, or the detected legal marker."
           }
         }
       },
@@ -4427,6 +5149,13 @@
               "null"
             ]
           },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Version metadata of the source's document (`RET-16`). Filled from the\nsame DocumentMeta that supplies `documentTitle`; absent for old rows."
+          },
           "documentId": {
             "type": [
               "string",
@@ -4435,6 +5164,18 @@
           },
           "documentTitle": {
             "type": "string"
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "page": {
             "type": [
@@ -4445,6 +5186,12 @@
             "minimum": 0
           },
           "section": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
             "type": [
               "string",
               "null"
@@ -4873,12 +5620,33 @@
             ],
             "description": "The categories the document is filed under, as a JSON array or a\ncomma-separated list."
           },
+          "docKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`RET-16`): stable key shared by all versions of one document.\nUploading a new version with an existing `docKey` retires the current\none in the same transaction."
+          },
           "documentType": {
             "type": [
               "string",
               "null"
             ],
             "description": "The kind of document, as the extractor should read it."
+          },
+          "effectiveFrom": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`RET-16`): when this version comes into force. Accepts\n`YYYY-MM-DD` or a full ISO timestamp; a bad date is a 400."
+          },
+          "effectiveTo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`RET-16`): when this version stops being in force (exclusive)."
           },
           "externalRef": {
             "type": [
@@ -4933,6 +5701,13 @@
               "null"
             ],
             "description": "The document's title. Defaults to the file name without its extension."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Additive (`RET-16`): the caller's version label, e.g. `\"2025\"`."
           }
         }
       }

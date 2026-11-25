@@ -231,11 +231,15 @@ impl PageArm {
         scope: &DocumentScope,
         query: &str,
     ) -> Result<Vec<RankedPage>, PortError> {
-        if scope.document_ids().is_empty() {
+        if scope.is_empty() {
             return Ok(Vec::new());
         }
         let vector = self.embedder.embed_query(query).await?;
         let n = self.config.candidates.max(1);
+        // Page units carry the page number as their `chunkIndex`. Using the
+        // caller's chunk range here would compare a page number with a text
+        // chunk index and exclude every page, so only the page half applies.
+        let page_scope = scope.pages_only();
         let hits = self
             .index
             .search(
@@ -246,7 +250,7 @@ impl PageArm {
                     k: n,
                     fusion: Fusion::None,
                 },
-                scope,
+                &page_scope,
             )
             .await?;
         Ok(hits.into_iter().filter_map(ranked_page).collect())
@@ -331,7 +335,9 @@ pub async fn merge_pages(
     );
     let mut rerank_failed = false;
     if let (Some(cfg), Some(ctx)) = (config.rerank, rerank) {
-        match rerank_slots(&fused, &by_slot, scope, &cfg, &ctx).await {
+        // The rerank reads page units, so it inherits the page half of the
+        // range only — see `PageArm::rank`.
+        match rerank_slots(&fused, &by_slot, &scope.pages_only(), &cfg, &ctx).await {
             Ok(order) => fused = order,
             Err(e) => {
                 tracing::warn!(error = %e, "page rerank failed (non-fatal); keeping fused order");

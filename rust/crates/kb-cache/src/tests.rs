@@ -368,6 +368,32 @@ async fn a_new_query_prefix_keeps_the_passage_vectors() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// `ING-9`: before the fix, passage vectors were stored under a key that
+/// claimed the passage prefix while the text had been sent without it. Those
+/// entries must not be read back, or a re-index would keep the wrong vectors.
+#[tokio::test]
+async fn pre_ing9_passage_entries_are_not_reused() {
+    let root = temp_root();
+    let disk = DiskCache::new(&root);
+    let stale = crate::store::CacheKey::from_parts(&[b"m", b"passage", b"P: ", b"x"]);
+    disk.put(
+        "embed-v1",
+        &stale,
+        &crate::vectors::encode(&[9.0, 9.0, 9.0]),
+    )
+    .await;
+    let inner = Arc::new(CountingEmbedder::default());
+    let cached = CachedEmbedder::new(inner.clone(), disk, "m").with_prefixes("", "P: ");
+    let out = cached.embed_passages(&texts(&["x"])).await.unwrap();
+    assert_eq!(
+        inner.passages.load(Ordering::SeqCst),
+        1,
+        "stale entry skipped"
+    );
+    assert_eq!(out, vec![vec_for("x")]);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Orders candidates by text length, longest first, and counts calls.
 #[derive(Default)]
 struct LengthReranker {

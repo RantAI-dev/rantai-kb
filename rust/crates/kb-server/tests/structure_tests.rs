@@ -63,6 +63,12 @@ async fn seed(h: &Harness) {
         TenantId(TENANT.to_string()),
         DocumentMeta {
             sha256: None,
+            doc_key: None,
+            version: None,
+            supersedes_document_id: None,
+            effective_from: None,
+            effective_to: None,
+            is_latest: true,
             metadata: Some(serde_json::json!({"figures": [
                 {
                     "assetKey": "documents/tenant-a/doc-1/assets/fig-p1-1.png",
@@ -421,6 +427,218 @@ async fn an_unlimited_key_reads_structure_in_any_knowledge_base() {
         .send("GET", "/v1/documents/doc-b/structure", &tenant_key(TENANT))
         .await;
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+// ─── RET-13: outline v2 ─────────────────────────────────────────────────────
+
+/// An Indonesian regulation: no markdown headings, just legal markers at the
+/// start of lines. One marker per chunk so every section owns a chunk range.
+async fn seed_regulation(h: &Harness, id: &str) {
+    h.documents
+        .insert_doc(TenantId(TENANT.to_string()), doc_meta(id, "Peraturan"));
+    let rows = [
+        (
+            0u32,
+            0u32,
+            "BAB I KETENTUAN UMUM\nPasal 1\n(1) Setiap orang berhak atas pendidikan.",
+            (0u32, 100u32, 0u32),
+        ),
+        (
+            1,
+            0,
+            "Pasal 2\n(1) Setiap orang berhak atas pekerjaan.",
+            (100, 200, 10),
+        ),
+        (
+            2,
+            1,
+            "BAB II HAK DAN KEWAJIBAN\nBagian Kesatu\nHak",
+            (200, 300, 0),
+        ),
+        (
+            3,
+            1,
+            "Pasal 3\n(1) Pekerja berhcp atas upah.",
+            (300, 450, 12),
+        ),
+    ];
+    let units: Vec<IndexUnit> = rows
+        .into_iter()
+        .map(|(index, page, content, (start, end, overlap))| {
+            unit(
+                TENANT,
+                id,
+                index,
+                ChunkType::Text,
+                Some(page),
+                content,
+                serde_json::json!({
+                    "chunkIndex": index,
+                    "chunkType": "text",
+                    "page": page,
+                    "charStart": start,
+                    "charEnd": end,
+                    "overlapPrefixLen": overlap,
+                }),
+            )
+        })
+        .collect();
+    h.chunks.upsert(units).await.unwrap();
+}
+
+#[tokio::test]
+async fn outline_v2_of_a_regulation_has_the_bab_pasal_tree_with_ranges() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    seed_regulation(&h, "regulation").await;
+
+    let response = h
+        .send(
+            "GET",
+            "/v1/documents/regulation/structure",
+            &tenant_key(TENANT),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+
+    // All the old fields are still on the wire, unchanged.
+    assert_eq!(body["documentId"], "regulation");
+    assert_eq!(body["title"], "Peraturan");
+    assert!(body.get("pages").is_some());
+    assert!(body.get("figures").is_some());
+    assert!(body.get("chunks").is_some());
+    assert_eq!(body["truncated"], false);
+
+    assert_eq!(body["outlineVersion"], 2);
+    assert_eq!(body["hasSpans"], true);
+    assert_eq!(body["estimatedChars"], 450);
+
+    let sections = body["sections"].as_array().expect("sections");
+    let titles: Vec<&str> = sections
+        .iter()
+        .map(|s| s["title"].as_str().expect("title"))
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "BAB I KETENTUAN UMUM",
+            "Pasal 1",
+            "Pasal 2",
+            "BAB II HAK DAN KEWAJIBAN",
+            "Bagian Kesatu",
+            "Pasal 3",
+        ]
+    );
+    assert_eq!(sections[0]["marker"], "bab");
+    assert_eq!(sections[0]["level"], 1);
+    assert_eq!(
+        sections[0]["path"],
+        serde_json::json!(["BAB I KETENTUAN UMUM"])
+    );
+    assert_eq!(sections[1]["marker"], "pasal");
+    assert_eq!(sections[1]["id"], "s2");
+    assert_eq!(
+        sections[1]["path"],
+        serde_json::json!(["BAB I KETENTUAN UMUM", "Pasal 1"])
+    );
+    assert_eq!(sections[2]["id"], "s3");
+    assert_eq!(sections[2]["chunkStart"], 1);
+    assert_eq!(sections[2]["chunkEnd"], 1);
+    assert_eq!(sections[2]["pageStart"], 0);
+    assert_eq!(sections[2]["pageEnd"], 0);
+    assert_eq!(sections[2]["estimatedChars"], 100);
+    assert_eq!(sections[4]["marker"], "bagian");
+    assert_eq!(sections[5]["marker"], "pasal");
+    assert_eq!(
+        sections[5]["path"],
+        serde_json::json!(["BAB II HAK DAN KEWAJIBAN", "Bagian Kesatu", "Pasal 3"])
+    );
+    assert_eq!(sections[5]["pageStart"], 1);
+    assert_eq!(sections[5]["estimatedChars"], 150);
+}
+
+#[tokio::test]
+async fn outline_v2_falls_back_to_per_page_sections_without_spans() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    h.documents
+        .insert_doc(TenantId(TENANT.to_string()), doc_meta("plain", "Scanned"));
+    h.chunks
+        .upsert(vec![
+            unit(
+                TENANT,
+                "plain",
+                0,
+                ChunkType::Text,
+                Some(0),
+                "aaaa",
+                serde_json::json!({"chunkIndex": 0, "page": 0}),
+            ),
+            unit(
+                TENANT,
+                "plain",
+                1,
+                ChunkType::Text,
+                Some(1),
+                "bb",
+                serde_json::json!({"chunkIndex": 1, "page": 1}),
+            ),
+        ])
+        .await
+        .unwrap();
+
+    let response = h
+        .send("GET", "/v1/documents/plain/structure", &tenant_key(TENANT))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert_eq!(body["outlineVersion"], 2);
+    assert_eq!(body["hasSpans"], false);
+    let sections = body["sections"].as_array().expect("sections");
+    assert_eq!(sections.len(), 2);
+    assert_eq!(sections[0]["title"], "Page 1");
+    assert_eq!(sections[0]["marker"], "page");
+    assert_eq!(sections[1]["title"], "Page 2");
+    assert_eq!(body["estimatedChars"], 6);
+}
+
+#[tokio::test]
+async fn outline_v2_never_lists_another_tenants_chunks() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    h.with_tenant(OTHER);
+    seed_regulation(&h, "secret").await;
+
+    let response = h
+        .send("GET", "/v1/documents/secret/structure", &tenant_key(OTHER))
+        .await;
+    assert_error(response, StatusCode::NOT_FOUND, "Not found").await;
+}
+
+#[tokio::test]
+async fn outline_v2_stays_hidden_from_a_key_outside_the_documents_kb() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    limited_key(&h);
+    doc_in_kb(&h, "restricted", KB_B);
+    h.chunks
+        .upsert(vec![unit(
+            TENANT,
+            "restricted",
+            0,
+            ChunkType::Text,
+            Some(0),
+            "BAB I RAHASIA",
+            serde_json::json!({"chunkIndex": 0, "page": 0}),
+        )])
+        .await
+        .unwrap();
+
+    let response = h
+        .send("GET", "/v1/documents/restricted/structure", LIMITED)
+        .await;
+    assert_error(response, StatusCode::NOT_FOUND, "Not found").await;
 }
 
 #[tokio::test]

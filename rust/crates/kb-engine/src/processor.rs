@@ -16,6 +16,7 @@ use kb_core::chunk::{Chunk, ChunkMetadata, SmartChunkingOptions, smart_chunk_doc
 use kb_core::figure_assets::{
     build_page_text, context_for_page, derive_label, figure_kind_word, normalize_figure_type,
 };
+use kb_core::outline::{OutlineChunk, build_outline};
 use kb_core::policy::{FigureMode, resolve_ingest_policy};
 use kb_ports::{
     ChunkId, Embedder, Entity, EntityExtractor, ExtractionOptions, Extractor, OcrReport, PageText,
@@ -176,6 +177,26 @@ pub struct ProcessedChunk {
     pub embedding: Option<Vec<f32>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sparse_vector: Option<SparseVectorData>,
+    /// Character span in the chunker's normalised source (`ING-13`). Absent,
+    /// not zero, when the chunk has no span (older formats, figures, tables).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub char_start: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub char_end: Option<u32>,
+    /// Leading chars of `content` that repeat the previous chunk's tail.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap_prefix_len: Option<u32>,
+}
+
+/// One page's cheap change-detection digest (`ING-14`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessedPage {
+    /// Zero-based page index, the same numbering as `ProcessOutput::page_map`.
+    pub page: u32,
+    /// Lowercase hex SHA-256 of the UTF-8 bytes of the corresponding
+    /// `pageMap[].text` (the page's extracted text, exactly as returned).
+    pub page_sha256: String,
 }
 
 /// One extracted structured table with its inferred typed manifest.
@@ -237,6 +258,12 @@ pub struct ProcessOutput {
     pub file_size: usize,
     pub content: String,
     pub page_map: Vec<PageText>,
+    /// Outline v2, built by the same `kb_core` function as `/structure` (`RET-13`).
+    pub outline_version: u32,
+    /// Navigable table of contents over the returned chunks. Additive (`ING-14`).
+    pub sections: Vec<kb_core::outline::Section>,
+    /// Per-page SHA-256 digests for cheap change detection (`ING-14`).
+    pub pages: Vec<ProcessedPage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub outline: Option<kb_core::tree::Outline>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -595,6 +622,7 @@ impl DocumentProcessor {
                         asset_key: None,
                         anchor_chunk_index: None,
                         table_id: None,
+                        ..ChunkMetadata::default()
                     },
                 });
                 chunk_table_indices.push(Some(table_idx));
@@ -622,6 +650,7 @@ impl DocumentProcessor {
                                 asset_key: None,
                                 anchor_chunk_index: None,
                                 table_id: None,
+                                ..ChunkMetadata::default()
                             },
                         });
                         chunk_table_indices.push(Some(table_idx));
@@ -713,6 +742,7 @@ impl DocumentProcessor {
                         anchor_chunk_index,
                         contextual_prefix: None,
                         table_id: None,
+                        ..ChunkMetadata::default()
                     },
                 });
                 chunk_table_indices.push(None);
@@ -840,11 +870,42 @@ impl DocumentProcessor {
                     table_index,
                     embedding,
                     sparse_vector,
+                    char_start: chunk.metadata.char_start,
+                    char_end: chunk.metadata.char_end,
+                    overlap_prefix_len: chunk.metadata.overlap_prefix_len,
                 }
             })
             .collect();
 
+        // Outline v2 uses exactly the same pure builder and chunk fields as
+        // `/v1/documents/:id/structure`, so the caller can reuse its sections
+        // without re-deriving them. The stored outline, when one was extracted,
+        // is the first source there too.
+        let outline_chunks: Vec<OutlineChunk> = processed_chunks
+            .iter()
+            .map(|chunk| OutlineChunk {
+                chunk_index: chunk.chunk_index,
+                page: chunk.page,
+                section: chunk.section.clone(),
+                content: chunk.content.clone(),
+                char_start: chunk.char_start,
+                char_end: chunk.char_end,
+                overlap_prefix_len: chunk.overlap_prefix_len,
+            })
+            .collect();
+        let sections = build_outline(&outline_chunks, outline.as_ref());
+
         let page_map = extraction.page_map.unwrap_or_default();
+        // Hash the page text exactly as it is returned in `page_map`: a caller
+        // can recompute `sha256(pageMap[i].text)` and compare it here. UTF-8
+        // bytes, lowercase hex, stable across runs for the same extracted text.
+        let pages = page_map
+            .iter()
+            .map(|page| ProcessedPage {
+                page: page.page,
+                page_sha256: hex::encode(Sha256::digest(page.text.as_bytes())),
+            })
+            .collect();
 
         Ok(ProcessOutput {
             title,
@@ -853,6 +914,9 @@ impl DocumentProcessor {
             file_size,
             content,
             page_map,
+            outline_version: 2,
+            sections,
+            pages,
             outline,
             ocr: extraction.ocr,
             quality: quality.verdict.metadata(),

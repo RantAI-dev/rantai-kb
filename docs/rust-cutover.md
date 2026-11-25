@@ -522,6 +522,7 @@ the tenant, soft-delete, knowledge-base and category predicates
 figure, neighbour, graph, entity — inherits the narrowed scope before ranking. Bun has no
 equivalent; a client that filters after the fact spends top-k on documents it then drops.
 The fields are additive and Bun ignores them.
+
 ### 18. Additive: `GET /v1/documents/:id/structure` (2026-11-04)
 
 A new read-only route returns a document's `pages`, `figures` and chunk → page map, with
@@ -610,6 +611,7 @@ sidecars in `metadata/<doc-key>.json` are uploaded with the corpus, so off/on sh
 ingest. MRR@10 comes from `rust/crates/kb-eval/scripts/score_deltas.py`, which already
 reported it. The set is synthetic and measures ranking, not answer correctness; the
 live MRR measurement for `RET-4` has **not** been run yet.
+
 ### 20. Additive: adaptive arm choice (`RET-5`, 2026-11-04)
 
 `POST /v1/search` accepts an optional `adaptiveArms: boolean`, and the server accepts a
@@ -650,6 +652,11 @@ pipeline uses. Measurement against the p50 −20% / nDCG@10 −0.005 target is p
 commands are in `docs/core/specs/ret-5.md`.
 
 ### 21. Additive: global community arm (`DEC-5`, 2026-11-04)
+
+**Deprecated (DEC-6, 2026-11-24):** `KB_GLOBAL_ARM` and `KB_GRAPH_ARM` stay off and are
+deprecated. Starting the server with either enabled logs one warning naming the evidence
+(HotpotQA −8.5 pp R@5 and +400 ms p95, `docs/eval-baseline.md`, `EVAL-3`); they may be removed
+after v1.0. Behaviour is unchanged in this release — warning only.
 
 `KB_GLOBAL_ARM=1` turns on a "global mode" retrieval arm built on graph community
 summaries. **It is off by default and it is a measured loss**: `EVAL-3` found that
@@ -773,6 +780,35 @@ file per grid version; a hard delete removes the document's table rows and Parqu
   at `KB_RERANK_FINAL_K`.
 - **Evidence**: `docs/eval-ab/rerank-max-k/README.md` (200 MIRACL-id queries,
   paired bootstrap over cached rerank scores, 10,000 resamples).
+
+### 23a. Additive: breadcrumb in the rerank input (`KB_RERANK_BREADCRUMBS`, RET-12, 2026-11-24)
+- **Bun / earlier Rust**: the reranker saw the bare `h.chunk.content`, so a chunk
+  like "berlaku 12 hari kerja" carried no document-title or section context.
+- **Rust (now)**: with `KB_RERANK_BREADCRUMBS=on` (`off` by default; `true` /
+  `false` are also accepted) the reranker sees
+  `"{document title} › {section path or section} · p.{page}\n" + content`. The
+  char budget from `KB_RERANK_CHAR_BUDGET` still truncates only the content at a
+  UTF-8 boundary; the breadcrumb is never clipped.
+- **What it changes in the API**: nothing. The response chunk content, sources,
+  context and scores keep their existing shapes — only the text sent to the
+  reranker changes, so no re-index is required. An unknown value is a startup
+  error.
+- **Status**: default `off` until the A/B (MIRACL-id-200 and ViDoRe HR, paired
+  bootstrap 95% CI) shows a gain; `docs/core/specs/v1-roadmap.md` RET-12.
+
+### 23b. Additive: `maxPerDocument` (`KB_MAX_PER_DOCUMENT`, RET-17, 2026-11-24)
+- **Bun / earlier Rust**: nothing limited how many of an answer's chunks came from one
+  document; a single vendor proposal could occupy the whole top of the list.
+- **Rust (now)**: the search body accepts `maxPerDocument` (integer `1..=50`; out of range is a
+  `400`), and `KB_MAX_PER_DOCUMENT` supplies the server-wide default (`0`/unset = off). The
+  engine walks the reranked list after rerank and before the final `maxChunks` cut and keeps a
+  hit only while its document has fewer than N kept hits; surplus hits are dropped, not moved to
+  the end, so the survivors' order is unchanged. Figures are attached after the cap and are not
+  counted; neighbour chunks are counted against the same per-document budget so a capped document
+  cannot regain chunks through the neighbour weave.
+- **What it changes in the API**: additive. `stats.perDocumentCapped` reports the number of
+  dropped hits when the cap is on (including zero); it is absent when the cap is off, so a client
+  that has never heard of it sees exactly the earlier shape.
 
 ### 28. Additive: the `waiting_for_ocr` job state and the per-backend health (`#36`, 2026-11-20)
 
@@ -1063,3 +1099,49 @@ already there — that is the opt-in below.
 `KB_EMBED_PRECISION` is a new variable: unset or `bf16` is the old behaviour, `nvfp4` asks for the
 4-bit build. An unknown value is a startup error, not a fallback. `docs/kb-tiers.md` has the
 per-tier VRAM budgets per build.
+
+## 8. Passage prefixes on ingest (ING-9)
+
+The batch embedding path (stateful ingest and stateless `/v1/process`) now prefixes every passage
+with the model's `passage_prefix`, exactly as the single-text path already did, so
+`/v1/encode mode=passage` and ingest embed the same text into the same space. Prefixes are applied
+once; providers whose instruction is carried out of band (`input_type`, Voyage / OmniEmbed) still
+send no text prefix.
+
+**Re-index required for `lite` (multilingual-e5-small):** documents indexed before this fix were
+embedded without the `passage: ` prefix and live in a different vector space from new queries and
+from `/v1/encode mode=passage`. Run `kb-server reindex` to rebuild those corpora. Other tiers and
+all query prefixes are unaffected.
+
+## 9. documentIds searches use the full pipeline (RET-11)
+
+`POST /v1/search` with `documentIds` used to take a private dense-only path: the BM25, reranker,
+page, tree, neighbour and figure arms never ran, so searching inside chosen documents was worse
+than searching everything. It now passes the same narrowed scope into the standard retrieval
+pipeline as every other search. The scope is still the intersection of the requested document ids
+and the documents the key may see (tenant, knowledge-base and metadata filters all still apply);
+`documentIds` cannot widen it, and a document from another tenant or another KB is never searched.
+
+This is additive to the response: `chunks` is still there, and the answer now also carries
+`sources` and `context` as a normal search does. Previously `sources` was omitted and `context`
+was only built for `format: "context"`, as a plain `"[i] content"` list; `context` now follows the
+standard format with numbered sources, with or without that request field. Clients that read only
+`chunks` need no change. `hybrid: true` is still the legacy Bun stub and is unchanged.
+
+## 10. Document versions (RET-16)
+
+Documents may now carry `docKey`, `version`, `supersedesDocumentId`, `effectiveFrom`,
+`effectiveTo` and `isLatest`. Uploading a new version under an existing `docKey` retires the
+previous latest row and closes its effective interval in the same transaction. `POST
+/v1/search` gains `includeHistory` (default false) and `asOf`; by default only current
+versions are searched, so an answer can no longer cite a stale policy. Chunks, sources and
+the document read/list routes report the version fields additively, and an answer that mixes
+versions carries `multiVersionWarning`.
+
+**The migration is additive.** `prisma/migrations/20261124120000_document_versions/migration.sql`
+adds five nullable columns and one `NOT NULL DEFAULT true` column plus a
+`(tenantId, docKey)` index; no existing row is backfilled or rewritten. **`kb-server migrate`
+applies it** (the same `_prisma_migrations` bookkeeping the Bun release used), so an operator
+running both binaries during cutover does not need a separate Prisma step. Old clients keep
+working: every new request/response field is optional, and every unversioned document stays
+visible in all three search modes.

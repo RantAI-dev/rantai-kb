@@ -194,6 +194,15 @@ fn scope_key(scope: &DocumentScope) -> (String, Vec<String>) {
         .iter()
         .map(ToString::to_string)
         .collect();
+    // A predicate scope has no id list. Its coarse conditions must be part of
+    // the cache identity: two KB-limited keys in the same tenant must never
+    // share a graph loaded for one of them.
+    if let Some(predicate) = scope.predicate() {
+        documents.push(format!(
+            "predicate:{}",
+            serde_json::to_string(predicate).unwrap_or_default()
+        ));
+    }
     documents.sort();
     (scope.tenant().as_str().to_string(), documents)
 }
@@ -558,8 +567,7 @@ mod tests {
                 .labels
                 .iter()
                 .filter(|(key, _)| {
-                    scope.document_ids().iter().any(|d| !d.0.is_empty())
-                        && terms.iter().any(|t| key.contains(t.as_str()))
+                    !scope.is_empty() && terms.iter().any(|t| key.contains(t.as_str()))
                 })
                 .map(|(key, _)| (key.clone(), 1.0))
                 .collect())

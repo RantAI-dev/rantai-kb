@@ -390,6 +390,8 @@ async fn scope_containment(store: &impl GraphStore) -> Outcome {
             Err(err) => return Outcome::Failed(format!("load_tenant_graph({scope_name}): {err}")),
         };
 
+        // Contract fixtures use Ids scopes; a predicate scope deliberately
+        // cannot enumerate ids, so an adapter under test stays on the id path.
         let expected: BTreeSet<&str> = scope.document_ids().iter().map(|id| id.as_str()).collect();
 
         for mention in graph.mentions() {

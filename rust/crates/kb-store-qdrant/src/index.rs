@@ -7,7 +7,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use kb_ports::Fusion as PortFusion;
 use kb_ports::{
-    ArmRanks, ArmScores, Candidate, ChunkId, DocumentId, DocumentScope, HybridQuery,
+    ArmRanks, ArmScores, Candidate, ChunkId, ChunkMeta, DocumentId, DocumentScope, HybridQuery,
     IndexCapabilities, IndexUnit, KeywordSemantics, PortError, RetrievalIndex, TenantId,
     sort_candidates,
 };
@@ -19,7 +19,7 @@ use qdrant_client::qdrant::{
 };
 
 use crate::ids::point_id;
-use crate::payload::{candidate_from, unit_payload};
+use crate::payload::{candidate_from, chunk_meta_from_payload, unit_payload};
 use crate::settings::{DENSE_VECTOR, QdrantSettings, SPARSE_VECTOR, map};
 
 /// Points below which the dense arm scans exactly instead of walking the HNSW
@@ -341,7 +341,7 @@ impl RetrievalIndex for QdrantIndex {
         query: &HybridQuery,
         scope: &DocumentScope,
     ) -> Result<Vec<Candidate>, PortError> {
-        if scope.document_ids().is_empty() {
+        if scope.is_empty() {
             return Ok(Vec::new());
         }
 
@@ -606,7 +606,7 @@ impl RetrievalIndex for QdrantIndex {
         scope: &DocumentScope,
         ids: &[ChunkId],
     ) -> Result<Vec<Candidate>, PortError> {
-        if ids.is_empty() || scope.document_ids().is_empty() {
+        if ids.is_empty() || scope.is_empty() {
             return Ok(Vec::new());
         }
         let filter = crate::payload::scoped_ids_filter(scope, ids);
@@ -638,7 +638,7 @@ impl RetrievalIndex for QdrantIndex {
         document_id: &DocumentId,
         chunk_indices: &[u32],
     ) -> Result<Vec<Candidate>, PortError> {
-        if chunk_indices.is_empty() || !scope.document_ids().contains(document_id) {
+        if chunk_indices.is_empty() || !scope.allows_document(document_id) {
             return Ok(Vec::new());
         }
 
@@ -659,8 +659,7 @@ impl RetrievalIndex for QdrantIndex {
         let min_idx = *adjacent.iter().min().unwrap_or(&0);
         let max_idx = *adjacent.iter().max().unwrap_or(&0);
 
-        let filter =
-            crate::payload::chunk_range_filter(scope.tenant(), document_id, min_idx, max_idx);
+        let filter = crate::payload::chunk_range_filter(scope, document_id, min_idx, max_idx);
 
         let limit = (max_idx - min_idx + 1).max(1);
         let response = self
@@ -693,13 +692,13 @@ impl RetrievalIndex for QdrantIndex {
     ) -> Result<Vec<Candidate>, PortError> {
         let matching_docs: Vec<String> = document_ids
             .iter()
-            .filter(|d| scope.document_ids().contains(d))
+            .filter(|d| scope.allows_document(d))
             .map(|d| d.as_str().to_string())
             .collect();
         if matching_docs.is_empty() {
             return Ok(Vec::new());
         }
-        let filter = crate::payload::figures_filter(scope.tenant(), &matching_docs);
+        let filter = crate::payload::figures_filter(scope, &matching_docs);
         let response = self
             .client
             .scroll(
@@ -726,7 +725,7 @@ impl RetrievalIndex for QdrantIndex {
         pages: &[(DocumentId, u32)],
         per_page: usize,
     ) -> Result<Vec<Candidate>, PortError> {
-        if pages.is_empty() || per_page == 0 || scope.document_ids().is_empty() {
+        if pages.is_empty() || per_page == 0 || scope.is_empty() {
             return Ok(Vec::new());
         }
         // Group the request by document so one filter and one scroll window
@@ -736,7 +735,7 @@ impl RetrievalIndex for QdrantIndex {
         let mut by_document: std::collections::HashMap<&DocumentId, Vec<u32>> =
             std::collections::HashMap::new();
         for (document, page) in pages {
-            if scope.document_ids().contains(document) {
+            if scope.allows_document(document) {
                 by_document.entry(document).or_default().push(*page);
             }
         }
@@ -745,7 +744,7 @@ impl RetrievalIndex for QdrantIndex {
         for (document, mut wanted) in by_document {
             wanted.sort_unstable();
             wanted.dedup();
-            let filter = crate::payload::pages_filter(scope.tenant(), document, &wanted);
+            let filter = crate::payload::pages_filter(scope, document, &wanted);
             // The cap is a safety valve, not the contract: keep scrolling until
             // every page has `per_page` units, the server has no more matches,
             // or the read cap is reached. A page with more chunks than
@@ -879,6 +878,47 @@ impl RetrievalIndex for QdrantIndex {
         }
         out.truncate(max_units);
         out.sort_by_key(|c| c.chunk_index);
+        Ok(out)
+    }
+
+    async fn list_chunk_meta(
+        &self,
+        scope: &DocumentScope,
+        document: &DocumentId,
+    ) -> Result<Vec<ChunkMeta>, PortError> {
+        // The caller checked visibility; repeat the scope test here so a
+        // document outside the caller's visible set is never read, even if a
+        // future caller forgets.
+        if !scope.allows_document(document) {
+            return Ok(Vec::new());
+        }
+        let filter = crate::payload::one_document_filter(scope.tenant(), document);
+        let mut out: Vec<ChunkMeta> = Vec::new();
+        let mut offset: Option<PointId> = None;
+        loop {
+            let mut builder = ScrollPointsBuilder::new(&self.collection)
+                .filter(filter.clone())
+                .limit(DOCUMENT_SCROLL_WINDOW)
+                .with_payload(true)
+                .with_vectors(false);
+            if let Some(next) = offset.take() {
+                builder = builder.offset(next);
+            }
+            let response = self.client.scroll(builder).await.map_err(map)?;
+            if response.result.is_empty() {
+                break;
+            }
+            for point in response.result {
+                if let Some(meta) = chunk_meta_from_payload(&point.payload) {
+                    out.push(meta);
+                }
+            }
+            match response.next_page_offset {
+                Some(next) => offset = Some(next),
+                None => break,
+            }
+        }
+        out.sort_by_key(|meta| meta.chunk_index);
         Ok(out)
     }
 

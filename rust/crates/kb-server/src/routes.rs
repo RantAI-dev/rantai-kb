@@ -10,7 +10,7 @@
 //! * Anything unmatched authenticates first and then 404s, so an unknown path
 //!   cannot be used to probe which tenants exist.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -23,18 +23,21 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
+use kb_core::ScoreEvidence;
+use kb_core::outline::{OutlineChunk, build_outline};
 use kb_core::policy::MimeRegistry;
+use kb_core::versions::normalise_timestamp;
 use kb_engine::timing::{Stopwatch, SystemClock};
 use kb_ports::{
-    AuthContext, DocumentFilter, DocumentId, DocumentMeta, KnowledgeBaseId, MetadataFilter,
-    ScopeRequest, SearchHit,
+    AuthContext, DocumentFilter, DocumentId, DocumentMeta, DocumentScope, KnowledgeBaseId,
+    MetadataFilter, ScopeRequest, UnitRange,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 
 use crate::auth::Authed;
 use crate::dto::{
-    BoostStatsDto, ChunkDto, SearchRequestDto, SearchResponseDto, SearchStatsDto, StageDetailDto,
+    BoostStatsDto, ConfidenceDto, SearchRequestDto, SearchResponseDto, SearchStatsDto,
     StageTimingsDto, splice_json_member,
 };
 use crate::error::{ApiError, ErrorBody};
@@ -42,6 +45,7 @@ use crate::state::AppState;
 
 // The route modules are public because their handlers carry the
 // `#[utoipa::path]` attributes the OpenAPI document is built from.
+pub mod content;
 pub mod jobs;
 pub mod media;
 pub mod structure;
@@ -289,6 +293,9 @@ route_table! {
         "/v1/documents/:id/structure" => "structure" {
             GET => structure::get_document_structure,
         },
+        "/v1/documents/:id/content" => "structure" {
+            GET => content::get_document_content,
+        },
         "/v1/documents/:id/assets" => "media" {
             GET => media::get_document_asset,
         },
@@ -514,6 +521,54 @@ pub struct OkResponse {
     pub ok: bool,
 }
 
+/// Parse one effective-date field on upload or PATCH. An absent or empty field
+/// is `None`; anything that is not a date is the route's own 400, naming the
+/// field so the caller can fix it.
+pub(crate) fn parse_version_date(
+    field: &str,
+    value: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    normalise_timestamp(raw).map(Some).ok_or_else(|| {
+        ApiError::BadRequest(format!(
+            "Invalid '{field}': expected YYYY-MM-DD or an ISO timestamp, got '{raw}'"
+        ))
+    })
+}
+
+/// The two additive version fields of a search body, validated at the boundary.
+/// Both may be sent: `asOf` takes precedence in the store's scope resolution,
+/// because a point-in-time question is more specific than "show me history".
+fn parse_search_versions(body: &SearchRequestDto) -> Result<(bool, Option<String>), ApiError> {
+    let include_history = match body.include_history.as_ref() {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "Invalid 'includeHistory': expected a boolean".to_string(),
+            ));
+        }
+    };
+    let as_of = match body.as_of.as_ref() {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => {
+            Some(parse_version_date("asOf", Some(value))?.ok_or_else(|| {
+                ApiError::BadRequest(
+                    "Invalid 'asOf': expected YYYY-MM-DD or an ISO timestamp".to_string(),
+                )
+            })?)
+        }
+        Some(_) => {
+            return Err(ApiError::BadRequest(
+                "Invalid 'asOf': expected YYYY-MM-DD or an ISO timestamp".to_string(),
+            ));
+        }
+    };
+    Ok((include_history, as_of))
+}
+
 /// Ask a question; get the chunks, the sources and the assembled context.
 ///
 /// `POST /v1/search` — the retrieval answer. Needs the `kb:read` scope. The
@@ -539,7 +594,21 @@ pub async fn search(
     Authed(auth): Authed,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    if !crate::auth::has_scope(&auth, "kb:read") {
+    search_inner(&state, &auth, body).await
+}
+
+/// The shared body of `POST /v1/search`.
+///
+/// The MCP `kb_search` tool calls this exact function, so scope building,
+/// knowledge-base limits, versions and every retrieval arm behave identically
+/// on the HTTP and MCP surfaces. There is deliberately no second visibility
+/// path here.
+pub(crate) async fn search_inner(
+    state: &Arc<AppState>,
+    auth: &AuthContext,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    if !crate::auth::has_scope(auth, "kb:read") {
         return Err(ApiError::missing_scope("kb:read"));
     }
     // From here the request is ours to account for: scope build, the pipeline
@@ -559,10 +628,44 @@ pub async fn search(
             "Body must include a 'query' string".to_string(),
         ));
     }
-    let requested_kbs = restrict_kbs(&auth, body.knowledge_base_ids.as_deref());
+    let requested_kbs = restrict_kbs(auth, body.knowledge_base_ids.as_deref());
     let max_chunks = body.max_chunks.unwrap_or(8).clamp(1, 50);
+    // RET-17: unlike `maxChunks`, a bad `maxPerDocument` is a 400 rather than
+    // a clamp — a caller asking for a cap of 0 or 51 has a broken request, and
+    // silently capping (or not) would hide it.
+    if let Some(n) = body.max_per_document
+        && !(1..=50).contains(&n)
+    {
+        return Err(ApiError::BadRequest(
+            "'maxPerDocument' must be an integer between 1 and 50".to_string(),
+        ));
+    }
     let metadata_filter = parse_metadata_filter(body.metadata.as_ref())?;
     let boost = parse_boost(body.boost.as_ref())?;
+    let (include_history, as_of) = parse_search_versions(&body)?;
+
+    // RET-15: both forms name one part of one document. Validate before any
+    // arm runs, so a bad request never spends top-k and never gets an empty
+    // answer that looks like a legitimate "no matches".
+    if body.page_range.is_some() && body.section.is_some() {
+        return Err(ApiError::BadRequest(
+            "pageRange and section cannot be used together".to_string(),
+        ));
+    }
+    if let Some(range) = body.page_range.as_ref()
+        && range.start > range.end
+    {
+        return Err(ApiError::BadRequest(
+            "pageRange.start must be <= pageRange.end".to_string(),
+        ));
+    }
+    if (body.page_range.is_some() || body.section.is_some())
+        && body.document_ids.as_ref().is_none_or(|ids| ids.len() != 1)
+    {
+        return Err(ApiError::BadRequest(
+            "pageRange/section need exactly one documentIds entry".to_string(),
+        ));
+    }
 
     // A key bound to specific knowledge bases that asks for none of them gets
     // an explicit note rather than an empty result: "no results" and "you may
@@ -573,6 +676,7 @@ pub async fn search(
                 "chunks": [],
                 "context": "",
                 "note": "API key is not bound to any of the requested knowledge bases",
+                "confidence": empty_confidence(state, &body),
             }))
             .into_response());
         }
@@ -594,6 +698,8 @@ pub async fn search(
         external_refs: body.external_refs.clone(),
         language: body.language.clone(),
         metadata: metadata_filter,
+        include_history,
+        as_of,
     };
 
     // Branch 1: documentIds filtering (TypeScript api.ts:139)
@@ -612,11 +718,10 @@ pub async fn search(
             return Ok(Json(serde_json::json!({
                 "chunks": [],
                 "context": "",
+                "confidence": empty_confidence(state, &body),
             }))
             .into_response());
         }
-        let alive_map: HashMap<DocumentId, DocumentMeta> =
-            alive.iter().map(|m| (m.id.clone(), m.clone())).collect();
         // Narrow the *filtered* scope, not the whole tenant: the key's
         // knowledge-base limit and every metadata filter still apply, so
         // `documentIds` can only intersect them, never widen them.
@@ -625,120 +730,41 @@ pub async fn search(
             .build_scope(&ScopeRequest {
                 tenant: auth.tenant_id.clone(),
                 filter: filter.clone(),
+                force_ids: body.page_range.is_some() || body.section.is_some(),
             })
             .await
             .map_err(ApiError::from)?;
-        let scope = filtered_scope.narrowed_to(&requested);
-        let scope_build_ms = scope_sw.elapsed_ms();
-        let embed_sw = Stopwatch::start(&SystemClock);
-        let embedded = state
-            .embedder
-            .embed_query_detailed(&query)
-            .await
-            .map_err(|e| ApiError::Internal(format!("embed: {e}")))?;
-        let query_vec = embedded.vector;
-        let query_embed_ms = embed_sw.elapsed_ms();
-        let vector_sw = Stopwatch::start(&SystemClock);
-        let query_hybrid = kb_ports::HybridQuery {
-            dense: Some(query_vec),
-            sparse: None,
-            per_arm_k: max_chunks as usize,
-            k: max_chunks as usize,
-            fusion: kb_ports::Fusion::None,
-        };
-        let cands = state
-            .index
-            .search(&query_hybrid, &scope)
-            .await
-            .map_err(ApiError::from)?;
-        let mut hits: Vec<SearchHit> = cands
-            .into_iter()
-            .map(kb_engine::retrieval::candidate_to_hit)
-            .collect();
-        let vector_arm_ms = vector_sw.elapsed_ms();
-        hits.retain(|h| h.similarity >= 0.30);
-        // This branch has no keyword arm, so the floor can only be dense and
-        // there is no exact-match exemption to grant (RET-2).
-        let (floor_score_kind, floor_dropped) =
-            if let Some(threshold) = body.min_score.or(state.engine.settings.min_score) {
-                let before = hits.len();
-                hits.retain(|h| h.similarity >= threshold);
-                (Some("dense".to_string()), Some(before - hits.len()))
-            } else {
-                (None, None)
-            };
-        // RET-4: the by-id branch has the same document rows it is about to use
-        // for titles, so the boost is applied here too rather than silently
-        // ignored. It runs before the cut so a promoted hit is not lost.
-        let boost_stats = boost
-            .as_ref()
-            .filter(|config| !config.is_off())
-            .map(|config| kb_engine::apply_boosts_now(&mut hits, &alive_map, config));
-        hits.truncate(max_chunks as usize);
-        for h in hits.iter_mut() {
-            if let Some(meta) = alive_map.get(&h.chunk.document_id) {
-                h.chunk.document_title = meta.title.clone();
-                h.chunk.categories = meta.categories.clone();
-                h.chunk.subcategory = meta.subcategory.clone();
-                h.chunk.external_ref = meta.external_ref.clone();
+        let mut scope = filtered_scope.narrowed_to(&requested);
+        // RET-15: the range lives on the scope, so every arm inherits it from
+        // the same object that carries the tenant and document visibility.
+        if scope.visible_document_count() == Some(1) {
+            if let Some(range) = body.page_range.as_ref() {
+                scope = scope.with_unit_range(UnitRange {
+                    pages: Some((range.start, range.end)),
+                    chunks: None,
+                });
+            } else if let Some(section) = body.section.as_ref() {
+                let range = resolve_section_range(state, &scope, &alive, section).await?;
+                scope = scope.with_unit_range(range);
             }
         }
-        let vector_results = hits.len();
-        let chunk_dtos: Vec<ChunkDto> = hits.into_iter().map(ChunkDto::from).collect();
-        let context = if body.format.as_deref() == Some("context") {
-            Some(
-                chunk_dtos
-                    .iter()
-                    .enumerate()
-                    .map(|(i, c)| format!("[{}] {}", i + 1, c.content))
-                    .collect::<Vec<_>>()
-                    .join("\n\n"),
-            )
-        } else {
-            None
-        };
-        let total_results = chunk_dtos.len();
-        let floor_note = (floor_dropped.unwrap_or(0) > 0 && total_results == 0).then(|| {
-            format!(
-                "No result passed the relevance floor (minScore={}, score=dense): {} \
-                 candidate(s) were dropped",
-                body.min_score
-                    .or(state.engine.settings.min_score)
-                    .unwrap_or_default(),
-                floor_dropped.unwrap_or(0)
-            )
-        });
-        let stats = StageTimingsDto {
-            scope_build: scope_build_ms,
-            arms: query_embed_ms + vector_arm_ms,
-            detail: StageDetailDto {
-                engine_total: query_embed_ms + vector_arm_ms,
-                query_embed: query_embed_ms,
-                query_embed_cached: embedded.cached,
-                vector_arm: vector_arm_ms,
-                ..StageDetailDto::default()
-            },
-            ..StageTimingsDto::default()
-        };
-        let mut response = SearchResponseDto {
-            chunks: Some(chunk_dtos),
-            sources: None,
-            context,
-            results: None,
-            stats: Some(search_stats(
-                stats,
-                vector_results,
-                total_results,
-                floor_score_kind,
-                floor_dropped,
-                boost_stats.map(BoostStatsDto::from),
-            )),
-            note: floor_note,
-            degrades: Vec::new(),
-            tables: Vec::new(),
-        };
-        tables::attach_tables(&state, &auth.tenant_id, &mut response).await;
-        return Ok(finish_search(response, route_sw));
+        let scope_build_ms = scope_sw.elapsed_ms();
+        // RET-11: the narrowed scope is the security-relevant part of this
+        // branch. Once it is built, the search is the same one Branch 3 runs —
+        // BM25, reranker, page/tree/neighbour and figure arms included.
+        return retrieve_and_finish(SearchTail {
+            state,
+            auth,
+            query: &query,
+            scope: &scope,
+            scope_build_ms,
+            max_chunks,
+            max_per_document: body.max_per_document,
+            body: &body,
+            boost,
+            route_sw,
+        })
+        .await;
     }
 
     // Branch 2: hybrid retrieval (TypeScript api.ts:151)
@@ -770,6 +796,10 @@ pub async fn search(
                 // so the stub degrades visibly instead of answering silently.
                 degrades: vec![HYBRID_STUB_DEGRADE.to_string()],
                 tables: Vec::new(),
+                // No search ran, so there is no score to calibrate. The key is
+                // absent here, unlike on every real search branch.
+                confidence: None,
+                multi_version_warning: Vec::new(),
             },
             route_sw,
         ));
@@ -782,31 +812,146 @@ pub async fn search(
         .build_scope(&ScopeRequest {
             tenant: auth.tenant_id.clone(),
             filter,
+            force_ids: body.page_range.is_some() || body.section.is_some(),
         })
         .await
         .map_err(ApiError::from)?;
     let scope_build_ms = scope_sw.elapsed_ms();
+    retrieve_and_finish(SearchTail {
+        state,
+        auth,
+        query: &query,
+        scope: &scope,
+        scope_build_ms,
+        max_chunks,
+        max_per_document: body.max_per_document,
+        body: &body,
+        boost,
+        route_sw,
+    })
+    .await
+}
 
+/// Resolve a `section` id to the chunk (and page) range of the outline v2 that
+/// `/v1/documents/:id/structure` serves. The same scoped, vector-free chunk
+/// read is used, so a document outside the caller's scope contributes nothing.
+async fn resolve_section_range(
+    state: &AppState,
+    scope: &DocumentScope,
+    alive: &[DocumentMeta],
+    requested: &str,
+) -> Result<UnitRange, ApiError> {
+    let Some(doc) = alive.first() else {
+        return Err(ApiError::BadRequest(format!(
+            "unknown section id: {requested}"
+        )));
+    };
+    let chunk_meta = state
+        .index
+        .list_chunk_meta(scope, &doc.id)
+        .await
+        .map_err(ApiError::from)?;
+    let chunks: Vec<OutlineChunk> = chunk_meta
+        .into_iter()
+        .map(|meta| OutlineChunk {
+            chunk_index: meta.chunk_index,
+            page: meta.page,
+            section: meta.section,
+            content: meta.content,
+            char_start: meta.char_start,
+            char_end: meta.char_end,
+            overlap_prefix_len: meta.overlap_prefix_len,
+        })
+        .collect();
+    let stored = doc
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("outline"))
+        .and_then(|value| serde_json::from_value::<kb_core::Outline>(value.clone()).ok());
+    let section = build_outline(&chunks, stored.as_ref())
+        .into_iter()
+        .find(|section| section.id == requested)
+        .ok_or_else(|| ApiError::BadRequest(format!("unknown section id: {requested}")))?;
+    Ok(UnitRange {
+        pages: section.page_start.zip(section.page_end),
+        chunks: Some((section.chunk_start, section.chunk_end)),
+    })
+}
+
+/// The inputs the two search branches share once their scope is resolved.
+struct SearchTail<'a> {
+    state: &'a Arc<AppState>,
+    auth: &'a AuthContext,
+    query: &'a str,
+    scope: &'a kb_ports::DocumentScope,
+    scope_build_ms: f64,
+    max_chunks: u32,
+    max_per_document: Option<u32>,
+    body: &'a SearchRequestDto,
+    boost: Option<kb_core::BoostConfig>,
+    route_sw: Stopwatch<'a>,
+}
+
+/// Run the standard retrieval pipeline over an already resolved scope and
+/// finish the response.
+///
+/// The `documentIds` branch and the standard branch differ only in how they
+/// build the scope. Sharing the tail here keeps them on the same arms, the same
+/// floor and boost handling, and the same response shape — so a caller that
+/// narrows a search to chosen documents gets the same answer quality, and a
+/// leak fixed in one path is fixed in the other.
+async fn retrieve_and_finish(tail: SearchTail<'_>) -> Result<Response, ApiError> {
+    let SearchTail {
+        state,
+        auth,
+        query,
+        scope,
+        scope_build_ms,
+        max_chunks,
+        max_per_document,
+        body,
+        boost,
+        route_sw,
+    } = tail;
     let outcome = state
         .engine
         .retrieve_inner(
-            &query,
-            &scope,
+            query,
+            scope,
             Some(max_chunks),
             body.min_score,
             boost,
             body.adaptive_arms,
+            max_per_document,
         )
         .await
         .map_err(ApiError::from)?;
-    let mut response = SearchResponseDto::from(outcome);
+    // Take the evidence before the outcome is consumed. The model id and the
+    // fitted table live on the composition root, not on the engine, so the
+    // band is attached here once both halves are available.
+    let evidence = outcome.confidence_scores;
+    let mut response = SearchResponseDto::from(outcome).with_confidence(state.confidence(
+        &evidence,
+        body.min_score.or(state.engine.settings.min_score),
+    ));
     if let Some(stats) = response.stats.as_mut() {
         // The route knows two stages the engine does not: building the scope,
         // and everything above it in the handler.
         stats.stage_timings_ms.scope_build = scope_build_ms;
     }
-    tables::attach_tables(&state, &auth.tenant_id, &mut response).await;
+    tables::attach_tables(state, &auth.tenant_id, &mut response).await;
     Ok(finish_search(response, route_sw))
+}
+
+/// The confidence object for an answer with no scored hits at all (an empty
+/// scope, or a key bound to no knowledge bases). `kb-core` reports `none`
+/// without inventing a top score; `calibrated` still says whether the active
+/// model has a fitted entry.
+fn empty_confidence(state: &AppState, body: &SearchRequestDto) -> ConfidenceDto {
+    ConfidenceDto::from(state.confidence(
+        &ScoreEvidence::default(),
+        body.min_score.or(state.engine.settings.min_score),
+    ))
 }
 
 /// What the `hybrid: true` stub reports. The standard search already fuses the
@@ -853,6 +998,8 @@ fn search_stats(
         // Only the standard branch runs a reranker, and it builds its stats
         // from the engine's outcome, which carries the count.
         reranked_count: None,
+        scope_verify_dropped: None,
+        per_document_capped: None,
     }
 }
 
@@ -911,6 +1058,8 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
         tree_arm,
         global_arm,
         reranked_count,
+        scope_verify_dropped,
+        per_document_capped,
         ..
     } = stats;
     let stats = SearchStatsDto {
@@ -920,6 +1069,8 @@ fn finish_search(response: SearchResponseDto, route_sw: Stopwatch<'_>) -> Respon
         tree_arm,
         global_arm,
         reranked_count,
+        scope_verify_dropped,
+        per_document_capped,
         ..search_stats(
             stages,
             vector_results,
@@ -1276,6 +1427,24 @@ pub struct DocumentSummary {
     /// one. Null for a document uploaded before the hash was recorded.
     #[serde(rename = "sha256")]
     pub sha256: Option<String>,
+    /// Version metadata (`RET-16`). Absent on documents created before the
+    /// version columns existed.
+    #[serde(rename = "docKey", skip_serializing_if = "Option::is_none")]
+    pub doc_key: Option<String>,
+    #[serde(rename = "version", skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(
+        rename = "supersedesDocumentId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supersedes_document_id: Option<String>,
+    #[serde(rename = "effectiveFrom", skip_serializing_if = "Option::is_none")]
+    pub effective_from: Option<String>,
+    #[serde(rename = "effectiveTo", skip_serializing_if = "Option::is_none")]
+    pub effective_to: Option<String>,
+    /// True for the current version; unversioned documents are current too.
+    #[serde(rename = "isLatest")]
+    pub is_latest: bool,
 }
 
 /// List the caller's documents.
@@ -1306,7 +1475,17 @@ pub async fn list_documents(
     Authed(auth): Authed,
     Query(q): Query<ListDocumentsQuery>,
 ) -> Result<Json<DocumentListResponse>, ApiError> {
-    if !crate::auth::has_scope(&auth, "kb:read") {
+    Ok(Json(list_documents_inner(&state, &auth, q).await?))
+}
+
+/// The shared body of `GET /v1/documents`. The MCP `kb_list_documents` tool
+/// calls it, so the key's knowledge-base limit and pagination are identical.
+pub(crate) async fn list_documents_inner(
+    state: &Arc<AppState>,
+    auth: &AuthContext,
+    q: ListDocumentsQuery,
+) -> Result<DocumentListResponse, ApiError> {
+    if !crate::auth::has_scope(auth, "kb:read") {
         return Err(ApiError::missing_scope("kb:read"));
     }
     // A limit above the cap is clamped, not refused: the callers that ask for
@@ -1332,19 +1511,19 @@ pub async fn list_documents(
         .unwrap_or_default();
     // An empty parameter parses to no ids, which is "absent".
     let requested = (!raw_kbs.is_empty()).then_some(raw_kbs.as_slice());
-    let kb_filter: Vec<KnowledgeBaseId> = match restrict_kbs(&auth, requested) {
+    let kb_filter: Vec<KnowledgeBaseId> = match restrict_kbs(auth, requested) {
         Some(v) => {
             if v.is_empty() {
                 // A restricted key asked for bases it does not hold. Answering
                 // with the whole tenant (what an empty filter means) would
                 // hand it documents it may not see.
-                return Ok(Json(DocumentListResponse {
+                return Ok(DocumentListResponse {
                     documents: Vec::new(),
                     next_cursor: None,
                     total: 0,
                     limit: page_size.limit,
                     limit_clamped: page_size.clamped,
-                }));
+                });
             }
             v.into_iter().map(KnowledgeBaseId::new_unchecked).collect()
         }
@@ -1381,16 +1560,22 @@ pub async fn list_documents(
                 chars_extracted: quality.chars_extracted,
                 degrades: quality.degrades,
                 sha256: d.sha256,
+                doc_key: d.doc_key,
+                version: d.version,
+                supersedes_document_id: d.supersedes_document_id,
+                effective_from: d.effective_from,
+                effective_to: d.effective_to,
+                is_latest: d.is_latest,
             }
         })
         .collect();
-    Ok(Json(DocumentListResponse {
+    Ok(DocumentListResponse {
         documents,
         next_cursor: page.next_cursor,
         total: page.total,
         limit: page_size.limit,
         limit_clamped: page_size.clamped,
-    }))
+    })
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1556,6 +1741,24 @@ pub struct DocumentDetail {
     /// one. Null for a document uploaded before the hash was recorded.
     #[serde(rename = "sha256")]
     pub sha256: Option<String>,
+    /// Version metadata (`RET-16`). Absent on documents created before the
+    /// version columns existed.
+    #[serde(rename = "docKey", skip_serializing_if = "Option::is_none")]
+    pub doc_key: Option<String>,
+    #[serde(rename = "version", skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(
+        rename = "supersedesDocumentId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supersedes_document_id: Option<String>,
+    #[serde(rename = "effectiveFrom", skip_serializing_if = "Option::is_none")]
+    pub effective_from: Option<String>,
+    #[serde(rename = "effectiveTo", skip_serializing_if = "Option::is_none")]
+    pub effective_to: Option<String>,
+    /// True for the current version; unversioned documents are current too.
+    #[serde(rename = "isLatest")]
+    pub is_latest: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1647,6 +1850,12 @@ pub async fn get_document(
             chars_extracted: quality.chars_extracted,
             degrades: quality.degrades,
             sha256: meta.sha256,
+            doc_key: meta.doc_key,
+            version: meta.version,
+            supersedes_document_id: meta.supersedes_document_id,
+            effective_from: meta.effective_from,
+            effective_to: meta.effective_to,
+            is_latest: meta.is_latest,
         },
         chunks: chunk_views,
     }))
@@ -1663,6 +1872,16 @@ pub struct PatchDocumentBody {
     /// The knowledge bases the document belongs to.
     #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Option<Vec<String>>,
+    /// Version metadata (`RET-16`). Absent leaves the column alone; a bad date
+    /// is a 400. Dates accept `YYYY-MM-DD` or a full ISO timestamp.
+    #[serde(rename = "docKey")]
+    pub doc_key: Option<String>,
+    #[serde(rename = "version")]
+    pub version: Option<String>,
+    #[serde(rename = "effectiveFrom")]
+    pub effective_from: Option<String>,
+    #[serde(rename = "effectiveTo")]
+    pub effective_to: Option<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -1701,6 +1920,23 @@ pub struct PatchedDocument {
     /// The knowledge bases the document belongs to.
     #[serde(rename = "knowledgeBaseIds")]
     pub knowledge_base_ids: Vec<String>,
+    /// Version metadata after the patch (`RET-16`).
+    #[serde(rename = "docKey", skip_serializing_if = "Option::is_none")]
+    pub doc_key: Option<String>,
+    #[serde(rename = "version", skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(
+        rename = "supersedesDocumentId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub supersedes_document_id: Option<String>,
+    #[serde(rename = "effectiveFrom", skip_serializing_if = "Option::is_none")]
+    pub effective_from: Option<String>,
+    #[serde(rename = "effectiveTo", skip_serializing_if = "Option::is_none")]
+    pub effective_to: Option<String>,
+    /// True for the current version; unversioned documents are current too.
+    #[serde(rename = "isLatest")]
+    pub is_latest: bool,
 }
 
 /// Change a document's metadata.
@@ -1741,6 +1977,10 @@ pub async fn patch_document(
         categories: None,
         subcategory: None,
         knowledge_base_ids: None,
+        doc_key: None,
+        version: None,
+        effective_from: None,
+        effective_to: None,
     }));
 
     let knowledge_base_ids = match body.knowledge_base_ids {
@@ -1765,11 +2005,19 @@ pub async fn patch_document(
         }
     };
 
+    // RET-16: validate before writing, so a bad date cannot leave the row in a
+    // half-patched state. Absent fields keep whatever the row already had.
+    let effective_from = parse_version_date("effectiveFrom", body.effective_from.as_deref())?;
+    let effective_to = parse_version_date("effectiveTo", body.effective_to.as_deref())?;
     let patch = kb_ports::PatchDocument {
         title: body.title,
         categories: body.categories,
         subcategory: body.subcategory,
         knowledge_base_ids,
+        doc_key: body.doc_key,
+        version: body.version,
+        effective_from,
+        effective_to,
     };
     let updated = state
         .documents
@@ -1791,6 +2039,12 @@ pub async fn patch_document(
             created_at: updated.created_at,
             updated_at: updated.updated_at,
             knowledge_base_ids: updated.knowledge_base_ids,
+            doc_key: updated.doc_key,
+            version: updated.version,
+            supersedes_document_id: updated.supersedes_document_id,
+            effective_from: updated.effective_from,
+            effective_to: updated.effective_to,
+            is_latest: updated.is_latest,
         },
     }))
 }

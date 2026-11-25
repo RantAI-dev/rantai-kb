@@ -1,5 +1,146 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Predicate scope with a fail-closed Postgres verify (SEC-2a).** When a tenant has more
+  visible documents than `KB_SCOPE_ID_LIMIT` (opt-in: default `0` = off until old chunks carry a `knowledge_base_id` payload; enable after `kb-server reindex`, e.g. `2000`), the search no
+  longer sends every document id to Qdrant: the index filters on the `tenant_id`,
+  `knowledge_base_id` and `category` payload, arms over-fetch 1.5×, and every candidate is
+  verified against the same Postgres visibility rule before fusion. Unverified candidates are
+  dropped and counted in the additive `stats.scopeVerifyDropped`; a failed verify fails the
+  search instead of returning unverified hits. Filters the payload cannot express (metadata,
+  language, external refs, `documentIds` narrowing with unit ranges, RET-16 versions) keep the
+  id-list path.
+
+### Fixed
+
+- **Passage prefixes are applied on the batch path (`ING-9`).** `embed_many` (used by ingest and
+  stateless `/v1/process`) now sends every text through the same prefix rule as the single-text
+  path: models that need it see `passage: ` before each chunk, so `/v1/encode mode=passage` and
+  `/v1/process` produce vectors in the same space. Prefixes are applied exactly once, and providers
+  whose instruction travels out of band (`input_type`, Voyage / OmniEmbed) still send no text
+  prefix; the embedding disk cache keys only the prefixes actually applied.
+  **Corpora indexed with `lite` (e5-small) before this fix are missing the prefix and must be
+  re-indexed with `kb-server reindex`** to get the fix. Queries and other tiers are unaffected.
+  The embedding disk cache (`KB_CACHE_DIR`) no longer reuses passage vectors cached under a
+  non-empty passage prefix (they were stored unprefixed), so that re-index really re-embeds.
+  One query-side change: a custom config that sets `KB_EMBEDDING_QUERY_PREFIX` **and** sends the
+  instruction out of band (`KB_EMBEDDING_INPUT_TYPE=true` or `KB_EMBEDDING_FORMAT=omniembed`) no
+  longer prefixes queries either. No shipped tier preset combines the two.
+- **RET-10 — citations keep documents apart.** `source_dedupe_key` now keys text sources by `doc:{documentId}|{section}` when a document id is present, so documents sharing a title (e.g. a 2023 and 2024 "Kebijakan Cuti") stay separate sources with their own `documentId` and page. Sources without a document id keep the legacy `documentTitle-section` key; figures stay keyed by asset.
+
+### Changed
+
+- **`documentIds` searches now run the full retrieval pipeline (RET-11).** A search that names
+  documents previously answered from a private dense-only branch: no BM25, reranker, page, tree,
+  neighbour or figure arms. It now passes the same narrowed scope into the standard retrieval
+  pipeline as any other search, so a caller searching inside chosen documents gets the same
+  answer quality. The scope is still the intersection of the requested ids and what the key may
+  see; it can never widen the key's tenant, knowledge-base or metadata limits. The response still
+  carries `chunks`, and now also carries `sources` and `context` in the standard format (previously
+  `sources` was absent and `context` was a plain `"[i] content"` list, and only when
+  `format: "context"` was requested). `hybrid: true` is unchanged.
+
+### Added
+
+- **`maxPerDocument` diversity cap on `/v1/search` (RET-17).** An additive body field (integer
+  `1..=50`, `400` outside that range) keeps at most N chunks from any one document: the engine
+  walks the reranked list after rerank and before the final `maxChunks` cut, drops surplus hits
+  instead of deferring them, and preserves the survivors' order. `KB_MAX_PER_DOCUMENT` supplies
+  the server default (unset or `0` = off); a request field wins. Figures are attached after the
+  cap and are not counted, and neighbour chunks are counted against the same budget so a capped
+  document cannot regain chunks as context. `stats.perDocumentCapped` reports the number dropped
+  when the cap is on and is absent when it is off.
+- **Stateless parity is pinned by tests (`API-5`).** `/v1/encode` query/passage dense vectors, BM25 sparse vectors and `/v1/rerank` order/scores are now tested bit-for-bit against full mode with the same fake embedding and reranking backend; no API shape changed. The stateless guide now states the guarantees and documents the one deliberate difference: with `KB_RERANK_BREADCRUMBS=on` full mode prepends a breadcrumb that `/v1/rerank` cannot know, so the client must prepend the same `kb_core::rerank::breadcrumb(...)` text for parity.
+- **Document versions and point-in-time search (`RET-16`).** Upload and PATCH accept
+  `docKey`, `version`, `effectiveFrom` and `effectiveTo`. Uploading a new version retires
+  the previous one in one transaction (`isLatest=false`, its `effectiveTo` closed at the
+  new `effectiveFrom` or now, and `supersedesDocumentId` set on the new row); deleting the
+  latest version does not promote an older one. `POST /v1/search` adds `includeHistory`
+  and `asOf` and defaults to current versions only, applied in the Postgres scope so every
+  retrieval arm inherits it; a bad `asOf` is a 400. Chunks, sources, and the document
+  read/list responses carry the version fields, and an answer mixing versions of one
+  `docKey` carries `multiVersionWarning`. All fields are additive and the migration is
+  nullable/defaulted: unversioned documents stay visible in every search mode.
+- **Additive `confidence` object on `/v1/search` (`RET-18`).** Every standard and
+  `documentIds` answer now carries `{topScore, scoreKind, margin, band, calibrated}`:
+  the top comparable score, the scale it came from (`rerank`, `dense`, `fused`), the
+  gap to the second hit, an actionable band (`high`, `medium`, `low`, `none`,
+  `unknown`) and whether the active model has a fitted table. Answer on `high` or
+  `medium`; treat an uncalibrated band as a hint only. No calibration ships in the
+  binary, so `calibrated` is `false` until an operator installs a fit through
+  `KB_CONFIDENCE_CALIBRATION=/path/calibration.json` (a malformed file is a startup
+  error). `kb-server eval calibrate-confidence` fits one over the RET-2 query sets
+  and writes `calibration.json`, `report.md` and `scores.jsonl`; the live fit is
+  still pending. `hybrid: true` is unchanged and has no confidence object.
+- **Thin Streamable-HTTP MCP endpoint at `POST /mcp` (`API-4`).** With `KB_MCP=on`
+  (default **off**), an AI agent can use rantai-kb as an MCP server on the same port and with the
+  same `Bearer` / `X-Api-Key` auth and `kb:read` scope. The five tools — `kb_search`,
+  `kb_list_documents`, `kb_outline`, `kb_read` and `kb_query_table` — each call the same shared
+  handler function as their `/v1` route, so tenant scope, knowledge-base limits, versions and
+  visible degradations are identical. JSON-RPC 2.0 in, `application/json` out; no sessions and no
+  SSE. An API error is an `isError: true` tool result, never a protocol error. With the flag off
+  `/mcp` is an unknown path (404). See `docs/api.md#mcp`.
+- **`KB_RERANK_BREADCRUMBS=off|on` (RET-12).** With the flag on, the reranker sees
+  `"{document title} › {section path or section} · p.{page}\n"` before the chunk content, so a
+  bare "berlaku 12 hari kerja" is judged with its "Kebijakan Cuti › Bab IV Cuti Tahunan · p.12"
+  context. `KB_RERANK_CHAR_BUDGET` still truncates only the content at a UTF-8 boundary; the
+  breadcrumb is never clipped. `false`/`true` are accepted too, an unknown value is a startup
+  error, and the **default is `off`** until the A/B (`docs/core/specs/v1-roadmap.md` RET-12).
+  additive: the response shapes and chunk content are unchanged and no re-index is needed.
+- **`kb-server eval disclosure` (`EVAL-7`).** A deterministic, no-LLM reader that walks
+  `search → structure → content` over page-level qrels under a 1.5× gold-char budget and writes
+  coverage with a 95% bootstrap CI, chars-read/gold-chars, per-endpoint latency and PASS/MISS
+  targets to `results.json`, `per_question.jsonl` and `report.md`. No live number is claimed yet;
+  the run procedure is in `docs/eval-ab/disclosure-v1/README.md`.
+- **`GET /v1/documents/:id/content` (`RET-14`).** Bounded, byte-exact reading of one
+  document by section, page range, chunk range or an opaque continuation cursor, without
+  re-searching. `maxChars` defaults to 8000 (clamped 500..50000); text is stitched from
+  the vector-free chunk metadata with overlap removed and hard-boundary paragraph
+  separators restored. The response adds `range`, `truncated`, `nextCursor`, `refs`
+  (table ids from the table store and figure asset keys from the chunks in range) and
+  visible `degrades`. The cursor is bound to the path document and to `Document.sha256`
+  (falling back to `updatedAt`): another document's cursor is a 400 and a changed
+  document is a 409. Visibility is the same tenant + knowledge-base + soft-delete check
+  as `/structure`. No existing response field changed.
+- New chunk metadata `charStart` / `charEnd` / `overlapPrefixLen` on newly ingested chunks,
+  carrying each chunk's character span and the length of the overlap prefix it repeats. Chunks
+  ingested before this change (and non-prose units such as figures and table summaries) have no
+  spans and read as absent, never as zero.
+- Integer payload indexes on `page` and `chunkIndex` in Qdrant, so page- and index-scoped reads
+  use range filters instead of scanning. Index creation is idempotent on an existing collection.
+- Old chunks get spans on `kb-server reindex` (rebuild from the originals); no store migration is
+  needed.
+- **Progressive-disclosure parity in stateless `/v1/process` (`ING-14`).** The response additively
+  carries `outlineVersion: 2` and `sections[]` built by the same `kb-core` outline v2 builder as
+  `/structure`, per-chunk `charStart` / `charEnd` / `overlapPrefixLen` (absent, not zero, when a
+  chunk has no span), and `pages[]` with a lowercase hex `pageSha256` of each page's returned
+  `pageMap[].text` (UTF-8 bytes) for cheap change detection. No existing field changed; the
+  stateless integration guide now documents the Qdrant integer-index payload recipe, the
+  client-side stitching rule and the per-page re-process loop.
+- **Outline v2 on `GET /v1/documents/:id/structure` (`RET-13`).** The response additively carries
+  `outlineVersion: 2`, `sections` (each with an id, title, level, path, page/chunk ranges and a
+  detected marker), document-level `estimatedChars` and `hasSpans`. Section sources are the stored
+  outline, chunk headings, Indonesian legal markers (`BAB` / `Bagian` / `Pasal` / `Paragraf`) and
+  a per-page fallback. A new scoped, vector-free `RetrievalIndex::list_chunk_meta` port method
+  backs this and the upcoming content route. No existing response field changed.
+- **Search inside part of a document (`RET-15`).** `POST /v1/search` additively accepts
+  `pageRange: {start, end}` (inclusive) and `section: "s3"`. Each requires exactly one
+  `documentIds` entry, and the two cannot be combined. The range is carried on the tenant- and
+  document-scoped `DocumentScope` and applied as an integer range condition inside every index
+  query — dense, BM25, page-image, figure, neighbour and tree — so no arm spends top-k on, or
+  returns, a unit outside the part. A section resolves through the outline v2 from
+  `list_chunk_meta` + `build_outline`; an unknown section id is a `400`.
+
+### Deprecated
+
+- **`KB_GRAPH_ARM` and `KB_GLOBAL_ARM` (DEC-6).** Both arms stay off by default and are now
+  deprecated: starting the server with either enabled logs one warning naming the evidence
+  (HotpotQA −8.5 pp R@5 and +400 ms p95, `docs/eval-baseline.md`, `EVAL-3`) and noting they may be
+  removed after v1.0. Behaviour is unchanged — this is a warning only.
+
 ## 0.8.0 — 2026-11-23
 
 ### Added

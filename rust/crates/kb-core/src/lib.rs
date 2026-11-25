@@ -7,6 +7,8 @@
 pub mod boost;
 pub mod chunk;
 pub mod community;
+pub mod confidence;
+pub mod content;
 mod context;
 pub mod figure_assets;
 pub mod figure_gate;
@@ -14,6 +16,7 @@ pub mod furniture;
 mod fusion;
 pub mod graph;
 pub mod intelligence;
+pub mod outline;
 pub mod page_fusion;
 pub mod page_map;
 pub mod pagination;
@@ -21,11 +24,13 @@ pub mod policy;
 mod progress;
 pub mod quality;
 pub mod query_class;
+pub mod rerank;
 pub mod signals;
 pub mod sparse;
 pub mod tables;
 pub mod title;
 pub mod tree;
+pub mod versions;
 pub mod visuals;
 mod weave;
 pub mod xiaomi_ocr;
@@ -45,6 +50,11 @@ pub use community::{
     Community, DetectOptions, assign_chunks, bm25_scores, cooccurrence, detect, hub_entities,
     louvain, rank_summaries, summary_prompt,
 };
+pub use confidence::{
+    Band, CALIBRATIONS, CalibrationEntry, CalibrationTable, Confidence, ScoreEvidence, ScoreKind,
+    confidence,
+};
+pub use content::{ContentCursor, StitchChunk, Stitched, WindowStart, stitch, stitch_from};
 pub use context::{
     ContextItem, NumberedSource, SourceDedupKey, SourceEntry, build_context_and_sources,
     numbered_source_list, source_dedupe_key,
@@ -77,6 +87,7 @@ pub use quality::{
     check_page_against_median, median_page_chars,
 };
 pub use query_class::{Arm, ArmPlan, QueryClass, QuerySignature, SkippedArm, classify_query};
+pub use rerank::breadcrumb;
 pub use signals::{RouterOpts, has_columnar_lines, has_dense_currency, is_unpdf_sufficient};
 pub use sparse::{
     BM25_AVGDL, BM25_B, BM25_K1, SparseVector, encode_document, encode_document_avgdl,

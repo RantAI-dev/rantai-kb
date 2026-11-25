@@ -7,11 +7,11 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use kb_core::{
-    ArmPlan, BoostConfig, ContextItem, QueryClass, RecencyField, RrfOptions, SkippedArm,
-    SourceEntry, authority_factor, authority_value, base_from_rank, base_from_rerank_in,
-    build_context_and_sources, classify_query, date_value, normalise_authority, parse_date,
-    recency_factor, reciprocal_rank_fusion_with, rerank_scores_are_probabilities,
-    weave_neighbours_with,
+    ArmPlan, BoostConfig, ContextItem, QueryClass, RecencyField, RrfOptions, ScoreEvidence,
+    ScoreKind, SkippedArm, SourceEntry, authority_factor, authority_value, base_from_rank,
+    base_from_rerank_in, breadcrumb, build_context_and_sources, classify_query, date_value,
+    normalise_authority, parse_date, recency_factor, reciprocal_rank_fusion_with,
+    rerank_scores_are_probabilities, weave_neighbours_with,
 };
 use kb_ports::{
     Candidate, Chunk, ChunkId, ChunkMetadata, DocumentId, DocumentMeta, DocumentScope,
@@ -44,6 +44,9 @@ pub struct RetrievalOptions {
     pub rrf_k: u32,
     pub rerank_candidate_limit: u32,
     pub rerank_char_budget: usize,
+    /// Prepend `"{title} › {section} · p.{page}\n"` to the rerank text (RET-12).
+    /// The budget caps only the content part. Off leaves the input byte-identical.
+    pub rerank_breadcrumbs: bool,
     pub rerank_timeout_ms: u64,
     /// The **floor** on the reranked head (`KB_RERANK_FINAL_K`).
     ///
@@ -64,6 +67,11 @@ pub struct RetrievalOptions {
     /// LLM one — keeps its head at `rerank_final_k`, because it returns ranks
     /// rather than relevance scores.
     pub rerank_max_k: u32,
+    /// Deterministic per-document diversity cap (`KB_MAX_PER_DOCUMENT`, RET-17).
+    /// `0` means off, so a request that never sent `maxPerDocument` keeps the
+    /// exact ranking it had before. Applied after rerank and before the final
+    /// cut to `max_chunks`; skipped hits are dropped, not moved to the end.
+    pub max_per_document: u32,
     pub neighbour_window: u32,
     pub figure_limit: u32,
     /// Whether to ask the expander for paraphrases.
@@ -112,9 +120,11 @@ impl fmt::Debug for RetrievalOptions {
             .field("rrf_k", &self.rrf_k)
             .field("rerank_candidate_limit", &self.rerank_candidate_limit)
             .field("rerank_char_budget", &self.rerank_char_budget)
+            .field("rerank_breadcrumbs", &self.rerank_breadcrumbs)
             .field("rerank_timeout_ms", &self.rerank_timeout_ms)
             .field("rerank_final_k", &self.rerank_final_k)
             .field("rerank_max_k", &self.rerank_max_k)
+            .field("max_per_document", &self.max_per_document)
             .field("neighbour_window", &self.neighbour_window)
             .field("figure_limit", &self.figure_limit)
             .field("expansion_enabled", &self.expansion_enabled)
@@ -144,9 +154,11 @@ impl Default for RetrievalOptions {
             rrf_k: 60,
             rerank_candidate_limit: 0,
             rerank_char_budget: 0,
+            rerank_breadcrumbs: false,
             rerank_timeout_ms: 20_000,
             rerank_final_k: 5,
             rerank_max_k: 10,
+            max_per_document: 0,
             neighbour_window: 0,
             figure_limit: 0,
             expansion_enabled: false,
@@ -278,6 +290,22 @@ pub struct RetrievalOutcome {
     /// pool was scored (the floor compares every hit against its score), so
     /// the count is the scored pool, not the head.
     pub reranked_count: Option<usize>,
+    /// SEC-2a: candidates whose document failed the Postgres visibility verify
+    /// (stale KB/tenant payload, deleted document, or an out-of-scope document
+    /// an arm still returned). Present only in predicate mode; `Ids` mode has
+    /// no verify and keeps the earlier response shape byte-for-byte.
+    pub scope_verify_dropped: Option<usize>,
+    /// The comparable scores the confidence band is fitted on (RET-18).
+    ///
+    /// The engine knows which score the ranked hits carry; the server knows
+    /// which model produced it and which calibration table is in force. Only
+    /// the top two are kept: a margin needs a second score, nothing else does.
+    pub confidence_scores: ScoreEvidence,
+    /// How many hits the per-document diversity cap dropped (`stats.perDocumentCapped`).
+    /// `None` when the cap was off, so a search that never asked for one keeps
+    /// exactly the earlier response shape; `Some(0)` when it ran but dropped
+    /// nothing.
+    pub per_document_capped: Option<usize>,
     /// What each stage cost. Always present: a request nobody times is a
     /// request nobody can make faster, and the numbers are the only evidence
     /// a retrieval change can be judged by.
@@ -412,6 +440,11 @@ fn candidate_to_hit_with(c: Candidate, retrieval: Option<RetrievalProvenance>) -
                     .or_else(|| c.metadata.get("table_id"))
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
+                // Filled from the DocumentMeta in `enrich_titles_cached`.
+                doc_key: None,
+                version: None,
+                effective_from: None,
+                effective_to: None,
             },
             categories: Vec::new(),
             subcategory: None,
@@ -557,6 +590,12 @@ pub async fn enrich_titles_cached(
             h.chunk.categories = meta.categories.clone();
             h.chunk.subcategory = meta.subcategory.clone();
             h.chunk.external_ref = meta.external_ref.clone();
+            // RET-16: version fields travel with the document title, so every
+            // chunk and source the answer renders can name its version.
+            h.chunk.metadata.doc_key = meta.doc_key.clone();
+            h.chunk.metadata.version = meta.version.clone();
+            h.chunk.metadata.effective_from = meta.effective_from.clone();
+            h.chunk.metadata.effective_to = meta.effective_to.clone();
         }
     }
 }
@@ -936,7 +975,18 @@ async fn execute_pipeline_with_plan(
     let total_sw = Stopwatch::start(clock);
     let mut timings = StageTimings::default();
     let mut degrades: Vec<RetrievalDegrade> = Vec::new();
-    let pool_size = opts.candidate_pool_size.clamp(1, 100);
+    let is_predicate = scope.is_predicate();
+    // SEC-2a: a coarse index filter can return candidates the filter excludes.
+    // Over-fetch 1.5× so the verify dropping them does not cut recall. Ids mode
+    // keeps the exact old pool size.
+    let base_pool = opts.candidate_pool_size.clamp(1, 100);
+    let pool_size = if is_predicate {
+        base_pool.saturating_mul(3).div_ceil(2).min(100)
+    } else {
+        base_pool
+    };
+    let mut verified: Option<HashSet<DocumentId>> = None;
+    let mut scope_verify_dropped = 0usize;
 
     // 0. The page-image arm runs alongside everything below: its query embedding
     // is a second round trip to a different model, and it must not add to the
@@ -1319,6 +1369,35 @@ async fn execute_pipeline_with_plan(
         timings.global_arm_ms = stopwatch.elapsed_ms();
     }
 
+    // SEC-2a: the authoritative Postgres verify. Every arm has now returned its
+    // candidates — dense, BM25, expansion variants, graph, tree and global — so
+    // this is the last point before fusion/rerank at which a whole candidate can
+    // be dropped. The index filter was only a coarse optimisation: a chunk whose
+    // payload is stale still arrives here, and must not become a hit.
+    if is_predicate {
+        let spec = scope.verify_spec().ok_or_else(|| {
+            EngineError::RetrievalFailed("predicate scope has no verify spec".to_string())
+        })?;
+        let ids: Vec<DocumentId> = {
+            let mut seen = HashSet::with_capacity(candidates.len());
+            candidates
+                .iter()
+                .filter(|candidate| seen.insert(candidate.document_id.clone()))
+                .map(|candidate| candidate.document_id.clone())
+                .collect()
+        };
+        // Fail closed: a verify error is an error, never unverified hits and
+        // never an empty answer that looks like "no matches".
+        let visible = doc_store
+            .verify_visible(&spec.request(), &ids)
+            .await
+            .map_err(|e| EngineError::RetrievalFailed(format!("scope verify failed: {e}")))?;
+        let before = candidates.len();
+        candidates.retain(|candidate| visible.contains(&candidate.document_id));
+        scope_verify_dropped += before - candidates.len();
+        verified = Some(visible);
+    }
+
     let mut hits: Vec<SearchHit> = candidates.into_iter().map(candidate_to_hit).collect();
 
     // A tree hit is one the outline brought in; the text arms never scored it.
@@ -1405,7 +1484,10 @@ async fn execute_pipeline_with_plan(
             let candidates: Vec<RerankCandidate> = to_rerank
                 .iter()
                 .map(|h| {
-                    let text = if opts.rerank_char_budget > 0
+                    // The budget caps only the content part, at a UTF-8
+                    // boundary as before. RET-12's breadcrumb is added after
+                    // the cut so a narrow budget can never clip it.
+                    let content = if opts.rerank_char_budget > 0
                         && h.chunk.content.len() > opts.rerank_char_budget
                     {
                         match h
@@ -1421,9 +1503,21 @@ async fn execute_pipeline_with_plan(
                     } else {
                         &h.chunk.content
                     };
+                    // Off is byte-identical to every earlier release: the
+                    // reranker sees the (possibly truncated) content alone.
+                    let text = if opts.rerank_breadcrumbs {
+                        let crumb = breadcrumb(
+                            &h.chunk.document_title,
+                            h.chunk.metadata.section.as_deref(),
+                            h.chunk.metadata.page,
+                        );
+                        format!("{crumb}\n{content}")
+                    } else {
+                        content.to_string()
+                    };
                     RerankCandidate {
                         id: h.chunk.id.clone(),
-                        text: text.to_string(),
+                        text,
                         original_rank: h.rank,
                         original_score: h.similarity,
                     }
@@ -1598,6 +1692,20 @@ async fn execute_pipeline_with_plan(
                 }
                 timings.total_ms = total_sw.elapsed_ms();
                 timings.engine_total_ms = timings.total_ms;
+                // The floor removed everything: no hit carries a score, but
+                // the answer still says which scale the (missing) score would
+                // have been on. `calibrated` is decided by the server for the
+                // model behind that scale.
+                let confidence_scores = ScoreEvidence {
+                    top: None,
+                    second: None,
+                    score_kind: match floor_stats.map(|floor| floor.score_kind) {
+                        Some(FloorScoreKind::Rerank) => ScoreKind::Rerank,
+                        Some(FloorScoreKind::Dense) => ScoreKind::Dense,
+                        None if rerank_ran => ScoreKind::Rerank,
+                        None => ScoreKind::Dense,
+                    },
+                };
                 return Ok(RetrievalOutcome {
                     chunks: Vec::new(),
                     sources: Vec::new(),
@@ -1614,6 +1722,10 @@ async fn execute_pipeline_with_plan(
                     // The rerank ran, and the floor kept nothing: no returned
                     // hit carries a score, because there is no returned hit.
                     reranked_count: rerank_ran.then_some(0),
+                    scope_verify_dropped: is_predicate.then_some(scope_verify_dropped),
+                    confidence_scores,
+                    // The diversity cap runs after the floor, so it never ran here.
+                    per_document_capped: None,
                     timings,
                 });
             }
@@ -1647,6 +1759,7 @@ async fn execute_pipeline_with_plan(
                 )
                 .await;
                 reranked_hits = outcome.hits;
+                scope_verify_dropped += retain_verified(&mut reranked_hits, &verified);
                 if outcome.rerank_failed {
                     degrades.push(RetrievalDegrade::RerankUnavailable);
                 }
@@ -1743,6 +1856,16 @@ async fn execute_pipeline_with_plan(
             apply_boosts(&mut reranked_hits, &meta_cache, config, now)
         });
 
+    // 5e. Per-document diversity cap (`RET-17`). After the rerank and boost,
+    // before the final cut: a skipped hit is dropped, not moved to the end, so
+    // the survivors keep their relative order. Figures are attached in step 8
+    // and are deliberately not counted here.
+    let (reranked_capped, capped_dropped) =
+        apply_max_per_document(reranked_hits, opts.max_per_document);
+    // Absent when the cap was off; present (even as zero) when it ran.
+    let per_document_capped = (opts.max_per_document > 0).then_some(capped_dropped);
+    reranked_hits = reranked_capped;
+
     // 6. Cut to max_chunks (1..=50)
     reranked_hits.truncate(max_chunks);
     // The ranking, before neighbours and figures are woven in for context.
@@ -1782,6 +1905,28 @@ async fn execute_pipeline_with_plan(
         }
         if neighbour_failed {
             degrades.push(RetrievalDegrade::NeighboursPartial);
+        }
+        scope_verify_dropped += retain_verified(&mut all_neighbours, &verified);
+        // The neighbour weave runs after the cut and its chunks appear in the
+        // `chunks` list as reading context. With a cap on, they must not let a
+        // document regain the chunks the cap just removed: count them against
+        // the same per-document budget before weaving. Documents still below
+        // the budget may take neighbours up to their remaining room.
+        if opts.max_per_document > 0 {
+            let mut per_doc: HashMap<DocumentId, usize> = HashMap::new();
+            for hit in &reranked_hits {
+                *per_doc.entry(hit.chunk.document_id.clone()).or_default() += 1;
+            }
+            let limit = opts.max_per_document as usize;
+            all_neighbours.retain(|hit| {
+                let count = per_doc.entry(hit.chunk.document_id.clone()).or_default();
+                if *count < limit {
+                    *count += 1;
+                    true
+                } else {
+                    false
+                }
+            });
         }
         if !all_neighbours.is_empty() {
             enrich_titles_cached(
@@ -1843,6 +1988,7 @@ async fn execute_pipeline_with_plan(
                     .into_iter()
                     .map(|c| candidate_to_hit_from(c, ProvenanceArm::Figure))
                     .collect();
+                scope_verify_dropped += retain_verified(&mut figures, &verified);
                 if let Some(gate) = &opts.figure_gate {
                     if !figures.is_empty() {
                         let gate_candidates: Vec<FigureGateCandidate> = figures
@@ -1907,8 +2053,15 @@ async fn execute_pipeline_with_plan(
     // the whole scored pool.
     let reranked_count = rerank_ran.then(|| count_reranked(&reranked_hits));
 
+    let chunks = ranked_first(reranked_hits, &ranked_ids);
+    let confidence_scores = confidence_evidence(
+        &chunks,
+        rerank_ran,
+        floor_stats.map(|floor| floor.score_kind),
+    );
+
     Ok(RetrievalOutcome {
-        chunks: ranked_first(reranked_hits, &ranked_ids),
+        chunks,
         sources,
         context,
         degrades,
@@ -1919,13 +2072,94 @@ async fn execute_pipeline_with_plan(
         tree: tree_stats,
         global_arm: global_stats,
         reranked_count,
+        scope_verify_dropped: is_predicate.then_some(scope_verify_dropped),
+        confidence_scores,
+        per_document_capped,
         timings,
     })
+}
+
+/// Keep at most `limit` hits per document, in the order given.
+///
+/// `limit == 0` means off: the input is returned unchanged and no stat is
+/// recorded. Otherwise a hit whose document already has `limit` kept hits is
+/// dropped on the spot (never deferred to the end), so the survivors' relative
+/// order is exactly the reranked order. Returns the kept hits and the number
+/// dropped.
+#[must_use]
+pub fn apply_max_per_document(hits: Vec<SearchHit>, limit: u32) -> (Vec<SearchHit>, usize) {
+    if limit == 0 {
+        return (hits, 0);
+    }
+    let limit = limit as usize;
+    let mut kept: HashMap<DocumentId, usize> = HashMap::new();
+    let mut dropped = 0;
+    let kept_hits: Vec<SearchHit> = hits
+        .into_iter()
+        .filter(|hit| {
+            let count = kept.entry(hit.chunk.document_id.clone()).or_default();
+            if *count < limit {
+                *count += 1;
+                true
+            } else {
+                dropped += 1;
+                false
+            }
+        })
+        .collect();
+    (kept_hits, dropped)
 }
 
 /// How many of the hits carry a rerank score.
 fn count_reranked(hits: &[SearchHit]) -> usize {
     hits.iter().filter(|h| h.rerank_score.is_some()).count()
+}
+
+/// Drop hits an arm attached after the main verify (page images, neighbours,
+/// figures) whose document is not in the verified set. These arms run after
+/// rerank, so they cannot be part of the single pre-fusion verify call; using
+/// the same set keeps them on the authoritative side of the fence.
+fn retain_verified(hits: &mut Vec<SearchHit>, verified: &Option<HashSet<DocumentId>>) -> usize {
+    let Some(visible) = verified else {
+        return 0;
+    };
+    let before = hits.len();
+    hits.retain(|hit| visible.contains(&hit.chunk.document_id));
+    before - hits.len()
+}
+
+/// The two top scores of the answer, from the score the pipeline actually used.
+///
+/// A reranked answer is read from `rerank_score`, a dense-only one from
+/// `dense_score`, and an answer with no comparable score from `similarity`
+/// (the fused, rank-only value). Hits from the neighbour, figure or page arms
+/// that carry no score of the chosen kind are skipped rather than counted as
+/// zero: an absent score is not evidence of relevance.
+fn confidence_evidence(
+    hits: &[SearchHit],
+    rerank_ran: bool,
+    floor_kind: Option<FloorScoreKind>,
+) -> ScoreEvidence {
+    let dense_or_fused = || {
+        let dense: Vec<f32> = hits.iter().filter_map(|h| h.dense_score).collect();
+        if dense.is_empty() {
+            ScoreEvidence::from_scores(hits.iter().map(|h| h.similarity), ScoreKind::Fused)
+        } else {
+            ScoreEvidence::from_scores(dense, ScoreKind::Dense)
+        }
+    };
+    let wants_rerank = match floor_kind {
+        Some(FloorScoreKind::Rerank) => true,
+        Some(FloorScoreKind::Dense) => false,
+        None => rerank_ran,
+    };
+    if wants_rerank {
+        let reranked: Vec<f32> = hits.iter().filter_map(|h| h.rerank_score).collect();
+        if !reranked.is_empty() {
+            return ScoreEvidence::from_scores(reranked, ScoreKind::Rerank);
+        }
+    }
+    dense_or_fused()
 }
 
 /// The ranked hits first, in rank order; then everything added for context
