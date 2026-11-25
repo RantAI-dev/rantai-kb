@@ -48,6 +48,7 @@ fn doc(id: &str, effective_date: Option<&str>, authority: Option<f64>) -> Docume
         effective_from: None,
         effective_to: None,
         is_latest: true,
+        acl_principals: Vec::new(),
         id: DocumentId(id.into()),
         title: format!("Title {id}"),
         categories: vec![],

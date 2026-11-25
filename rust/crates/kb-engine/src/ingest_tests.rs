@@ -82,6 +82,7 @@ fn document() -> DocumentMeta {
         effective_from: None,
         effective_to: None,
         is_latest: true,
+        acl_principals: Vec::new(),
         id: DocumentId::new_unchecked(DOC),
         title: "Quarterly report".to_string(),
         categories: vec!["finance".to_string()],
@@ -2715,6 +2716,7 @@ fn named_document(doc: &str) -> DocumentMeta {
         effective_from: None,
         effective_to: None,
         is_latest: true,
+        acl_principals: Vec::new(),
         id: DocumentId::new_unchecked(doc),
         ..document()
     }

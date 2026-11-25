@@ -251,6 +251,32 @@ impl Harness {
             .unwrap()
     }
 
+    /// A request that asserts principals (SEC-3). The header is only honoured
+    /// for keys holding `kb:assert-principals`; the router enforces that.
+    pub async fn send_with_principals(
+        &self,
+        method: &str,
+        uri: &str,
+        key: &str,
+        principals: &[&str],
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        self.app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .method(method)
+                    .header("authorization", format!("Bearer {key}"))
+                    .header("content-type", "application/json")
+                    .header("x-kb-principals", principals.join(","))
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
     pub async fn send_multipart(
         &self,
         uri: &str,
@@ -386,6 +412,7 @@ pub fn doc_meta(id: &str, title: &str) -> DocumentMeta {
         effective_from: None,
         effective_to: None,
         is_latest: true,
+        acl_principals: Vec::new(),
         id: kb_ports::DocumentId(id.to_string()),
         title: title.to_string(),
         categories: vec![],

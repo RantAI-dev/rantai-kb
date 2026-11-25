@@ -46,6 +46,7 @@ fn document(n: u32) -> DocumentMeta {
         effective_from: None,
         effective_to: None,
         is_latest: true,
+        acl_principals: Vec::new(),
         id: doc_id(n),
         title: format!("Document {n}"),
         categories: vec!["finance".to_string()],

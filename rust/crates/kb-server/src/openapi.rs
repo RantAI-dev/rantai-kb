@@ -46,7 +46,12 @@ pub const API_KEY_SCHEME: &str = "api_key_header";
         description = "Upload documents, search them, and read back what was found.\n\n\
                        Every route under `/v1` needs an API key: send it as `Authorization: Bearer <key>` \
                        or as `X-API-Key: <key>`. The key decides the tenant, the scopes \
-                       (`kb:read`, `kb:write`) and, when it is limited, the knowledge bases the caller may see."
+                       (`kb:read`, `kb:write`, or the privileged `kb:assert-principals`) and, when it is \
+                       limited, the knowledge bases the caller may see.\n\n\
+                       Documents can carry an access list (`aclPrincipals`). To read an ACL'd document, \
+                       assert the caller's principals with `X-KB-Principals: user:42,group:hr` (or the \
+                       search body's `principals` field) using a key with the `kb:assert-principals` \
+                       scope. With no assertion, ACL'd documents are hidden (default-deny)."
     ),
     paths(
         crate::routes::health,

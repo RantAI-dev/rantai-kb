@@ -614,6 +614,13 @@ pub struct DocumentMeta {
     /// as latest, whatever the stored flag says.
     #[serde(default = "default_is_latest")]
     pub is_latest: bool,
+    // ── Document access lists (SEC-3) ───────────────────────────────────────
+    /// Principals allowed to read this document. An empty list means no ACL:
+    /// the document is visible exactly as it was before SEC-3. A non-empty
+    /// list is visible only to a request asserting one of these principals.
+    /// Default-deny: a request with no principals sees no ACL'd document.
+    #[serde(default)]
+    pub acl_principals: Vec<String>,
 }
 
 /// Serde default for [`DocumentMeta::is_latest`]: old payloads and rows have no
@@ -661,6 +668,12 @@ pub struct AuthContext {
     pub scopes: Vec<String>,
     /// Empty = the whole tenant. Non-empty restricts to those knowledge bases.
     pub knowledge_base_ids: Vec<KnowledgeBaseId>,
+    /// Principals the caller asserts (SEC-3). Populated by the auth layer from
+    /// `X-KB-Principals` / the search body only when the key holds
+    /// `kb:assert-principals`. Empty means the caller asserts nobody: an ACL'd
+    /// document is then invisible (default-deny).
+    #[serde(default)]
+    pub principals: Vec<String>,
 }
 
 /// A candidate handed to a reranker. The reranker ranks the inputs by query
@@ -757,6 +770,9 @@ pub struct NewDocument {
     pub effective_from: Option<String>,
     #[serde(default)]
     pub effective_to: Option<String>,
+    /// Principals allowed to read the new document (SEC-3). Empty means no ACL.
+    #[serde(default)]
+    pub acl_principals: Vec<String>,
 }
 
 /// Metadata update patch for a document.
@@ -775,6 +791,10 @@ pub struct PatchDocument {
     pub effective_from: Option<String>,
     #[serde(default)]
     pub effective_to: Option<String>,
+    /// Replace the document's access list (SEC-3). Absent leaves it alone;
+    /// `Some(vec![])` removes the ACL, making the document visible as before.
+    #[serde(default)]
+    pub acl_principals: Option<Vec<String>>,
 }
 
 /// One stored chunk as the document-detail route returns it: the store id, the

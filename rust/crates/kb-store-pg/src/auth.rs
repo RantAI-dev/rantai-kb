@@ -76,6 +76,10 @@ pub async fn resolve_api_key_query(
                     .into_iter()
                     .map(KnowledgeBaseId::new_unchecked)
                     .collect(),
+                // Asserted principals come from the request header/body, never
+                // from the stored key. The auth extractor fills them after the
+                // scope check; the store starts with none (default-deny).
+                principals: Vec::new(),
             }))
         }
         None => Ok(None),
