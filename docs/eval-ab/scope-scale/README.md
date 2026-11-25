@@ -167,6 +167,15 @@ leak matrix: 54 probes, 1 leak(s)
 1 leak(s) across 54 probes — see .../leak-stale/leak-report.md
 ```
 
+> **Reviewer finding (2026-11-25): the 24 `mcp` leaks are false positives, not a scope
+> failure.** The leak run used the tenant `v1m-disclosure`, which also holds the EVAL-9 HR
+> corpus. `mcp_probe` sent only `{query, maxChunks}`, with no scope filters, and `finish`
+> judged the MCP row against the harness's seed set. The one "foreign" document,
+> `f2343726…`, is an HR document that the same key may legitimately see. Every HTTP arm in
+> the same run passed, the stale-payload rows passed, and the in-process leak tests with
+> `/mcp` mounted pass. SEC-2d makes the MCP probe send the HTTP probe's filters and judge
+> against the scope, and the matrix is re-run in a clean tenant.
+
 **Target 0 leaks: MISS.** Every leak is in the `mcp` arm; the foreign document
 reported by the probes is `f2343726-85e8-48d3-a686-90e120c220ee`, an
 HR-corpus document present in the same tenant. Every probe was answered without
