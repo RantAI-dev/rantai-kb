@@ -142,6 +142,9 @@ pub struct Config {
     /// What the upload route does with a file the tenant already has
     /// (`KB_UPLOAD_DEDUPE`). `reject` by default.
     pub upload_dedupe: kb_core::policy::UploadDedupe,
+    /// Whether the thin Streamable-HTTP MCP endpoint is mounted (`KB_MCP`).
+    /// Off by default: when off, `/mcp` is just an unknown path.
+    pub mcp_enabled: bool,
     /// Confidence bands fitted per scoring model (`RET-18`). Loaded from
     /// `KB_CONFIDENCE_CALIBRATION` at startup; a bad file is a startup error.
     /// Empty by default, so every answer is honestly `calibrated: false`.
@@ -1343,6 +1346,7 @@ impl Config {
             request_timeout: Duration::from_secs(30),
             tier: tier_plan,
             upload_dedupe,
+            mcp_enabled: bool_flag(&lookup, "KB_MCP", false),
             confidence_table,
         })
     }

@@ -52,7 +52,22 @@ impl Default for Harness {
 
 impl Harness {
     pub fn new() -> Self {
-        Self::build(BackendTargets::default(), UploadDedupe::default(), None)
+        Self::build(
+            BackendTargets::default(),
+            UploadDedupe::default(),
+            false,
+            None,
+        )
+    }
+
+    /// A harness with the thin MCP endpoint mounted (`KB_MCP=on`).
+    pub fn with_mcp() -> Self {
+        Self::build(
+            BackendTargets::default(),
+            UploadDedupe::default(),
+            true,
+            None,
+        )
     }
 
     /// A harness with a fitted calibration table and model ids installed, for
@@ -65,6 +80,7 @@ impl Harness {
         Self::build(
             BackendTargets::default(),
             UploadDedupe::default(),
+            false,
             Some((table, embedding_model_id, rerank_model_id)),
         )
     }
@@ -74,19 +90,20 @@ impl Harness {
     /// The router is built from the state, so the probe has to be in place
     /// before that.
     pub fn with_backends(targets: BackendTargets) -> Self {
-        Self::build(targets, UploadDedupe::default(), None)
+        Self::build(targets, UploadDedupe::default(), false, None)
     }
 
     /// A harness whose upload route refuses a file the tenant already has
     /// (`KB_UPLOAD_DEDUPE=reject`, the default) or stores it again
     /// (`KB_UPLOAD_DEDUPE=off`).
     pub fn with_upload_dedupe(upload_dedupe: UploadDedupe) -> Self {
-        Self::build(BackendTargets::default(), upload_dedupe, None)
+        Self::build(BackendTargets::default(), upload_dedupe, false, None)
     }
 
     fn build(
         targets: BackendTargets,
         upload_dedupe: UploadDedupe,
+        mcp_enabled: bool,
         confidence: Option<(CalibrationTable, String, Option<String>)>,
     ) -> Self {
         let documents = FakeDocumentStore::default();
@@ -118,6 +135,7 @@ impl Harness {
         );
         // The backends the health route probes (`#36`).
         state.backends = BackendProbe::new(targets);
+        state.mcp_enabled = mcp_enabled;
         if let Some((table, embedding_model_id, rerank_model_id)) = confidence {
             state = state.with_confidence(table, embedding_model_id, rerank_model_id);
         }
