@@ -93,6 +93,34 @@ pub trait OcrPageCache: Send + Sync {
     async fn put(&self, key: &str, text: &str);
 }
 
+/// What the layout figure pass did for one document (ING-15).
+///
+/// The pass renders each page, asks the layout detector where its pictures
+/// and charts are, and crops them from the rendered page, so a vector diagram
+/// and the labels drawn over a photo are kept. A page the detector failed on
+/// is listed, never silently treated as a page without figures.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutFigureReport {
+    /// How many pages the detector answered for.
+    pub pages: u32,
+    /// How many figures were cut out.
+    pub figures: u32,
+    /// The pages the detector or the renderer failed on (1-based).
+    #[serde(default)]
+    pub failed_pages: Vec<u32>,
+    /// How many crops were dropped as page furniture: the same picture on
+    /// three or more pages (section icons, chapter banners, logos).
+    #[serde(default)]
+    pub repeated: u32,
+    /// How many pages were past the page cap and not looked at.
+    #[serde(default)]
+    pub skipped_pages: u32,
+    /// Why the pass did not run at all, when it did not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// One region of a page, as a layout detector found it.
 ///
 /// The box is normalised to 0–1000 so it travels with the page's own

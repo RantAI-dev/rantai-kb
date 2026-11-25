@@ -209,6 +209,14 @@ pub struct ExtractConfig {
     /// detector on CPU serves one page at a time, so a full batch queues
     /// behind it: raise this there.
     pub ocr_layout_timeout: Duration,
+    /// Crop figures from rendered PDF pages with the layout detector
+    /// (`KB_LAYOUT_FIGURES`, ING-15). Off by default: it renders every page and
+    /// asks the detector at `KB_OCR_LAYOUT_URL` about it, which costs ingest
+    /// time. On, vector diagrams and labelled pictures become figures.
+    pub layout_figures: bool,
+    /// The most pages of one PDF the layout figure pass looks at
+    /// (`KB_LAYOUT_FIGURES_MAX_PAGES`, default 1000).
+    pub layout_figures_max_pages: u32,
     /// Rendering resolution for OCR page images (default 150).
     pub ocr_dpi: u32,
     /// Page requests in flight (default 2).
@@ -267,7 +275,7 @@ impl ExtractConfig {
             "epoch={EXTRACT_CACHE_EPOCH}|ver={}|primary={}|fallback={}|smart={}|\
              mineru_url={}|mineru_api={}:{}:{}|mistral={}:{}|order={}|vision={}:{}:{}|ocr={}|\
              local_ocr={}:{}:{}:{}:{}:{}:{}|mode={}:{}:{}:{}:{}:{}|recipe={}:{}|layout={}|\
-             quality={}:{}",
+             quality={}:{}|figures={}:{}",
             env!("CARGO_PKG_VERSION"),
             self.primary,
             self.fallback,
@@ -304,6 +312,8 @@ impl ExtractConfig {
             // written with the gate off must not be served with it on.
             self.quality_gate,
             self.quality_min_chunks_per_page,
+            self.layout_figures,
+            self.layout_figures_max_pages,
         )
     }
 }
@@ -340,6 +350,8 @@ impl Default for ExtractConfig {
             ocr_table_format: OcrTableFormat::Markdown,
             ocr_layout_url: String::new(),
             ocr_layout_timeout: Duration::from_secs(60),
+            layout_figures: false,
+            layout_figures_max_pages: crate::layout_figures::DEFAULT_MAX_PAGES,
             ocr_dpi: 150,
             ocr_concurrency: 2,
             ocr_timeout: Duration::from_secs(120),
@@ -469,6 +481,20 @@ impl ExtractConfig {
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|ms| *ms > 0)
                 .map_or(default.ocr_layout_timeout, Duration::from_millis),
+            layout_figures: match lookup("KB_LAYOUT_FIGURES") {
+                Some(raw) => parse_switch(&raw).unwrap_or_else(|| {
+                    tracing::warn!(
+                        value = %raw,
+                        "KB_LAYOUT_FIGURES must be on or off; leaving the layout figure pass off"
+                    );
+                    false
+                }),
+                None => default.layout_figures,
+            },
+            layout_figures_max_pages: lookup("KB_LAYOUT_FIGURES_MAX_PAGES")
+                .and_then(|s| s.parse::<u32>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(default.layout_figures_max_pages),
             ocr_dpi: lookup("KB_OCR_DPI")
                 .and_then(|s| s.parse::<u32>().ok())
                 .filter(|dpi| *dpi > 0)
@@ -592,6 +618,15 @@ impl ExtractConfig {
             min_chunks_per_page: self.quality_min_chunks_per_page,
             ..kb_core::quality::QualityOptions::default()
         })
+    }
+}
+
+/// An on/off switch as operators write it.
+fn parse_switch(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => Some(true),
+        "off" | "false" | "0" | "no" | "" => Some(false),
+        _ => None,
     }
 }
 
@@ -843,5 +878,24 @@ mod tests {
             mutate(&mut changed);
             assert_ne!(base.cache_fingerprint(), changed.cache_fingerprint());
         }
+    }
+
+    #[test]
+    fn the_layout_figure_pass_is_off_unless_switched_on() {
+        let cfg = ExtractConfig::from_lookup(|_| None);
+        assert!(!cfg.layout_figures);
+        assert_eq!(cfg.layout_figures_max_pages, 1000);
+        let on = ExtractConfig::from_lookup(|key| match key {
+            "KB_LAYOUT_FIGURES" => Some("on".to_string()),
+            "KB_LAYOUT_FIGURES_MAX_PAGES" => Some("40".to_string()),
+            _ => None,
+        });
+        assert!(on.layout_figures);
+        assert_eq!(on.layout_figures_max_pages, 40);
+        assert_ne!(cfg.cache_fingerprint(), on.cache_fingerprint());
+        let typo = ExtractConfig::from_lookup(|key| {
+            (key == "KB_LAYOUT_FIGURES").then(|| "maybe".to_string())
+        });
+        assert!(!typo.layout_figures, "an unknown value leaves the pass off");
     }
 }

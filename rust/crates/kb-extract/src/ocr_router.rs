@@ -1291,6 +1291,7 @@ impl PageTexts {
         }
 
         ExtractionResult {
+            layout_figures: None,
             content: content_pages.join("\n\n"),
             file_type: file_type.to_string(),
             used_ocr,

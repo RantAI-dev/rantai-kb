@@ -17,6 +17,7 @@ use crate::chain::{LayoutExtractorChain, ScannedPageOcr};
 use crate::config::{ExtractConfig, OcrMode, OcrRecipe};
 use crate::hybrid::HybridExtractor;
 use crate::layout_client::HttpLayoutDetector;
+use crate::layout_figures::LayoutFigurePass;
 use crate::mineru::MineruExtractor;
 use crate::mineru_api::MineruApiExtractor;
 use crate::mistral::MistralOcrExtractor;
@@ -52,6 +53,7 @@ pub struct ProductionExtractor {
     chain: LayoutExtractorChain,
     vision_ocr: Option<Arc<dyn ScannedPageOcr>>,
     ocr_router: Option<Arc<OcrRouter>>,
+    layout_figures: Option<LayoutFigurePass>,
 }
 
 impl ProductionExtractor {
@@ -62,7 +64,16 @@ impl ProductionExtractor {
             chain,
             vision_ocr,
             ocr_router: None,
+            layout_figures: None,
         }
+    }
+
+    /// Add the layout figure pass (`ING-15`): every PDF page is rendered and
+    /// its pictures and charts are cropped from the render.
+    #[must_use]
+    pub fn with_layout_figures(mut self, pass: LayoutFigurePass) -> Self {
+        self.layout_figures = Some(pass);
+        self
     }
 
     /// Add the per-page OCR router (`ING-6`). Without one the PDF path is the
@@ -110,7 +121,9 @@ impl Extractor for ProductionExtractor {
         let chain = self.chain.clone();
         let vision = self.vision_ocr.clone();
         let router = self.ocr_router.clone();
-        crate::dispatch::extract_document(
+        let want_figures = options.figures;
+        let seat = options.seat.clone();
+        let mut result = crate::dispatch::extract_document(
             &name,
             &mime,
             &bytes,
@@ -120,7 +133,18 @@ impl Extractor for ProductionExtractor {
             router.as_deref(),
         )
         .await
-        .map_err(PortError::from)
+        .map_err(PortError::from)?;
+
+        if let Some(pass) = self.layout_figures.as_ref() {
+            let is_pdf = matches!(
+                crate::detect::detect_file_type(&name),
+                Some(crate::detect::SupportedFileType::Pdf)
+            );
+            if want_figures && is_pdf && result.error.is_none() {
+                add_layout_figures(pass, &bytes, &seat, &mut result).await;
+            }
+        }
+        Ok(result)
     }
 
     async fn outline(
@@ -142,6 +166,38 @@ impl Extractor for ProductionExtractor {
         .await
         .ok()
         .flatten()
+    }
+}
+
+/// Run the layout figure pass over a PDF and add what it cut to the result.
+///
+/// A pass that cannot run leaves the document's text alone and says why in
+/// `layout_figures.error`: the figures are missing, visibly.
+async fn add_layout_figures(
+    pass: &LayoutFigurePass,
+    bytes: &[u8],
+    seat: &kb_ports::SeatRelease,
+    result: &mut ExtractionResult,
+) {
+    let covered: std::collections::HashSet<u32> = result.figures.iter().map(|f| f.page).collect();
+    match pass.run(bytes, &covered, seat).await {
+        Ok((figures, report)) => {
+            tracing::info!(
+                pages = report.pages,
+                figures = report.figures,
+                failed = report.failed_pages.len(),
+                "layout figure pass"
+            );
+            result.figures.extend(figures);
+            result.layout_figures = Some(report);
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "layout figure pass failed");
+            result.layout_figures = Some(kb_ports::LayoutFigureReport {
+                error: Some(err.to_string()),
+                ..kb_ports::LayoutFigureReport::default()
+            });
+        }
     }
 }
 
@@ -181,6 +237,25 @@ pub fn build_production_extractor_with_cache(
             "OCR page router on"
         );
         extractor = extractor.with_ocr_router(router);
+    }
+    if cfg.layout_figures {
+        match build_layout_detector(cfg) {
+            Some(detector) => {
+                tracing::info!(
+                    url = cfg.ocr_layout_url.trim(),
+                    max_pages = cfg.layout_figures_max_pages,
+                    "layout figure pass on"
+                );
+                extractor = extractor.with_layout_figures(LayoutFigurePass::new(
+                    detector,
+                    cfg.layout_figures_max_pages,
+                ));
+            }
+            None => tracing::warn!(
+                "KB_LAYOUT_FIGURES=on needs a layout detector at KB_OCR_LAYOUT_URL; \
+                 the layout figure pass stays off"
+            ),
+        }
     }
     Ok(extractor)
 }

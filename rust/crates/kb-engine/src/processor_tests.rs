@@ -145,6 +145,7 @@ impl EntityExtractor for StubEntityExtractor {
 
 fn ok_extraction(content: &str) -> ExtractionResult {
     ExtractionResult {
+        layout_figures: None,
         content: content.to_string(),
         file_type: "markdown".to_string(),
         used_ocr: false,
