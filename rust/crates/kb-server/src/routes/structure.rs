@@ -247,6 +247,9 @@ pub(crate) async fn get_document_structure_inner(
                 // SEC-3: the chunk read below must be scoped by the same
                 // principals that made the document visible above.
                 principals: auth.principals.clone(),
+                // A by-id read already chose this document: an older
+                // version must still read its chunks (RET-16).
+                include_history: true,
                 ..DocumentFilter::default()
             },
             force_ids: false,

@@ -143,10 +143,39 @@ pub async fn list_tables(
             Some(doc.id)
         }
     };
-    let records = store
+    let mut records = store
         .list_tables(&auth.tenant_id, document.as_ref())
         .await
         .map_err(ApiError::from)?;
+    // A table is visible only when its document is: the same rule as search
+    // and the document routes (tenant, the key's knowledge bases, SEC-3 access
+    // lists). Without this a listing without `documentId` named every table
+    // of the tenant, manifest and sample values included.
+    let document_ids: Vec<DocumentId> = {
+        let mut ids: Vec<DocumentId> = records.iter().map(|r| r.document_id.clone()).collect();
+        ids.sort_by(|a, b| a.0.cmp(&b.0));
+        ids.dedup();
+        ids
+    };
+    let visible = state
+        .documents
+        .verify_visible(
+            &kb_ports::ScopeRequest {
+                tenant: auth.tenant_id.clone(),
+                filter: kb_ports::DocumentFilter {
+                    knowledge_base_ids: auth.knowledge_base_ids.clone(),
+                    principals: auth.principals.clone(),
+                    // Listing is not a search: every version's tables show.
+                    include_history: true,
+                    ..kb_ports::DocumentFilter::default()
+                },
+                force_ids: false,
+            },
+            &document_ids,
+        )
+        .await
+        .map_err(ApiError::from)?;
+    records.retain(|record| visible.contains(&record.document_id));
     Ok(Json(records.into_iter().map(TableDto::from).collect()))
 }
 
