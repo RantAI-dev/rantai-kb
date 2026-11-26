@@ -858,16 +858,19 @@ impl OcrRouter {
         items: Vec<PageArtifact>,
         provider: &dyn OcrPageProvider,
     ) -> Result<RouteOutcome, ExtractError> {
+        // One page per request, `concurrency` in flight. Grouping pages into
+        // runs of `concurrency` and reading each run in order made the pages in
+        // flight per document ceil(pages / concurrency): raising the setting
+        // lowered the parallelism (3 textbooks at 128 sent 7 pages at once).
         let concurrency = self.settings.concurrency.max(1) as usize;
         let items = Arc::new(items);
-        let ranges: Vec<(usize, usize)> = (0..items.len())
-            .step_by(concurrency)
-            .map(|start| (start, (start + concurrency).min(items.len())))
-            .collect();
-        let results: Vec<RouteOutcome> = stream::iter(ranges)
-            .map(|(start, end)| {
+        let results: Vec<RouteOutcome> = stream::iter(0..items.len())
+            .map(|index| {
                 let items = Arc::clone(&items);
-                async move { self.read_image_chunk(&items[start..end], provider).await }
+                async move {
+                    self.read_image_chunk(&items[index..index + 1], provider)
+                        .await
+                }
             })
             .buffered(concurrency)
             .collect()
