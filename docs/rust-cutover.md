@@ -865,6 +865,36 @@ document. `GET /v1/documents` and `GET /v1/documents/{id}` gain `pages`, `charsE
 `degrades` (additive; null or empty for documents indexed before this). With the gate off, nothing
 about the status changes; the numbers are still recorded in `metadata.quality`.
 
+### 29. Additive: contextual chunk headers and the structure route's chapters (`RET-8`, 2026-11-19)
+
+Every chunk ingested from this release on carries a **contextual header** in
+`contextualPrefix`: `<document title> > <chapter> > <section>`, built from the
+document's outline (PDF bookmarks, else the headings in the page text) and the
+page the chunk sits on, capped at ~160 characters. The header reaches the three
+consumers that need it — the embedding text, the BM25 sparse text and the
+reranker input — and is never folded into `content`: a search hit's passage
+stays verbatim, and the answer context already prints the header above it.
+
+Heading detection learned the schoolbook vocabulary in both languages:
+`BAB <roman|digit>`, `Bab`, `Chapter`, `Unit`, `Pelajaran`, `Tema` are
+chapters, `Subtema` and lettered `A.` lines are sections, and
+`Daftar Isi`/`Contents` pages are skipped, so a chapter's outline page is the
+page it starts on, never the contents page that lists it. This also fixes the
+tree arm (`KB_TREE_ARM`) for those books: `is_chapter_node` now matches the
+same words, so "apa isi bab 4" scores `BAB IV` explicitly.
+
+`KB_CONTEXTUAL_HEADERS=false` (default on) restores the previous behaviour
+byte for byte: no prefix is written, and the embed, BM25 and rerank text are
+built from the title, heading path and content exactly as before. Documents
+ingested by an older release keep their (empty) prefixes until re-ingested —
+`kb-server reindex` rebuilds from the stored originals.
+
+`GET /v1/documents/:id/structure` gains an additive `chapters` array —
+`{title, number, page}` per top-level outline node, `page` 0-based, the page
+the chapter starts on. The key is omitted (not `null`, not `[]`) when the
+document has no stored outline, so an old client sees the response it always
+saw. The OpenAPI document is regenerated with the field.
+
 ---
 
 ## 6. Shared Known Issues

@@ -362,6 +362,10 @@ pub struct WorkerConfig {
     /// Characters of each chunk sent to the embedder, 0 = all
     /// (`KB_EMBEDDING_MAX_CHARS`).
     pub embedding_max_chars: usize,
+    /// Fill each chunk's `contextualPrefix` from the document's outline and
+    /// include it in the embedded and BM25 text
+    /// (`KB_CONTEXTUAL_HEADERS`, default on).
+    pub contextual_headers: bool,
     /// Chunk size and overlap in characters (`KB_CHUNK_SIZE`, default 800;
     /// `KB_CHUNK_OVERLAP`, default 200). Changing them changes chunk boundaries,
     /// so a corpus is re-chunked only on re-ingest.
@@ -397,6 +401,7 @@ impl WorkerConfig {
             strip_page_furniture: self.strip_page_furniture,
             entity_extraction_enabled: self.entity_extraction_enabled,
             embedding_max_chars: self.embedding_max_chars,
+            contextual_headers: self.contextual_headers,
             seats: self.seats,
             chunking: kb_core::chunk::SmartChunkingOptions {
                 max_chunk_size: Some(self.chunk_size),
@@ -505,6 +510,7 @@ where
         strip_page_furniture: bool_flag(lookup, "KB_STRIP_PAGE_FURNITURE", false),
         entity_extraction_enabled: bool_flag(lookup, "KB_ENTITY_EXTRACTION_ENABLED", true),
         embedding_max_chars: int_var(lookup, "KB_EMBEDDING_MAX_CHARS", 0usize).unwrap_or(0),
+        contextual_headers: bool_flag(lookup, "KB_CONTEXTUAL_HEADERS", true),
         chunk_size: int_var(lookup, "KB_CHUNK_SIZE", 800u32)
             .unwrap_or(800)
             .max(100),
@@ -2317,13 +2323,19 @@ mod tests {
             "defaults unchanged"
         );
         assert_eq!(s.embedding_max_chars, 0);
+        assert!(
+            s.contextual_headers,
+            "the headers are on unless an operator turns them off"
+        );
         map.insert("KB_CHUNK_SIZE", "1200");
         map.insert("KB_CHUNK_OVERLAP", "0");
         map.insert("KB_EMBEDDING_MAX_CHARS", "512");
+        map.insert("KB_CONTEXTUAL_HEADERS", "false");
         let s = load(&map);
         assert_eq!(s.chunking.max_chunk_size, Some(1200));
         assert_eq!(s.chunking.overlap_size, Some(0));
         assert_eq!(s.embedding_max_chars, 512);
+        assert!(!s.contextual_headers, "an explicit false is honoured");
     }
 
     #[test]
