@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Table headers that differ only in case no longer fail the whole document.** Header names
+  were made unique case-sensitively, but they become DuckDB columns, whose identifiers are
+  case-insensitive: an OCR'd physics table with `U` (energy) and `u` (velocity) failed ingest
+  with `Column with name "u" already exists!`. Names are now unique ignoring case; the printed
+  case is kept and only the later name gets a ` (2)` suffix. Tables without such a collision are
+  unchanged.
+
 ## 1.0.2 — 2026-11-25
 
 ### Changed
