@@ -221,8 +221,10 @@ mod tests {
             document("a", "d2", Some("documents/a/d2/two.pdf"), false),
             document("a", "d3", Some("documents/a/d3/three.pdf"), false),
         ];
-        let listed: std::collections::HashSet<String> =
-            ["d3", "d1", "typo"].iter().map(|s| (*s).to_string()).collect();
+        let listed: std::collections::HashSet<String> = ["d3", "d1", "typo"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
         let (kept, missing) = retain_listed(rows, &listed);
         let ids: Vec<&str> = kept.iter().map(|d| d.document_id.as_str()).collect();
         assert_eq!(ids, vec!["d1", "d3"]);
