@@ -56,6 +56,9 @@ pub enum OutlineMethod {
     Bookmarks,
     /// Numbered headings recovered from page text.
     Headings,
+    /// The book's own table of contents ("Daftar Isi"), its printed page
+    /// numbers mapped onto PDF pages.
+    Contents,
     /// Neither produced anything. Reported, not silently omitted.
     #[default]
     None,
@@ -68,6 +71,7 @@ impl OutlineMethod {
         match self {
             Self::Bookmarks => "bookmarks",
             Self::Headings => "headings",
+            Self::Contents => "contents",
             Self::None => "none",
         }
     }
