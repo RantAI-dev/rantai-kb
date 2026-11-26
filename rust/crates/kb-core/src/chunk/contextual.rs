@@ -174,6 +174,7 @@ mod tests {
                 asset_key: None,
                 anchor_chunk_index: None,
                 table_id: None,
+                ..ChunkMetadata::default()
             },
         }
     }
