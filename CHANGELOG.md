@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- **Contextual chunk headers (`RET-8`).** Every chunk now carries
+  `contextualPrefix`: `<document title> > <chapter> > <section>`, built at ingest from the
+  document's outline and the page the chunk sits on, capped at ~160 characters. The header is
+  prepended to the text the embedder sees, to the BM25 sparse text and to the reranker input; it is
+  never folded into the chunk's `content`, so the passage a search returns stays verbatim. Heading
+  detection learned the schoolbook vocabulary in both languages — `BAB <roman|digit>`, `Bab`,
+  `Chapter`, `Unit`, `Pelajaran`, `Tema`, `Subtema`, lettered `A.` sections — and skips
+  `Daftar Isi`/`Contents` pages, so a chapter's outline page is where it starts, never the contents
+  page that lists it. Measured motive: production kb6 had 0 of 1,148 (Bahasa Inggris) and 0 of
+  1,205 (IPA) chunks with a prefix, and a book that repeats one activity template on every page
+  ranked its gold page 9–22. Off with `KB_CONTEXTUAL_HEADERS=false`, which restores the previous
+  embed/BM25/rerank text byte for byte. Documents must be re-ingested (or
+  `kb-server reindex`-ed) to get headers.
+- **`GET /v1/documents/:id/structure` lists the document's detected chapters** (additive
+  `chapters`: `title`, `number`, 0-based start `page`), from the outline ingest stores. Omitted
+  (not `null`) when the document has no outline — including everything ingested before this
+  release; re-ingest gives a document one.
+
 ### Fixed
 
 - **`KB_OCR_CONCURRENCY` is now the number of image pages in flight.** `route_image_items`

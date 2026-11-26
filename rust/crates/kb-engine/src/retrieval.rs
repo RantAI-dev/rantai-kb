@@ -1485,8 +1485,11 @@ async fn execute_pipeline_with_plan(
                 .iter()
                 .map(|h| {
                     // The budget caps only the content part, at a UTF-8
-                    // boundary as before. RET-12's breadcrumb is added after
-                    // the cut so a narrow budget can never clip it.
+                    // boundary as before. RET-12's breadcrumb and RET-8's
+                    // contextual header (≤ ~160 chars, written at ingest) are
+                    // added after the cut, so a narrow budget never clips
+                    // them: the header is what tells two otherwise-identical
+                    // textbook passages apart.
                     let content = if opts.rerank_char_budget > 0
                         && h.chunk.content.len() > opts.rerank_char_budget
                     {
@@ -1505,7 +1508,7 @@ async fn execute_pipeline_with_plan(
                     };
                     // Off is byte-identical to every earlier release: the
                     // reranker sees the (possibly truncated) content alone.
-                    let text = if opts.rerank_breadcrumbs {
+                    let body = if opts.rerank_breadcrumbs {
                         let crumb = breadcrumb(
                             &h.chunk.document_title,
                             h.chunk.metadata.section.as_deref(),
@@ -1514,6 +1517,17 @@ async fn execute_pipeline_with_plan(
                         format!("{crumb}\n{content}")
                     } else {
                         content.to_string()
+                    };
+                    let text = match h
+                        .chunk
+                        .metadata
+                        .contextual_prefix
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                    {
+                        Some(prefix) => format!("{prefix}\n\n{body}"),
+                        None => body,
                     };
                     RerankCandidate {
                         id: h.chunk.id.clone(),

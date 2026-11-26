@@ -343,6 +343,90 @@ async fn page_units_from_before_provenance_was_recorded_answer_null_not_a_guess(
     assert_eq!(page["imageAssetKey"], serde_json::Value::Null);
 }
 
+// ─── detected chapters, from the outline ingest stored ──────────────────────
+
+/// A textbook document row: the outline ingest wrote to `metadata.outline`,
+/// with BAB chapters, a contents page before them and sections inside.
+/// The chapters start on their own pages; the contents page that *lists*
+/// them is page 0 and must never be reported as a chapter's page.
+async fn seed_textbook(h: &Harness) {
+    let mut doc = doc_with_ref("doc-book");
+    doc.title = "Ekonomi".to_string();
+    doc.metadata = Some(serde_json::json!({"outline": {
+        "documentTitle": "Ekonomi",
+        "method": "headings",
+        "nodes": [
+            {"title": "BAB I Kewirausahaan", "level": 1, "start_page": 1, "end_page": 9},
+            {"title": "A. Pengertian wirausaha", "level": 2, "start_page": 2, "end_page": 4},
+            {"title": "BAB II Pasar dan Uang", "level": 1, "start_page": 10, "end_page": 19},
+            {"title": "Unit 3 Things Around Me", "level": 1, "start_page": 20, "end_page": 29}
+        ]
+    }}));
+    h.documents.insert_doc(TenantId(TENANT.to_string()), doc);
+}
+
+#[tokio::test]
+async fn the_structure_lists_the_detected_chapters_with_their_start_pages() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    seed_textbook(&h).await;
+
+    let response = h
+        .send(
+            "GET",
+            "/v1/documents/doc-book/structure",
+            &tenant_key(TENANT),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+
+    let chapters = body["chapters"].as_array().expect("chapters");
+    let titles: Vec<&str> = chapters
+        .iter()
+        .map(|c| c["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        titles,
+        vec![
+            "BAB I Kewirausahaan",
+            "BAB II Pasar dan Uang",
+            "Unit 3 Things Around Me"
+        ],
+        "the top-level nodes, both languages, in document order"
+    );
+    // The chapter's own number, read from its heading.
+    assert_eq!(chapters[0]["number"], "I");
+    assert_eq!(chapters[1]["number"], "II");
+    assert_eq!(chapters[2]["number"], "3");
+    // The page the chapter STARTS on — not the contents page that lists it.
+    assert_eq!(chapters[0]["page"], 1);
+    assert_eq!(chapters[1]["page"], 10);
+    assert_eq!(chapters[2]["page"], 20);
+}
+
+#[tokio::test]
+async fn a_document_without_a_stored_outline_omits_the_chapters_field() {
+    let h = Harness::new();
+    h.with_tenant(TENANT);
+    h.documents
+        .insert_doc(TenantId(TENANT.to_string()), doc_with_ref("doc-plain"));
+
+    let response = h
+        .send(
+            "GET",
+            "/v1/documents/doc-plain/structure",
+            &tenant_key(TENANT),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json_body(response).await;
+    assert!(
+        body.get("chapters").is_none(),
+        "absent, not an empty array: {body}"
+    );
+}
+
 // ─── SEC-1: tenant and the key's knowledge-base limit ───────────────────────
 
 fn limited_key(h: &Harness) {
