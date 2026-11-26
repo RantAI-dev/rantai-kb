@@ -27,7 +27,7 @@ pub mod stateless;
 pub mod tier;
 
 pub use boundary::{ADAPTER_CRATES, INNER_CRATES};
-pub use cli::{CliError, ReindexArgs, dispatch};
+pub use cli::{CliError, ReindexArgs, dispatch, parse_document_list};
 pub use config::{Config, WorkerConfig};
 pub use dto::{ChunkDto, RetrievalDto, SearchRequestDto, SearchResponseDto, SourceDto};
 pub use events::EventBus;
