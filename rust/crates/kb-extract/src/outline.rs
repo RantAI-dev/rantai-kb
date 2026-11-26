@@ -127,16 +127,50 @@ fn strip_footnote_marker(text: &str) -> String {
 /// that have no text layer.
 #[must_use]
 pub fn heading_nodes(pages: &[String]) -> Vec<OutlineNode> {
+    // Page furniture: a line printed on three or more pages once its digits
+    // are gone ("2 Kelas VIII SMP/MTs Semester 1", "Ilmu Pengetahuan Alam 3")
+    // is a running header or footer, not a heading. Chapter-word lines are
+    // exempt: a "Bab 1 Vektor" running header is still that chapter, and the
+    // first-wins dedupe below keeps only its first page.
+    let furniture = furniture_keys(pages);
+    // A book with two or more chapter headings is structured by them; its
+    // bare "3. Mistar" lines are list items and exercises, not chapters.
+    let chaptered = pages
+        .iter()
+        .filter(|text| !is_toc_page(text))
+        .flat_map(|text| text.lines())
+        .map(plain_line)
+        .filter(|line| chapter_parts(line.trim()).is_some())
+        .map(|line| dedupe_key(&line))
+        .collect::<HashSet<_>>()
+        .len()
+        >= 2;
     let mut nodes: Vec<OutlineNode> = Vec::new();
     let mut seen: HashSet<(String, u32)> = HashSet::new();
     for (page_index, text) in pages.iter().enumerate() {
         if is_toc_page(text) {
             continue;
         }
-        let lines: Vec<&str> = text.lines().collect();
+        let plain: Vec<String> = text.lines().map(plain_line).collect();
+        let lines: Vec<&str> = plain.iter().map(String::as_str).collect();
         for (index, line) in lines.iter().enumerate() {
             let candidate = line.trim();
             if candidate.is_empty() || candidate.chars().count() > 120 {
+                continue;
+            }
+            // An instruction or a question ("Perhatikan gambar berikut ini!").
+            if candidate.ends_with('!') || candidate.ends_with('?') {
+                continue;
+            }
+            let is_chapter =
+                chapter_parts(candidate).is_some() || subtema_parts(candidate).is_some();
+            if !is_chapter && furniture.contains(&furniture_key(candidate)) {
+                continue;
+            }
+            if !is_chapter && in_a_list(&lines, index) {
+                continue;
+            }
+            if chaptered && !is_chapter && top_numbered_body(candidate).is_some() {
                 continue;
             }
             let (title, level) = heading_of(candidate, &lines, index);
@@ -164,6 +198,261 @@ pub fn heading_nodes(pages: &[String]) -> Vec<OutlineNode> {
         }
     }
     nodes
+}
+
+/// A line without the markup an OCR model writes around headings: leading
+/// markdown heading marks (`## BAB 2`) and bold or italic wrappers
+/// (`**Bab 1 Vektor**`).
+fn plain_line(line: &str) -> String {
+    let trimmed = line.trim().trim_start_matches('#').trim();
+    let unwrapped = trimmed
+        .trim_start_matches("**")
+        .trim_end_matches("**")
+        .trim_start_matches("__")
+        .trim_end_matches("__");
+    unwrapped.trim().to_string()
+}
+
+/// One line of a table of contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ContentsEntry {
+    title: String,
+    level: u32,
+    /// The page number printed after the title, when it is an arabic one.
+    printed: Option<u32>,
+}
+
+/// Split a contents line into its title and its printed page number.
+///
+/// `Some(None)` is a line that ends in a roman page number (front matter:
+/// "Kata Pengantar ... iii"); `None` is a line with no page number at all.
+fn split_page_number(line: &str) -> (String, Option<Option<u32>>) {
+    let trimmed = line.trim_end();
+    let leader = |head: &str| head.ends_with(['.', '…', ' ', '\t']);
+    let body_of = |head: &str| head.trim_end_matches(['.', '…', ' ', '\t']).to_string();
+    // "Konsep Vektor...3", "Bab 3 DINAMIKA ...63", "Gaya ........ 10".
+    let digits = trimmed
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .count();
+    if (1..=4).contains(&digits) {
+        let (head, number) = trimmed.split_at(trimmed.len() - digits);
+        let body = body_of(head);
+        if leader(head) && !body.is_empty() {
+            return (body, Some(number.parse().ok()));
+        }
+    }
+    // "Kata Pengantar...iii": front matter.
+    let roman = trimmed
+        .chars()
+        .rev()
+        .take_while(|c| matches!(c, 'i' | 'v' | 'x' | 'l' | 'c' | 'd' | 'm'))
+        .count();
+    if (1..=6).contains(&roman) {
+        let head = &trimmed[..trimmed.len() - roman];
+        let body = body_of(head);
+        if leader(head) && !body.is_empty() {
+            return (body, Some(None));
+        }
+    }
+    (trimmed.to_string(), None)
+}
+
+/// The entries of a book's table of contents, in order: chapters (`Bab 1
+/// Vektor`, level 1), lettered sections (`A. Konsep Vektor`, level 2) and
+/// numbered subsections (`1. Lambang dan Notasi`, level 3). Front matter with
+/// roman page numbers and unnumbered extras (`Intisari`, `Refleksi`) are left
+/// out. A chapter line without a page number takes the page of the entry
+/// after it, which is where its first section starts.
+fn contents_entries(pages: &[String]) -> Vec<ContentsEntry> {
+    let mut entries: Vec<ContentsEntry> = Vec::new();
+    for text in pages.iter().filter(|text| is_toc_page(text)) {
+        for raw in text.lines() {
+            let line = plain_line(raw);
+            if line.is_empty() {
+                continue;
+            }
+            let (body, number) = split_page_number(&line);
+            if matches!(number, Some(None)) {
+                continue;
+            }
+            let printed = number.flatten();
+            let level = if chapter_parts(&body).is_some() {
+                1
+            } else if printed.is_none() {
+                continue;
+            } else if lettered_body(&body).is_some() {
+                2
+            } else if top_numbered_body(&body).is_some() || dotted_number(&body).is_some() {
+                3
+            } else {
+                continue;
+            };
+            entries.push(ContentsEntry {
+                title: clean_title(&body),
+                level,
+                printed,
+            });
+        }
+    }
+    for index in (0..entries.len()).rev() {
+        if entries[index].printed.is_none() {
+            entries[index].printed = entries.get(index + 1).and_then(|next| next.printed);
+        }
+    }
+    entries.retain(|entry| entry.printed.is_some());
+    entries
+}
+
+/// The difference between a PDF page index and the page number printed on
+/// it, found by looking each contents entry up among the body's lines: the
+/// most common `pdf index − printed page` over the entries that match. A
+/// book whose contents never match its body (or match too rarely to agree)
+/// has no offset, and the contents outline is not used.
+fn contents_offset(pages: &[String], entries: &[ContentsEntry]) -> Option<i64> {
+    let mut pages_of: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (page, text) in pages.iter().enumerate() {
+        if is_toc_page(text) {
+            continue;
+        }
+        for raw in text.lines() {
+            let line = plain_line(raw);
+            if line.is_empty() || line.chars().count() > 120 {
+                continue;
+            }
+            pages_of.entry(dedupe_key(&line)).or_default().push(page);
+        }
+    }
+    let mut votes: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+    let mut matched = 0usize;
+    for entry in entries {
+        let Some(printed) = entry.printed else {
+            continue;
+        };
+        let Some(found) = pages_of.get(&dedupe_key(&entry.title)) else {
+            continue;
+        };
+        matched += 1;
+        let mut seen = HashSet::new();
+        for &page in found {
+            let diff = i64::try_from(page).unwrap_or(i64::MAX) - i64::from(printed);
+            if (-2..=80).contains(&diff) && seen.insert(diff) {
+                *votes.entry(diff).or_default() += 1;
+            }
+        }
+    }
+    let (offset, count) = votes
+        .into_iter()
+        .max_by_key(|&(diff, count)| (count, -diff))?;
+    (count >= 3 && count * 3 >= matched).then_some(offset)
+}
+
+/// The outline a table of contents gives, its printed pages moved onto PDF
+/// pages. Empty when the book has no usable contents (fewer than three
+/// entries or two chapters) or the printed pages cannot be placed.
+#[must_use]
+pub fn contents_nodes(pages: &[String]) -> Vec<OutlineNode> {
+    let entries = contents_entries(pages);
+    let chapters = entries.iter().filter(|e| e.level == 1).count();
+    if entries.len() < 3 || chapters < 2 {
+        return Vec::new();
+    }
+    let Some(offset) = contents_offset(pages, &entries) else {
+        return Vec::new();
+    };
+    let last = i64::try_from(pages.len()).unwrap_or(i64::MAX) - 1;
+    let mut seen: HashSet<(String, u32)> = HashSet::new();
+    let mut nodes = Vec::new();
+    for entry in entries {
+        let Some(printed) = entry.printed else {
+            continue;
+        };
+        let page = (i64::from(printed) + offset).clamp(0, last.max(0));
+        if !seen.insert((dedupe_key(&entry.title), entry.level)) {
+            continue;
+        }
+        let start = u32::try_from(page).unwrap_or(0);
+        nodes.push(OutlineNode {
+            title: entry.title,
+            level: entry.level,
+            start_page: start,
+            end_page: start,
+        });
+    }
+    nodes
+}
+
+/// A line with its digits removed, lower-cased: the same running header
+/// carries a different page number on every page.
+fn furniture_key(line: &str) -> String {
+    let key: String = dedupe_key(line)
+        .chars()
+        .filter(|c| !c.is_ascii_digit())
+        .collect();
+    key.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The lines that recur on three or more pages, by [`furniture_key`].
+fn furniture_keys(pages: &[String]) -> HashSet<String> {
+    let mut pages_of: std::collections::HashMap<String, HashSet<usize>> =
+        std::collections::HashMap::new();
+    for (page, text) in pages.iter().enumerate() {
+        for line in text.lines() {
+            let key = furniture_key(line.trim());
+            if key.chars().count() >= 4 {
+                pages_of.entry(key).or_default().insert(page);
+            }
+        }
+    }
+    pages_of
+        .into_iter()
+        .filter(|(_, on)| on.len() >= 3)
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// The kind of list marker a line opens with: a number ("3.") or a capital
+/// letter ("B.").
+#[derive(PartialEq, Eq)]
+enum ListMarker {
+    Number,
+    Letter,
+}
+
+fn list_marker(line: &str) -> Option<ListMarker> {
+    let first = line.split_whitespace().next()?;
+    let mark = first
+        .strip_suffix('.')
+        .or_else(|| first.strip_suffix(')'))?;
+    if !mark.is_empty() && mark.chars().all(|c| c.is_ascii_digit()) {
+        return Some(ListMarker::Number);
+    }
+    let mut chars = mark.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if c.is_ascii_alphabetic() => Some(ListMarker::Letter),
+        _ => None,
+    }
+}
+
+/// True when the line at `index` is one item of a list: the nearest non-empty
+/// line before or after it (two lines at most) opens with the same kind of
+/// marker. A section heading is followed by prose; "1. Mobil mainan /
+/// 2. Mistar" and "A. 10 N / B. 20 N" are materials and answer options.
+fn in_a_list(lines: &[&str], index: usize) -> bool {
+    let Some(kind) = list_marker(lines[index].trim()) else {
+        return false;
+    };
+    let near = |range: &mut dyn Iterator<Item = usize>| {
+        range
+            .map(|i| lines[i].trim())
+            .filter(|line| !line.is_empty())
+            .take(1)
+            .any(|line| list_marker(line).as_ref() == Some(&kind))
+    };
+    near(&mut (index.saturating_sub(2)..index).rev())
+        || near(&mut (index + 1..(index + 3).min(lines.len())))
 }
 
 /// The title and level of one candidate line, if it looks like a heading.
@@ -467,7 +756,8 @@ pub fn finish_nodes(mut nodes: Vec<OutlineNode>, pages: u32) -> Vec<OutlineNode>
     nodes
 }
 
-/// Extract a PDF's outline: bookmarks first, numbered headings as the fallback.
+/// Extract a PDF's outline: bookmarks first, then the book's own table of
+/// contents, then numbered headings as the fallback.
 #[must_use]
 pub fn extract_outline(pdfium: &Pdfium, pdf_bytes: &[u8], pages: &[String]) -> Outline {
     let Ok(document) = pdfium.load_pdf_from_byte_slice(pdf_bytes, None) else {
@@ -480,6 +770,14 @@ pub fn extract_outline(pdfium: &Pdfium, pdf_bytes: &[u8], pages: &[String]) -> O
             document_title: None,
             method: OutlineMethod::Bookmarks,
             nodes: finish_nodes(bookmarks, page_count),
+        };
+    }
+    let contents = contents_nodes(pages);
+    if !contents.is_empty() {
+        return Outline {
+            document_title: None,
+            method: OutlineMethod::Contents,
+            nodes: finish_nodes(contents, page_count),
         };
     }
     let headings = heading_nodes(pages);
@@ -635,6 +933,118 @@ mod tests {
         // "2. Methods" is closed by the next level-1 heading on page 3.
         assert_eq!(finished[1].end_page, 2);
         assert_eq!(finished[3].end_page, 3);
+    }
+
+    #[test]
+    fn ocr_noise_in_a_chaptered_schoolbook_does_not_become_chapters() {
+        // What full-page OCR of a BSE IPA book gives: a running header with the
+        // page number, a materials list, numbered steps, answer options and an
+        // instruction line, around two real chapters and a lettered section.
+        let mut pages =
+            vec!["Bab 1 Gerak Benda\nPada bab ini kamu belajar tentang gerak.".to_string()];
+        for n in 2..6 {
+            let section = if n == 2 {
+                "A. Gerak Lurus\nBenda bergerak lurus jika lintasannya lurus.\n"
+            } else {
+                "Benda yang bergerak memiliki kecepatan.\n"
+            };
+            pages.push(format!(
+                "{n} Kelas VIII SMP/MTs Semester 1\n\
+                 {section}\
+                 1. Mobil mainan\n2. Mistar\n3. Ticker timer\n\
+                 Perhatikan gambar berikut ini!\n\
+                 A. 10 N\nB. 20 N\nC. 30 N"
+            ));
+        }
+        pages.push("Bab 2 Gaya\nGaya adalah tarikan atau dorongan.".to_string());
+        let nodes = heading_nodes(&pages);
+        let titles: Vec<&str> = nodes.iter().map(|n| n.title.as_str()).collect();
+        assert_eq!(
+            titles,
+            vec!["Bab 1 Gerak Benda", "A. Gerak Lurus", "Bab 2 Gaya"]
+        );
+        assert_eq!(nodes[0].level, 1);
+        assert_eq!(nodes[1].level, 2);
+        assert_eq!(nodes[2].level, 1);
+    }
+
+    #[test]
+    fn a_schoolbook_outline_comes_from_its_contents_page() {
+        // An OCR'd BSE book: markdown headings, roman front matter, chapters
+        // whose own pages are pictures, and printed page 1 on PDF page 4.
+        let mut pages: Vec<String> = vec![String::new(); 4];
+        pages[1] = "## Daftar Isi\n\
+                    Kata Pengantar ... iii\n\
+                    ## Bab 1 Gerak Benda\n\
+                    A. Konsep Gerak ... 2\n\
+                    1. Gerak Lurus ... 3\n\
+                    Uji Kompetensi ... 5\n\
+                    Bab 2 Gaya ... 6\n\
+                    A. Jenis Gaya ... 7\n\
+                    1. Gaya Gesek ... 8"
+            .to_string();
+        for printed in 1..=9 {
+            let body = match printed {
+                2 => "## A. Konsep Gerak\nBenda bergerak.",
+                3 => "1. Gerak Lurus\nLintasannya lurus.",
+                7 => "## A. Jenis Gaya\nAda banyak gaya.",
+                8 => "## 1. Gaya Gesek\nGesekan memperlambat.",
+                _ => "Isi buku.",
+            };
+            pages.push(format!("{printed} Ilmu Pengetahuan Alam\n{body}"));
+        }
+        let nodes = contents_nodes(&pages);
+        let got: Vec<(&str, u32, u32)> = nodes
+            .iter()
+            .map(|n| (n.title.as_str(), n.level, n.start_page))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("Bab 1 Gerak Benda", 1, 5),
+                ("A. Konsep Gerak", 2, 5),
+                ("1. Gerak Lurus", 3, 6),
+                ("Bab 2 Gaya", 1, 9),
+                ("A. Jenis Gaya", 2, 10),
+                ("1. Gaya Gesek", 3, 11),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_contents_line_gives_its_page_with_or_without_a_space_before_the_leader() {
+        assert_eq!(
+            split_page_number("A. Konsep Vektor...3"),
+            ("A. Konsep Vektor".to_string(), Some(Some(3)))
+        );
+        assert_eq!(
+            split_page_number("Bab 3 DINAMIKA GERAK PARTIKEL ...63"),
+            ("Bab 3 DINAMIKA GERAK PARTIKEL".to_string(), Some(Some(63)))
+        );
+        assert_eq!(
+            split_page_number("2. Gaya ........................ 10"),
+            ("2. Gaya".to_string(), Some(Some(10)))
+        );
+        assert_eq!(
+            split_page_number("Kata Pengantar...iii"),
+            ("Kata Pengantar".to_string(), Some(None))
+        );
+        assert_eq!(split_page_number("## Bab 1 VEKTOR").1, None);
+        assert_eq!(split_page_number("Bab 2 Kimia").1, None);
+    }
+
+    #[test]
+    fn markdown_heading_marks_do_not_hide_a_chapter() {
+        let pages = vec!["## BAB 2\nKINEMATIKA\nGerak benda.".to_string()];
+        let nodes = heading_nodes(&pages);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].title, "BAB 2 KINEMATIKA");
+    }
+
+    #[test]
+    fn a_numbered_list_item_is_not_a_heading_even_without_chapters() {
+        let pages = vec!["Alat dan bahan\n1. Mobil mainan\n2. Mistar\nLangkah kerja".to_string()];
+        assert!(heading_nodes(&pages).is_empty());
     }
 
     #[test]
