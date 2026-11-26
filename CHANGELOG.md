@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **`KB_OCR_CONCURRENCY` is now the number of image pages in flight.** `route_image_items`
+  grouped a document's pages into runs of `concurrency` and read the runs in order, so the pages
+  in flight per document were `ceil(pages / concurrency)`: raising the setting lowered the
+  parallelism (three textbooks at 128 sent 7 pages at once). Pages now stream one request each
+  with `concurrency` in flight. Measured on one GB10 (Xiaomi-OCR-0 on vLLM, 3 textbooks, every
+  page OCR'd): 33 min → 18.8 min end to end. A new contract case fails on the old router
+  (peak 2, want 4).
+
 ## 1.0.2 — 2026-11-25
 
 ### Changed

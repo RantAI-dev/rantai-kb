@@ -152,6 +152,11 @@ struct FakeProvider {
     fail_pages: Mutex<Vec<u32>>,
     /// Whether every call fails, and whether the failure is transient.
     fail_all: Mutex<Option<bool>>,
+    /// Image reads in flight now, and the most seen at once.
+    in_flight: AtomicU32,
+    peak_in_flight: AtomicU32,
+    /// How long an image read takes, so concurrent reads overlap.
+    image_delay: Duration,
 }
 
 impl FakeProvider {
@@ -163,6 +168,9 @@ impl FakeProvider {
             images: AtomicU32::new(0),
             fail_pages: Mutex::new(Vec::new()),
             fail_all: Mutex::new(None),
+            in_flight: AtomicU32::new(0),
+            peak_in_flight: AtomicU32::new(0),
+            image_delay: Duration::ZERO,
         })
     }
 
@@ -174,6 +182,9 @@ impl FakeProvider {
             images: AtomicU32::new(0),
             fail_pages: Mutex::new(Vec::new()),
             fail_all: Mutex::new(None),
+            in_flight: AtomicU32::new(0),
+            peak_in_flight: AtomicU32::new(0),
+            image_delay: Duration::ZERO,
         })
     }
 
@@ -195,12 +206,34 @@ impl FakeProvider {
             images: AtomicU32::new(0),
             fail_pages: Mutex::new(Vec::new()),
             fail_all: Mutex::new(Some(transient)),
+            in_flight: AtomicU32::new(0),
+            peak_in_flight: AtomicU32::new(0),
+            image_delay: Duration::ZERO,
         })
     }
 
     /// The backend comes back: the next call answers normally.
     fn recover(&self) {
         *self.fail_all.lock().unwrap() = None;
+    }
+
+    /// An image provider whose reads take `delay`, to observe parallelism.
+    fn slow_chat(delay: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            id: "chat",
+            transport: OcrTransport::Image,
+            calls: AtomicU32::new(0),
+            images: AtomicU32::new(0),
+            fail_pages: Mutex::new(Vec::new()),
+            fail_all: Mutex::new(None),
+            in_flight: AtomicU32::new(0),
+            peak_in_flight: AtomicU32::new(0),
+            image_delay: delay,
+        })
+    }
+
+    fn peak_in_flight(&self) -> u32 {
+        self.peak_in_flight.load(Ordering::SeqCst)
     }
 
     fn calls(&self) -> u32 {
@@ -280,6 +313,12 @@ impl OcrPageProvider for FakeProvider {
                 OcrCallError::permanent("fake rejection")
             });
         }
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak_in_flight.fetch_max(now, Ordering::SeqCst);
+        if !self.image_delay.is_zero() {
+            tokio::time::sleep(self.image_delay).await;
+        }
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
         let page = self.images.fetch_add(1, Ordering::SeqCst);
         Ok(OcrPageAnswer::text(format!("IMG-page-{page}")))
     }
@@ -831,6 +870,31 @@ async fn case_a_page_subset_holds_exactly_the_pages_it_was_given() {
     assert!(text.content.contains("Digital page 2"), "{}", text.content);
 }
 
+/// `concurrency` pages of one document are read at once, whatever the page
+/// count. Before, pages were grouped in runs of `concurrency` read one after
+/// another, so 8 pages at concurrency 4 sent only 2 at a time.
+async fn case_concurrency_is_the_pages_in_flight() {
+    let pdf = mixed_pdf(0, 8);
+    let provider = FakeProvider::slow_chat(Duration::from_millis(50));
+    let router = OcrRouter::new(
+        OcrRouterSettings {
+            concurrency: 4,
+            ..settings(OcrMode::Full)
+        },
+        Some(Arc::clone(&provider) as Arc<dyn OcrPageProvider>),
+        None,
+        Some(Arc::new(OcrBreaker::new(3, Duration::from_secs(60)))),
+    );
+    let out = extract(&router, &pdf).await;
+    assert_eq!(provider.images(), 8, "every page was read");
+    assert_eq!(
+        provider.peak_in_flight(),
+        4,
+        "4 pages in flight at concurrency 4, not ceil(8 / 4) = 2"
+    );
+    assert!(out.used_ocr);
+}
+
 /// One entry point, run once: the router cases need a quiet pdfium, and
 /// libpdfium's library state is not safe to drive from several threads of one
 /// process here (parallel `#[tokio::test]`s see empty documents and format
@@ -842,6 +906,7 @@ async fn the_page_router_meets_its_contract() {
     case_hybrid_sends_exactly_the_scanned_pages().await;
     case_hybrid_sends_a_page_with_no_text_at_all().await;
     case_full_sends_every_page().await;
+    case_concurrency_is_the_pages_in_flight().await;
     case_off_never_sends_a_page_and_still_reports().await;
     case_a_document_provider_sends_three_batches_of_eight().await;
     case_a_second_run_is_served_entirely_from_the_page_cache().await;
