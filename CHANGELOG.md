@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`kb-server reindex --documents <file>`** rebuilds only the documents listed in the file (one
+  id per line; blank lines and `#` comments skipped), so a large corpus can be rebuilt in batches
+  and each batch checked before the next is queued. An id that is not a live document (of the
+  `--tenant`, when given) is a usage error naming up to five of them, so a typo never silently
+  skips a document. Without the flag nothing changes.
+
 ## 1.0.2 — 2026-11-25
 
 ### Changed

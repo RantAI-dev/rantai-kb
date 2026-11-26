@@ -109,6 +109,29 @@ pub fn plan(documents: &[ReindexDocument]) -> BTreeMap<String, ReindexTenantCoun
     plan
 }
 
+/// Keep the documents whose id is in `listed`, in their original order, and
+/// return the listed ids that matched no live document (sorted), so a typo in
+/// a batch list is an error rather than a silently skipped book.
+#[must_use]
+pub fn retain_listed(
+    documents: Vec<ReindexDocument>,
+    listed: &std::collections::HashSet<String>,
+) -> (Vec<ReindexDocument>, Vec<String>) {
+    let kept: Vec<ReindexDocument> = documents
+        .into_iter()
+        .filter(|doc| listed.contains(doc.document_id.as_str()))
+        .collect();
+    let found: std::collections::HashSet<&str> =
+        kept.iter().map(|doc| doc.document_id.as_str()).collect();
+    let mut missing: Vec<String> = listed
+        .iter()
+        .filter(|id| !found.contains(id.as_str()))
+        .cloned()
+        .collect();
+    missing.sort();
+    (kept, missing)
+}
+
 const SELECT_REINDEX_DOCUMENTS: &str = r#"
     SELECT d.id, d."tenantId", d.title, d.categories, d.subcategory, d.metadata,
            d."s3Key", d."fileSize", d."mimeType",
@@ -189,6 +212,23 @@ mod tests {
             mime_type: None,
             active_job,
         }
+    }
+
+    #[test]
+    fn retain_listed_keeps_the_listed_documents_in_order_and_names_the_strays() {
+        let rows = vec![
+            document("a", "d1", Some("documents/a/d1/one.pdf"), false),
+            document("a", "d2", Some("documents/a/d2/two.pdf"), false),
+            document("a", "d3", Some("documents/a/d3/three.pdf"), false),
+        ];
+        let listed: std::collections::HashSet<String> = ["d3", "d1", "typo"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let (kept, missing) = retain_listed(rows, &listed);
+        let ids: Vec<&str> = kept.iter().map(|d| d.document_id.as_str()).collect();
+        assert_eq!(ids, vec!["d1", "d3"]);
+        assert_eq!(missing, vec!["typo".to_string()]);
     }
 
     #[test]

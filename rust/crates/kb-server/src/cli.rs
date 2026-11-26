@@ -359,7 +359,7 @@ fn migrations_dir() -> PathBuf {
     }
 }
 
-/// `kb-server reindex [--tenant <id>] [--dry-run]`.
+/// `kb-server reindex [--tenant <id>] [--documents <file>] [--dry-run]`.
 ///
 /// Qdrant is the only chunk store, and data written by Bun lives in Postgres
 /// (documents) and S3 (originals). Reindex re-queues every live document so the
@@ -370,7 +370,31 @@ async fn reindex(args: &[String]) -> Result<(), CliError> {
     let settings =
         Config::pg_from_lookup(env_lookup).map_err(|e| CliError::Failed(e.to_string()))?;
     let pool = kb_store_pg::connect_pool(&settings).await?;
-    let documents = kb_store_pg::reindex::list_documents(&pool, parsed.tenant.as_deref()).await?;
+    let mut documents =
+        kb_store_pg::reindex::list_documents(&pool, parsed.tenant.as_deref()).await?;
+    if let Some(path) = parsed.documents.as_ref() {
+        let listed = read_document_list(path)?;
+        let (kept, missing) = kb_store_pg::reindex::retain_listed(documents, &listed);
+        if !missing.is_empty() {
+            let shown: Vec<&str> = missing.iter().take(5).map(String::as_str).collect();
+            return Err(CliError::Usage(format!(
+                "--documents lists {} id(s) that are not live documents{}: {}",
+                missing.len(),
+                parsed
+                    .tenant
+                    .as_deref()
+                    .map(|t| format!(" of tenant {t}"))
+                    .unwrap_or_default(),
+                shown.join(", ")
+            )));
+        }
+        println!(
+            "reindex: --documents {} lists {} document(s)",
+            path.display(),
+            kept.len()
+        );
+        documents = kept;
+    }
     let plan = kb_store_pg::reindex::plan(&documents);
     print_reindex_plan(&plan, parsed.dry_run);
 
@@ -408,6 +432,34 @@ async fn reindex(args: &[String]) -> Result<(), CliError> {
         plan.len()
     );
     Ok(())
+}
+
+/// The ids in a `--documents` file: one per line; blank lines and lines
+/// starting with `#` are skipped.
+fn read_document_list(
+    path: &std::path::Path,
+) -> Result<std::collections::HashSet<String>, CliError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| CliError::Usage(format!("--documents {}: {e}", path.display())))?;
+    let ids: std::collections::HashSet<String> = parse_document_list(&text);
+    if ids.is_empty() {
+        return Err(CliError::Usage(format!(
+            "--documents {} lists no document id",
+            path.display()
+        )));
+    }
+    Ok(ids)
+}
+
+/// Parse a `--documents` list: one id per line, trimmed; blank lines and
+/// `#` comments are skipped.
+#[must_use]
+pub fn parse_document_list(text: &str) -> std::collections::HashSet<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect()
 }
 
 fn print_reindex_plan(
@@ -795,15 +847,21 @@ fn join_or(values: &[String], empty: &str) -> String {
 pub struct ReindexArgs {
     /// Restrict to one tenant. `None` means every tenant.
     pub tenant: Option<String>,
+    /// Restrict to the document ids listed in this file, one per line. Lets an
+    /// operator rebuild a large corpus in batches (one grade, one subject)
+    /// and check each batch before queueing the next.
+    pub documents: Option<std::path::PathBuf>,
     /// Print the counts and create nothing.
     pub dry_run: bool,
 }
 
 impl ReindexArgs {
-    /// Parse `[--tenant <id>] [--dry-run]`. No positionals: a bare argument is
-    /// a usage error rather than a silently ignored tenant name.
+    /// Parse `[--tenant <id>] [--documents <file>] [--dry-run]`. No
+    /// positionals: a bare argument is a usage error rather than a silently
+    /// ignored tenant name.
     pub fn parse(args: &[String]) -> Result<Self, CliError> {
         let mut tenant: Option<String> = None;
+        let mut documents: Option<std::path::PathBuf> = None;
         let mut dry_run = false;
         let mut index = 0;
         while index < args.len() {
@@ -822,18 +880,39 @@ impl ReindexArgs {
                     }
                     index += 2;
                 }
+                "--documents" => {
+                    let value = args.get(index + 1).ok_or_else(|| {
+                        CliError::Usage("--documents needs a file of document ids".to_string())
+                    })?;
+                    if value.starts_with("--") || value.trim().is_empty() {
+                        return Err(CliError::Usage(
+                            "--documents needs a file of document ids".to_string(),
+                        ));
+                    }
+                    if documents.replace(value.into()).is_some() {
+                        return Err(CliError::Usage(
+                            "--documents may be given only once".to_string(),
+                        ));
+                    }
+                    index += 2;
+                }
                 "--dry-run" => {
                     dry_run = true;
                     index += 1;
                 }
                 other => {
                     return Err(CliError::Usage(format!(
-                        "unknown reindex argument {other:?}; expected [--tenant <id>] [--dry-run]"
+                        "unknown reindex argument {other:?}; \
+                         expected [--tenant <id>] [--documents <file>] [--dry-run]"
                     )));
                 }
             }
         }
-        Ok(Self { tenant, dry_run })
+        Ok(Self {
+            tenant,
+            documents,
+            dry_run,
+        })
     }
 }
 

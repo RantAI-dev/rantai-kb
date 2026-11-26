@@ -173,6 +173,38 @@ fn reindex_parses_a_tenant_and_a_dry_run() {
 }
 
 #[test]
+fn reindex_parses_a_documents_file() {
+    let parsed = kb_server::ReindexArgs::parse(&reindex_args(&[
+        "--tenant",
+        "ugm",
+        "--documents",
+        "/tmp/smp.txt",
+        "--dry-run",
+    ]))
+    .expect("parse");
+    assert_eq!(parsed.tenant.as_deref(), Some("ugm"));
+    assert_eq!(
+        parsed.documents.as_deref(),
+        Some(std::path::Path::new("/tmp/smp.txt"))
+    );
+    assert!(parsed.dry_run);
+    assert_eq!(
+        kb_server::ReindexArgs::parse(&reindex_args(&[]))
+            .expect("parse")
+            .documents,
+        None
+    );
+}
+
+#[test]
+fn a_documents_list_skips_blank_lines_and_comments() {
+    let ids = kb_server::parse_document_list("# SMP batch\n\n  doc-1  \ndoc-2\n#doc-3\ndoc-1\n");
+    let mut ids: Vec<String> = ids.into_iter().collect();
+    ids.sort();
+    assert_eq!(ids, vec!["doc-1".to_string(), "doc-2".to_string()]);
+}
+
+#[test]
 fn reindex_rejects_a_missing_tenant_value_or_an_unknown_flag() {
     for args in [
         vec!["--tenant"],
@@ -181,6 +213,9 @@ fn reindex_rejects_a_missing_tenant_value_or_an_unknown_flag() {
         vec!["acme"],
         vec!["--dry_run"],
         vec!["--tenant", "a", "--tenant", "b"],
+        vec!["--documents"],
+        vec!["--documents", "--dry-run"],
+        vec!["--documents", "a.txt", "--documents", "b.txt"],
     ] {
         let err = kb_server::ReindexArgs::parse(&reindex_args(&args)).unwrap_err();
         assert!(matches!(err, kb_server::CliError::Usage(_)), "{args:?}");
