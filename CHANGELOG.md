@@ -29,6 +29,12 @@
 
 ### Fixed
 
+- **Table headers that differ only in case no longer fail the whole document.** Header names
+  were made unique case-sensitively, but they become DuckDB columns, whose identifiers are
+  case-insensitive: an OCR'd physics table with `U` (energy) and `u` (velocity) failed ingest
+  with `Column with name "u" already exists!`. Names are now unique ignoring case; the printed
+  case is kept and only the later name gets a ` (2)` suffix. Tables without such a collision are
+  unchanged.
 - **`KB_OCR_CONCURRENCY` is now the number of image pages in flight.** `route_image_items`
   grouped a document's pages into runs of `concurrency` and read the runs in order, so the pages
   in flight per document were `ceil(pages / concurrency)`: raising the setting lowered the
