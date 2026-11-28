@@ -2468,6 +2468,33 @@
           }
         }
       },
+      "ChapterStructure": {
+        "type": "object",
+        "description": "One detected chapter of the document: a top-level node of the stored\noutline. `BAB`/`Chapter`/`Unit`/… headings are chapters; `A.`/`1.1`\nsections are not.\n\n`page` is the page the chapter **starts on**, 0-based like every page in\nthis response. It is the extractor's own answer, which skips\ntable-of-contents pages, so it is never the contents page that merely\nlists the chapter.",
+        "required": [
+          "title",
+          "page"
+        ],
+        "properties": {
+          "number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The chapter's own number (\"IV\", \"2\"), when the heading carries one."
+          },
+          "page": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The 0-based page the chapter starts on.",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string",
+            "description": "The chapter's heading as printed, e.g. \"BAB IV Kewirausahaan\"."
+          }
+        }
+      },
       "ChunkDto": {
         "type": "object",
         "required": [
@@ -3168,6 +3195,13 @@
           "hasSpans"
         ],
         "properties": {
+          "chapters": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChapterStructure"
+            },
+            "description": "The document's detected chapters, from the outline ingest stored in\n`Document.metadata.outline` (DEC-4). Absent — not `null`, and not an\nempty list — when the document has no outline or no top-level\nsections, including every document ingested before the outline was\nstored. A document gets one by re-ingesting."
+          },
           "chunks": {
             "type": "array",
             "items": {

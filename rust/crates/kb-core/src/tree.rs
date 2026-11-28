@@ -56,6 +56,9 @@ pub enum OutlineMethod {
     Bookmarks,
     /// Numbered headings recovered from page text.
     Headings,
+    /// The book's own table of contents ("Daftar Isi"), its printed page
+    /// numbers mapped onto PDF pages.
+    Contents,
     /// Neither produced anything. Reported, not silently omitted.
     #[default]
     None,
@@ -68,6 +71,7 @@ impl OutlineMethod {
         match self {
             Self::Bookmarks => "bookmarks",
             Self::Headings => "headings",
+            Self::Contents => "contents",
             Self::None => "none",
         }
     }
@@ -296,11 +300,21 @@ fn top_numbered() -> Option<&'static Regex> {
         .as_ref()
 }
 
-/// "Chapter 3", "CHAPTER 3: Title", "Part II".
+/// "Chapter 3", "CHAPTER 3: Title", "Part II" — and the schoolbook words the
+/// same job is done with: `BAB IV`, `Bab 2`, `Unit 1`, `Pelajaran 3`,
+/// `Tema 2`. Indonesian textbooks open chapters with `BAB <roman>`, the
+/// English ones with `Chapter`/`Unit`, and a matcher that only knows "BAB"
+/// finds no chapters in the English books while one that only knows
+/// "Chapter" finds none in the Indonesian ones — so one word list covers both.
 fn chapter() -> Option<&'static Regex> {
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)^(chapter|part)\s+([0-9]+|[ivxlcdm]+)\b[.:]?\s*(.*)$").ok())
-        .as_ref()
+    RE.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(bab|chapter|part|unit|pelajaran|tema)\s+([0-9]+|[ivxlcdm]+)\b[.:]?\s*(.*)$",
+        )
+        .ok()
+    })
+    .as_ref()
 }
 
 /// "Annex", "Appendix".
@@ -310,11 +324,15 @@ fn annex() -> Option<&'static Regex> {
         .as_ref()
 }
 
-/// Words that open a structural reference: "chapter 5", "section 3.4", "part 2".
+/// Words that open a structural reference: "chapter 5", "section 3.4", "part 2",
+/// "bab 2", "unit 1".
 fn chapter_query() -> Option<&'static Regex> {
     static RE: OnceLock<Option<Regex>> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)\b(?:chapter|chap\.?|part)\s+(\d+(?:\.\d+)*)\b").ok())
-        .as_ref()
+    RE.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:bab|chapter|chap\.?|part|unit|pelajaran|tema)\s+(\d+(?:\.\d+)*)\b")
+            .ok()
+    })
+    .as_ref()
 }
 
 /// `section 3.4` / `§ 3.4`.
@@ -379,7 +397,8 @@ fn push_token(out: &mut Vec<String>, token: &str) {
 
 /// The number a heading carries in its own title.
 ///
-/// "4.2 Leave" → "4.2"; "Chapter 5" → "5"; anything else → `None`.
+/// "4.2 Leave" → "4.2"; "Chapter 5" → "5"; "BAB IV" → "IV";
+/// "1. Introduction" → "1"; anything else → `None`.
 #[must_use]
 pub fn node_number(title: &str) -> Option<String> {
     if let Some(caps) = captures_first(dotted(), title) {
@@ -389,7 +408,10 @@ pub fn node_number(title: &str) -> Option<String> {
     if let Some(caps) = captures_all(chapter(), title, 2).into_iter().next() {
         return Some(caps);
     }
-    None
+    // A top-level numbered heading ("3. Labour market developments") carries
+    // its own number the same way: a query that says "chapter 3" is about
+    // that heading, and it scores at the non-chapter rate.
+    captures_first(top_numbered(), title)
 }
 
 /// A title whose own word is "Chapter".
@@ -863,7 +885,83 @@ mod tests {
     fn node_number_reads_dotted_and_chapter_titles() {
         assert_eq!(node_number("4.2 Leave entitlement"), Some("4.2".into()));
         assert_eq!(node_number("Chapter 5"), Some("5".into()));
+        assert_eq!(node_number("1. Introduction"), Some("1".into()));
         assert_eq!(node_number("Introduction"), None);
+    }
+
+    #[test]
+    fn schoolbook_chapter_words_are_chapters_in_both_languages() {
+        // Indonesian: BAB with a roman numeral, Bab with a digit.
+        assert!(is_chapter_node("BAB IV Kewirausahaan"));
+        assert!(is_chapter_node("Bab 2 Keragaman Makhluk Hidup"));
+        // English: the Kelas 7 books open with Chapter, the activity books with Unit.
+        assert!(is_chapter_node("Chapter 1 My Family"));
+        assert!(is_chapter_node("Unit 3 Things Around Me"));
+        // The rest of the curriculum vocabulary.
+        assert!(is_chapter_node("Pelajaran 5 Peristiwa Sekitarku"));
+        assert!(is_chapter_node("Tema 2 Bermain di Lingkunganku"));
+        // Still chapters: the English and report words the arm already knew.
+        assert!(is_chapter_node("Part II Findings"));
+        assert!(
+            !is_chapter_node("Subtema 1 Kebutuhanku"),
+            "a subtema is a section"
+        );
+        assert!(
+            !is_chapter_node("Introduction"),
+            "a bare title is not a chapter"
+        );
+    }
+
+    #[test]
+    fn a_schoolbook_chapter_number_reads_roman_and_digits() {
+        assert_eq!(node_number("BAB IV"), Some("IV".into()));
+        assert_eq!(node_number("Bab 2 Keragaman"), Some("2".into()));
+        assert_eq!(node_number("Unit 1"), Some("1".into()));
+        assert_eq!(
+            numbering_level("BAB I Kewirausahaan"),
+            Some(1),
+            "a BAB heading is top level whatever the bookmark nesting says"
+        );
+    }
+
+    #[test]
+    fn a_bab_query_matches_a_bab_node_exactly() {
+        // No node of the fixture outline carries a 9, so nothing should win
+        // by accident. (A "bab 4" *would* match the fixture's
+        // "Chapter 4 Social policy" — the two words name the same thing.)
+        let hits = score_tree(
+            "apa isi bab 9 tentang kewirausahaan?",
+            &[TreeDocument {
+                key: "buku-ekonomi",
+                title: "Ekonomi",
+                nodes: &outline(),
+            }],
+        );
+        assert!(
+            hits.is_empty(),
+            "no node should win without its own number: {hits:?}"
+        );
+        // Digit-numbered chapters, the schoolbook form a query also uses.
+        // (A digit query against a roman-numbered "BAB IV" is a known gap,
+        // the same one "part 2" vs "Part II" has always had.)
+        let nodes = vec![
+            node("Bab 3 Kewirausahaan", 1, 30, 39),
+            node("Bab 4 Pasar dan Uang", 1, 40, 49),
+        ];
+        let hits = score_tree(
+            "apa isi bab 4?",
+            &[TreeDocument {
+                key: "buku-ekonomi",
+                title: "Ekonomi",
+                nodes: &nodes,
+            }],
+        );
+        assert_eq!(hits[0].node, 1, "Bab 4 wins over Bab 3: {hits:?}");
+        assert!(
+            hits[0].score >= 12.0,
+            "the chapter bonus applied: {}",
+            hits[0].score
+        );
     }
 
     #[test]

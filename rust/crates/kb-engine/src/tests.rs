@@ -1378,6 +1378,143 @@ mod pipeline_tests {
         assert_eq!(outcome.chunks.len(), 3);
     }
 
+    /// A hit with a contextual prefix, as an ingest with the headers on
+    /// stores it: the passage is identical, the header says which chapter it
+    /// belongs to.
+    fn hit_with_prefix(id: &str, prefix: &str, content: &str) -> kb_ports::SearchHit {
+        kb_ports::SearchHit {
+            chunk: kb_ports::Chunk {
+                id: ChunkId(id.into()),
+                document_id: DocumentId("d1".into()),
+                document_title: String::new(),
+                external_ref: None,
+                content: content.to_string(),
+                chunk_type: ChunkType::Text,
+                metadata: kb_ports::ChunkMetadata {
+                    contextual_prefix: Some(prefix.to_string()),
+                    ..Default::default()
+                },
+                categories: Vec::new(),
+                subcategory: None,
+            },
+            similarity: 0.9,
+            rank: 0,
+            is_bm25: false,
+            retrieval: None,
+            dense_score: None,
+            rerank_score: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_reranker_sees_the_contextual_header_in_front_of_the_passage() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        // Two byte-identical passages from two chapters: without the header
+        // the reranker has nothing to tell them apart by.
+        let boilerplate = "Bagas BENI Here are what we will do. First, we will discuss it.";
+        chunk_store
+            .vector_hits
+            .write()
+            .unwrap()
+            .push(hit_with_prefix(
+                "c1",
+                "Book > BAB I Kewirausahaan",
+                boilerplate,
+            ));
+        chunk_store
+            .vector_hits
+            .write()
+            .unwrap()
+            .push(hit_with_prefix(
+                "c2",
+                "Book > BAB II Pasar dan Uang",
+                boilerplate,
+            ));
+        let opts = RetrievalOptions {
+            max_chunks: 2,
+            rerank_enabled: true,
+            ..RetrievalOptions::default()
+        };
+        execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker.clone() as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "apa isi bab dua tentang pasar?",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        let seen = reranker.seen.read().unwrap();
+        let texts: Vec<&str> = seen.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts.len(), 2);
+        let bab_one = format!("Book > BAB I Kewirausahaan\n\n{boilerplate}");
+        let bab_two = format!("Book > BAB II Pasar dan Uang\n\n{boilerplate}");
+        assert!(texts.contains(&bab_one.as_str()), "{texts:?}");
+        assert!(texts.contains(&bab_two.as_str()), "{texts:?}");
+    }
+
+    #[tokio::test]
+    async fn a_char_budget_bounds_the_passage_not_the_contextual_header() {
+        let (doc_store, chunk_store, embedder, reranker) = setup();
+        let scope = make_fake_scope(TenantId("t1".into()), vec![DocumentId("d1".into())]);
+        chunk_store
+            .vector_hits
+            .write()
+            .unwrap()
+            .push(hit_with_prefix("c1", "Book > BAB I", &"x".repeat(1_000)));
+        chunk_store.vector_hits.write().unwrap().push(make_fake_hit(
+            "c2",
+            "d1",
+            "Title 1",
+            &"y".repeat(1_000),
+            2,
+            0.8,
+        ));
+        let opts = RetrievalOptions {
+            max_chunks: 2,
+            rerank_enabled: true,
+            rerank_char_budget: 200,
+            ..RetrievalOptions::default()
+        };
+        execute_pipeline(
+            &(doc_store as Arc<_>),
+            &(chunk_store as Arc<_>),
+            &(embedder as Arc<_>),
+            &(reranker.clone() as Arc<_>),
+            &noop_expander(),
+            &scope,
+            "query",
+            &opts,
+            &SystemClock,
+        )
+        .await
+        .unwrap();
+
+        let seen = reranker.seen.read().unwrap();
+        // The header rides on top of the budget: cutting it off to honour the
+        // cap would leave the passage with nothing to tell it apart by.
+        let with_header = &seen.iter().find(|c| c.id.0 == "c1").unwrap().text;
+        assert!(
+            with_header.starts_with("Book > BAB I\n\n"),
+            "{with_header:?}"
+        );
+        assert!(
+            with_header.len() <= "Book > BAB I\n\n".len() + 201,
+            "the passage is still bounded by the budget: {}",
+            with_header.len()
+        );
+        // A hit without a header is truncated exactly as before.
+        let plain = &seen.iter().find(|c| c.id.0 == "c2").unwrap().text;
+        assert!(plain.len() <= 201, "{plain:?}");
+        assert!(!plain.contains(" > "), "no header was invented: {plain:?}");
+    }
+
     /// A caller asking for as many chunks as the pool holds still gets them
     /// reranked. Before 2026-10-23 the reranker ran only when the pool was
     /// larger than `max_chunks`, so asking for 10 of 5 candidates returned the

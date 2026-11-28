@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Contextual chunk headers (`RET-8`).** Every chunk now carries
+  `contextualPrefix`: `<document title> > <chapter> > <section>`, built at ingest from the
+  document's outline and the page the chunk sits on, capped at ~160 characters. The header is
+  prepended to the text the embedder sees, to the BM25 sparse text and to the reranker input; it is
+  never folded into the chunk's `content`, so the passage a search returns stays verbatim. Heading
+  detection learned the schoolbook vocabulary in both languages — `BAB <roman|digit>`, `Bab`,
+  `Chapter`, `Unit`, `Pelajaran`, `Tema`, `Subtema`, lettered `A.` sections — and skips
+  `Daftar Isi`/`Contents` pages, so a chapter's outline page is where it starts, never the contents
+  page that lists it. Measured motive: production kb6 had 0 of 1,148 (Bahasa Inggris) and 0 of
+  1,205 (IPA) chunks with a prefix, and a book that repeats one activity template on every page
+  ranked its gold page 9–22. Off with `KB_CONTEXTUAL_HEADERS=false`, which restores the previous
+  embed/BM25/rerank text byte for byte. Documents must be re-ingested (or
+  `kb-server reindex`-ed) to get headers.
+- **`GET /v1/documents/:id/structure` lists the document's detected chapters** (additive
+  `chapters`: `title`, `number`, 0-based start `page`), from the outline ingest stores. Omitted
+  (not `null`) when the document has no outline — including everything ingested before this
+  release; re-ingest gives a document one.
+
 ## 1.0.2 — 2026-11-25
 
 ### Changed
@@ -102,6 +124,20 @@ and [`docs/rust-cutover.md` §13](docs/rust-cutover.md) for the 0.8 → 1.0 upgr
 
 ### Fixed
 
+- **Schoolbook outlines from the table of contents, and OCR noise kept out of the headings.**
+  On full-page OCR text (Xiaomi-OCR-0), the heading fallback took every numbered list item,
+  answer option, instruction line and running header for a chapter: three BSE textbooks got 604,
+  1,004 and hundreds of level-1 nodes, and the real `## BAB 2` headings were missed because of
+  their markdown marks. The outline now comes from the book's own contents page when it has one
+  (`method: "contents"`): `Bab N` chapters, `A.` sections and `1.` subsections with their printed
+  page numbers, mapped onto PDF pages by the offset that the most entries agree on (each entry
+  looked up among the body's lines). Measured on the same three books: 7, 6 and 4 chapters with
+  their sections, 5 of 6 spot-checked pages exact and the sixth one page off. The heading fallback
+  strips markdown marks, skips list items (a line next to another line with the same marker),
+  running headers and footers (lines on three or more pages once digits are removed) and
+  instruction or question lines, and in a book with two or more chapter headings no longer makes
+  `N. Title` lines chapters. Bookmarks still come first. Re-ingest (`kb-server reindex`) to
+  rebuild outlines and contextual headers; OCR and image readings come from the cache.
 - **Faster scope SQL (SEC-2d).** The visibility query no longer uses `LEFT JOIN … DISTINCT`;
   the knowledge-base limit is an `EXISTS` semi-join, so `LIMIT` can stop early. Same rows, and
   every Postgres contract passes. On 100k documents (EXPLAIN ANALYZE) the tenant-wide query
