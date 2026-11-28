@@ -118,6 +118,32 @@ fn validate_identifiers(names: &[String]) -> Result<(), PortError> {
     Ok(())
 }
 
+/// Column names DuckDB will accept: unique **ignoring case**, the printed
+/// case kept, a later clash suffixed ` (2)`, ` (3)`…
+///
+/// DuckDB identifiers are case-insensitive. Extraction already makes header
+/// names unique, but a grid can still reach the store with two names DuckDB
+/// takes for one (an OCR'd word-search puzzle is a "table" whose header is
+/// single letters, `| u | k | u | k |`), and one such grid failed the whole
+/// document with `Column with name "u" already exists`. This is the last line
+/// of defence: the grid is stored under names that cannot collide.
+#[must_use]
+pub fn distinct_column_names(names: &[String]) -> Vec<String> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    names
+        .iter()
+        .map(|name| {
+            let mut candidate = name.clone();
+            let mut suffix = 2usize;
+            while !seen.insert(candidate.to_lowercase()) {
+                candidate = format!("{name} ({suffix})");
+                suffix += 1;
+            }
+            candidate
+        })
+        .collect()
+}
+
 /// Write one grid to Parquet and return the file's bytes.
 ///
 /// The staging table is built in an in-memory DuckDB, filled with bound
@@ -434,6 +460,38 @@ fn number_or_null(n: f64) -> serde_json::Value {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+
+    #[test]
+    fn column_names_are_made_distinct_for_duckdb() {
+        let names: Vec<String> = ["u", "k", "u", "U", "u (2)"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            super::distinct_column_names(&names),
+            vec!["u", "k", "u (2)", "U (3)", "u (2) (2)"]
+        );
+    }
+
+    #[test]
+    fn a_word_search_grid_with_repeated_letters_is_written() {
+        let names: Vec<String> = ["u", "k", "u", "K"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        let grid = TableGrid {
+            header: super::distinct_column_names(&names),
+            rows: vec![vec![
+                Cell::Text("a".into()),
+                Cell::Text("b".into()),
+                Cell::Text("c".into()),
+                Cell::Text("d".into()),
+            ]],
+            ..TableGrid::default()
+        };
+        assert!(write_grid(&grid, None).is_ok());
+    }
+
     use super::*;
     use kb_core::tables::{ColumnInfo, ColumnKind, ColumnRole, Confidence, TableGrid};
 

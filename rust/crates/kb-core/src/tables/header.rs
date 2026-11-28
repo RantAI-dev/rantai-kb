@@ -108,6 +108,11 @@ pub fn is_column_number_row(row: &[Cell]) -> bool {
 
 /// Normalise every header name, name an empty one `Column N` (1-based), and
 /// keep the names unique with a ` (2)`, ` (3)`… suffix.
+///
+/// Unique **ignoring case**: the names become DuckDB columns, and DuckDB
+/// identifiers are case-insensitive, so a physics table with `U` (energy) and
+/// `u` (velocity) failed the whole document with "Column with name "u" already
+/// exists". The printed case is kept; only the second one gets a suffix.
 #[must_use]
 pub fn unique_header_names(names: &[String]) -> Vec<String> {
     let mut seen: Vec<String> = Vec::with_capacity(names.len());
@@ -121,11 +126,11 @@ pub fn unique_header_names(names: &[String]) -> Vec<String> {
         };
         let mut candidate = base.clone();
         let mut suffix = 2usize;
-        while seen.contains(&candidate) {
+        while seen.contains(&candidate.to_lowercase()) {
             candidate = format!("{base} ({suffix})");
             suffix += 1;
         }
-        seen.push(candidate.clone());
+        seen.push(candidate.to_lowercase());
         unique.push(candidate);
     }
     unique
@@ -201,6 +206,19 @@ fn wider_row_ahead(cells: &[Vec<Cell>], from: usize) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
+
+    #[test]
+    fn header_names_differing_only_in_case_are_made_unique() {
+        let names: Vec<String> = ["U", "u", "v", "U"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        assert_eq!(
+            super::unique_header_names(&names),
+            vec!["U", "u (2)", "v", "U (3)"]
+        );
+    }
+
     use super::*;
 
     fn text(value: &str) -> Cell {

@@ -136,7 +136,16 @@ impl TableStore for TablesStore {
             .saturating_add(1);
         let mut rows = Vec::with_capacity(tables.len());
         let mut uploaded: Vec<String> = Vec::with_capacity(tables.len());
-        for (index, (grid, manifest)) in tables.into_iter().enumerate() {
+        for (index, (mut grid, mut manifest)) in tables.into_iter().enumerate() {
+            // Store under names DuckDB cannot collide on; keep the manifest's
+            // column names in step so a query names the stored column.
+            let distinct = parquet::distinct_column_names(&grid.header);
+            if distinct != grid.header {
+                for (column, name) in manifest.columns.iter_mut().zip(distinct.iter()) {
+                    column.name = name.clone();
+                }
+                grid.header = distinct;
+            }
             let index = u32::try_from(index).unwrap_or(u32::MAX);
             let id = TableId::of(document, index);
             // Capture what the record needs before the grid is moved into the
